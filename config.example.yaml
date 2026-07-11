@@ -1,0 +1,27 @@
+dns_addr: "127.0.0.1:5353"
+doh_addr: "127.0.0.1:8443"
+admin_addr: "127.0.0.1:8444"
+admin_token: "test-token"
+# e2e smoke test points at a local mock UDP upstream (no external network).
+# In production use e.g.:
+#   upstream: "https://1.1.1.1/dns-query https://8.8.8.8/dns-query"
+upstream: "udp://127.0.0.1:8053"
+cache_cap: 1h
+
+default_policy:
+  id: "default"
+  block_action: "refused"
+
+policies:
+  - id: "kids"
+    networks: ["192.168.10.0/24"]
+    block:
+      - "ads.example.com"
+      - "*.tracker.net"
+    allow:
+      - "good.tracker.net"
+    log: true
+  - id: "office"
+    networks: ["10.0.0.0/8"]
+    block:
+      - "timewaster.com"
