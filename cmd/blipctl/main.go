@@ -81,6 +81,24 @@ func main() {
 		}
 		die(client.DeletePolicy(ctx, rest[0]))
 		fmt.Println("deleted policy:", rest[0])
+	case "adopt-status":
+		st, err := client.AdoptStatus(ctx)
+		die(err)
+		printJSON(st)
+	case "adopt":
+		if len(rest) < 1 {
+			die(fmt.Errorf("adopt requires <code>"))
+		}
+		resp, err := client.Adopt(ctx, rest[0])
+		die(err)
+		if !resp.Adopted {
+			die(fmt.Errorf("adoption rejected: %s", resp.Message))
+		}
+		if resp.Token != "" {
+			fmt.Println("adopted. admin token:", resp.Token)
+		} else {
+			fmt.Println("already adopted (token was issued earlier; use the stored token)")
+		}
 	case "watch":
 		fmt.Println("watching", base, "(ctrl-c to stop)")
 		die(client.Watch(ctx, func(e control.WatchEvent) {
@@ -140,6 +158,8 @@ commands:
   set-policy <file.yml>  push a policy
   block <cidr> <domain>  add a block policy for a client CIDR
   del-policy <id>        remove a policy
+  adopt-status           show adoption state (unauth)
+  adopt <code>           claim this instance once; prints its admin token
   watch                  stream events (SSE)
 `)
 }

@@ -94,6 +94,31 @@ func (c *Client) DeletePolicy(ctx context.Context, id string) error {
 	return c.do(ctx, http.MethodDelete, "/api/v1/policy?id="+id, nil, nil)
 }
 
+// AdoptStatus fetches the instance's adoption state (unauthenticated).
+func (c *Client) AdoptStatus(ctx context.Context) (*AdoptStatus, error) {
+	var st AdoptStatus
+	if err := c.do(ctx, http.MethodGet, "/api/v1/adopt/status", nil, &st); err != nil {
+		return nil, err
+	}
+	return &st, nil
+}
+
+// Adopt presents a one-time claim code; on success it returns the real admin
+// token so the controller can store it and never need manual copy/paste.
+func (c *Client) Adopt(ctx context.Context, code string) (*AdoptResponse, error) {
+	var resp AdoptResponse
+	if err := c.do(ctx, http.MethodPost, "/api/v1/adopt", &AdoptRequest{Code: code}, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// ResetAdoption resets the instance's adoption handshake (requires the
+// instance's current admin token).
+func (c *Client) ResetAdoption(ctx context.Context) error {
+	return c.do(ctx, http.MethodPost, "/api/v1/adopt/reset", nil, nil)
+}
+
 // Watch opens the SSE stream and invokes fn for each event until ctx is
 // cancelled.
 func (c *Client) Watch(ctx context.Context, fn func(WatchEvent)) error {

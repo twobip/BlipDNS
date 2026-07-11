@@ -48,15 +48,50 @@ Open `http://<host>:8500/?token=<token>`. You'll see:
 
 The UI is token-gated; without the token you get `401`.
 
+## Adding an instance (one-time claim-code adoption)
+
+A newly installed `blipd` prints a **one-time claim code** to its journal on
+first start (and after `adopt/reset`):
+
+```
+journalctl -u blipd | grep ADOPTION CODE
+```
+
+In the controller web UI, click **+**, enter the instance URL + label, paste
+the claim code, and the controller will:
+
+1. call `blipd`'s unauthenticated `POST /api/v1/adopt` with the code,
+2. receive the instance's real **admin token** back (never typed by a human),
+3. store it and immediately start polling/stats — the instance shows `claimed`.
+
+The code is **one-time**: after adoption it's invalidated and the `adopted`
+state is persisted to `state_file` (e.g. `/var/lib/blipd/adopted.json`) so a
+reboot doesn't regenerate a code. To re-adopt (e.g. after losing the
+controller), call `POST /api/v1/adopt/reset` on `blipd` (requires its current
+admin token) to mint a fresh code.
+
+This is the "automatic verify between them, once" bootstrap: no pre-shared
+secret is needed to bring a new instance under management, but a rogue host on
+the LAN can't hijack it without the local-journal code.
+
+CLI equivalent:
+```
+blipctl http://host:8444 adopt-status        # is it claimed?
+blipctl http://host:8444 adopt <CODE>         # claim it; prints the admin token
+```
+
 ## Controller API (also token-gated)
 
 ```
 GET    /api/instances                 list managed instances
-POST   /api/instances                 add instance  {id,label,url,token}
+POST   /api/instances                 add instance  {id,label,url,token,claim}
 DELETE /api/instances/<id>            remove instance
 GET    /api/instances/<id>/policies   list policies on the instance
-PUT    /api/instances/<id>/policy     set policy  {id,networks,block,allow,...}
+PUT    /api/instances/<id>/policy      set policy  {id,networks,block,allow,...}
 DELETE /api/instances/<id>/policy?id= push delete
+GET    /api/instances/<id>/adopt/status  adoption state (unauth)
+POST   /api/instances/<id>/adopt         adopt with {code} (one-time bootstrap)
+POST   /api/instances/<id>/adopt/reset   reset adoption (requires instance token)
 GET    /api/events                    SSE fleet event stream
 GET    /api/health                    per-instance health
 ```

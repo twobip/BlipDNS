@@ -55,9 +55,31 @@ type AckResponse struct {
 
 // WatchEvent is streamed by GET /api/v1/watch as SSE.
 type WatchEvent struct {
-	Type    string    `json:"type"` // "stats" | "block" | "health"
-	At      time.Time `json:"at"`
-	Stats   *StatsResponse `json:"stats,omitempty"`
-	Client  string    `json:"client,omitempty"`
-	Domain  string    `json:"domain,omitempty"`
+	Type   string         `json:"type"` // "stats" | "block" | "health"
+	At     time.Time      `json:"at"`
+	Stats  *StatsResponse `json:"stats,omitempty"`
+	Client string         `json:"client,omitempty"`
+	Domain string         `json:"domain,omitempty"`
+}
+
+// ---- adoption (claim-code bootstrap) ----
+
+// AdoptStatus reports whether the instance is already adopted.
+type AdoptStatus struct {
+	Adopted    bool   `json:"adopted"`
+	InstanceID string `json:"instance_id"`
+	Version    string `json:"version"`
+}
+
+// AdoptRequest carries the one-time claim code from a controller.
+type AdoptRequest struct {
+	Code string `json:"code"`
+}
+
+// AdoptResponse returns the real admin token on success so the controller
+// never needs the operator to copy/paste it.
+type AdoptResponse struct {
+	Adopted bool   `json:"adopted"`
+	Token   string `json:"token,omitempty"`
+	Message string `json:"message,omitempty"`
 }

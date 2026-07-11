@@ -18,6 +18,8 @@ type Config struct {
 	KeyFile    string        `yaml:"key_file"`
 	AdminAddr  string        `yaml:"admin_addr"`
 	AdminToken string        `yaml:"admin_token"`
+	StateFile  string        `yaml:"state_file"`  // persists "adopted" so the claim code isn't regenerated
+	InstanceID string        `yaml:"instance_id"` // stable id shown to the controller
 	Upstream   string        `yaml:"upstream"`
 	CacheCap   time.Duration `yaml:"cache_cap"`
 	Default    *filter.Policy `yaml:"default_policy"`

@@ -6,15 +6,23 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/twobip/BlipDNS/internal/control"
 )
 
-// fakeBlipd is a minimal blipd management API for controller tests.
-func fakeBlipd(t *testing.T, token string, health *control.HealthResponse, stats *control.StatsResponse, policies *control.ListResponse) *httptest.Server {
+// fakeBlipd is a minimal blipd management API for controller tests. It
+// supports the claim-code adoption handshake: unauthenticated /adopt/status,
+// POST /adopt with the code returns a token once, then rejects re-adopt.
+func fakeBlipd(t *testing.T, token, claimCode string, health *control.HealthResponse, stats *control.StatsResponse, policies *control.ListResponse) *httptest.Server {
 	t.Helper()
+	var (
+		mu        sync.Mutex
+		adopted   bool
+		curCode   = claimCode
+	)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/health", func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer "+token {
@@ -38,6 +46,28 @@ func fakeBlipd(t *testing.T, token string, health *control.HealthResponse, stats
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		writeJSONH(w, map[string]string{"ok": "set", "id": req.Policy.ID})
 	})
+	mux.HandleFunc("/api/v1/adopt/status", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		writeJSONH(w, control.AdoptStatus{Adopted: adopted, InstanceID: "fake", Version: "blipd/0.1.0"})
+	})
+	mux.HandleFunc("/api/v1/adopt", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		if adopted {
+			writeJSONH(w, control.AdoptResponse{Adopted: true})
+			return
+		}
+		var req control.AdoptRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if req.Code != curCode {
+			writeJSONH(w, control.AdoptResponse{Adopted: false, Message: "invalid code"})
+			return
+		}
+		adopted = true
+		curCode = ""
+		writeJSONH(w, control.AdoptResponse{Adopted: true, Token: token})
+	})
 	return httptest.NewServer(mux)
 }
 
@@ -48,7 +78,7 @@ func writeJSONH(w http.ResponseWriter, v interface{}) {
 
 func TestFleetAddAndPoll(t *testing.T) {
 	tok := "test-token"
-	srv := fakeBlipd(t, tok,
+	srv := fakeBlipd(t, "test-token", "",
 		&control.HealthResponse{OK: true, Version: "blipd/0.1.0"},
 		&control.StatsResponse{QueriesTotal: 7, BlockedTotal: 2, Cached: 3},
 		&control.ListResponse{},
@@ -82,7 +112,7 @@ func TestFleetAddAndPoll(t *testing.T) {
 
 func TestFleetSetPolicy(t *testing.T) {
 	tok := "t"
-	srv := fakeBlipd(t, tok, &control.HealthResponse{OK: true}, &control.StatsResponse{}, &control.ListResponse{})
+	srv := fakeBlipd(t, tok, "", &control.HealthResponse{OK: true}, &control.StatsResponse{}, &control.ListResponse{})
 	defer srv.Close()
 	fleet := NewFleet()
 	ctx := context.Background()
@@ -172,4 +202,74 @@ func TestServerAuth(t *testing.T) {
 		t.Errorf("expected 200 with ?token, got %d", rec3.Code)
 	}
 	_ = strings.TrimSpace
+}
+
+// TestFleetAdopt verifies the claim-code bootstrap: a request-scoped Add (as
+// the HTTP API does) must still leave the long-lived poll loop running on a
+// background context, so the instance becomes online after adopting. It also
+// checks the code is one-time (re-adopt returns no token).
+func TestFleetAdopt(t *testing.T) {
+	pollInterval = 100 * time.Millisecond
+	defer func() { pollInterval = 5 * time.Second }()
+	tok := "adopt-token"
+	code := "ABCD-1234"
+	srv := fakeBlipd(t, tok, code,
+		&control.HealthResponse{OK: true, Version: "blipd/0.1.0"},
+		&control.StatsResponse{QueriesTotal: 3},
+		&control.ListResponse{},
+	)
+	defer srv.Close()
+
+	fleet := NewFleet()
+	// Simulate the HTTP API path: Add is invoked with a context that is
+	// cancelled immediately afterwards (as r.Context() is on request return).
+	addCtx, cancel := context.WithCancel(context.Background())
+	err := fleet.Add(addCtx, InstanceConfig{ID: "s1", URL: srv.URL, Claim: code, Label: "site1"})
+	cancel() // request ends -> ctx cancelled
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The goroutine must survive the cancelled addCtx (background context).
+	deadline := time.After(3 * time.Second)
+	for {
+		st := fleet.List()[0]
+		if st.Online && st.Adopted {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("instance never came online/adopted: %+v", st)
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+
+	// Re-adopt must not re-issue a token (one-time) and is idempotent: a
+	// wrong code after adoption returns "already adopted", not an error.
+	if err := fleet.Adopt(context.Background(), "s1", code); err != nil {
+		t.Fatalf("re-adopt returned error: %v", err)
+	}
+	if err := fleet.Adopt(context.Background(), "s1", "WRON-G000"); err != nil {
+		t.Fatalf("post-adoption re-adopt with wrong code should be idempotent, got: %v", err)
+	}
+	if !fleet.List()[0].Adopted {
+		t.Error("instance should remain adopted")
+	}
+}
+
+// TestFleetAdoptRejectsWrongCode ensures an invalid code never yields a token
+// and the instance stays unadopted.
+func TestFleetAdoptRejectsWrongCode(t *testing.T) {
+	tok := "t2"
+	code := "GOOD-0000"
+	srv := fakeBlipd(t, tok, code, &control.HealthResponse{OK: true}, &control.StatsResponse{}, &control.ListResponse{})
+	defer srv.Close()
+	fleet := NewFleet()
+	if err := fleet.Add(context.Background(), InstanceConfig{ID: "s1", URL: srv.URL, Claim: "BAD-1111", Label: "site1"}); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(150 * time.Millisecond)
+	st := fleet.List()[0]
+	if st.Adopted {
+		t.Error("instance should NOT be adopted with a wrong code")
+	}
 }

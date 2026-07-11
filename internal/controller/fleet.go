@@ -35,6 +35,7 @@ type InstanceConfig struct {
 	URL    string `yaml:"url" json:"url"`       // http://host:8444
 	Token  string `yaml:"token" json:"token"`
 	Label  string `yaml:"label" json:"label"`
+	Claim  string `yaml:"claim" json:"claim"`   // one-time claim code (optional bootstrap)
 }
 
 // Fleet holds all instances and the event bus.
@@ -74,7 +75,17 @@ func (f *Fleet) Add(ctx context.Context, cfg InstanceConfig) error {
 	f.mu.Lock()
 	f.instances[cfg.ID] = inst
 	f.mu.Unlock()
-	inst.start(ctx)
+	// Use a background context for the long-lived poll/watch loops: the caller's
+	// ctx (e.g. an HTTP request) is cancelled when the request returns, which
+	// would kill the goroutines after the first poll.
+	inst.start(context.Background())
+	if cfg.Claim != "" {
+		// Adopt is a network call; run it on a background context so it isn't
+		// cut short when the caller's request context is cancelled.
+		if err := f.Adopt(context.Background(), cfg.ID, cfg.Claim); err != nil {
+			f.bus.Publish(Event{InstanceID: cfg.ID, Instance: cfg.Label, Type: "status", At: f.now(), Msg: "adopt failed: " + err.Error()})
+		}
+	}
 	return nil
 }
 
@@ -116,6 +127,70 @@ func (f *Fleet) SetPolicy(ctx context.Context, id string, p *control.Policy) err
 		return err
 	}
 	f.bus.Publish(Event{InstanceID: id, Instance: inst.Config.Label, Type: "policy", At: f.now(), Msg: "set " + p.ID, Domain: p.ID})
+	return nil
+}
+
+// Adopt presents a claim code to an instance and, on success, stores the
+// returned admin token on the instance so subsequent calls use it. This is the
+// one-time, automatic bootstrap between controller and blipd.
+func (f *Fleet) Adopt(ctx context.Context, id, code string) error {
+	inst := f.get(id)
+	if inst == nil {
+		return fmt.Errorf("controller: unknown instance %s", id)
+	}
+	if code == "" && inst.claimCode != "" {
+		code = inst.claimCode // controller was pre-seeded with the code
+	}
+	resp, err := inst.client.Adopt(ctx, code)
+	if err != nil {
+		return err
+	}
+	if !resp.Adopted {
+		return fmt.Errorf("controller: adoption rejected: %s", resp.Message)
+	}
+	if resp.Token != "" {
+		inst.mu.Lock()
+		inst.Config.Token = resp.Token
+		inst.claimCode = ""
+		inst.client = control.NewClient(inst.Config.URL, resp.Token)
+		inst.mu.Unlock()
+	}
+	f.bus.Publish(Event{InstanceID: id, Instance: inst.Config.Label, Type: "status", At: f.now(), Msg: "adopted"})
+	return nil
+}
+
+// SetClaimCode records a claim code for an instance (e.g. pasted once into the
+// controller UI). It is used by Adopt() if no code is supplied at adopt time.
+func (f *Fleet) SetClaimCode(id, code string) {
+	inst := f.get(id)
+	if inst == nil {
+		return
+	}
+	inst.mu.Lock()
+	inst.claimCode = code
+	inst.mu.Unlock()
+}
+
+// AdoptStatus returns the instance's adoption state from blipd (unauthenticated).
+func (f *Fleet) GetAdoptStatus(id string) (*control.AdoptStatus, error) {
+	inst := f.get(id)
+	if inst == nil {
+		return nil, fmt.Errorf("controller: unknown instance %s", id)
+	}
+	return inst.client.AdoptStatus(context.Background())
+}
+
+// ResetAdoption resets a managed instance's adoption state (requires the
+// instance to still be reachable; blipd requires its own current token).
+func (f *Fleet) ResetAdoption(ctx context.Context, id string) error {
+	inst := f.get(id)
+	if inst == nil {
+		return fmt.Errorf("controller: unknown instance %s", id)
+	}
+	if err := inst.client.ResetAdoption(ctx); err != nil {
+		return err
+	}
+	f.bus.Publish(Event{InstanceID: id, Instance: inst.Config.Label, Type: "status", At: f.now(), Msg: "adoption reset"})
 	return nil
 }
 

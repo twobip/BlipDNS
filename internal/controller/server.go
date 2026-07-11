@@ -32,7 +32,7 @@ func (s *Server) Handler() http.Handler {
 		return s.auth(h)
 	}
 	mux.HandleFunc("/api/instances", api(s.handleInstances))
-	mux.HandleFunc("/api/instances/", api(s.handleInstance)) // /add /delete /policies /policy
+	mux.HandleFunc("/api/instances/", api(s.handleInstance)) // /add /delete /policies /policy /adopt /adopt/status /adopt/reset
 	mux.HandleFunc("/api/events", api(s.handleEvents))
 	mux.HandleFunc("/api/health", api(s.handleHealth))
 
@@ -141,6 +141,41 @@ func (s *Server) handleInstance(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	case "adopt/status":
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		st, err := s.fleet.GetAdoptStatus(id)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		writeJSON(w, st)
+	case "adopt":
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req struct {
+			Code string `json:"code"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if err := s.fleet.Adopt(ctx, id, req.Code); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, map[string]string{"ok": "adopted", "id": id})
+	case "adopt/reset":
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if err := s.fleet.ResetAdoption(ctx, id); err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		writeJSON(w, map[string]string{"ok": "reset", "id": id})
 	case "": // delete instance
 		if r.Method != http.MethodDelete {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

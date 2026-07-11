@@ -26,18 +26,37 @@ function renderInstances(list) {
   }
   for (const i of list) {
     const s = i.stats || {};
+    const adoptBadge = i.adopted
+      ? '<span class="badge on">claimed</span>'
+      : '<span class="badge off">unclaimed</span>';
+    const adoptBtn = i.adopted ? "" :
+      `<button class="mini" data-adopt="${i.id}">Adopt…</button>`;
     const card = document.createElement("div");
     card.className = "card";
     card.innerHTML = `
-      <h3>${esc(i.label)} <span class="badge ${i.online ? "on" : "off"}">${i.online ? "online" : "offline"}</span></h3>
+      <h3>${esc(i.label)} <span class="badge ${i.online ? "on" : "off"}">${i.online ? "online" : "offline"}</span> ${adoptBadge}</h3>
       <div class="sub">${esc(i.url)}</div>
       <div class="stat"><span>queries</span><span>${s.queries_total ?? 0}</span></div>
       <div class="stat"><span>blocked</span><span>${s.blocked_total ?? 0}</span></div>
       <div class="stat"><span>upstream errs</span><span>${s.upstream_errors ?? 0}</span></div>
       <div class="stat"><span>cache</span><span>${s.cached ?? 0}</span></div>
+      <div class="actions">${adoptBtn}</div>
     `;
     el.appendChild(card);
   }
+  document.querySelectorAll("[data-adopt]").forEach((b) => {
+    b.onclick = () => adoptInstance(b.getAttribute("data-adopt"));
+  });
+}
+
+async function adoptInstance(id) {
+  const code = prompt("Paste the blipd claim code (from its journal, one-time):");
+  if (!code) return;
+  try {
+    await api(`/api/instances/${encodeURIComponent(id)}/adopt`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ code }) });
+    toast("adopted " + id);
+    refresh();
+  } catch (e) { toast("adopt failed: " + e.message); }
 }
 
 function esc(s) {
@@ -93,12 +112,18 @@ document.getElementById("i-save").onclick = async () => {
     label: document.getElementById("i-label").value.trim(),
     url: document.getElementById("i-url").value.trim(),
     token: document.getElementById("i-token").value,
+    claim: document.getElementById("i-claim").value.trim(),
   };
   if (!body.id || !body.url) return toast("id and url required");
   try {
     await api("/api/instances", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
     modal.classList.add("hidden");
     toast("instance added");
+    // if a claim code was supplied, adopt immediately
+    if (body.claim) {
+      await api(`/api/instances/${encodeURIComponent(body.id)}/adopt`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ code: body.claim }) });
+      toast("adopted " + body.id);
+    }
     refresh();
   } catch (e) { toast("add failed: " + e.message); }
 };

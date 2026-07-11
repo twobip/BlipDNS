@@ -25,6 +25,7 @@ fi
 
 echo ">> installing config -> $CFG_DST"
 mkdir -p "$CFG_DIR"
+mkdir -p /var/lib/blipd
 if [[ -f "$CFG_DST" ]]; then
   echo "   (existing config preserved — not overwriting; edit $CFG_DST to change)"
 else
@@ -33,6 +34,7 @@ else
   chmod 0640 "$CFG_DST"
   chown root:"$SVC_USER" "$CFG_DST"
   echo "   admin token: $TOKEN   (use with: blipctl --token $TOKEN http://127.0.0.1:8444 ...)"
+  echo "   claim code is printed to the journal on first start: journalctl -u blipd | grep ADOPTION"
 fi
 
 echo ">> installing unit -> $UNIT_DST"

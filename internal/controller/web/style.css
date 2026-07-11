@@ -51,6 +51,8 @@ main { padding: 18px 20px; max-width: 1100px; margin: 0 auto; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 10px; }
 button { background: var(--panel2); color: var(--fg); border: 1px solid #000; padding: 8px 14px; border-radius: 7px; cursor: pointer; }
 button.primary { background: var(--accent); color: #001; border: none; }
+button.mini { padding: 5px 10px; font-size: 12px; margin-top: 8px; }
+.card .actions { margin-top: 8px; }
 .fab { position: fixed; right: 24px; bottom: 24px; width: 52px; height: 52px; border-radius: 50%; font-size: 24px; background: var(--accent); color: #001; border: none; box-shadow: 0 4px 16px #0008; }
 .toast { position: fixed; left: 50%; bottom: 30px; transform: translateX(-50%); background: var(--panel2); border: 1px solid #000; padding: 10px 16px; border-radius: 8px; }
 .toast.hidden { display: none; }

@@ -1,9 +1,12 @@
 package control
 
 import (
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 
@@ -17,15 +20,27 @@ type StatsCollector interface {
 }
 
 // Server exposes the authenticated management API for a blipd instance.
+// It also exposes an unauthenticated claim-code adoption handshake so a
+// controller can bootstrap trust once without the operator copying tokens.
 type Server struct {
-	token    string
-	store    *filter.Store
-	cache    *cache.Cache
-	stats    StatsCollector
-	started  time.Time
-	version  string
-	mu       sync.RWMutex
+	token   string
+	store   *filter.Store
+	cache   *cache.Cache
+	stats   StatsCollector
+	started time.Time
+	version string
+	mu      sync.RWMutex
+	watchMu sync.Mutex
 	watchers map[chan WatchEvent]struct{}
+
+	// adoption (claim-code bootstrap)
+	adoptMu    sync.Mutex
+	adopted    bool
+	claimCode  string
+	stateFile  string
+	instanceID string
+	adoptFails int
+	adoptUntil time.Time
 }
 
 // NewServer builds a management API server guarded by token.
@@ -38,6 +53,66 @@ func NewServer(token string, store *filter.Store, c *cache.Cache, stats StatsCol
 		started:  time.Now(),
 		version:  version,
 		watchers: make(map[chan WatchEvent]struct{}),
+	}
+}
+
+// ConfigureAdoption initialises the claim-code handshake. If a prior adopted
+// state file exists the instance is treated as already adopted (the claim code
+// is not regenerated). Otherwise a fresh one-time code is generated and logged
+// to the local journal only.
+func (s *Server) ConfigureAdoption(stateFile, instanceID string) {
+	s.adoptMu.Lock()
+	defer s.adoptMu.Unlock()
+	s.stateFile = stateFile
+	if instanceID == "" {
+		if h, err := os.Hostname(); err == nil {
+			instanceID = h
+		}
+	}
+	s.instanceID = instanceID
+
+	if s.token == "" {
+		s.token = genToken()
+		log.Printf("blipd: WARNING no admin_token configured; generated ephemeral token (set admin_token in config to persist)")
+	}
+
+	if stateFile != "" {
+		if b, err := os.ReadFile(stateFile); err == nil {
+			var st struct {
+				Adopted bool `json:"adopted"`
+			}
+			if json.Unmarshal(b, &st) == nil && st.Adopted {
+				s.adopted = true
+				s.claimCode = ""
+				log.Printf("blipd: management already adopted (state %s); claim code not required", stateFile)
+				return
+			}
+		}
+	}
+	s.genClaim()
+}
+
+func (s *Server) genClaim() {
+	s.claimCode = genClaimCode()
+	s.adopted = false
+	log.Printf("blipd: ADOPTION CODE = %s  (use it ONCE in the controller to claim this instance; printed to the local journal only)", s.claimCode)
+}
+
+func (s *Server) persistAdopted(adopted bool) {
+	if s.stateFile == "" {
+		return
+	}
+	if !adopted {
+		_ = os.Remove(s.stateFile)
+		return
+	}
+	b, _ := json.Marshal(struct {
+		Adopted    bool      `json:"adopted"`
+		InstanceID string    `json:"instance_id"`
+		AdoptedAt  time.Time `json:"adopted_at"`
+	}{true, s.instanceID, time.Now()})
+	if err := os.WriteFile(s.stateFile, b, 0640); err != nil {
+		log.Printf("blipd: warning: cannot persist adoption state to %s: %v", s.stateFile, err)
 	}
 }
 
@@ -64,6 +139,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/policies", s.auth(s.handleListPolicies))
 	mux.HandleFunc("/api/v1/policy", s.auth(s.handlePolicy))
 	mux.HandleFunc("/api/v1/watch", s.auth(s.handleWatch))
+	// unauthenticated adoption handshake
+	mux.HandleFunc("/api/v1/adopt/status", s.handleAdoptStatus)
+	mux.HandleFunc("/api/v1/adopt", s.handleAdopt)
+	mux.HandleFunc("/api/v1/adopt/reset", s.auth(s.handleAdoptReset))
 	return mux
 }
 
@@ -141,7 +220,6 @@ func (s *Server) handlePolicy(w http.ResponseWriter, r *http.Request) {
 	case http.MethodDelete:
 		var req DeletePolicyRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			// allow ?id= query form
 			req.ID = r.URL.Query().Get("id")
 		} else if req.ID == "" {
 			req.ID = r.URL.Query().Get("id")
@@ -164,13 +242,13 @@ func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ch := make(chan WatchEvent, 16)
-	s.mu.Lock()
+	s.watchMu.Lock()
 	s.watchers[ch] = struct{}{}
-	s.mu.Unlock()
+	s.watchMu.Unlock()
 	defer func() {
-		s.mu.Lock()
+		s.watchMu.Lock()
 		delete(s.watchers, ch)
-		s.mu.Unlock()
+		s.watchMu.Unlock()
 		close(ch)
 	}()
 
@@ -196,6 +274,71 @@ func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request) {
 			flusher.Flush()
 		}
 	}
+}
+
+// ---- adoption handshake ----
+
+func (s *Server) handleAdoptStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	s.adoptMu.Lock()
+	adopted := s.adopted
+	inst := s.instanceID
+	s.adoptMu.Unlock()
+	writeJSON(w, AdoptStatus{Adopted: adopted, InstanceID: inst, Version: s.version})
+}
+
+func (s *Server) handleAdopt(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req AdoptRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	s.adoptMu.Lock()
+	defer s.adoptMu.Unlock()
+	if s.adopted {
+		writeJSON(w, AdoptResponse{Adopted: true, Message: "already adopted"})
+		return
+	}
+	if time.Now().Before(s.adoptUntil) {
+		http.Error(w, "too many attempts; try again later", http.StatusTooManyRequests)
+		return
+	}
+	if req.Code == "" || req.Code != s.claimCode {
+		s.adoptFails++
+		if s.adoptFails >= 5 {
+			s.adoptUntil = time.Now().Add(5 * time.Minute)
+			s.adoptFails = 0
+		}
+		writeJSON(w, AdoptResponse{Adopted: false, Message: "invalid code"})
+		return
+	}
+	s.adopted = true
+	s.claimCode = "" // one-time: invalidate immediately
+	s.persistAdopted(true)
+	log.Printf("blipd: instance adopted via claim code")
+	writeJSON(w, AdoptResponse{Adopted: true, Token: s.token})
+}
+
+func (s *Server) handleAdoptReset(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	s.adoptMu.Lock()
+	s.adopted = false
+	s.adoptFails = 0
+	s.adoptUntil = time.Time{}
+	s.persistAdopted(false)
+	s.genClaim()
+	s.adoptMu.Unlock()
+	writeJSON(w, AckResponse{OK: true, Msg: "reset; new adoption code generated (see journal)"})
 }
 
 func mustJSON(v interface{}) string {
@@ -225,4 +368,29 @@ func toFilter(p *Policy) *filter.Policy {
 		Log:         p.Log,
 		Upstream:    p.Upstream,
 	}
+}
+
+// genClaimCode returns an 8-char grouped code from an unambiguous alphabet
+// (no I/O/0/1), ~40 bits of entropy.
+func genClaimCode() string {
+	const alpha = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+	b := make([]byte, 8)
+	if _, err := rand.Read(b); err != nil {
+		for i := range b {
+			b[i] = alpha[(int(time.Now().UnixNano())+i)%len(alpha)]
+		}
+	}
+	for i := range b {
+		b[i] = alpha[int(b[i])%len(alpha)]
+	}
+	return string(b[:4]) + "-" + string(b[4:])
+}
+
+// genToken returns a 32-byte hex token.
+func genToken() string {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return fmt.Sprintf("%x", time.Now().UnixNano())
+	}
+	return fmt.Sprintf("%x", b)
 }

@@ -20,8 +20,8 @@ NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
+ReadWritePaths=/etc/blipd /var/lib/blipd
 LimitNOFILE=65536
-
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=blipd

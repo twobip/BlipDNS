@@ -52,8 +52,12 @@ func main() {
 	})
 
 	// Admin / management API.
-	if cfg.AdminToken != "" {
+	if cfg.AdminToken != "" || cfg.StateFile != "" {
+		if cfg.AdminToken == "" && cfg.StateFile == "" {
+			cfg.AdminToken = "" // let ConfigureAdoption generate an ephemeral token
+		}
 		srv.SetMgmtToken(cfg.AdminToken)
+		srv.ControlServer().ConfigureAdoption(cfg.StateFile, cfg.InstanceID)
 		go func() {
 			admin := &http.Server{Addr: cfg.AdminAddr, Handler: srv.ControlServer().Handler()}
 			log.Printf("blipd: management API on %s", cfg.AdminAddr)

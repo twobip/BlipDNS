@@ -10,21 +10,23 @@ import (
 
 // InstanceStatus is a point-in-time view of an instance.
 type InstanceStatus struct {
-	ID      string                    `json:"id"`
-	Label   string                    `json:"label"`
-	URL     string                    `json:"url"`
-	Online  bool                      `json:"online"`
-	Health  *control.HealthResponse   `json:"health,omitempty"`
-	Stats   *control.StatsResponse    `json:"stats,omitempty"`
-	LastOK  time.Time                 `json:"last_ok"`
-	Err     string                    `json:"error,omitempty"`
+	ID             string                  `json:"id"`
+	Label          string                  `json:"label"`
+	URL            string                  `json:"url"`
+	Online         bool                    `json:"online"`
+	Adopted        bool                    `json:"adopted"`
+	Health         *control.HealthResponse `json:"health,omitempty"`
+	Stats          *control.StatsResponse  `json:"stats,omitempty"`
+	LastOK         time.Time               `json:"last_ok"`
+	Err            string                  `json:"error,omitempty"`
 }
 
 // Instance is a managed blipd with background poll + watch loops.
 type Instance struct {
-	Config InstanceConfig
-	client *control.Client
-	fleet  *Fleet
+	Config    InstanceConfig
+	client    *control.Client
+	fleet     *Fleet
+	claimCode string // optional code the controller was pre-seeded with
 
 	mu     sync.RWMutex
 	online bool
@@ -37,6 +39,10 @@ type Instance struct {
 	wg     sync.WaitGroup
 }
 
+// pollInterval is how often the controller polls an instance's health/stats.
+// Overridable in tests.
+var pollInterval = 5 * time.Second
+
 func (i *Instance) start(parent context.Context) {
 	ctx, cancel := context.WithCancel(parent)
 	i.cancel = cancel
@@ -45,7 +51,7 @@ func (i *Instance) start(parent context.Context) {
 	i.wg.Add(1)
 	go func() {
 		defer i.wg.Done()
-		t := time.NewTicker(5 * time.Second)
+		t := time.NewTicker(pollInterval)
 		defer t.Stop()
 		i.poll(ctx)
 		for {
@@ -73,9 +79,16 @@ func (i *Instance) stop() {
 	i.wg.Wait()
 }
 
+func (i *Instance) ctl() *control.Client {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.client
+}
+
 func (i *Instance) poll(ctx context.Context) {
-	h, herr := i.client.Health(ctx)
-	s, serr := i.client.Stats(ctx)
+	c := i.ctl()
+	h, herr := c.Health(ctx)
+	s, serr := c.Stats(ctx)
 	i.mu.Lock()
 	if herr == nil {
 		i.online = true
@@ -105,7 +118,7 @@ func (i *Instance) watch(ctx context.Context) {
 			return
 		default:
 		}
-		err := i.client.Watch(ctx, func(e control.WatchEvent) {
+		err := i.ctl().Watch(ctx, func(e control.WatchEvent) {
 			i.fleet.bus.Publish(Event{
 				InstanceID: i.Config.ID,
 				Instance:   i.Config.Label,
@@ -129,7 +142,7 @@ func (i *Instance) watch(ctx context.Context) {
 func (i *Instance) status() *InstanceStatus {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
-	return &InstanceStatus{
+	st := &InstanceStatus{
 		ID:     i.Config.ID,
 		Label:  i.Config.Label,
 		URL:    i.Config.URL,
@@ -139,4 +152,8 @@ func (i *Instance) status() *InstanceStatus {
 		LastOK: i.last,
 		Err:    i.err,
 	}
+	if ad, err := i.ctl().AdoptStatus(context.Background()); err == nil {
+		st.Adopted = ad.Adopted
+	}
+	return st
 }
