@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>BlipDNS Controller</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header>
+    <h1>BlipDNS Controller</h1>
+    <div id="conn" class="badge">connecting…</div>
+  </header>
+
+  <main>
+    <section class="cards" id="instances"></section>
+
+    <section class="panel">
+      <h2>Fleet Event Stream</h2>
+      <div class="toolbar">
+        <input id="f-domain" placeholder="filter domain/client…" />
+        <span id="event-count" class="muted">0 events</span>
+      </div>
+      <ul id="events" class="events"></ul>
+    </section>
+  </main>
+
+  <!-- Add instance modal -->
+  <div id="modal" class="modal hidden">
+    <div class="modal-box">
+      <h2>Add Instance</h2>
+      <label>ID <input id="i-id" placeholder="office-dns" /></label>
+      <label>Label <input id="i-label" placeholder="Office" /></label>
+      <label>URL <input id="i-url" placeholder="http://10.0.0.5:8444" /></label>
+      <label>Token <input id="i-token" type="password" placeholder="admin token" /></label>
+      <div class="modal-actions">
+        <button id="i-cancel">Cancel</button>
+        <button id="i-save" class="primary">Add</button>
+      </div>
+    </div>
+  </div>
+
+  <button id="add-btn" class="fab" title="Add instance">+</button>
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>

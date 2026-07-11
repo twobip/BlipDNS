@@ -1,0 +1,13 @@
+dns_addr: "0.0.0.0:53"
+doh_addr: "0.0.0.0:8443"
+admin_addr: "127.0.0.1:8444"
+admin_token: "__BLIP_ADMIN_TOKEN__"
+# Production upstreams with failover (override in /etc/blipd/blipd.yaml).
+upstream: "https://1.1.1.1/dns-query https://8.8.8.8/dns-query"
+cache_cap: 1h
+
+default_policy:
+  id: "default"
+  block_action: "nxdomain"
+
+policies: []

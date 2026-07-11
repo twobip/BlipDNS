@@ -1,0 +1,9 @@
+listen: "0.0.0.0:8500"
+token: "__BLIPC_TOKEN__"
+instances:
+  # Add blipd instances here, or via the web UI at runtime.
+  # token may be a literal, an "@/path" file, or an "/abs/path" file.
+  # - id: office-dns
+  #   label: "Office"
+  #   url: "http://10.0.0.5:8444"
+  #   token: "secret-token"
