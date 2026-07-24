@@ -34,6 +34,7 @@ function switchTab(tab) {
   });
   document.getElementById("dashboard-view").classList.toggle("hidden", tab !== "dashboard");
   document.getElementById("instances-view").classList.toggle("hidden", tab !== "instances");
+  document.getElementById("queries-view").classList.toggle("hidden", tab !== "queries");
   refresh();
 }
 
@@ -41,7 +42,8 @@ async function refresh() {
   try {
     const list = await api("/api/instances").then((r) => r.json());
     if (currentTab === "dashboard") renderDashboard(list);
-    else renderInstances(list);
+    else if (currentTab === "instances") renderInstances(list);
+    else refreshQueryLog();
     const conn = document.getElementById("conn");
     const online = list.filter((i) => i.online).length;
     conn.textContent = online + "/" + list.length + " online";
@@ -82,7 +84,7 @@ function renderInstances(list) {
     const adoptBadge = i.adopted
       ? '<span class="badge on">claimed</span>'
       : '<span class="badge off">unclaimed</span>';
-    const adoptBtn = i.adopted ? "" : '<button class="mini" data-adopt="' + i.id + '">Adopt…</button>';
+    const adoptBtn = i.adopted ? "" : '<button class="mini" data-adopt="' + i.id + '">Adopt...</button>';
     const card = document.createElement("div");
     card.className = "card";
     card.innerHTML =
@@ -152,12 +154,83 @@ function addEvent(e) {
   while (ul.children.length > 200) ul.removeChild(ul.lastChild);
 }
 
+// --- Query Log tab ---
+let queryLog = [];
+const queryLogMax = 500;
+
+function addQueryLog(entry) {
+  queryLog.unshift(entry);
+  if (queryLog.length > queryLogMax) queryLog = queryLog.slice(0, queryLogMax);
+  if (!document.getElementById("queries-view").classList.contains("hidden")) {
+    renderQueryLog();
+  }
+}
+
+function renderQueryLog() {
+  const instanceSel = document.getElementById("q-instance");
+  const filter = document.getElementById("q-filter")?.value.toLowerCase() || "";
+  const selectedInstance = instanceSel?.value || "";
+  const tbody = document.querySelector("#q-table tbody");
+  if (!tbody) return;
+
+  // Update instance selector
+  const instances = new Set(queryLog.map((e) => e.instance).filter(Boolean));
+  const currentVal = instanceSel?.value || "";
+  instanceSel.innerHTML = '<option value="">All</option>' + [...instances].map((i) => `<option value="${i}">${i}</option>`).join("");
+  instanceSel.value = currentVal;
+
+  const filtered = queryLog.filter((e) => {
+    if (selectedInstance && e.instance !== selectedInstance) return false;
+    const hay = `${e.instance} ${e.client} ${e.domain} ${e.action} ${e.upstream || ""}`.toLowerCase();
+    return hay.includes(filter);
+  });
+
+  tbody.innerHTML = filtered
+    .slice(0, 200)
+    .map(
+      (e) => `
+      <tr class="action-${e.action?.toLowerCase() || "pass"}">
+        <td>${new Date(e.at).toLocaleTimeString()}</td>
+        <td>${e.instance || "\u2014"}</td>
+        <td>${e.client || "\u2014"}</td>
+        <td>${e.domain}</td>
+        <td><span class="action-badge action-${e.action?.toLowerCase() || "pass"}">${e.action || "PASS"}</span></td>
+        <td>${e.upstream || "\u2014"}</td>
+      </tr>
+    `
+    )
+    .join("");
+}
+
+function refreshQueryLog() {
+  renderQueryLog();
+}
+
+document.getElementById("q-filter")?.addEventListener("input", renderQueryLog);
+document.getElementById("q-instance")?.addEventListener("change", renderQueryLog);
+document.getElementById("q-clear")?.addEventListener("click", () => {
+  queryLog = [];
+  renderQueryLog();
+});
+
 function connectSSE() {
   const qs = TOKEN ? "?token=" + encodeURIComponent(TOKEN) : "";
   const es = new EventSource("/api/events" + qs);
   es.onmessage = (ev) => {
     try {
-      addEvent(JSON.parse(ev.data));
+      const e = JSON.parse(ev.data);
+      addEvent(e);
+      // Also add query log entries for block/pass events
+      if (e.type === "block" || e.type === "pass") {
+        addQueryLog({
+          at: e.at,
+          instance: e.instance,
+          client: e.client,
+          domain: e.domain,
+          action: e.type.toUpperCase(),
+          upstream: e.upstream || "\u2014",
+        });
+      }
     } catch {}
   };
   es.onerror = () => {
@@ -167,11 +240,11 @@ function connectSSE() {
 }
 
 // Tab switching
-document.querySelectorAll(".tab").forEach((a) => {
-  a.onclick = (e) => {
+document.querySelectorAll(".tab[data-tab]").forEach((t) => {
+  t.addEventListener("click", (e) => {
     e.preventDefault();
-    switchTab(a.dataset.tab);
-  };
+    switchTab(t.dataset.tab);
+  });
 });
 
 // Modal wiring
@@ -209,8 +282,6 @@ if (iSave) {
     }
   };
 }
-
-document.getElementById("f-domain")?.addEventListener("input", () => {});
 
 refresh();
 connectSSE();

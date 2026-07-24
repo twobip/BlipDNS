@@ -12,6 +12,7 @@
     <nav class="tabs">
       <a href="javascript:void(0)" class="tab active" data-tab="dashboard">Dashboard</a>
       <a href="javascript:void(0)" class="tab" data-tab="instances">Instances</a>
+      <a href="javascript:void(0)" class="tab" data-tab="queries">Query Log</a>
     </nav>
     <div id="conn" class="badge">connecting…</div>
   </header>
@@ -53,6 +54,23 @@
 
     <div id="instances-view" class="hidden">
       <section class="cards" id="instances"></section>
+    </div>
+
+    <div id="queries-view" class="hidden">
+      <section class="panel">
+        <h2>Query Log</h2>
+        <div class="query-log-controls">
+          <label>Instance <select id="q-instance"></select></label>
+          <label>Filter <input id="q-filter" type="search" placeholder="domain, client, action…" /></label>
+          <button id="q-clear">Clear</button>
+        </div>
+        <table id="q-table">
+          <thead>
+            <tr><th>Time</th><th>Instance</th><th>Client</th><th>Domain</th><th>Action</th><th>Upstream</th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </section>
     </div>
   </main>
 
