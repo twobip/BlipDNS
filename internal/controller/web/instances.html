@@ -3,21 +3,21 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>BlipDNS Controller</title>
+  <title>BlipDNS Controller — Instances</title>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
   <header>
     <h1>BlipDNS Controller</h1>
     <nav class="tabs">
-      <a href="javascript:void(0)" class="tab active" data-tab="dashboard">Dashboard</a>
-      <a href="javascript:void(0)" class="tab" data-tab="instances">Instances</a>
+      <a href="javascript:void(0)" class="tab" data-tab="dashboard">Dashboard</a>
+      <a href="javascript:void(0)" class="tab active" data-tab="instances">Instances</a>
     </nav>
     <div id="conn" class="badge">connecting…</div>
   </header>
 
   <main>
-    <div id="dashboard-view">
+    <div id="dashboard-view" class="hidden">
       <section class="dashboard-cards">
         <div class="card stat-card">
           <h3>Total DNS Queries</h3>
@@ -51,7 +51,7 @@
       </section>
     </div>
 
-    <div id="instances-view" class="hidden">
+    <div id="instances-view">
       <section class="cards" id="instances"></section>
     </div>
   </main>
