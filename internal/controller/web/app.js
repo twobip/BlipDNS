@@ -84,7 +84,7 @@ function renderInstances(list) {
     const adoptBadge = i.adopted
       ? '<span class="badge on">claimed</span>'
       : '<span class="badge off">unclaimed</span>';
-    const adoptBtn = i.adopted ? "" : '<button class="mini" data-adopt="' + i.id + '">Adopt...</button>';
+    const adoptBtn = i.adopted ? "" : '<button class="mini" data-adopt="' + i.id + '">Adopt\u2026</button>';
     const card = document.createElement("div");
     card.className = "card";
     card.innerHTML =
@@ -179,10 +179,12 @@ function renderQueryLog() {
   instanceSel.innerHTML = '<option value="">All</option>' + [...instances].map((i) => `<option value="${i}">${i}</option>`).join("");
   instanceSel.value = currentVal;
 
+  const filterVal = document.getElementById("q-filter")?.value.toLowerCase() || "";
+
   const filtered = queryLog.filter((e) => {
-    if (selectedInstance && e.instance !== selectedInstance) return false;
+    if (instanceSel?.value && e.instance !== instanceSel?.value) return false;
     const hay = `${e.instance} ${e.client} ${e.domain} ${e.action} ${e.upstream || ""}`.toLowerCase();
-    return hay.includes(filter);
+    return hay.includes(filterVal);
   });
 
   tbody.innerHTML = filtered

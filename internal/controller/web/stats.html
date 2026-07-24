@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>BlipDNS Controller — Stats</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header>
+    <h1>BlipDNS Controller</h1>
+    <nav class="tabs">
+      <a href="/?token={{TOKEN}}" class="tab" data-tab="dashboard">Dashboard</a>
+      <a href="/stats.html?token={{TOKEN}}" class="tab active" data-tab="stats">Stats</a>
+      <a href="/instances.html?token={{TOKEN}}" class="tab" data-tab="instances">Instances</a>
+    </nav>
+    <div id="conn" class="badge">connecting…</div>
+  </header>
+
+  <main>
+    <section class="dashboard-cards">
+      <div class="card stat-card">
+        <h3>Total DNS Queries</h3>
+        <div class="big-number" id="total-queries">—</div>
+        <div class="sub">Across all instances</div>
+      </div>
+      <div class="card stat-card">
+        <h3>Total Blocked</h3>
+        <div class="big-number" id="total-blocked">—</div>
+        <div class="sub">Filtered queries</div>
+      </div>
+      <div class="card stat-card">
+        <h3>Total Upstream Errors</h3>
+        <div class="big-number" id="total-upstream-errors">—</div>
+        <div class="sub">Failed upstream requests</div>
+      </div>
+      <div class="card stat-card">
+        <h3>Online Instances</h3>
+        <div class="big-number" id="online-instances">—</div>
+        <div class="sub">of <span id="total-instances">—</span> total</div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Fleet Event Stream</h2>
+      <div class="toolbar">
+        <input id="f-domain" placeholder="filter domain/client…" />
+        <span id="event-count" class="muted">0 events</span>
+      </div>
+      <ul id="events" class="events"></ul>
+    </section>
+  </main>
+
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>

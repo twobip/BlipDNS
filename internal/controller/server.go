@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io/fs"
@@ -230,13 +231,13 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) serveUI(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/" && r.URL.Path != "/index.html" && r.URL.Path != "/instances.html" && !isUIAsset(r.URL.Path) {
+	if r.URL.Path != "/" && r.URL.Path != "/index.html" && r.URL.Path != "/stats.html" && r.URL.Path != "/instances.html" && !isUIAsset(r.URL.Path) {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
 	// The page requires the token; static assets (js/css) are served
 	// unauthenticated so browsers can load them as relative sub-resources.
-	if r.URL.Path == "/" || r.URL.Path == "/index.html" || r.URL.Path == "/instances.html" {
+	if r.URL.Path == "/" || r.URL.Path == "/index.html" || r.URL.Path == "/stats.html" || r.URL.Path == "/instances.html" {
 		if !s.validToken(r) {
 			w.Header().Set("WWW-Authenticate", "Bearer")
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -256,10 +257,18 @@ func (s *Server) serveUI(w http.ResponseWriter, r *http.Request) {
 		}
 		name = "index.html"
 	}
-	ct := contentType(name)
-	w.Header().Set("Content-Type", ct)
-	_, _ = w.Write(b)
-}
+		// Inject token into {{TOKEN}} placeholders for nav links
+		tok := r.URL.Query().Get("token")
+		if h := r.Header.Get("Authorization"); len(h) > 7 && strings.EqualFold(h[:7], "Bearer ") {
+			tok = h[7:]
+		}
+		if tok != "" && len(b) > 0 {
+			b = bytes.ReplaceAll(b, []byte("{{TOKEN}}"), []byte(tok))
+		}
+		ct := contentType(name)
+		w.Header().Set("Content-Type", ct)
+		_, _ = w.Write(b)
+	}
 
 func isUIAsset(p string) bool {
 	switch {
