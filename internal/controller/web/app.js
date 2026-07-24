@@ -1,7 +1,9 @@
 // BlipDNS Controller dashboard JS. Talks to the controller API and SSE feed.
 const TOKEN = new URLSearchParams(location.search).get("token") || "";
 const AUTH = TOKEN ? "Bearer " + TOKEN : "";
-let currentTab = location.pathname === "/instances.html" ? "instances" : "dashboard";
+const IS_DASHBOARD = location.pathname === "/" || location.pathname === "/index.html";
+const IS_STATS = location.pathname === "/stats.html";
+const IS_INSTANCES = location.pathname === "/instances.html";
 
 function api(path, opts = {}) {
   return fetch(path, { ...opts, headers: { ...(opts.headers || {}), Authorization: AUTH } })
@@ -27,21 +29,11 @@ function esc(s) {
     .replace(/'/g, "'");
 }
 
-function switchTab(tab) {
-  currentTab = tab;
-  document.querySelectorAll(".tab").forEach((a) => {
-    a.classList.toggle("active", a.dataset.tab === tab);
-  });
-  document.getElementById("dashboard-view").classList.toggle("hidden", tab !== "dashboard");
-  document.getElementById("instances-view").classList.toggle("hidden", tab !== "instances");
-  refresh();
-}
-
 async function refresh() {
   try {
     const list = await api("/api/instances").then((r) => r.json());
-    if (currentTab === "dashboard") renderDashboard(list);
-    else renderInstances(list);
+    if (IS_DASHBOARD || IS_STATS) renderDashboard(list);
+    if (IS_INSTANCES) renderInstances(list);
     const conn = document.getElementById("conn");
     const online = list.filter((i) => i.online).length;
     conn.textContent = online + "/" + list.length + " online";
@@ -166,15 +158,7 @@ function connectSSE() {
   };
 }
 
-// Tab switching
-document.querySelectorAll(".tab").forEach((a) => {
-  a.onclick = (e) => {
-    e.preventDefault();
-    switchTab(a.dataset.tab);
-  };
-});
-
-// Modal wiring
+// Modal wiring (only on instances page)
 const modal = document.getElementById("modal");
 const addBtn = document.getElementById("add-btn");
 if (addBtn) addBtn.onclick = () => modal.classList.remove("hidden");
@@ -212,6 +196,8 @@ if (iSave) {
 
 document.getElementById("f-domain")?.addEventListener("input", () => {});
 
+// Only connect SSE on stats page
+if (IS_STATS) connectSSE();
+
 refresh();
-connectSSE();
 setInterval(refresh, 5000);
