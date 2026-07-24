@@ -28,11 +28,21 @@ mkdir -p "$CFG_DIR"
 if [[ -f "$CFG_DST" ]]; then
   echo "   (existing config preserved — not overwriting; edit $CFG_DST to change)"
 else
-  TOKEN="$(openssl rand -hex 16)"
-  sed "s/__BLIPC_TOKEN__/$TOKEN/" "$TPL" > "$CFG_DST"
-  chmod 0640 "$CFG_DST"
-  chown root:"$SVC_USER" "$CFG_DST"
-  echo "   web UI token: $TOKEN   (open http://<host>:8500/?token=$TOKEN)"
+  # Default config ships with token: "" (OPEN, no auth) for convenient
+  # testing on a trusted management VLAN. To require a token on a fresh
+  # install, run with BLIPC_SETUP_TOKEN=1 (a random token is generated).
+  if [[ "${BLIPC_SETUP_TOKEN:-0}" == "1" ]]; then
+    TOKEN="$(openssl rand -hex 16)"
+    sed "s/__BLIPC_TOKEN__/$TOKEN/" "$TPL" > "$CFG_DST"
+    chmod 0640 "$CFG_DST"
+    chown root:"$SVC_USER" "$CFG_DST"
+    echo "   web UI token: $TOKEN   (open http://<host>:8500/?token=$TOKEN)"
+  else
+    sed 's/token: "__BLIPC_TOKEN__"/token: ""/' "$TPL" > "$CFG_DST"
+    chmod 0640 "$CFG_DST"
+    chown root:"$SVC_USER" "$CFG_DST"
+    echo "   auth: OPEN (no token). Set 'token:' in $CFG_DST to enable."
+  fi
 fi
 
 echo ">> installing unit -> $UNIT_DST"
@@ -44,4 +54,8 @@ systemctl enable --now blipc
 systemctl status --no-pager blipc
 echo
 echo "BlipDNS Controller is running. Open the web UI:"
-echo "  http://localhost:8500/?token=$TOKEN"
+if [[ "${BLIPC_SETUP_TOKEN:-0}" == "1" ]]; then
+  echo "  http://localhost:8500/?token=$TOKEN"
+else
+  echo "  http://localhost:8500/   (auth: OPEN)"
+fi

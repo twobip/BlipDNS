@@ -1,5 +1,8 @@
 listen: "0.0.0.0:8500"
-token: "__BLIPC_TOKEN__"
+# Auth for the web UI / API. Empty = OPEN (no auth) — convenient for testing
+# or a trusted management VLAN. Set a secret here (or via BLIPC_TOKEN) for
+# production; the UI is then accessed with ?token=<secret>.
+token: ""
 instances:
   # Add blipd instances here, or via the web UI at runtime.
   # token may be a literal, an "@/path" file, or an "/abs/path" file.

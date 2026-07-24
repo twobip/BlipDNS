@@ -36,9 +36,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/events", api(s.handleEvents))
 	mux.HandleFunc("/api/health", api(s.handleHealth))
 
-	// UI assets (token-gated too, so the console isn't world-open)
+	// UI: the page itself requires the token, but static assets (js/css) are
+	// served unauthenticated. Browsers fetch sub-resources like /app.js as
+	// relative URLs, which drop the ?token= query — gating them would 401 and
+	// leave the console stuck on "connecting". The assets hold no secrets; the
+	// control plane (/api/*) stays fully token-gated.
 	if s.ui != nil {
-		mux.Handle("/", s.auth(s.serveUI))
+		mux.Handle("/", http.HandlerFunc(s.serveUI))
 	} else {
 		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "blipc: no UI embedded (API only)", http.StatusNotFound)
@@ -49,23 +53,28 @@ func (s *Server) Handler() http.Handler {
 
 func (s *Server) auth(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if s.token == "" {
-			h(w, r)
-			return
-		}
-		tok := r.Header.Get("Authorization")
-		if len(tok) > 7 && strings.EqualFold(tok[:7], "Bearer ") {
-			tok = tok[7:]
-		} else if q := r.URL.Query().Get("token"); q != "" {
-			tok = q
-		}
-		if tok != s.token {
+		if !s.validToken(r) {
 			w.Header().Set("WWW-Authenticate", "Bearer")
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
 		h(w, r)
 	}
+}
+
+// validToken reports whether the request carries the server's token, either as
+// a Bearer header or a ?token= query parameter.
+func (s *Server) validToken(r *http.Request) bool {
+	if s.token == "" {
+		return true
+	}
+	tok := r.Header.Get("Authorization")
+	if len(tok) > 7 && strings.EqualFold(tok[:7], "Bearer ") {
+		tok = tok[7:]
+	} else if q := r.URL.Query().Get("token"); q != "" {
+		tok = q
+	}
+	return tok == s.token
 }
 
 func writeJSON(w http.ResponseWriter, v interface{}) {
@@ -224,6 +233,15 @@ func (s *Server) serveUI(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" && !isUIAsset(r.URL.Path) {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
+	}
+	// The page requires the token; static assets (js/css/etc.) are served
+	// unauthenticated so browsers can load them as relative sub-resources.
+	if r.URL.Path == "/" || r.URL.Path == "/index.html" {
+		if !s.validToken(r) {
+			w.Header().Set("WWW-Authenticate", "Bearer")
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
 	}
 	name := strings.TrimPrefix(r.URL.Path, "/")
 	if name == "" {
