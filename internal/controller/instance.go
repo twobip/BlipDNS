@@ -19,6 +19,9 @@ type InstanceStatus struct {
 	Stats          *control.StatsResponse  `json:"stats,omitempty"`
 	LastOK         time.Time               `json:"last_ok"`
 	Err            string                  `json:"error,omitempty"`
+	PingAvgMs      float64                 `json:"ping_avg_ms"`
+	PingLastMs     float64                 `json:"ping_last_ms"`
+	PingSamples    int                     `json:"ping_samples"`
 }
 
 // Instance is a managed blipd with background poll + watch loops.
@@ -28,15 +31,18 @@ type Instance struct {
 	fleet     *Fleet
 	claimCode string // optional code the controller was pre-seeded with
 
-	mu     sync.RWMutex
-	online bool
-	health *control.HealthResponse
-	stats  *control.StatsResponse
-	last   time.Time
-	err    string
-
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
+	mu          sync.RWMutex
+	online      bool
+	health      *control.HealthResponse
+	stats       *control.StatsResponse
+	last        time.Time
+	err         string
+	cancel      context.CancelFunc
+	wg          sync.WaitGroup
+	pingSamples int
+	pingSumMs   float64
+	pingAvgMs   float64
+	pingLastMs  float64
 }
 
 // pollInterval is how often the controller polls an instance's health/stats.
@@ -87,14 +93,22 @@ func (i *Instance) ctl() *control.Client {
 
 func (i *Instance) poll(ctx context.Context) {
 	c := i.ctl()
+	start := time.Now()
 	h, herr := c.Health(ctx)
 	s, serr := c.Stats(ctx)
+	latencyMs := float64(time.Since(start).Milliseconds())
+
 	i.mu.Lock()
 	if herr == nil {
 		i.online = true
 		i.health = h
 		i.last = i.fleet.now()
 		i.err = ""
+		// Update ping stats
+		i.pingSamples++
+		i.pingSumMs += latencyMs
+		i.pingAvgMs = i.pingSumMs / float64(i.pingSamples)
+		i.pingLastMs = latencyMs
 	} else {
 		i.online = false
 		i.err = herr.Error()
@@ -143,14 +157,17 @@ func (i *Instance) status() *InstanceStatus {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
 	st := &InstanceStatus{
-		ID:     i.Config.ID,
-		Label:  i.Config.Label,
-		URL:    i.Config.URL,
-		Online: i.online,
-		Health: i.health,
-		Stats:  i.stats,
-		LastOK: i.last,
-		Err:    i.err,
+		ID:           i.Config.ID,
+		Label:        i.Config.Label,
+		URL:          i.Config.URL,
+		Online:       i.online,
+		Health:       i.health,
+		Stats:        i.stats,
+		LastOK:       i.last,
+		Err:          i.err,
+		PingAvgMs:    i.pingAvgMs,
+		PingLastMs:   i.pingLastMs,
+		PingSamples:  i.pingSamples,
 	}
 	if ad, err := i.ctl().AdoptStatus(context.Background()); err == nil {
 		st.Adopted = ad.Adopted
