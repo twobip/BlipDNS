@@ -14,6 +14,7 @@
       <a href="javascript:void(0)" class="tab active" data-tab="dashboard">Dashboard</a>
       <a href="javascript:void(0)" class="tab" data-tab="instances">Instances</a>
       <a href="javascript:void(0)" class="tab" data-tab="queries">Query Log</a>
+      <a href="javascript:void(0)" class="tab" data-tab="blocklist">Blocklist</a>
       <a href="javascript:void(0)" class="tab" data-tab="settings">Settings</a>
     </nav>
     <div id="conn" class="badge">connecting…</div>
@@ -80,6 +81,22 @@
             </thead>
             <tbody></tbody>
           </table>
+        </section>
+      </div>
+
+      <div id="blocklist-view" class="hidden">
+        <section class="panel">
+          <h2>DNS Blocklist</h2>
+          <p class="sub">Domains here are blocked for ALL clients before per-client policy is checked.</p>
+          <div class="blocklist-controls">
+            <input id="b-domain" placeholder="domain to block (e.g. ads.example.com)" />
+            <button id="b-add" class="primary">Add</button>
+          </div>
+          <div class="toolbar">
+            <input id="b-filter" placeholder="filter…" />
+            <button id="b-export">Export</button>
+          </div>
+          <ul id="blocklist" class="blocklist"></ul>
         </section>
       </div>
 

@@ -34,10 +34,14 @@ func (s *Server) Handler() http.Handler {
 	}
 	mux.HandleFunc("/api/instances", api(s.handleInstances))
 	mux.HandleFunc("/api/instances/", api(s.handleInstance)) // /add /delete /policies /policy /adopt /adopt/status /adopt/reset /label /query-log
-	mux.HandleFunc("/api/queries", api(s.handleQueries)) // query log
-	mux.HandleFunc("/api/stats", api(s.handleStats)) // aggregated query stats for graphs
+	mux.HandleFunc("/api/queries", api(s.handleQueries))     // query log
+	mux.HandleFunc("/api/stats", api(s.handleStats))           // aggregated query stats for graphs
 	mux.HandleFunc("/api/events", api(s.handleEvents))
 	mux.HandleFunc("/api/health", api(s.handleHealth))
+
+	// Blocklist (token-gated)
+	mux.HandleFunc("/api/blocklist", api(s.handleBlocklist))        // GET list / POST add / DELETE remove
+	mux.HandleFunc("/api/blocklist/export", api(s.handleBlocklistExport)) // GET text
 
 	// UI: the page itself requires the token, but static assets (js/css) are
 	// served unauthenticated. Browsers fetch sub-resources like /app.js as
@@ -333,6 +337,56 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintf(w, "data: %s\n\n", mustJSON(e))
 			flusher.Flush()
 		}
+	}
+}
+
+func (s *Server) handleBlocklist(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, map[string]interface{}{
+			"domains": s.fleet.Blocklist().List(),
+		})
+	case http.MethodPost:
+		var req struct {
+			Domain string `json:"domain"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if req.Domain == "" {
+			http.Error(w, "domain required", http.StatusBadRequest)
+			return
+		}
+		s.fleet.Blocklist().Add(req.Domain)
+		writeJSON(w, map[string]string{"ok": "added"})
+	case http.MethodDelete:
+		var req struct {
+			Domain string `json:"domain"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if req.Domain == "" {
+			http.Error(w, "domain required", http.StatusBadRequest)
+			return
+		}
+		s.fleet.Blocklist().Remove(req.Domain)
+		writeJSON(w, map[string]string{"ok": "removed"})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) handleBlocklistExport(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain")
+	for _, d := range s.fleet.Blocklist().List() {
+		fmt.Fprintln(w, d)
 	}
 }
 

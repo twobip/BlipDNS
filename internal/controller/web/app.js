@@ -7,6 +7,7 @@ function getTabFromPath() {
   const path = location.pathname;
   if (path === "/instances" || path === "/instances.html") return "instances";
   if (path === "/queries" || path === "/queries.html") return "queries";
+  if (path === "/blocklist" || path === "/blocklist.html") return "blocklist";
   if (path === "/settings" || path === "/settings.html") return "settings";
   return "dashboard";
 }
@@ -45,9 +46,10 @@ function switchTab(tab) {
   document.getElementById("dashboard-view").classList.toggle("hidden", tab !== "dashboard");
   document.getElementById("instances-view").classList.toggle("hidden", tab !== "instances");
   document.getElementById("queries-view").classList.toggle("hidden", tab !== "queries");
+  document.getElementById("blocklist-view").classList.toggle("hidden", tab !== "blocklist");
   document.getElementById("settings-view").classList.toggle("hidden", tab !== "settings");
   // Update URL without reload
-  const paths = { dashboard: "/", instances: "/instances", queries: "/queries", settings: "/settings" };
+  const paths = { dashboard: "/", instances: "/instances", queries: "/queries", blocklist: "/blocklist", settings: "/settings" };
   history.pushState(null, "", paths[tab] || "/");
   refresh();
 }
@@ -58,6 +60,7 @@ async function refresh() {
     if (currentTab === "dashboard") renderDashboard(list);
     else if (currentTab === "instances") renderInstances(list);
     else if (currentTab === "queries") refreshQueryLog();
+    else if (currentTab === "blocklist") refreshBlocklist();
     else if (currentTab === "settings") refreshSettings(list);
     const conn = document.getElementById("conn");
     const online = list.filter((i) => i.online).length;
@@ -426,6 +429,50 @@ function refreshSettings(list) {
   }
 }
 
+// --- Blocklist ---
+let blocklistDomains = [];
+
+async function refreshBlocklist() {
+  try {
+    const r = await api("/api/blocklist");
+    const data = await r.json();
+    blocklistDomains = data.domains || [];
+    renderBlocklist();
+  } catch (e) {
+    console.error("refreshBlocklist:", e);
+  }
+}
+
+function renderBlocklist() {
+  const ul = document.getElementById("blocklist");
+  if (!ul) return;
+  const filter = document.getElementById("b-filter")?.value.toLowerCase() || "";
+  ul.innerHTML = "";
+  blocklistDomains.forEach((d) => {
+    if (filter && !d.toLowerCase().includes(filter)) return;
+    const li = document.createElement("li");
+    li.className = "blocklist-item";
+    li.innerHTML = '<span>' + esc(d) + '</span><button class="mini" data-remove="' + esc(d) + '">Remove</button>';
+    ul.appendChild(li);
+  });
+  document.querySelectorAll("[data-remove]").forEach((b) => {
+    b.onclick = async () => {
+      const domain = b.getAttribute("data-remove");
+      try {
+        await api("/api/blocklist", {
+          method: "DELETE",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ domain }),
+        });
+        toast("removed " + domain);
+        refreshBlocklist();
+      } catch (e) {
+        toast("remove failed: " + e.message);
+      }
+    };
+  });
+}
+
 document.getElementById("s-save")?.addEventListener("click", async () => {
   const upstream = document.getElementById("s-upstream")?.value.trim();
   if (!upstream) return toast("upstream required");
@@ -444,6 +491,28 @@ document.getElementById("s-save")?.addEventListener("click", async () => {
   } catch (e) {
     toast("save failed: " + e.message);
   }
+});
+
+document.getElementById("b-add")?.addEventListener("click", async () => {
+  const domain = document.getElementById("b-domain")?.value.trim() || "";
+  if (!domain) return toast("domain required");
+  try {
+    await api("/api/blocklist", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ domain }),
+    });
+    toast("blocked " + domain);
+    document.getElementById("b-domain").value = "";
+    refreshBlocklist();
+  } catch (e) {
+    toast("add failed: " + e.message);
+  }
+});
+
+document.getElementById("b-filter")?.addEventListener("input", renderBlocklist);
+document.getElementById("b-export")?.addEventListener("click", () => {
+  window.open("/api/blocklist/export", "_blank");
 });
 
 refresh();

@@ -3,6 +3,7 @@
 // aggregates stats/health/block events into a single feed, and exposes a
 // token-gated HTTP API plus an embedded web dashboard.
 package controller
+
 import (
 	"context"
 	"fmt"
@@ -15,54 +16,56 @@ import (
 
 	_ "modernc.org/sqlite"
 
-	"gopkg.in/yaml.v3"
+	"github.com/twobip/BlipDNS/internal/blocklist"
 	"github.com/twobip/BlipDNS/internal/control"
+	"gopkg.in/yaml.v3"
 )
 
 // Event is a fleet-wide event (federated from instances).
 type Event struct {
-	InstanceID string                 `json:"instance_id"`
-	Instance   string                 `json:"instance"` // human label
-	Type       string                 `json:"type"`     // stats|block|health|policy|status
-	At         time.Time              `json:"at"`
+	InstanceID string                  `json:"instance_id"`
+	Instance   string                  `json:"instance"` // human label
+	Type       string                  `json:"type"`     // stats|block|health|policy|status
+	At         time.Time               `json:"at"`
 	Health     *control.HealthResponse `json:"health,omitempty"`
-	Stats      *control.StatsResponse `json:"stats,omitempty"`
-	Client     string                 `json:"client,omitempty"`
-	Domain     string                 `json:"domain,omitempty"`
-	Msg        string                 `json:"msg,omitempty"`
+	Stats      *control.StatsResponse  `json:"stats,omitempty"`
+	Client     string                  `json:"client,omitempty"`
+	Domain     string                  `json:"domain,omitempty"`
+	Msg        string                  `json:"msg,omitempty"`
 }
 
 // InstanceConfig is one managed blipd entry (from controller config).
 type InstanceConfig struct {
-	ID     string `yaml:"id" json:"id"`
-	URL    string `yaml:"url" json:"url"`       // http://host:8444
-	Token  string `yaml:"token" json:"token"`
-	Label  string `yaml:"label" json:"label"`
-	Claim  string `yaml:"claim" json:"claim"`   // one-time claim code (optional bootstrap)
+	ID    string `yaml:"id" json:"id"`
+	URL   string `yaml:"url" json:"url"` // http://host:8444
+	Token string `yaml:"token" json:"token"`
+	Label string `yaml:"label" json:"label"`
+	Claim string `yaml:"claim" json:"claim"` // one-time claim code (optional bootstrap)
 }
 
-// Fleet holds all instances and the event bus.
+// Fleet holds all instances, the event bus, and the global blocklist.
 type Fleet struct {
-	mu           sync.RWMutex
-	instances    map[string]*Instance
-	bus          *Bus
-	http         *http.Client
-	now          func() time.Time
-	logfn        func(Event)
-
-	queryLog     *QueryLogStore // persistent query log
-	configPath   string         // path to controller config YAML (for persisting tokens)
+	mu         sync.RWMutex
+	instances  map[string]*Instance
+	bus        *Bus
+	http       *http.Client
+	now        func() time.Time
+	logfn      func(Event)
+	queryLog   *QueryLogStore        // persistent query log
+	blocklist  *blocklist.Blocklist  // global DNS blocklist
+	configPath string                // path to controller config YAML (for persisting tokens)
 }
 
 // NewFleet creates an empty fleet with a default event buffer.
 func NewFleet(configPath string) *Fleet {
-	queryLog, _ := NewQueryLogStore("/var/lib/blipc/querylog.db") // persistent SQLite DB
+	queryLog, _ := NewQueryLogStore("/var/lib/blipc/querylog.db")
 	return &Fleet{
 		instances:  make(map[string]*Instance),
 		bus:        NewBus(500),
 		http:       &http.Client{Timeout: 10 * time.Second},
 		now:        time.Now,
 		queryLog:   queryLog,
+		blocklist:  blocklist.New(),
 		configPath: configPath,
 	}
 }
@@ -150,8 +153,7 @@ func (f *Fleet) SetPolicy(ctx context.Context, id string, p *control.Policy) err
 }
 
 // Adopt presents a claim code to an instance and, on success, stores the
-// returned admin token on the instance so subsequent calls use it. This is the
-// one-time, automatic bootstrap between controller and blipd.
+// returned admin token on the instance so subsequent calls use it.
 func (f *Fleet) Adopt(ctx context.Context, id, code string) error {
 	inst := f.get(id)
 	if inst == nil {
@@ -173,7 +175,6 @@ func (f *Fleet) Adopt(ctx context.Context, id, code string) error {
 		inst.claimCode = ""
 		inst.client = control.NewClient(inst.Config.URL, resp.Token)
 		inst.mu.Unlock()
-		// Persist the updated token to config file
 		if f.configPath != "" {
 			if err := f.saveConfig(); err != nil {
 				log.Printf("blipc: warning: failed to persist adopted token: %v", err)
@@ -184,8 +185,7 @@ func (f *Fleet) Adopt(ctx context.Context, id, code string) error {
 	return nil
 }
 
-// SetClaimCode records a claim code for an instance (e.g. pasted once into the
-// controller UI). It is used by Adopt() if no code is supplied at adopt time.
+// SetClaimCode records a claim code for an instance.
 func (f *Fleet) SetClaimCode(id, code string) {
 	inst := f.get(id)
 	if inst == nil {
@@ -196,7 +196,7 @@ func (f *Fleet) SetClaimCode(id, code string) {
 	inst.mu.Unlock()
 }
 
-// AdoptStatus returns the instance's adoption state from blipd (unauthenticated).
+// GetAdoptStatus returns the instance's adoption state from blipd (unauthenticated).
 func (f *Fleet) GetAdoptStatus(id string) (*control.AdoptStatus, error) {
 	inst := f.get(id)
 	if inst == nil {
@@ -205,8 +205,7 @@ func (f *Fleet) GetAdoptStatus(id string) (*control.AdoptStatus, error) {
 	return inst.client.AdoptStatus(context.Background())
 }
 
-// ResetAdoption resets a managed instance's adoption state (requires the
-// instance to still be reachable; blipd requires its own current token).
+// ResetAdoption resets a managed instance's adoption state.
 func (f *Fleet) ResetAdoption(ctx context.Context, id string) error {
 	inst := f.get(id)
 	if inst == nil {
@@ -262,6 +261,11 @@ func (f *Fleet) Health() map[string]*control.HealthResponse {
 // Bus returns the event bus (for SSE streaming to UIs).
 func (f *Fleet) Bus() *Bus { return f.bus }
 
+// Blocklist returns the global blocklist.
+func (f *Fleet) Blocklist() *blocklist.Blocklist {
+	return f.blocklist
+}
+
 // LoadConfig adds instances from a YAML config file (instances: section).
 func (f *Fleet) LoadConfig(ctx context.Context, path string) error {
 	if path == "" {
@@ -290,28 +294,25 @@ func (f *Fleet) saveConfig() error {
 	if f.configPath == "" {
 		return nil
 	}
-	
-	// Read existing config to preserve all fields
+
 	b, err := os.ReadFile(f.configPath)
 	if err != nil {
-		// If file doesn't exist, create minimal config
 		b = []byte{}
 	}
-	
+
 	type fullConfig struct {
-		Listen     string               `yaml:"listen"`
-		Token      string               `yaml:"token"`
-		Instances  []InstanceConfig     `yaml:"instances"`
+		Listen    string           `yaml:"listen"`
+		Token     string           `yaml:"token"`
+		Instances []InstanceConfig `yaml:"instances"`
 	}
-	
+
 	var cfg fullConfig
 	if len(b) > 0 {
 		if err := yaml.Unmarshal(b, &cfg); err != nil {
 			return err
 		}
 	}
-	
-	// Update instances from fleet
+
 	f.mu.RLock()
 	instances := make([]InstanceConfig, 0, len(f.instances))
 	for _, inst := range f.instances {
@@ -321,8 +322,7 @@ func (f *Fleet) saveConfig() error {
 	}
 	f.mu.RUnlock()
 	cfg.Instances = instances
-	
-	// Marshal and write
+
 	out, err := yaml.Marshal(cfg)
 	if err != nil {
 		return err
@@ -345,5 +345,5 @@ func ResolveTokenFile(cfg InstanceConfig) InstanceConfig {
 	return cfg
 }
 
-// ConfigDir returns the controller config directory hint (used for token files).
+// ConfigDir returns the controller config directory hint.
 func ConfigDir() string { return filepath.Dir(os.Args[0]) }

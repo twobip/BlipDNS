@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/twobip/BlipDNS/internal/blocklist"
 	"github.com/twobip/BlipDNS/internal/cache"
 	"github.com/twobip/BlipDNS/internal/control"
 	"github.com/twobip/BlipDNS/internal/filter"
@@ -29,6 +30,7 @@ type Config struct {
 	CacheCap  time.Duration
 	Store     *filter.Store
 	Version   string
+	Blocklist *blocklist.Blocklist // global blocklist applied before per-client policy
 }
 
 // Server is the DNS + DoH resolver.
@@ -157,6 +159,20 @@ func (s *Server) serve(ctx context.Context, clientIP net.IP, req *dns.Msg) *dns.
 		return resp
 	}
 	q := req.Question[0]
+
+	// Check global blocklist first (applied to all clients)
+	if s.cfg.Blocklist != nil && s.cfg.Blocklist.Match(q.Name) {
+		s.cnt.AddBlocked()
+		s.ctrl.Notify(control.WatchEvent{
+			Type: "block", At: time.Now(),
+			Client: clientIP.String(), Domain: q.Name,
+		})
+		if s.logfn != nil {
+			s.logfn(clientIP.String(), q.Name)
+		}
+		resp.Rcode = dns.RcodeNameError // NXDOMAIN for blocklist hits
+		return resp
+	}
 
 	blocked, action, upstreamOverride, log := s.cfg.Store.Classify(clientIP, q.Name)
 	if blocked {
