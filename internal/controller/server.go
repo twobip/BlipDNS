@@ -33,7 +33,8 @@ func (s *Server) Handler() http.Handler {
 		return s.auth(h)
 	}
 	mux.HandleFunc("/api/instances", api(s.handleInstances))
-	mux.HandleFunc("/api/instances/", api(s.handleInstance)) // /add /delete /policies /policy /adopt /adopt/status /adopt/reset
+	mux.HandleFunc("/api/instances/", api(s.handleInstance)) // /add /delete /policies /policy /adopt /adopt/status /adopt/reset /label
+	mux.HandleFunc("/api/queries", api(s.handleQueries)) // query log
 	mux.HandleFunc("/api/events", api(s.handleEvents))
 	mux.HandleFunc("/api/health", api(s.handleHealth))
 
@@ -204,6 +205,33 @@ func (s *Server) handleInstance(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, map[string]string{"ok": "label updated", "id": id})
+	case "query-log":
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if s.fleet.queryLog == nil {
+			http.Error(w, "query log not available", http.StatusServiceUnavailable)
+			return
+		}
+		instance := r.URL.Query().Get("instance")
+		filter := r.URL.Query().Get("filter")
+		limit := 100
+		if l := r.URL.Query().Get("limit"); l != "" {
+			fmt.Sscanf(l, "%d", &limit)
+		}
+		since := time.Now().Add(-24 * time.Hour)
+		if s := r.URL.Query().Get("since"); s != "" {
+			if d, err := time.ParseDuration(s); err == nil {
+				since = time.Now().Add(-d)
+			}
+		}
+		entries, err := s.fleet.queryLog.Query(ctx, instance, filter, since, limit)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		writeJSON(w, entries)
 	case "": // delete instance
 		if r.Method != http.MethodDelete {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -218,6 +246,35 @@ func (s *Server) handleInstance(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, s.fleet.Health())
+}
+
+func (s *Server) handleQueries(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.fleet.queryLog == nil {
+		http.Error(w, "query log not available", http.StatusServiceUnavailable)
+		return
+	}
+	instance := r.URL.Query().Get("instance")
+	filter := r.URL.Query().Get("filter")
+	limit := 100
+	if l := r.URL.Query().Get("limit"); l != "" {
+		fmt.Sscanf(l, "%d", &limit)
+	}
+	since := time.Now().Add(-24 * time.Hour)
+	if s := r.URL.Query().Get("since"); s != "" {
+		if d, err := time.ParseDuration(s); err == nil {
+			since = time.Now().Add(-d)
+		}
+	}
+	entries, err := s.fleet.queryLog.Query(r.Context(), instance, filter, since, limit)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	writeJSON(w, entries)
 }
 
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {

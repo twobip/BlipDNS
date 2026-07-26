@@ -13,6 +13,8 @@ import (
 	"sync"
 	"time"
 
+	_ "modernc.org/sqlite"
+
 	"github.com/twobip/BlipDNS/internal/control"
 )
 
@@ -46,15 +48,19 @@ type Fleet struct {
 	http      *http.Client
 	now       func() time.Time
 	logfn     func(Event)
+
+	queryLog *QueryLogStore // persistent query log
 }
 
 // NewFleet creates an empty fleet with a default event buffer.
 func NewFleet() *Fleet {
+	queryLog, _ := NewQueryLogStore("") // empty path = in-memory
 	return &Fleet{
 		instances: make(map[string]*Instance),
 		bus:       NewBus(500),
 		http:      &http.Client{Timeout: 10 * time.Second},
 		now:       time.Now,
+		queryLog:  queryLog,
 	}
 }
 

@@ -122,6 +122,17 @@ func (i *Instance) poll(ctx context.Context) {
 			InstanceID: i.Config.ID, Instance: i.Config.Label,
 			Type: "health", At: i.fleet.now(), Health: h, Stats: s,
 		})
+		// Also log to query log
+		if i.fleet.queryLog != nil && s != nil {
+			_ = i.fleet.queryLog.Insert(ctx, QueryLogEntry{
+				Timestamp: time.Now(),
+				Instance:  i.Config.Label,
+				Client:    "controller",
+				Domain:    "health_check",
+				Action:    "POLL",
+				Upstream:  "",
+			})
+		}
 	}
 }
 
