@@ -62,7 +62,9 @@ async function refresh() {
     const conn = document.getElementById("conn");
     const online = list.filter((i) => i.online).length;
     conn.textContent = online + "/" + list.length + " online";
-    conn.className = "badge " + (list.some((i) => i.online) ? "on" : "off");
+    const allOnline = online === list.length && list.length > 0;
+    const someOnline = list.some((i) => i.online);
+    conn.className = "badge " + (allOnline ? "on" : someOnline ? "warn" : "off");
   } catch (err) {
     document.getElementById("conn").textContent = "error";
   }
@@ -85,6 +87,15 @@ function renderDashboard(list) {
   document.getElementById("total-upstream-errors").textContent = totalUpstreamErrors.toLocaleString();
   document.getElementById("online-instances").textContent = online;
   document.getElementById("total-instances").textContent = list.length;
+  const onlineEl = document.getElementById("online-instances");
+  const card = onlineEl.closest(".stat-card");
+  if (online < list.length && list.length > 0) {
+    onlineEl.classList.add("warn");
+    if (card) card.classList.add("warn");
+  } else {
+    onlineEl.classList.remove("warn");
+    if (card) card.classList.remove("warn");
+  }
 
   // Update query volume chart (fetch 24h historical data)
   fetchAndRenderChart();

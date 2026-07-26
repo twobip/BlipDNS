@@ -40,7 +40,7 @@ func main() {
 		cfg.Listen = "0.0.0.0:8500"
 	}
 
-	fleet := controller.NewFleet()
+	fleet := controller.NewFleet(*cfgPath)
 	ctx := context.Background()
 	for _, ic := range cfg.Instances {
 		ic = controller.ResolveTokenFile(ic)

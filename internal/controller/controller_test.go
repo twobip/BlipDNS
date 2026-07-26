@@ -85,7 +85,7 @@ func TestFleetAddAndPoll(t *testing.T) {
 	)
 	defer srv.Close()
 
-	fleet := NewFleet()
+	fleet := NewFleet("/tmp/blip-test-config.yaml")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	if err := fleet.Add(ctx, InstanceConfig{ID: "s1", URL: srv.URL, Token: tok, Label: "site1"}); err != nil {
@@ -114,8 +114,9 @@ func TestFleetSetPolicy(t *testing.T) {
 	tok := "t"
 	srv := fakeBlipd(t, tok, "", &control.HealthResponse{OK: true}, &control.StatsResponse{}, &control.ListResponse{})
 	defer srv.Close()
-	fleet := NewFleet()
+	fleet := NewFleet("/tmp/blip-test-config.yaml")
 	ctx := context.Background()
+	fleet = NewFleet("/tmp/blip-test-config.yaml")
 	if err := fleet.Add(ctx, InstanceConfig{ID: "s1", URL: srv.URL, Token: tok}); err != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +179,7 @@ func TestBusRingBuffer(t *testing.T) {
 }
 
 func TestServerAuth(t *testing.T) {
-	fleet := NewFleet()
+		fleet := NewFleet("/tmp/blip-test-config.yaml")
 	srv := NewServer("secret", fleet, nil)
 	// unauthenticated
 	rec := httptest.NewRecorder()
@@ -220,7 +221,7 @@ func TestFleetAdopt(t *testing.T) {
 	)
 	defer srv.Close()
 
-	fleet := NewFleet()
+	fleet := NewFleet("/tmp/blip-test-config.yaml")
 	// Simulate the HTTP API path: Add is invoked with a context that is
 	// cancelled immediately afterwards (as r.Context() is on request return).
 	addCtx, cancel := context.WithCancel(context.Background())
@@ -263,7 +264,7 @@ func TestFleetAdoptRejectsWrongCode(t *testing.T) {
 	code := "GOOD-0000"
 	srv := fakeBlipd(t, tok, code, &control.HealthResponse{OK: true}, &control.StatsResponse{}, &control.ListResponse{})
 	defer srv.Close()
-	fleet := NewFleet()
+	fleet := NewFleet("/tmp/blip-test-config.yaml")
 	if err := fleet.Add(context.Background(), InstanceConfig{ID: "s1", URL: srv.URL, Claim: "BAD-1111", Label: "site1"}); err != nil {
 		t.Fatal(err)
 	}

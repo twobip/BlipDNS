@@ -3,10 +3,10 @@
 // aggregates stats/health/block events into a single feed, and exposes a
 // token-gated HTTP API plus an embedded web dashboard.
 package controller
-
 import (
 	"context"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -15,6 +15,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
+	"gopkg.in/yaml.v3"
 	"github.com/twobip/BlipDNS/internal/control"
 )
 
@@ -42,25 +43,27 @@ type InstanceConfig struct {
 
 // Fleet holds all instances and the event bus.
 type Fleet struct {
-	mu        sync.RWMutex
-	instances map[string]*Instance
-	bus       *Bus
-	http      *http.Client
-	now       func() time.Time
-	logfn     func(Event)
+	mu           sync.RWMutex
+	instances    map[string]*Instance
+	bus          *Bus
+	http         *http.Client
+	now          func() time.Time
+	logfn        func(Event)
 
-	queryLog *QueryLogStore // persistent query log
+	queryLog     *QueryLogStore // persistent query log
+	configPath   string         // path to controller config YAML (for persisting tokens)
 }
 
 // NewFleet creates an empty fleet with a default event buffer.
-func NewFleet() *Fleet {
+func NewFleet(configPath string) *Fleet {
 	queryLog, _ := NewQueryLogStore("/var/lib/blipc/querylog.db") // persistent SQLite DB
 	return &Fleet{
-		instances: make(map[string]*Instance),
-		bus:       NewBus(500),
-		http:      &http.Client{Timeout: 10 * time.Second},
-		now:       time.Now,
-		queryLog:  queryLog,
+		instances:  make(map[string]*Instance),
+		bus:        NewBus(500),
+		http:       &http.Client{Timeout: 10 * time.Second},
+		now:        time.Now,
+		queryLog:   queryLog,
+		configPath: configPath,
 	}
 }
 
@@ -85,6 +88,11 @@ func (f *Fleet) Add(ctx context.Context, cfg InstanceConfig) error {
 	// ctx (e.g. an HTTP request) is cancelled when the request returns, which
 	// would kill the goroutines after the first poll.
 	inst.start(context.Background())
+	if f.configPath != "" {
+		if err := f.saveConfig(); err != nil {
+			log.Printf("blipc: warning: failed to persist instance: %v", err)
+		}
+	}
 	if cfg.Claim != "" {
 		// Adopt is a network call; run it on a background context so it isn't
 		// cut short when the caller's request context is cancelled.
@@ -103,6 +111,11 @@ func (f *Fleet) Remove(id string) {
 	f.mu.Unlock()
 	if inst != nil {
 		inst.stop()
+	}
+	if f.configPath != "" {
+		if err := f.saveConfig(); err != nil {
+			log.Printf("blipc: warning: failed to persist after remove: %v", err)
+		}
 	}
 }
 
@@ -160,6 +173,12 @@ func (f *Fleet) Adopt(ctx context.Context, id, code string) error {
 		inst.claimCode = ""
 		inst.client = control.NewClient(inst.Config.URL, resp.Token)
 		inst.mu.Unlock()
+		// Persist the updated token to config file
+		if f.configPath != "" {
+			if err := f.saveConfig(); err != nil {
+				log.Printf("blipc: warning: failed to persist adopted token: %v", err)
+			}
+		}
 	}
 	f.bus.Publish(Event{InstanceID: id, Instance: inst.Config.Label, Type: "status", At: f.now(), Msg: "adopted"})
 	return nil
@@ -264,6 +283,51 @@ func (f *Fleet) LoadConfig(ctx context.Context, path string) error {
 		}
 	}
 	return nil
+}
+
+// saveConfig writes the current fleet config (including updated tokens) to the config file.
+func (f *Fleet) saveConfig() error {
+	if f.configPath == "" {
+		return nil
+	}
+	
+	// Read existing config to preserve all fields
+	b, err := os.ReadFile(f.configPath)
+	if err != nil {
+		// If file doesn't exist, create minimal config
+		b = []byte{}
+	}
+	
+	type fullConfig struct {
+		Listen     string               `yaml:"listen"`
+		Token      string               `yaml:"token"`
+		Instances  []InstanceConfig     `yaml:"instances"`
+	}
+	
+	var cfg fullConfig
+	if len(b) > 0 {
+		if err := yaml.Unmarshal(b, &cfg); err != nil {
+			return err
+		}
+	}
+	
+	// Update instances from fleet
+	f.mu.RLock()
+	instances := make([]InstanceConfig, 0, len(f.instances))
+	for _, inst := range f.instances {
+		inst.mu.RLock()
+		instances = append(instances, inst.Config)
+		inst.mu.RUnlock()
+	}
+	f.mu.RUnlock()
+	cfg.Instances = instances
+	
+	// Marshal and write
+	out, err := yaml.Marshal(cfg)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(f.configPath, out, 0640)
 }
 
 // ResolveTokenFile expands token paths like "@/path" or absolute/relative files

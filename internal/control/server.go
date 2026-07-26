@@ -71,23 +71,28 @@ func (s *Server) ConfigureAdoption(stateFile, instanceID string) {
 	}
 	s.instanceID = instanceID
 
-	if s.token == "" {
-		s.token = genToken()
-		log.Printf("blipd: WARNING no admin_token configured; generated ephemeral token (set admin_token in config to persist)")
-	}
-
 	if stateFile != "" {
 		if b, err := os.ReadFile(stateFile); err == nil {
 			var st struct {
-				Adopted bool `json:"adopted"`
+				Adopted    bool   `json:"adopted"`
+				InstanceID string `json:"instance_id"`
+				Token      string `json:"token,omitempty"`
 			}
 			if json.Unmarshal(b, &st) == nil && st.Adopted {
 				s.adopted = true
 				s.claimCode = ""
+				if st.Token != "" {
+					s.token = st.Token
+				}
 				log.Printf("blipd: management already adopted (state %s); claim code not required", stateFile)
 				return
 			}
 		}
+	}
+
+	if s.token == "" {
+		s.token = genToken()
+		log.Printf("blipd: WARNING no admin_token configured; generated ephemeral token (set admin_token in config to persist)")
 	}
 	s.genClaim()
 }
@@ -109,8 +114,9 @@ func (s *Server) persistAdopted(adopted bool) {
 	b, _ := json.Marshal(struct {
 		Adopted    bool      `json:"adopted"`
 		InstanceID string    `json:"instance_id"`
+		Token      string    `json:"token,omitempty"`
 		AdoptedAt  time.Time `json:"adopted_at"`
-	}{true, s.instanceID, time.Now()})
+	}{true, s.instanceID, s.token, time.Now()})
 	if err := os.WriteFile(s.stateFile, b, 0640); err != nil {
 		log.Printf("blipd: warning: cannot persist adoption state to %s: %v", s.stateFile, err)
 	}
