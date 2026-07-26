@@ -194,6 +194,19 @@ func (f *Fleet) ResetAdoption(ctx context.Context, id string) error {
 	return nil
 }
 
+// SetLabel updates the label of a managed instance.
+func (f *Fleet) SetLabel(ctx context.Context, id, label string) error {
+	inst := f.get(id)
+	if inst == nil {
+		return fmt.Errorf("controller: unknown instance %s", id)
+	}
+	inst.mu.Lock()
+	inst.Config.Label = label
+	inst.mu.Unlock()
+	f.bus.Publish(Event{InstanceID: id, Instance: label, Type: "status", At: f.now(), Msg: "label updated"})
+	return nil
+}
+
 // DeletePolicy removes a policy on a managed instance.
 func (f *Fleet) DeletePolicy(ctx context.Context, id, policyID string) error {
 	inst := f.get(id)

@@ -186,6 +186,24 @@ func (s *Server) handleInstance(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, map[string]string{"ok": "reset", "id": id})
+	case "label":
+		if r.Method != http.MethodPut {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req struct {
+			Label string `json:"label"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if req.Label == "" {
+			http.Error(w, "label required", http.StatusBadRequest)
+			return
+		}
+		if err := s.fleet.SetLabel(ctx, id, req.Label); err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		writeJSON(w, map[string]string{"ok": "label updated", "id": id})
 	case "": // delete instance
 		if r.Method != http.MethodDelete {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

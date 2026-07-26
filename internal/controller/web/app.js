@@ -82,41 +82,46 @@ function renderInstances(list) {
     return;
   }
   for (const i of list) {
-    const s = i.stats || {};
-    const adoptBadge = i.adopted
-      ? '<span class="badge on">claimed</span>'
-      : '<span class="badge off">unclaimed</span>';
-    const adoptBtn = i.adopted ? "" : '<button class="mini" data-adopt="' + i.id + '">Adopt\u2026</button>';
-    const card = document.createElement("div");
-    card.className = "card";
-    card.innerHTML =
-      '\n      <h3>' +
-      esc(i.label) +
-      ' <span class="badge ' +
-      (i.online ? "on" : "off") +
-      '">' +
-      (i.online ? "online" : "offline") +
-      "</span> " +
-      adoptBadge +
-      "</h3>\n      <div class=\"sub\">" +
-      esc(i.url) +
-      "</div>\n      <div class=\"stat\"><span>queries</span><span>" +
-      (s.queries_total ?? 0) +
-      "</span></div>\n      <div class=\"stat\"><span>blocked</span><span>" +
-      (s.blocked_total ?? 0) +
-      "</span></div>\n      <div class=\"stat\"><span>upstream errs</span><span>" +
-      (s.upstream_errors ?? 0) +
-      "</span></div>\n      <div class=\"stat\"><span>cache</span><span>" +
-      (s.cached ?? 0) +
-      "</span></div>\n      <div class=\"actions\">" +
-      adoptBtn +
-      "</div>\n    ";
-    el.appendChild(card);
+      const s = i.stats || {};
+      const adoptBadge = i.adopted
+        ? '<span class="badge on">claimed</span>'
+        : '<span class="badge off">unclaimed</span>';
+      const adoptBtn = i.adopted ? '' : '<button class="mini" data-adopt="' + i.id + '">Adopt\u2026</button>';
+      const renameBtn = '<button class="mini" data-rename="' + i.id + '">Rename</button>';
+      const card = document.createElement("div");
+      card.className = "card";
+      card.innerHTML =
+        '\n      <h3>' +
+        esc(i.label) +
+        ' <span class="badge ' +
+        (i.online ? "on" : "off") +
+        '">' +
+        (i.online ? "online" : "offline") +
+        "</span> " +
+        adoptBadge +
+        "</h3>\n      <div class=\"sub\">" +
+        esc(i.url) +
+        "</div>\n      <div class=\"stat\"><span>queries</span><span>" +
+        (s.queries_total ?? 0) +
+        "</span></div>\n      <div class=\"stat\"><span>blocked</span><span>" +
+        (s.blocked_total ?? 0) +
+        "</span></div>\n      <div class=\"stat\"><span>upstream errs</span><span>" +
+        (s.upstream_errors ?? 0) +
+        "</span></div>\n      <div class=\"stat\"><span>cache</span><span>" +
+        (s.cached ?? 0) +
+        "</span></div>\n      <div class=\"actions\">" +
+        adoptBtn +
+        renameBtn +
+        "</div>\n    ";
+      el.appendChild(card);
+    }
+    document.querySelectorAll("[data-adopt]").forEach((b) => {
+      b.onclick = () => adoptInstance(b.getAttribute("data-adopt"));
+    });
+    document.querySelectorAll("[data-rename]").forEach((b) => {
+      b.onclick = () => renameInstance(b.getAttribute("data-rename"));
+    });
   }
-  document.querySelectorAll("[data-adopt]").forEach((b) => {
-    b.onclick = () => adoptInstance(b.getAttribute("data-adopt"));
-  });
-}
 
 async function adoptInstance(id) {
   const code = prompt("Paste the blipd claim code (from its journal, one-time):");
@@ -131,6 +136,22 @@ async function adoptInstance(id) {
     refresh();
   } catch (e) {
     toast("adopt failed: " + e.message);
+  }
+}
+
+async function renameInstance(id) {
+  const label = prompt("Enter new label for instance " + id + ":");
+  if (!label) return;
+  try {
+    await api("/api/instances/" + encodeURIComponent(id) + "/label", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ label }),
+    });
+    toast("renamed " + id);
+    refresh();
+  } catch (e) {
+    toast("rename failed: " + e.message);
   }
 }
 
