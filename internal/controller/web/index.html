@@ -13,66 +13,81 @@
       <a href="javascript:void(0)" class="tab active" data-tab="dashboard">Dashboard</a>
       <a href="javascript:void(0)" class="tab" data-tab="instances">Instances</a>
       <a href="javascript:void(0)" class="tab" data-tab="queries">Query Log</a>
+      <a href="javascript:void(0)" class="tab" data-tab="settings">Settings</a>
     </nav>
     <div id="conn" class="badge">connecting…</div>
   </header>
 
   <main>
-    <div id="dashboard-view">
-      <section class="dashboard-cards">
-        <div class="card stat-card">
-          <h3>Total DNS Queries</h3>
-          <div class="big-number" id="total-queries">—</div>
-          <div class="sub">Across all instances</div>
-        </div>
-        <div class="card stat-card">
-          <h3>Total Blocked</h3>
-          <div class="big-number" id="total-blocked">—</div>
-          <div class="sub">Filtered queries</div>
-        </div>
-        <div class="card stat-card">
-          <h3>Total Upstream Errors</h3>
-          <div class="big-number" id="total-upstream-errors">—</div>
-          <div class="sub">Failed upstream requests</div>
-        </div>
-        <div class="card stat-card">
-          <h3>Online Instances</h3>
-          <div class="big-number" id="online-instances">—</div>
-          <div class="sub">of <span id="total-instances">—</span> total</div>
-        </div>
-      </section>
+      <div id="dashboard-view">
+        <section class="dashboard-cards">
+          <div class="card stat-card">
+            <h3>Total DNS Queries</h3>
+            <div class="big-number" id="total-queries">—</div>
+            <div class="sub">Across all instances</div>
+          </div>
+          <div class="card stat-card">
+            <h3>Total Blocked</h3>
+            <div class="big-number" id="total-blocked">—</div>
+            <div class="sub">Filtered queries</div>
+          </div>
+          <div class="card stat-card">
+            <h3>Total Upstream Errors</h3>
+            <div class="big-number" id="total-upstream-errors">—</div>
+            <div class="sub">Failed upstream requests</div>
+          </div>
+          <div class="card stat-card">
+            <h3>Online Instances</h3>
+            <div class="big-number" id="online-instances">—</div>
+            <div class="sub">of <span id="total-instances">—</span> total</div>
+          </div>
+        </section>
 
-      <section class="panel">
-        <h2>Fleet Event Stream</h2>
-        <div class="toolbar">
-          <input id="f-domain" placeholder="filter domain/client…" />
-          <span id="event-count" class="muted">0 events</span>
-        </div>
-        <ul id="events" class="events"></ul>
-      </section>
-    </div>
+        <section class="panel">
+          <h2>Fleet Event Stream</h2>
+          <div class="toolbar">
+            <input id="f-domain" placeholder="filter domain/client…" />
+            <span id="event-count" class="muted">0 events</span>
+          </div>
+          <ul id="events" class="events"></ul>
+        </section>
+      </div>
 
-    <div id="instances-view" class="hidden">
-      <section class="cards" id="instances"></section>
-    </div>
+      <div id="instances-view" class="hidden">
+        <section class="cards" id="instances"></section>
+      </div>
 
-    <div id="queries-view" class="hidden">
-      <section class="panel">
-        <h2>Query Log</h2>
-        <div class="query-log-controls">
-          <label>Instance <select id="q-instance"></select></label>
-          <label>Filter <input id="q-filter" type="search" placeholder="domain, client, action…" /></label>
-          <button id="q-clear">Clear</button>
-        </div>
-        <table id="q-table">
-          <thead>
-            <tr><th>Time</th><th>Instance</th><th>Client</th><th>Domain</th><th>Action</th><th>Upstream</th></tr>
-          </thead>
-          <tbody></tbody>
-        </table>
-      </section>
-    </div>
-  </main>
+      <div id="queries-view" class="hidden">
+        <section class="panel">
+          <h2>Query Log</h2>
+          <div class="query-log-controls">
+            <label>Instance <select id="q-instance"></select></label>
+            <label>Filter <input id="q-filter" type="search" placeholder="domain, client, action…" /></label>
+            <button id="q-clear">Clear</button>
+          </div>
+          <table id="q-table">
+            <thead>
+              <tr><th>Time</th><th>Instance</th><th>Client</th><th>Domain</th><th>Action</th><th>Upstream</th></tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </section>
+      </div>
+
+      <div id="settings-view" class="hidden">
+        <section class="panel">
+          <h2>Settings</h2>
+          <div class="settings-form">
+            <h3>Upstream DNS Servers</h3>
+            <p class="sub">Space-separated DoH endpoints (e.g. https://1.1.1.1/dns-query https://8.8.8.8/dns-query)</p>
+            <label>Upstream <input id="s-upstream" type="text" placeholder="https://1.1.1.1/dns-query https://8.8.8.8/dns-query" /></label>
+            <div class="settings-actions">
+              <button id="s-save" class="primary">Save Upstream</button>
+            </div>
+          </div>
+        </section>
+      </div>
+    </main>
 
   <!-- Add instance modal -->
   <div id="modal" class="modal hidden">

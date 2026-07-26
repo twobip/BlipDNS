@@ -186,6 +186,10 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	st := s.stats.Stats()
 	if st != nil {
 		st.Cached = s.cache.Len()
+		// Add upstream from default policy
+		if def, _ := s.store.All(); def != nil {
+			st.Upstream = def.Upstream
+		}
 	}
 	writeJSON(w, st)
 }

@@ -32,6 +32,7 @@ type StatsResponse struct {
 	BlockedTotal uint64         `json:"blocked_total"`
 	UpstreamErr  uint64         `json:"upstream_errors"`
 	PerClient    map[string]uint64 `json:"per_client,omitempty"`
+	Upstream     string         `json:"upstream,omitempty"`
 }
 
 // ListResponse returns the default (nil ID indicates default) plus all policies.

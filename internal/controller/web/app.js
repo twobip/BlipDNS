@@ -35,6 +35,7 @@ function switchTab(tab) {
   document.getElementById("dashboard-view").classList.toggle("hidden", tab !== "dashboard");
   document.getElementById("instances-view").classList.toggle("hidden", tab !== "instances");
   document.getElementById("queries-view").classList.toggle("hidden", tab !== "queries");
+  document.getElementById("settings-view").classList.toggle("hidden", tab !== "settings");
   refresh();
 }
 
@@ -43,7 +44,8 @@ async function refresh() {
     const list = await api("/api/instances").then((r) => r.json());
     if (currentTab === "dashboard") renderDashboard(list);
     else if (currentTab === "instances") renderInstances(list);
-    else refreshQueryLog();
+    else if (currentTab === "queries") refreshQueryLog();
+    else if (currentTab === "settings") refreshSettings(list);
     const conn = document.getElementById("conn");
     const online = list.filter((i) => i.online).length;
     conn.textContent = online + "/" + list.length + " online";
@@ -284,6 +286,41 @@ if (iSave) {
     }
   };
 }
+
+function refreshSettings(list) {
+  const upstreamInput = document.getElementById("s-upstream");
+  if (upstreamInput) {
+    // Get upstream from first instance's default policy
+    let upstream = "";
+    for (const i of list) {
+      if (i.stats && i.stats.upstream) {
+        upstream = i.stats.upstream;
+        break;
+      }
+    }
+    upstreamInput.value = upstream;
+  }
+}
+
+document.getElementById("s-save")?.addEventListener("click", async () => {
+  const upstream = document.getElementById("s-upstream")?.value.trim();
+  if (!upstream) return toast("upstream required");
+  // Apply to first online instance's default policy
+  const list = await api("/api/instances").then((r) => r.json());
+  const online = list.find((i) => i.online);
+  if (!online) return toast("no online instances");
+  try {
+    await api("/api/instances/" + encodeURIComponent(online.id) + "/policy", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: "default", upstream }),
+    });
+    toast("upstream saved");
+    refresh();
+  } catch (e) {
+    toast("save failed: " + e.message);
+  }
+});
 
 refresh();
 connectSSE();

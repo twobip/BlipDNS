@@ -158,7 +158,7 @@ func (s *Server) serve(ctx context.Context, clientIP net.IP, req *dns.Msg) *dns.
 	}
 	q := req.Question[0]
 
-	blocked, action, log := s.cfg.Store.Classify(clientIP, q.Name)
+	blocked, action, upstreamOverride, log := s.cfg.Store.Classify(clientIP, q.Name)
 	if blocked {
 		s.cnt.AddBlocked()
 		s.ctrl.Notify(control.WatchEvent{
@@ -179,9 +179,21 @@ func (s *Server) serve(ctx context.Context, clientIP net.IP, req *dns.Msg) *dns.
 		return resp
 	}
 
+	// Use policy-specific upstream if provided, else fall back to global
+	resolver := s.up
+	if upstreamOverride != "" {
+		var err error
+		resolver, err = upstream.FromSpec(upstreamOverride)
+		if err != nil {
+			s.cnt.AddUpErr()
+			resp.Rcode = dns.RcodeServerFailure
+			return resp
+		}
+	}
+
 	key := cache.Key(req)
 	out, err := s.cache.Do(ctx, key, func() (*dns.Msg, error) {
-		return s.up.Resolve(ctx, req)
+		return resolver.Resolve(ctx, req)
 	})
 	if err != nil {
 		s.cnt.AddUpErr()

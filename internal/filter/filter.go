@@ -236,17 +236,17 @@ func (s *Store) lookup(ip net.IP) *compiledPolicy {
 
 // Classify reports whether name from clientIP should be blocked.
 // Allowlist takes precedence over blocklist. Returns the matched policy's
-// block action and whether logging is enabled.
-func (s *Store) Classify(clientIP net.IP, name string) (blocked bool, action BlockAction, log bool) {
+// block action, upstream override (if any), and whether logging is enabled.
+func (s *Store) Classify(clientIP net.IP, name string) (blocked bool, action BlockAction, upstream string, log bool) {
 	p := s.lookup(clientIP)
 	if p == nil {
-		return false, DefaultAction, false
+		return false, DefaultAction, "", false
 	}
 	if p.allowM.match(name) {
-		return false, p.action(), p.Log
+		return false, p.action(), p.Upstream, p.Log
 	}
 	if p.blockM.match(name) {
-		return true, p.action(), p.Log
+		return true, p.action(), p.Upstream, p.Log
 	}
-	return false, p.action(), p.Log
+	return false, p.action(), p.Upstream, p.Log
 }
