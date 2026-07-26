@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"time"
 
@@ -153,6 +154,17 @@ func (i *Instance) watch(ctx context.Context) {
 				Client:     e.Client,
 				Domain:     e.Domain,
 			})
+			// Also log block/pass events to query log
+			if (e.Type == "block" || e.Type == "pass") && i.fleet.queryLog != nil {
+				_ = i.fleet.queryLog.Insert(ctx, QueryLogEntry{
+					Timestamp: e.At,
+					Instance:  i.Config.Label,
+					Client:    e.Client,
+					Domain:    e.Domain,
+					Action:    strings.ToUpper(e.Type), // "BLOCK" or "PASS"
+					Upstream:  "",
+				})
+			}
 		})
 		if err != nil {
 			select {

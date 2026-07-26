@@ -179,7 +179,18 @@ func (s *Server) serve(ctx context.Context, clientIP net.IP, req *dns.Msg) *dns.
 		return resp
 	}
 
-	// Use policy-specific upstream if provided, else fall back to global
+		// Notify pass event for query log
+		if log && s.logfn != nil {
+			s.logfn(clientIP.String(), q.Name)
+		}
+		s.ctrl.Notify(control.WatchEvent{
+			Type:   "pass",
+			At:     time.Now(),
+			Client: clientIP.String(),
+			Domain: q.Name,
+		})
+
+		// Use policy-specific upstream if provided, else fall back to global
 	resolver := s.up
 	if upstreamOverride != "" {
 		var err error

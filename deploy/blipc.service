@@ -19,7 +19,7 @@ NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
-ReadWritePaths=/etc/blipc
+ReadWritePaths=/etc/blipc /var/lib/blipc
 LimitNOFILE=65536
 
 StandardOutput=journal

@@ -54,7 +54,7 @@ type Fleet struct {
 
 // NewFleet creates an empty fleet with a default event buffer.
 func NewFleet() *Fleet {
-	queryLog, _ := NewQueryLogStore("") // empty path = in-memory
+	queryLog, _ := NewQueryLogStore("/var/lib/blipc/querylog.db") // persistent SQLite DB
 	return &Fleet{
 		instances: make(map[string]*Instance),
 		bus:       NewBus(500),

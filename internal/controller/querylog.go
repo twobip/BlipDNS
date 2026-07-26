@@ -25,6 +25,13 @@ type QueryLogEntry struct {
 	Upstream  string
 }
 
+// TimeSeriesPoint represents a single point in a time series
+type TimeSeriesPoint struct {
+	Timestamp  time.Time `json:"timestamp"`
+	TotalQueries int     `json:"total_queries"`
+	BlockedQueries int   `json:"blocked_queries"`
+}
+
 // NewQueryLogStore creates a new query log store backed by SQLite
 func NewQueryLogStore(dbPath string) (*QueryLogStore, error) {
 	db, err := sql.Open("sqlite", dbPath)
@@ -106,6 +113,65 @@ func (s *QueryLogStore) Query(ctx context.Context, instance, filter string, sinc
 		e.Timestamp, _ = time.Parse("2006-01-02 15:04:05", ts)
 		results = append(results, e)
 	}
+	return results, rows.Err()
+}
+
+// GetQueryStats returns aggregated query counts per time bucket for the last 24 hours
+func (s *QueryLogStore) GetQueryStats(ctx context.Context, instance string, bucketSize time.Duration, since time.Time) ([]TimeSeriesPoint, error) {
+	// SQLite doesn't have native time bucketing, so we'll do it in Go
+	// First, fetch all relevant entries
+	query := `SELECT timestamp, action FROM query_log WHERE timestamp >= ?`
+	args := []interface{}{since}
+
+	if instance != "" {
+		query += " AND instance = ?"
+		args = append(args, instance)
+	}
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	// Bucket the data
+	buckets := make(map[int64]*TimeSeriesPoint)
+	for rows.Next() {
+		var tsStr, action string
+		if err := rows.Scan(&tsStr, &action); err != nil {
+			return nil, err
+		}
+		ts, _ := time.Parse("2006-01-02 15:04:05", tsStr)
+		
+		// Calculate bucket key (unix timestamp truncated to bucket size)
+		bucketKey := ts.Unix() / int64(bucketSize.Seconds())
+		
+		if _, ok := buckets[bucketKey]; !ok {
+			buckets[bucketKey] = &TimeSeriesPoint{
+				Timestamp: ts.Truncate(bucketSize),
+			}
+		}
+		buckets[bucketKey].TotalQueries++
+		if action == "BLOCK" {
+			buckets[bucketKey].BlockedQueries++
+		}
+	}
+
+	// Convert to sorted slice
+	var results []TimeSeriesPoint
+	for _, v := range buckets {
+		results = append(results, *v)
+	}
+	
+	// Sort by timestamp
+	for i := 0; i < len(results)-1; i++ {
+		for j := i + 1; j < len(results); j++ {
+			if results[i].Timestamp.After(results[j].Timestamp) {
+				results[i], results[j] = results[j], results[i]
+			}
+		}
+	}
+
 	return results, rows.Err()
 }
 

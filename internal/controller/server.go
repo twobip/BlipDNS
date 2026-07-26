@@ -33,8 +33,9 @@ func (s *Server) Handler() http.Handler {
 		return s.auth(h)
 	}
 	mux.HandleFunc("/api/instances", api(s.handleInstances))
-	mux.HandleFunc("/api/instances/", api(s.handleInstance)) // /add /delete /policies /policy /adopt /adopt/status /adopt/reset /label
+	mux.HandleFunc("/api/instances/", api(s.handleInstance)) // /add /delete /policies /policy /adopt /adopt/status /adopt/reset /label /query-log
 	mux.HandleFunc("/api/queries", api(s.handleQueries)) // query log
+	mux.HandleFunc("/api/stats", api(s.handleStats)) // aggregated query stats for graphs
 	mux.HandleFunc("/api/events", api(s.handleEvents))
 	mux.HandleFunc("/api/health", api(s.handleHealth))
 
@@ -275,6 +276,36 @@ func (s *Server) handleQueries(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, entries)
+}
+
+func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.fleet.queryLog == nil {
+		http.Error(w, "query log not available", http.StatusServiceUnavailable)
+		return
+	}
+	instance := r.URL.Query().Get("instance")
+	bucketSize := 5 * time.Minute
+	if b := r.URL.Query().Get("bucket"); b != "" {
+		if d, err := time.ParseDuration(b); err == nil {
+			bucketSize = d
+		}
+	}
+	since := time.Now().Add(-24 * time.Hour)
+	if s := r.URL.Query().Get("since"); s != "" {
+		if d, err := time.ParseDuration(s); err == nil {
+			since = time.Now().Add(-d)
+		}
+	}
+	stats, err := s.fleet.queryLog.GetQueryStats(r.Context(), instance, bucketSize, since)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	writeJSON(w, stats)
 }
 
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
