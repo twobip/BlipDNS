@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>BlipDNS Controller</title>
   <link rel="stylesheet" href="style.css" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 </head>
 <body>
   <header>
@@ -44,6 +45,16 @@
         </section>
 
         <section class="panel">
+          <h2>DNS Query Volume (last 60 polls)</h2>
+          <div class="chart-container">
+            <canvas id="query-chart" height="200"></canvas>
+          </div>
+          <div class="sub">Queries per poll interval (5s intervals)</div>
+        </section>
+      </div>
+
+      <div id="instances-view" class="hidden">
+        <section class="panel">
           <h2>Fleet Event Stream</h2>
           <div class="toolbar">
             <input id="f-domain" placeholder="filter domain/client…" />
@@ -51,9 +62,7 @@
           </div>
           <ul id="events" class="events"></ul>
         </section>
-      </div>
 
-      <div id="instances-view" class="hidden">
         <section class="cards" id="instances"></section>
       </div>
 

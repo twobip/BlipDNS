@@ -52,6 +52,8 @@ main { padding: 18px 20px; max-width: 1100px; margin: 0 auto; }
 .stat { display: flex; justify-content: space-between; padding: 3px 0; border-top: 1px solid #00000055; }
 .stat span:first-child { color: var(--muted); }
 .panel { background: var(--panel); border: 1px solid #000; border-radius: 10px; padding: 14px; }
+.chart-container { position: relative; height: 200px; width: 100%; }
+.panel canvas { max-height: 200px; height: 200px; }
 .panel h2 { margin: 0 0 10px; font-size: 14px; }
 .toolbar { display: flex; gap: 10px; align-items: center; margin-bottom: 8px; }
 .toolbar input { flex: 1; background: var(--panel2); border: 1px solid #000; color: var(--fg); padding: 7px 10px; border-radius: 7px; }

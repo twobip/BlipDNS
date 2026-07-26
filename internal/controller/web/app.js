@@ -85,6 +85,101 @@ function renderDashboard(list) {
   document.getElementById("total-upstream-errors").textContent = totalUpstreamErrors.toLocaleString();
   document.getElementById("online-instances").textContent = online;
   document.getElementById("total-instances").textContent = list.length;
+
+  // Update query volume chart
+  updateQueryChart(list);
+}
+// Query volume chart
+let queryChart = null;
+const chartMaxPoints = 60;
+let queryHistory = { queries: [], blocked: [], timestamps: [] };
+let lastQueries = 0;
+let lastBlocked = 0;
+let firstPoll = true;
+
+function updateQueryChart(list) {
+  const canvas = document.getElementById("query-chart");
+  if (!canvas) return;
+
+  let totalQueries = 0;
+  let totalBlocked = 0;
+  for (const i of list) {
+    const s = i.stats || {};
+    totalQueries += s.queries_total ?? 0;
+    totalBlocked += s.blocked_total ?? 0;
+  }
+
+  // Calculate delta since last poll
+  let deltaQueries = 0;
+  let deltaBlocked = 0;
+  if (firstPoll) {
+    firstPoll = false;
+  } else {
+    deltaQueries = totalQueries - lastQueries;
+    deltaBlocked = totalBlocked - lastBlocked;
+  }
+  lastQueries = totalQueries;
+  lastBlocked = totalBlocked;
+
+  const now = new Date();
+  const timeLabel = now.toLocaleTimeString();
+
+  queryHistory.timestamps.push(timeLabel);
+  queryHistory.queries.push(deltaQueries);
+  queryHistory.blocked.push(deltaBlocked);
+
+  // Keep only last 60 points
+  if (queryHistory.timestamps.length > chartMaxPoints) {
+    queryHistory.timestamps.shift();
+    queryHistory.queries.shift();
+    queryHistory.blocked.shift();
+  }
+
+  if (!queryChart) {
+    const ctx = canvas.getContext("2d");
+    queryChart = new Chart(ctx, {
+      type: "line",
+      data: {
+        labels: queryHistory.timestamps,
+        datasets: [
+          {
+            label: "Queries / poll",
+            data: queryHistory.queries,
+            borderColor: "#3b82f6",
+            backgroundColor: "rgba(59, 130, 246, 0.1)",
+            fill: true,
+            tension: 0.3,
+            pointRadius: 0,
+          },
+          {
+            label: "Blocked / poll",
+            data: queryHistory.blocked,
+            borderColor: "#ef4444",
+            backgroundColor: "rgba(239, 68, 68, 0.1)",
+            fill: true,
+            tension: 0.3,
+            pointRadius: 0,
+          },
+        ],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: { duration: 300 },
+        interaction: { mode: "index", intersect: false },
+        scales: {
+          x: { display: true, title: { display: true, text: "Time" } },
+          y: { beginAtZero: true, title: { display: true, text: "Queries / poll" } },
+        },
+        plugins: { legend: { position: "top" } },
+      },
+    });
+  } else {
+    queryChart.data.labels = queryHistory.timestamps;
+    queryChart.data.datasets[0].data = queryHistory.queries;
+    queryChart.data.datasets[1].data = queryHistory.blocked;
+    queryChart.update("none");
+  }
 }
 
 function renderInstances(list) {
