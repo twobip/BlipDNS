@@ -2,10 +2,17 @@ dns_addr: "127.0.0.1:5353"
 doh_addr: "127.0.0.1:8443"
 admin_addr: "127.0.0.1:8444"
 admin_token: "test-token"
-# e2e smoke test points at a local mock UDP upstream (no external network).
-# In production use e.g.:
+# Upstream DNS resolvers - space/comma-separated specs for failover.
+# Supported formats:
+#   udp://host:port         - classic UDP/TCP DNS (e.g. udp://1.1.1.1:53)
+#   https://host/dns-query  - DNS-over-HTTPS (RFC 8484)
+#   doh://host/dns-query    - DNS-over-HTTPS (shorthand)
+# Multiple specs provide failover (tried in order).
+# Examples:
+#   upstream: "udp://1.1.1.1:53 udp://8.8.8.8:53"
 #   upstream: "https://1.1.1.1/dns-query https://8.8.8.8/dns-query"
-upstream: "udp://127.0.0.1:8053"
+#   upstream: "udp://1.1.1.1:53 https://1.1.1.1/dns-query"  # UDP primary, DoH failover
+upstream: "udp://1.1.1.1:53 https://1.1.1.1/dns-query"
 cache_cap: 1h
 
 default_policy:

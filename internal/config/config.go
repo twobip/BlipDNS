@@ -27,13 +27,13 @@ type Config struct {
 }
 
 // Default returns a configuration that works out of the box (listens on
-// localhost, forwards to Cloudflare over DoH).
+// localhost, forwards to Cloudflare over UDP with DoH failover).
 func Default() *Config {
 	return &Config{
 		DNSAddr:  "127.0.0.1:5353",
 		DoHAddr:  "127.0.0.1:8443",
 		AdminAddr: "127.0.0.1:8443",
-		Upstream: "https://1.1.1.1/dns-query https://8.8.8.8/dns-query",
+		Upstream: "udp://1.1.1.1:53 https://1.1.1.1/dns-query",
 		CacheCap: 1 * time.Hour,
 	}
 }

@@ -79,8 +79,8 @@
           <h2>Settings</h2>
           <div class="settings-form">
             <h3>Upstream DNS Servers</h3>
-            <p class="sub">Space-separated DoH endpoints (e.g. https://1.1.1.1/dns-query https://8.8.8.8/dns-query)</p>
-            <label>Upstream <input id="s-upstream" type="text" placeholder="https://1.1.1.1/dns-query https://8.8.8.8/dns-query" /></label>
+            <p class="sub">Space-separated specs: udp://host:port (UDP/TCP) or https://host/dns-query (DoH). Multiple for failover.</p>
+            <label>Upstream <input id="s-upstream" type="text" placeholder="udp://1.1.1.1:53 https://1.1.1.1/dns-query" /></label>
             <div class="settings-actions">
               <button id="s-save" class="primary">Save Upstream</button>
             </div>
