@@ -249,13 +249,13 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) serveUI(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/" && r.URL.Path != "/index.html" && r.URL.Path != "/stats.html" && r.URL.Path != "/instances.html" && !isUIAsset(r.URL.Path) {
+	if r.URL.Path != "/" && r.URL.Path != "/index.html" && r.URL.Path != "/instances" && r.URL.Path != "/instances.html" && r.URL.Path != "/queries" && r.URL.Path != "/queries.html" && r.URL.Path != "/settings" && r.URL.Path != "/settings.html" && !isUIAsset(r.URL.Path) {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
 	// The page requires the token; static assets (js/css) are served
 	// unauthenticated so browsers can load them as relative sub-resources.
-	if r.URL.Path == "/" || r.URL.Path == "/index.html" || r.URL.Path == "/stats.html" || r.URL.Path == "/instances.html" {
+	if r.URL.Path == "/" || r.URL.Path == "/index.html" || r.URL.Path == "/instances" || r.URL.Path == "/instances.html" || r.URL.Path == "/queries" || r.URL.Path == "/queries.html" || r.URL.Path == "/settings" || r.URL.Path == "/settings.html" {
 		if !s.validToken(r) {
 			w.Header().Set("WWW-Authenticate", "Bearer")
 			http.Error(w, "unauthorized", http.StatusUnauthorized)

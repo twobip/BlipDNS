@@ -1,7 +1,17 @@
 // BlipDNS Controller dashboard JS. Talks to the controller API and SSE feed.
 const TOKEN = new URLSearchParams(location.search).get("token") || "";
 const AUTH = TOKEN ? "Bearer " + TOKEN : "";
-let currentTab = location.pathname === "/instances.html" ? "instances" : "dashboard";
+
+// Determine current tab from URL path (e.g., /instances, /queries, /settings)
+function getTabFromPath() {
+  const path = location.pathname;
+  if (path === "/instances" || path === "/instances.html") return "instances";
+  if (path === "/queries" || path === "/queries.html") return "queries";
+  if (path === "/settings" || path === "/settings.html") return "settings";
+  return "dashboard";
+}
+
+let currentTab = getTabFromPath();
 
 function api(path, opts = {}) {
   return fetch(path, { ...opts, headers: { ...(opts.headers || {}), Authorization: AUTH } })
@@ -36,6 +46,9 @@ function switchTab(tab) {
   document.getElementById("instances-view").classList.toggle("hidden", tab !== "instances");
   document.getElementById("queries-view").classList.toggle("hidden", tab !== "queries");
   document.getElementById("settings-view").classList.toggle("hidden", tab !== "settings");
+  // Update URL without reload
+  const paths = { dashboard: "/", instances: "/instances", queries: "/queries", settings: "/settings" };
+  history.pushState(null, "", paths[tab] || "/");
   refresh();
 }
 
@@ -270,6 +283,12 @@ document.querySelectorAll(".tab[data-tab]").forEach((t) => {
     e.preventDefault();
     switchTab(t.dataset.tab);
   });
+});
+
+// Handle browser back/forward navigation
+window.addEventListener("popstate", () => {
+  currentTab = getTabFromPath();
+  switchTab(currentTab);
 });
 
 // Modal wiring
