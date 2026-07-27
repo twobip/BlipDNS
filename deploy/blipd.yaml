@@ -8,6 +8,11 @@ state_file: "/var/lib/blipd/adopted.json"
 # Production upstreams with failover (override in /etc/blipd/blipd.yaml).
 upstream: "https://1.1.1.1/dns-query https://8.8.8.8/dns-query"
 cache_cap: 1h
+# Optional global DNS blocklist (AdBlock Plus format). Applied to ALL clients
+# before per-client policy. Set blocklist_url and blocklist_update_hours to
+# auto-refresh from a URL (e.g. a self-hosted EasyList mirror).
+# blocklist_url: ""
+# blocklist_update_hours: 24
 
 default_policy:
   id: "default"

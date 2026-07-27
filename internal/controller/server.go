@@ -40,8 +40,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/health", api(s.handleHealth))
 
 	// Blocklist (token-gated)
-	mux.HandleFunc("/api/blocklist", api(s.handleBlocklist))        // GET list / POST add / DELETE remove
-	mux.HandleFunc("/api/blocklist/export", api(s.handleBlocklistExport)) // GET text
+	mux.HandleFunc("/api/blocklist", api(s.handleBlocklist))                   // GET list / POST add / DELETE remove
+	mux.HandleFunc("/api/blocklist/export", api(s.handleBlocklistExport))     // GET text
+	mux.HandleFunc("/api/blocklist/import-url", api(s.handleBlocklistImportURL)) // POST fetch from URL
 
 	// UI: the page itself requires the token, but static assets (js/css) are
 	// served unauthenticated. Browsers fetch sub-resources like /app.js as
@@ -388,6 +389,29 @@ func (s *Server) handleBlocklistExport(w http.ResponseWriter, r *http.Request) {
 	for _, d := range s.fleet.Blocklist().List() {
 		fmt.Fprintln(w, d)
 	}
+}
+
+func (s *Server) handleBlocklistImportURL(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		URL string `json:"url"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.URL == "" {
+		http.Error(w, "url required", http.StatusBadRequest)
+		return
+	}
+	if err := s.fleet.Blocklist().LoadFromURL(r.Context(), req.URL); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, map[string]interface{}{"ok": true, "count": len(s.fleet.Blocklist().List())})
 }
 
 func (s *Server) serveUI(w http.ResponseWriter, r *http.Request) {

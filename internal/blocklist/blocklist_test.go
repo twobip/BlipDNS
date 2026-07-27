@@ -62,9 +62,13 @@ func TestList(t *testing.T) {
 	if len(list) != 2 {
 		t.Fatalf("expected 2 items, got %d: %v", len(list), list)
 	}
-	// List should be sorted (by implementation)
-	if list[0] != "a.com" || list[1] != "z.com" {
-		t.Errorf("unexpected list order: %v", list)
+	// List order is undefined (map iteration), just check both are present.
+	seen := make(map[string]bool)
+	for _, d := range list {
+		seen[d] = true
+	}
+	if !seen["a.com"] || !seen["z.com"] {
+		t.Errorf("expected a.com and z.com in list, got %v", list)
 	}
 }
 

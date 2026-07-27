@@ -89,15 +89,28 @@ func (b *Blocklist) List() []string {
 
 // IsBlocked reports whether the given host (e.g., from a DNS query) is blocked.
 // It checks if the host ends with any blocked domain (with a dot boundary).
+// Domains stored with a "*." prefix match any subdomain of that root (wildcard).
 func (b *Blocklist) IsBlocked(host string) bool {
 	if host == "" {
 		return false
 	}
-	h := strings.TrimSuffix(host, ".") // normalize
+	h := strings.ToLower(strings.TrimSuffix(host, ".")) // normalize
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	for d := range b.domains {
-		if d == h || strings.HasSuffix(h, "."+d) {
+		if d == h {
+			return true
+		}
+		// Wildcard entry: *.root matches any subdomain of root.
+		if strings.HasPrefix(d, "*.") {
+			root := d[2:] // strip "*."
+			if root != "" && strings.HasSuffix(h, "."+root) && h != root {
+				return true
+			}
+			continue
+		}
+		// Exact suffix match: domain or subdomain of domain.
+		if strings.HasSuffix(h, "."+d) {
 			return true
 		}
 	}

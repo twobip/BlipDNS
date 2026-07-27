@@ -9,7 +9,9 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
+	"github.com/twobip/BlipDNS/internal/blocklist"
 	"github.com/twobip/BlipDNS/internal/config"
 	"github.com/twobip/BlipDNS/internal/dnsserver"
 	"github.com/twobip/BlipDNS/internal/filter"
@@ -33,15 +35,46 @@ func main() {
 		}
 	}
 
+	bl := blocklist.New()
+	if cfg.BlocklistURL != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := bl.LoadFromURL(ctx, cfg.BlocklistURL); err != nil {
+			log.Printf("blipd: blocklist load %s: %v (continuing without blocklist)", cfg.BlocklistURL, err)
+		} else {
+			log.Printf("blipd: blocklist loaded from %s (%d domains)", cfg.BlocklistURL, len(bl.List()))
+			if cfg.BlocklistUpdateHours > 0 {
+				go func() {
+					ticker := time.NewTicker(time.Duration(cfg.BlocklistUpdateHours) * time.Hour)
+					defer ticker.Stop()
+					for {
+						select {
+						case <-ctx.Done():
+							return
+						case <-ticker.C:
+							log.Printf("blipd: refreshing blocklist from %s", cfg.BlocklistURL)
+							if err := bl.LoadFromURL(context.Background(), cfg.BlocklistURL); err != nil {
+								log.Printf("blipd: blocklist refresh: %v", err)
+							} else {
+								log.Printf("blipd: blocklist refreshed (%d domains)", len(bl.List()))
+							}
+						}
+					}
+				}()
+			}
+		}
+	}
+
 	srv, err := dnsserver.New(dnsserver.Config{
-		DNSAddr:  cfg.DNSAddr,
-		DoHAddr:  cfg.DoHAddr,
-		CertFile: cfg.CertFile,
-		KeyFile:  cfg.KeyFile,
-		Upstream: cfg.Upstream,
-		CacheCap: cfg.CacheCap,
-		Store:    store,
-		Version:  version,
+		DNSAddr:    cfg.DNSAddr,
+		DoHAddr:    cfg.DoHAddr,
+		CertFile:   cfg.CertFile,
+		KeyFile:    cfg.KeyFile,
+		Upstream:   cfg.Upstream,
+		CacheCap:   cfg.CacheCap,
+		Store:      store,
+		Version:    version,
+		Blocklist:  bl,
 	})
 	if err != nil {
 		log.Fatalf("blipd: %v", err)

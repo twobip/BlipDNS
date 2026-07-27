@@ -161,7 +161,7 @@ func (s *Server) serve(ctx context.Context, clientIP net.IP, req *dns.Msg) *dns.
 	q := req.Question[0]
 
 	// Check global blocklist first (applied to all clients)
-	if s.cfg.Blocklist != nil && s.cfg.Blocklist.Match(q.Name) {
+	if s.cfg.Blocklist != nil && s.cfg.Blocklist.IsBlocked(q.Name) {
 		s.cnt.AddBlocked()
 		s.ctrl.Notify(control.WatchEvent{
 			Type: "block", At: time.Now(),

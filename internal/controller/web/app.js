@@ -473,6 +473,107 @@ function renderBlocklist() {
   });
 }
 
+document.getElementById("b-import-url")?.addEventListener("click", async () => {
+  const url = document.getElementById("b-url")?.value.trim();
+  if (!url) return toast("URL required");
+  const status = document.getElementById("b-import-status");
+  if (status) status.textContent = "fetching…";
+  try {
+    const r = await api("/api/blocklist/import-url", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url }),
+    });
+    const data = await r.json();
+    if (status) status.textContent = `loaded ${data.count} domains`;
+    toast(`imported ${data.count} domains`);
+    document.getElementById("b-url").value = "";
+    refreshBlocklist();
+  } catch (e) {
+    if (status) status.textContent = "failed";
+    toast("import failed: " + e.message);
+  }
+});
+
+// File import
+let bFileData = null;
+document.getElementById("b-file")?.addEventListener("change", (e) => {
+  const file = e.target.files[0];
+  const nameEl = document.getElementById("b-file-name");
+  const btn = document.getElementById("b-import-file");
+  if (nameEl) nameEl.textContent = file ? file.name : "";
+  if (btn) btn.disabled = !file;
+  if (!file) { bFileData = null; return; }
+  const reader = new FileReader();
+  reader.onload = () => { bFileData = reader.result; };
+  reader.readAsText(file);
+});
+
+document.getElementById("b-import-file")?.addEventListener("click", async () => {
+  if (!bFileData) return toast("no file loaded");
+  // Parse ADBlock format: extract domains from ||domain^ and plain lines
+  const lines = bFileData.split("\n");
+  const domains = [];
+  for (const raw of lines) {
+    let line = raw.trim();
+    if (!line || line.startsWith("!")) continue;
+    if (line.includes("$")) line = line.split("$")[0];
+    if (line.startsWith("||")) { line = line.slice(2); if (line.includes("^")) line = line.split("^")[0]; }
+    else if (line.startsWith("|")) { line = line.slice(1); if (line.includes("^")) line = line.split("^")[0]; }
+    if (!line) continue;
+    // Skip if it starts with http (URL)
+    if (line.includes("://")) {
+      try { const u = new URL(line); if (u.hostname) line = u.hostname; else continue; } catch { continue; }
+    }
+    // Basic domain validation
+    if (line.includes(".") && !line.startsWith(".") && !line.endsWith(".")) {
+      domains.push(line.toLowerCase().replace(/\.+$/, ""));
+    }
+  }
+  if (!domains.length) return toast("no domains found in file");
+  // Add in batch via repeated calls (UI stays responsive with chunking)
+  let added = 0;
+  for (const d of domains) {
+    try {
+      await api("/api/blocklist", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ domain: d }),
+      });
+      added++;
+    } catch (_) { /* skip dupes/errors */ }
+  }
+  toast(`imported ${added} domains from file`);
+  bFileData = null;
+  const fn = document.getElementById("b-file-name");
+  if (fn) fn.textContent = "";
+  const btn = document.getElementById("b-import-file");
+  if (btn) btn.disabled = true;
+  document.getElementById("b-file").value = "";
+  refreshBlocklist();
+});
+
+document.getElementById("b-clear")?.addEventListener("click", async () => {
+  if (!confirm("Remove ALL domains from the global blocklist?")) return;
+  // Fetch current list and remove each
+  try {
+    const r = await api("/api/blocklist");
+    const data = await r.json();
+    const domains = data.domains || [];
+    for (const d of domains) {
+      await api("/api/blocklist", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ domain: d }),
+      });
+    }
+    toast(`cleared ${domains.length} domains`);
+    refreshBlocklist();
+  } catch (e) {
+    toast("clear failed: " + e.message);
+  }
+});
+
 document.getElementById("s-save")?.addEventListener("click", async () => {
   const upstream = document.getElementById("s-upstream")?.value.trim();
   if (!upstream) return toast("upstream required");

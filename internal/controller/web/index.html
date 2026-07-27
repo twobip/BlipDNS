@@ -88,13 +88,35 @@
         <section class="panel">
           <h2>DNS Blocklist</h2>
           <p class="sub">Domains here are blocked for ALL clients before per-client policy is checked.</p>
+
+          <!-- Manual add -->
           <div class="blocklist-controls">
             <input id="b-domain" placeholder="domain to block (e.g. ads.example.com)" />
             <button id="b-add" class="primary">Add</button>
           </div>
+
+          <!-- Import from URL -->
+          <div class="blocklist-controls" style="margin-top:10px;">
+            <input id="b-url" placeholder="AdBlock Plus URL (e.g. https://adaway.org/hosts.txt)" />
+            <button id="b-import-url" class="primary">Import URL</button>
+            <span id="b-import-status" class="muted"></span>
+          </div>
+
+          <!-- Import from file -->
+          <div class="blocklist-controls" style="margin-top:10px;">
+            <label for="b-file" style="cursor:pointer;">
+              <input type="file" id="b-file" accept=".txt,.csv,.conf" style="display:none;" />
+              <span class="btn-file">Choose File</span>
+            </label>
+            <span id="b-file-name" class="muted"></span>
+            <button id="b-import-file" class="primary" disabled>Import File</button>
+          </div>
+
+          <!-- List -->
           <div class="toolbar">
             <input id="b-filter" placeholder="filter…" />
             <button id="b-export">Export</button>
+            <button id="b-clear" class="danger">Clear All</button>
           </div>
           <ul id="blocklist" class="blocklist"></ul>
         </section>
