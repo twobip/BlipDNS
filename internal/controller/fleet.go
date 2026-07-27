@@ -45,15 +45,19 @@ type InstanceConfig struct {
 
 // Fleet holds all instances, the event bus, and the global blocklist.
 type Fleet struct {
-	mu         sync.RWMutex
-	instances  map[string]*Instance
-	bus        *Bus
-	http       *http.Client
-	now        func() time.Time
-	logfn      func(Event)
-	queryLog   *QueryLogStore        // persistent query log
-	blocklist  *blocklist.Blocklist  // global DNS blocklist
-	configPath string                // path to controller config YAML (for persisting tokens)
+	mu               sync.RWMutex
+	instances        map[string]*Instance
+	bus              *Bus
+	http             *http.Client
+	now              func() time.Time
+	logfn            func(Event)
+	queryLog         *QueryLogStore        // persistent query log
+	blocklist        *blocklist.Blocklist  // global DNS blocklist
+	blocklistURL     string                // URL to fetch blocklist from (AdBlock Plus format)
+	blocklistUpdateHours int                 // update interval in hours (0 = disabled)
+	updateStopCh     chan struct{}         // channel to stop the updater goroutine
+	updateMu         sync.Mutex            // protects updateStopCh
+	configPath       string                // path to controller config YAML (for persisting tokens)
 }
 
 // NewFleet creates an empty fleet with a default event buffer.

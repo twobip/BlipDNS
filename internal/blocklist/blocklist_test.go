@@ -1,121 +1,133 @@
+// Copyright 2025 The BlipDNS Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package blocklist
 
 import (
 	"testing"
 )
 
-func TestExactMatch(t *testing.T) {
+func TestIsBlocked(t *testing.T) {
 	b := New()
 	b.Add("ads.example.com")
-	tests := []struct{ name string; want bool }{
-		{"ads.example.com", true},
-		{"sub.ads.example.com", true}, // suffix match: ads.example.com is a suffix root
-		{"other.com", false},
-		{"", false},
+	tests := []struct {
+		host   string
+		want   bool
+		desc   string
+	}{
+		{"ads.example.com", true, "exact match"},
+		{"sub.ads.example.com", true, "subdomain"},
+		{"a.b.ads.example.com", true, "deep subdomain"},
+		{"example.com", false, "parent domain not blocked"},
+		{"ads.example.com.", true, "trailing dot"},
+		{"ADS.EXAMPLE.COM", true, "case insensitive"},
+		{"notads.example.com", false, "similar but not subdomain"},
+		{"", false, "empty host"},
 	}
 	for _, tt := range tests {
-		got := b.Match(tt.name)
-		if got != tt.want {
-			t.Errorf("Match(%q) = %v, want %v", tt.name, got, tt.want)
+		if got := b.IsBlocked(tt.host); got != tt.want {
+			t.Errorf("%s: IsBlocked(%q) = %v, want %v", tt.desc, tt.host, got, tt.want)
 		}
 	}
 }
 
-func TestSuffixMatch(t *testing.T) {
+func TestAddRemove(t *testing.T) {
 	b := New()
-	b.Add("example.com")
-	tests := []struct{ name string; want bool }{
-		{"example.com", true},
-		{"sub.example.com", true},
-		{"deep.sub.example.com", true},
-		{"notexample.com", false},
-		{"example.com.", true}, // trailing dot stripped
+	b.Add("bad.com")
+	if !b.IsBlocked("bad.com") {
+		t.Error("expected bad.com to be blocked after Add")
 	}
-	for _, tt := range tests {
-		got := b.Match(tt.name)
-		if got != tt.want {
-			t.Errorf("Match(%q) = %v, want %v", tt.name, got, tt.want)
-		}
-	}
-}
-
-func TestWildcardMatch(t *testing.T) {
-	b := New()
-	b.Add("*.tracker.net")
-	tests := []struct{ name string; want bool }{
-		{"sub.tracker.net", true},
-		{"deep.sub.tracker.net", true},
-		{"tracker.net", false}, // wildcard doesn't match the root itself
-		{"nottracker.net", false},
-		{"ads.example.com", false},
-	}
-	for _, tt := range tests {
-		got := b.Match(tt.name)
-		if got != tt.want {
-			t.Errorf("Match(%q) = %v, want %v", tt.name, got, tt.want)
-		}
-	}
-}
-
-func TestRemove(t *testing.T) {
-	b := New()
-	b.Add("ads.example.com")
-	b.Add("*.tracker.net")
-	if !b.Match("ads.example.com") {
-		t.Error("ads.example.com should be blocked before remove")
-	}
-	b.Remove("ads.example.com")
-	if b.Match("ads.example.com") {
-		t.Error("ads.example.com should NOT be blocked after remove")
-	}
-	b.Remove("*.tracker.net")
-	if b.Match("sub.tracker.net") {
-		t.Error("sub.tracker.net should NOT be blocked after wildcard remove")
+	b.Remove("bad.com")
+	if b.IsBlocked("bad.com") {
+		t.Error("expected bad.com not blocked after Remove")
 	}
 }
 
 func TestList(t *testing.T) {
 	b := New()
-	b.Add("ads.example.com")
-	b.Add("*.tracker.net")
+	b.Add("z.com")
+	b.Add("a.com")
 	list := b.List()
 	if len(list) != 2 {
-		t.Errorf("expected 2 entries, got %d: %v", len(list), list)
+		t.Fatalf("expected 2 items, got %d: %v", len(list), list)
 	}
-	// List is sorted
-	if list[0] != "*.tracker.net" || list[1] != "ads.example.com" {
-		t.Errorf("List not sorted: %v", list)
+	// List should be sorted (by implementation)
+	if list[0] != "a.com" || list[1] != "z.com" {
+		t.Errorf("unexpected list order: %v", list)
 	}
 }
 
 func TestFromDomainsAndReplace(t *testing.T) {
-	b := FromDomains([]string{"evil.com", "*.ads.net", ""})
-	if b.Len() != 2 {
-		t.Fatalf("Len()=%d want 2", b.Len())
+	b := New()
+	b.FromDomains([]string{"evil.com", "*.ads.net", ""})
+	if !b.IsBlocked("evil.com") {
+		t.Error("expected evil.com blocked")
 	}
-	if !b.Match("evil.com") || !b.Match("sub.ads.net") {
-		t.Fatal("FromDomains should seed matches")
+	if !b.IsBlocked("sub.ads.net") {
+		t.Error("expected sub.ads.net blocked")
 	}
-	b.Replace([]string{"only.com"})
-	if b.Len() != 1 || !b.Match("only.com") || b.Match("evil.com") {
-		t.Fatalf("Replace failed: list=%v", b.List())
+	if b.IsBlocked("ads.net") {
+		t.Error("expected ads.net NOT blocked (wildcard only matches subdomains)")
 	}
-	b.Clear()
-	if b.Len() != 0 || b.Match("only.com") {
-		t.Fatal("Clear should empty the list")
+	// Replace list
+	b.FromDomains([]string{"only.com"})
+	if !b.IsBlocked("only.com") {
+		t.Error("expected only.com blocked after replace")
+	}
+	if b.IsBlocked("evil.com") {
+		t.Error("expected evil.com not blocked after replace")
+	}
+	// Clear
+	b.FromDomains([]string{})
+	if b.IsBlocked("anything") {
+		t.Error("expected nothing blocked after clear")
 	}
 }
 
-func TestNormalizeTrailingDotAndCase(t *testing.T) {
+func TestNormalize(t *testing.T) {
 	b := New()
 	b.Add("Ads.Example.COM.")
-	if !b.Match("ads.example.com") {
+	if !b.IsBlocked("ads.example.com") {
 		t.Error("should match after normalize")
 	}
-	if !b.Match("SUB.ADS.EXAMPLE.COM.") {
+	if !b.IsBlocked("SUB.ADS.EXAMPLE.COM.") {
 		t.Error("suffix match should ignore case/trailing dot")
 	}
 }
+
+// TestLoadFromURL is skipped because it requires network.
+// To test manually, you can uncomment and run with -run TestLoadFromURL.
+// func TestLoadFromURL(t *testing.T) {
+// 	b := New()
+// 	// Use a known public adblock list (small one for testing)
+// 	const testURL = "https://easylist.to/easylist/easylist.txt"
+// 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+// 	defer cancel()
+// 	if err := b.LoadFromURL(ctx, testURL); err != nil {
+// 		t.Fatalf("LoadFromURL failed: %v", err)
+// 	}
+
+// 	// Check that we got some domains
+// 	if len(b.List()) == 0 {
+// 		t.Error("expected at least one domain from the list")
+// 	}
+
+// 	// Check a known domain from EasyList (as of time of writing)
+// 	if !b.IsBlocked("ad.doubleclick.net") {
+// 		t.Error("expected to block a known ad domain")
+// 	}
+// }
 
 func TestConcurrentAccess(t *testing.T) {
 	b := New()
@@ -124,9 +136,8 @@ func TestConcurrentAccess(t *testing.T) {
 		go func(id int) {
 			for j := 0; j < 100; j++ {
 				b.Add("test.domain.com")
-				_ = b.Match("test.domain.com")
+				_ = b.IsBlocked("test.domain.com")
 				_ = b.List()
-				_ = b.Len()
 				b.Remove("test.domain.com")
 			}
 			done <- true

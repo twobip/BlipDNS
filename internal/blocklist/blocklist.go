@@ -1,158 +1,243 @@
 // Package blocklist implements a simple global DNS blocklist.
-// Domains are matched exactly or as suffixes/wildcards (same semantics
-// as filter.Policy block/allow lists) but apply to ALL clients regardless
-// of source IP. A blocklist-triggered block is logged with action "BLOCKLIST"
-// so it appears in the query log distinct from policy blocks.
+// Domains are matched exactly or as subdomains (same semantics
+// as filter.Policy block/allow lists) but apply to ALL clients.
 package blocklist
 
 import (
-	"sort"
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 )
 
-// Blocklist holds a set of blocked domains.
+// Blocklist holds a set of domains to block.
+// It is safe for concurrent use.
 type Blocklist struct {
-	mu        sync.RWMutex
-	domains   map[string]struct{} // normalized, lowercased exact/suffix roots
-	suffixes  map[string]struct{} // root domains from suffix entries
-	wildcards map[string]struct{} // roots from *.wild entries
+	mu      sync.RWMutex
+	domains map[string]bool // domain -> true (we only store the domain, matching is done via IsBlocked)
+	onChange func([]string) // called with the current list when the list changes
 }
 
-// New creates an empty Blocklist.
+// New creates an empty blocklist.
 func New() *Blocklist {
 	return &Blocklist{
-		domains:   make(map[string]struct{}),
-		suffixes:  make(map[string]struct{}),
-		wildcards: make(map[string]struct{}),
+		domains: make(map[string]bool),
 	}
 }
 
-// FromDomains creates a Blocklist pre-seeded with the given patterns.
-func FromDomains(domains []string) *Blocklist {
-	b := New()
-	for _, d := range domains {
-		b.Add(d)
-	}
-	return b
+// SetOnChange sets the function to call when the blocklist changes.
+func (b *Blocklist) SetOnChange(fn func([]string)) {
+	b.mu.Lock()
+	b.onChange = fn
+	b.mu.Unlock()
 }
 
-func (b *Blocklist) addLocked(domain string) {
-	d := normalize(domain)
-	if d == "" {
-		return
-	}
-	if strings.HasPrefix(d, "*.") {
-		root := d[2:]
-		if root != "" {
-			b.wildcards[root] = struct{}{}
+// FromDomains replaces the current list with the given domains.
+// It normalizes each domain (lowercase, trim dot) and ignores invalid ones.
+func (b *Blocklist) FromDomains(list []string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.domains = make(map[string]bool)
+	for _, d := range list {
+		if d := normalizeDomain(d); d != "" {
+			b.domains[d] = true
 		}
-		return
 	}
-	// suffix match: store root domain; also store exact
-	b.suffixes[d] = struct{}{}
-	b.domains[d] = struct{}{}
+	if b.onChange != nil {
+		go b.onChange(b.List())
+	}
 }
 
-// Add inserts a domain pattern into the blocklist. Supports exact,
-// suffix (example.com matches sub.example.com), and wildcard (*.example.com
-// matches sub.example.com but not example.com itself).
+// Add adds a domain to the blocklist.
 func (b *Blocklist) Add(domain string) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.addLocked(domain)
+	if d := normalizeDomain(domain); d != "" {
+		b.mu.Lock()
+		b.domains[d] = true
+		b.mu.Unlock()
+		if b.onChange != nil {
+			go b.onChange(b.List())
+		}
+	}
 }
 
-// Remove deletes a domain pattern from the blocklist.
+// Remove removes a domain from the blocklist.
 func (b *Blocklist) Remove(domain string) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	d := normalize(domain)
-	if d == "" {
-		return
+	if d := normalizeDomain(domain); d != "" {
+		b.mu.Lock()
+		delete(b.domains, d)
+		b.mu.Unlock()
+		if b.onChange != nil {
+			go b.onChange(b.List())
+		}
 	}
-	if strings.HasPrefix(d, "*.") {
-		delete(b.wildcards, d[2:])
-		return
-	}
-	delete(b.suffixes, d)
-	delete(b.domains, d)
 }
 
-// Match checks whether name is covered by the blocklist.
-func (b *Blocklist) Match(name string) bool {
+// List returns a slice of all domains in the blocklist.
+func (b *Blocklist) List() []string {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	n := normalize(name)
-	if n == "" {
+	out := make([]string, 0, len(b.domains))
+	for d := range b.domains {
+		out = append(out, d)
+	}
+	return out
+}
+
+// IsBlocked reports whether the given host (e.g., from a DNS query) is blocked.
+// It checks if the host ends with any blocked domain (with a dot boundary).
+func (b *Blocklist) IsBlocked(host string) bool {
+	if host == "" {
 		return false
 	}
-	if _, ok := b.domains[n]; ok {
-		return true
-	}
-	// suffix match
-	labels := strings.Split(n, ".")
-	for i := 0; i < len(labels); i++ {
-		root := strings.Join(labels[i:], ".")
-		if _, ok := b.suffixes[root]; ok {
-			return true
-		}
-	}
-	// wildcard match: subdomains only (i >= 1)
-	for i := 1; i < len(labels); i++ {
-		root := strings.Join(labels[i:], ".")
-		if _, ok := b.wildcards[root]; ok {
+	h := strings.TrimSuffix(host, ".") // normalize
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	for d := range b.domains {
+		if d == h || strings.HasSuffix(h, "."+d) {
 			return true
 		}
 	}
 	return false
 }
 
-// List returns all patterns as a sorted snapshot.
-func (b *Blocklist) List() []string {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-	out := make([]string, 0, len(b.domains)+len(b.wildcards))
-	for d := range b.domains {
-		out = append(out, d)
+// LoadFromURL fetches the given URL, parses it as an AdBlock Plus filter list,
+// and replaces the current blocklist with the parsed domains.
+// ctx is used for cancellation and timeout.
+func (b *Blocklist) LoadFromURL(ctx context.Context, rawURL string) error {
+	if rawURL == "" {
+		return errors.New("empty URL")
 	}
-	for root := range b.wildcards {
-		out = append(out, "*."+root)
+	// Parse URL to validate
+	if _, err := url.ParseRequestURI(rawURL); err != nil {
+		return err
 	}
-	sort.Strings(out)
-	return out
-}
 
-// Len returns the number of stored patterns.
-func (b *Blocklist) Len() int {
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-	return len(b.domains) + len(b.wildcards)
-}
-
-// Clear removes all patterns.
-func (b *Blocklist) Clear() {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.domains = make(map[string]struct{})
-	b.suffixes = make(map[string]struct{})
-	b.wildcards = make(map[string]struct{})
-}
-
-// Replace clears the list and adds the given domains.
-func (b *Blocklist) Replace(domains []string) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.domains = make(map[string]struct{})
-	b.suffixes = make(map[string]struct{})
-	b.wildcards = make(map[string]struct{})
-	for _, domain := range domains {
-		b.addLocked(domain)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return err
 	}
+	// Set a reasonable User-Agent to avoid being blocked by some servers.
+	req.Header.Set("User-Agent", "blipdns-blocklist/1.0")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+	}
+
+	var buf strings.Builder
+	if _, err := io.Copy(&buf, resp.Body); err != nil {
+		return err
+	}
+	content := buf.String()
+
+	domains := parseABPList(content)
+	if len(domains) == 0 {
+		return errors.New("no domains parsed from list")
+	}
+	b.FromDomains(domains)
+	return nil
 }
 
-func normalize(domain string) string {
-	d := strings.ToLower(strings.TrimSpace(domain))
-	d = strings.TrimSuffix(d, ".")
-	return d
+// parseABPList extracts domains to block from an AdBlock Plus filter list.
+// It supports:
+//   - Lines starting with ! are comments and are ignored.
+//   - Lines containing ||<domain>^ (with optional $options after ^) are treated as blocking the domain and subdomains.
+//   - Lines containing |<http://<domain>> (with optional ^ and $options) are treated similarly.
+//   - Plain domains (without anchors) are also blocked (and subdomains).
+//   - Anything else is ignored.
+func parseABPList(content string) []string {
+	var domains []string
+	seen := make(map[string]struct{})
+	lines := strings.Split(content, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "!") {
+			continue
+		}
+		// Remove any inline comment (not standard in ABP but some lists have it)
+		if idx := strings.Index(line, "!"); idx != -1 {
+			line = line[:idx]
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+		}
+		// Split at the first $ to remove options
+		if idx := strings.Index(line, "$"); idx != -1 {
+			line = line[:idx]
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+		}
+		// Now we have the pattern part.
+		// Remove leading | characters (one or two) but keep track of anchoring.
+		// We only care about extracting the domain.
+		hasDoublePipe := strings.HasPrefix(line, "||")
+		hasSinglePipe := strings.HasPrefix(line, "|")
+		if hasDoublePipe {
+			line = strings.TrimPrefix(line, "||")
+		} else if hasSinglePipe {
+			line = strings.TrimPrefix(line, "|")
+		}
+		// Remove trailing ^ if present (it separates domain from next char in regex)
+		if idx := strings.Index(line, "^"); idx != -1 {
+			line = line[:idx]
+		}
+		// Now line may contain a URL or just a domain.
+		// If it contains ://, try to extract the host.
+		if strings.Contains(line, "://") {
+			u, err := url.Parse(line)
+			if err == nil && u.Hostname() != "" {
+				if h := normalizeDomain(u.Hostname()); h != "" {
+					if _, exists := seen[h]; !exists {
+						seen[h] = struct{}{}
+						domains = append(domains, h)
+					}
+				}
+				continue
+			}
+			// If URL parsing fails, fall back to treating as domain.
+		}
+		// Otherwise, treat the whole string as a domain (maybe with dots).
+		if h := normalizeDomain(line); h != "" {
+			if _, exists := seen[h]; !exists {
+				seen[h] = struct{}{}
+				domains = append(domains, h)
+			}
+		}
+	}
+	return domains
+}
+
+// normalizeDomain returns a lowercase domain with trailing dot removed.
+// It returns empty string if the input is empty or not a valid domain (too simple).
+func normalizeDomain(s string) string {
+	if s == "" {
+		return ""
+	}
+	s = strings.TrimSpace(s)
+	s = strings.ToLower(s)
+	s = strings.TrimSuffix(s, ".")
+	// Very basic validation: must contain at least one dot and not start/end with dot.
+	if strings.Count(s, ".") < 1 {
+		return ""
+	}
+	// Disallow empty labels (like .. or . at start/end already trimmed)
+	parts := strings.Split(s, ".")
+	for _, p := range parts {
+		if p == "" {
+			return ""
+		}
+	}
+	return s
 }
