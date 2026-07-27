@@ -54,7 +54,7 @@ async function refresh() {
   try {
     const list = await API("/api/instances").then((r) => r.json());
     if (currentTab === "dashboard") renderDashboard(list);
-    else if (currentTab === "instances") renderInstances(list);
+    else if (currentTab === "instances") renderInstances(list.slice().sort(instanceSort));
     else if (currentTab === "blocklist") refreshBlocklist();
     else if (currentTab === "settings") refreshSettings(list);
     const online = list.filter((i) => i.online).length;
@@ -167,6 +167,13 @@ document.addEventListener("click", async (e) => {
     }
   }
 });
+function instanceSort(a, b) {
+  const idA = parseInt(a.id, 10);
+  const idB = parseInt(b.id, 10);
+  if (!isNaN(idA) && !isNaN(idB)) return idA - idB;
+  return (a.id || "").localeCompare(b.id || "");
+}
+
 function renderInstances(list) {
   const el = document.getElementById("inst-cards");
   el.innerHTML = "";
@@ -202,7 +209,10 @@ function renderInstances(list) {
     el.appendChild(card);
   }
 }
-document.getElementById("inst-filter")?.addEventListener("input", () => renderInstances(document.querySelector("#inst-cards")?.dataset?.lastList ? JSON.parse(document.querySelector("#inst-cards").dataset.lastList) : []));
+document.getElementById("inst-filter")?.addEventListener("input", () => {
+  const list = JSON.parse(document.querySelector("#inst-cards")?.dataset?.lastList || "[]");
+  renderInstances(list.slice().sort(instanceSort));
+});
 
 // --- Blocklist ---
 let blDomains = [];
