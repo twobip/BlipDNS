@@ -208,6 +208,7 @@ function renderInstances(list) {
     ${i.adopted ? '<div class="stat"><span>Adopted</span><span class="badge on">yes</span></div>' : '<div class="stat"><span>Adopted</span><span class="badge off">no</span></div>'}`;
     el.appendChild(card);
   }
+  el.dataset.lastList = JSON.stringify(list);
 }
 document.getElementById("inst-filter")?.addEventListener("input", () => {
   const list = JSON.parse(document.querySelector("#inst-cards")?.dataset?.lastList || "[]");
