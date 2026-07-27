@@ -115,7 +115,58 @@ async function fetchChart() {
   } catch (e) {}
 }
 
-// --- Instances ---
+// --- Instance menus (three-dots dropdown) ---
+document.addEventListener("click", (e) => {
+  const menuBtn = e.target.closest("[data-menu]");
+  if (menuBtn) {
+    const id = menuBtn.getAttribute("data-menu");
+    const dropdown = document.querySelector(`[data-menu-for="${CSS.escape(id)}"]`);
+    if (dropdown) {
+      const isHidden = dropdown.classList.contains("hidden");
+      // Close all other menus first
+      document.querySelectorAll(".menu-dropdown:not(.hidden)").forEach((d) => d.classList.add("hidden"));
+      if (isHidden) {
+        dropdown.classList.remove("hidden");
+      }
+    }
+    return;
+  }
+  // Close menus when clicking outside
+  if (!e.target.closest(".menu-dropdown") && !e.target.closest("[data-menu]")) {
+    document.querySelectorAll(".menu-dropdown:not(.hidden)").forEach((d) => d.classList.add("hidden"));
+  }
+});
+
+document.addEventListener("click", async (e) => {
+  const item = e.target.closest(".menu-item");
+  if (!item) return;
+  const action = item.getAttribute("data-action");
+  const id = item.getAttribute("data-id");
+  if (!action || !id) return;
+  // Close the menu
+  const dropdown = document.querySelector(`[data-menu-for="${CSS.escape(id)}"]`);
+  if (dropdown) dropdown.classList.add("hidden");
+
+  if (action === "remove") {
+    if (!confirm(`Remove instance ${id}? This cannot be undone.`)) return;
+    try {
+      await API("/api/instances/" + encodeURIComponent(id), { method: "DELETE" });
+      toast("removed instance " + id);
+      refresh();
+    } catch (err) {
+      toast("remove failed: " + err.message);
+    }
+  } else if (action === "reset-adopt") {
+    if (!confirm(`Reset adoption for instance ${id}? blipd will need a new claim code on next start.`)) return;
+    try {
+      await API("/api/instances/" + encodeURIComponent(id) + "/adopt/reset", { method: "POST" });
+      toast("adoption reset for " + id);
+      refresh();
+    } catch (err) {
+      toast("reset failed: " + err.message);
+    }
+  }
+});
 function renderInstances(list) {
   const el = document.getElementById("inst-cards");
   el.innerHTML = "";
@@ -132,13 +183,22 @@ function renderInstances(list) {
     const s = i.stats || {};
     const card = document.createElement("div");
     card.className = "card";
-    card.innerHTML = `<h3>${esc(i.label || i.id)} <span class="badge ${i.online ? "on" : "off"}">${i.online ? "online" : "offline"}</span></h3>
-      <p class="sub">${esc(i.url)}</p>
-      <div class="stat"><span>Queries</span><span>${s.queries_total ?? 0}</span></div>
-      <div class="stat"><span>Blocked</span><span>${s.blocked_total ?? 0}</span></div>
-      <div class="stat"><span>Upstream errs</span><span>${s.upstream_errors ?? 0}</span></div>
-      <div class="stat"><span>Cache</span><span>${s.cached ?? 0}</span></div>
-      ${i.adopted ? '<div class="stat"><span>Adopted</span><span class="badge on">yes</span></div>' : '<div class="stat"><span>Adopted</span><span class="badge off">no</span></div>'}`;
+    card.innerHTML = `<div class="card-header">
+      <h3>${esc(i.label || i.id)} <span class="badge ${i.online ? "on" : "off"}">${i.online ? "online" : "offline"}</span></h3>
+      <div class="card-actions">
+        <button class="icon-btn" data-menu="${esc(i.id)}" title="Actions">&#8942;</button>
+      </div>
+    </div>
+    <div class="menu-dropdown hidden" data-menu-for="${esc(i.id)}">
+      <button class="menu-item" data-action="reset-adopt" data-id="${esc(i.id)}">Reset Adoption</button>
+      <button class="menu-item danger" data-action="remove" data-id="${esc(i.id)}">Remove Instance</button>
+    </div>
+    <p class="sub">${esc(i.url)}</p>
+    <div class="stat"><span>Queries</span><span>${s.queries_total ?? 0}</span></div>
+    <div class="stat"><span>Blocked</span><span>${s.blocked_total ?? 0}</span></div>
+    <div class="stat"><span>Upstream errs</span><span>${s.upstream_errors ?? 0}</span></div>
+    <div class="stat"><span>Cache</span><span>${s.cached ?? 0}</span></div>
+    ${i.adopted ? '<div class="stat"><span>Adopted</span><span class="badge on">yes</span></div>' : '<div class="stat"><span>Adopted</span><span class="badge off">no</span></div>'}`;
     el.appendChild(card);
   }
 }
