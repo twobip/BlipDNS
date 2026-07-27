@@ -1,493 +1,208 @@
-// BlipDNS Controller dashboard JS. Talks to the controller API and SSE feed.
+// BlipDNS Controller — SPA dashboard
 const TOKEN = new URLSearchParams(location.search).get("token") || "";
 const AUTH = TOKEN ? "Bearer " + TOKEN : "";
-
-// Determine current tab from URL path (e.g., /instances, /queries, /settings)
-function getTabFromPath() {
-  const path = location.pathname;
-  if (path === "/instances" || path === "/instances.html") return "instances";
-  if (path === "/queries" || path === "/queries.html") return "queries";
-  if (path === "/blocklist" || path === "/blocklist.html") return "blocklist";
-  if (path === "/settings" || path === "/settings.html") return "settings";
-  return "dashboard";
-}
-
-let currentTab = getTabFromPath();
-
-function api(path, opts = {}) {
-  return fetch(path, { ...opts, headers: { ...(opts.headers || {}), Authorization: AUTH } })
-    .then((r) => {
-      if (!r.ok) throw new Error(r.status + " " + r.statusText);
-      return r;
-    });
-}
+const API = (path, opts = {}) =>
+  fetch(path, {
+    ...opts,
+    headers: { ...(opts.headers || {}), Authorization: AUTH },
+  }).then((r) => {
+    if (!r.ok) throw new Error(r.status + " " + r.statusText);
+    return r;
+  });
 
 function toast(msg) {
-  const t = document.getElementById("toast");
+  const t = document.createElement("div");
+  t.className = "toast";
   t.textContent = msg;
-  t.classList.remove("hidden");
-  setTimeout(() => t.classList.add("hidden"), 2500);
+  document.body.appendChild(t);
+  setTimeout(() => t.remove(), 2600);
+}
+function esc(s) {
+  return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
-function esc(s) {
-  return String(s)
-    .replace(/&/g, "&")
-    .replace(/</g, "<")
-    .replace(/>/g, ">")
-    .replace(/"/g, "\"")
-    .replace(/'/g, "'");
+function getTab() {
+  const p = location.pathname.replace(/\.html$/, "");
+  if (p === "/blocklist") return "blocklist";
+  if (p === "/instances") return "instances";
+  if (p === "/settings") return "settings";
+  if (p === "/" || p === "") return "dashboard";
+  return "dashboard";
 }
+let currentTab = getTab();
 
 function switchTab(tab) {
   currentTab = tab;
-  document.querySelectorAll(".tab").forEach((a) => {
-    a.classList.toggle("active", a.dataset.tab === tab);
+  document.querySelectorAll(".nav-item").forEach((a) => {
+    a.classList.toggle("active", a.dataset.nav === tab);
   });
-  document.getElementById("dashboard-view").classList.toggle("hidden", tab !== "dashboard");
-  document.getElementById("instances-view").classList.toggle("hidden", tab !== "instances");
-  document.getElementById("queries-view").classList.toggle("hidden", tab !== "queries");
-  document.getElementById("blocklist-view").classList.toggle("hidden", tab !== "blocklist");
-  document.getElementById("settings-view").classList.toggle("hidden", tab !== "settings");
-  // Update URL without reload
-  const paths = { dashboard: "/", instances: "/instances", queries: "/queries", blocklist: "/blocklist", settings: "/settings" };
+  document.querySelectorAll(".view").forEach((v) => v.classList.add("hidden"));
+  const map = { dashboard: "dashboard-view", instances: "instances-view", blocklist: "blocklist-view", settings: "settings-view" };
+  const el = document.getElementById(map[tab]);
+  if (el) el.classList.remove("hidden");
+  const titles = { dashboard: "Dashboard", instances: "Instances", blocklist: "Blocklist", settings: "Settings" };
+  document.getElementById("page-title").textContent = titles[tab] || "Dashboard";
+  const paths = { dashboard: "/", instances: "/instances", blocklist: "/blocklist", settings: "/settings" };
   history.pushState(null, "", paths[tab] || "/");
   refresh();
 }
+document.querySelectorAll(".nav-item").forEach((a) => {
+  a.addEventListener("click", (e) => { e.preventDefault(); switchTab(a.dataset.nav); });
+});
 
 async function refresh() {
   try {
-    const list = await api("/api/instances").then((r) => r.json());
+    const list = await API("/api/instances").then((r) => r.json());
     if (currentTab === "dashboard") renderDashboard(list);
     else if (currentTab === "instances") renderInstances(list);
-    else if (currentTab === "queries") refreshQueryLog();
     else if (currentTab === "blocklist") refreshBlocklist();
     else if (currentTab === "settings") refreshSettings(list);
-    const conn = document.getElementById("conn");
     const online = list.filter((i) => i.online).length;
+    const conn = document.getElementById("conn");
     conn.textContent = online + "/" + list.length + " online";
-    const allOnline = online === list.length && list.length > 0;
-    const someOnline = list.some((i) => i.online);
-    conn.className = "badge " + (allOnline ? "on" : someOnline ? "warn" : "off");
-  } catch (err) {
+    conn.className = "badge " + (online === list.length && list.length > 0 ? "on" : online > 0 ? "warn" : "off");
+    document.getElementById("sidebar-status").className = "badge " + conn.className.replace("badge ", "");
+  } catch (e) {
     document.getElementById("conn").textContent = "error";
   }
 }
 
-function renderDashboard(list) {
-  let totalQueries = 0;
-  let totalBlocked = 0;
-  let totalUpstreamErrors = 0;
-  let online = 0;
+// --- Dashboard ---
+async function renderDashboard(list) {
+  let totalQ = 0, totalB = 0, totalE = 0, online = 0;
   for (const i of list) {
     if (i.online) online++;
     const s = i.stats || {};
-    totalQueries += s.queries_total ?? 0;
-    totalBlocked += s.blocked_total ?? 0;
-    totalUpstreamErrors += s.upstream_errors ?? 0;
+    totalQ += s.queries_total ?? 0;
+    totalB += s.blocked_total ?? 0;
+    totalE += s.upstream_errors ?? 0;
   }
-  document.getElementById("total-queries").textContent = totalQueries.toLocaleString();
-  document.getElementById("total-blocked").textContent = totalBlocked.toLocaleString();
-  document.getElementById("total-upstream-errors").textContent = totalUpstreamErrors.toLocaleString();
-  document.getElementById("online-instances").textContent = online;
-  document.getElementById("total-instances").textContent = list.length;
-  const onlineEl = document.getElementById("online-instances");
-  const card = onlineEl.closest(".stat-card");
-  if (online < list.length && list.length > 0) {
-    onlineEl.classList.add("warn");
-    if (card) card.classList.add("warn");
-  } else {
-    onlineEl.classList.remove("warn");
-    if (card) card.classList.remove("warn");
-  }
-
-  // Update query volume chart (fetch 24h historical data)
-  fetchAndRenderChart();
+  document.getElementById("d-queries").textContent = totalQ.toLocaleString();
+  document.getElementById("d-blocked").textContent = totalB.toLocaleString();
+  document.getElementById("d-errors").textContent = totalE.toLocaleString();
+  document.getElementById("d-instances").textContent = list.length;
+  document.getElementById("d-online").textContent = online;
+  await fetchChart();
 }
-// Query volume chart
-let queryChart = null;
-const chartMaxPoints = 288; // 5-min buckets for 24h = 288 points
-
-async function fetchAndRenderChart() {
-  const canvas = document.getElementById("query-chart");
-  if (!canvas) return;
-
+let chart = null;
+async function fetchChart() {
   try {
-    const res = await api("/api/stats?bucket=5m&since=24h");
+    const res = await API("/api/stats?bucket=5m&since=24h");
     const stats = await res.json();
-    
-    if (!stats || stats.length === 0) {
-      // Fallback to live polling if no historical data
-      return;
-    }
-
-    const labels = stats.map(s => new Date(s.timestamp).toLocaleTimeString());
-    const totalQueries = stats.map(s => s.total_queries);
-    const blockedQueries = stats.map(s => s.blocked_queries);
-
-    if (!queryChart) {
-      const ctx = canvas.getContext("2d");
-      queryChart = new Chart(ctx, {
+    if (!stats || !stats.length) return;
+    const labels = stats.map((s) => new Date(s.timestamp).toLocaleTimeString());
+    const tq = stats.map((s) => s.total_queries);
+    const bq = stats.map((s) => s.blocked_queries);
+    const ctx = document.getElementById("chart-queries").getContext("2d");
+    if (!chart) {
+      chart = new Chart(ctx, {
         type: "line",
         data: {
-          labels: labels,
+          labels,
           datasets: [
-            {
-              label: "Total Queries (5-min)",
-              data: totalQueries,
-              borderColor: "#3b82f6",
-              backgroundColor: "rgba(59, 130, 246, 0.1)",
-              fill: true,
-              tension: 0.3,
-              pointRadius: 0,
-            },
-            {
-              label: "Blocked Queries (5-min)",
-              data: blockedQueries,
-              borderColor: "#ef4444",
-              backgroundColor: "rgba(239, 68, 68, 0.1)",
-              fill: true,
-              tension: 0.3,
-              pointRadius: 0,
-            },
+            { label: "Total", data: tq, borderColor: "#5b9cf6", backgroundColor: "rgba(91,156,246,.1)", fill: true, tension: .3, pointRadius: 0 },
+            { label: "Blocked", data: bq, borderColor: "#f87171", backgroundColor: "rgba(248,113,113,.1)", fill: true, tension: .3, pointRadius: 0 },
           ],
         },
-        options: {
-          responsive: true,
-          maintainAspectRatio: false,
-          animation: { duration: 300 },
-          interaction: { mode: "index", intersect: false },
-          scales: {
-            x: { display: true, title: { display: true, text: "Time (last 24h)" } },
-            y: { beginAtZero: true, title: { display: true, text: "Queries / 5-min" } },
-          },
-          plugins: { legend: { position: "top" } },
-        },
+        options: { responsive: true, maintainAspectRatio: false, animation: { duration: 300 }, scales: { x: { display: true, title: { display: true, text: "Time" } }, y: { beginAtZero: true } } },
       });
     } else {
-      queryChart.data.labels = labels;
-      queryChart.data.datasets[0].data = totalQueries;
-      queryChart.data.datasets[1].data = blockedQueries;
-      queryChart.update("none");
+      chart.data.labels = labels;
+      chart.data.datasets[0].data = tq;
+      chart.data.datasets[1].data = bq;
+      chart.update("none");
     }
-  } catch (err) {
-    console.error("Failed to fetch chart data:", err);
-  }
+  } catch (e) {}
 }
 
+// --- Instances ---
 function renderInstances(list) {
-  const el = document.getElementById("instances");
+  const el = document.getElementById("inst-cards");
   el.innerHTML = "";
-  if (!list.length) {
-    el.innerHTML = '<div class="card"><h3>No instances</h3><div class="sub">Click + to add a blipd instance</div></div>';
+  const f = (document.getElementById("inst-filter")?.value || "").toLowerCase();
+  const filtered = list.filter((i) => {
+    if (!f) return true;
+    return (i.id + " " + (i.label || "") + " " + (i.url || "")).toLowerCase().includes(f);
+  });
+  if (!filtered.length) {
+    el.innerHTML = '<div class="card"><h3>No instances</h3><p class="sub">Add an instance from the controller or via the API.</p></div>';
     return;
   }
-  for (const i of list) {
-      const s = i.stats || {};
-      const adoptBadge = i.adopted
-        ? '<span class="badge on">claimed</span>'
-        : '<span class="badge off">unclaimed</span>';
-      const adoptBtn = i.adopted ? '' : '<button class="mini" data-adopt="' + i.id + '">Adopt\u2026</button>';
-      const renameBtn = '<button class="mini" data-rename="' + i.id + '">Rename</button>';
-      const card = document.createElement("div");
-      card.className = "card";
-      card.innerHTML =
-        '\n      <h3>' +
-        esc(i.label) +
-        ' <span class="badge ' +
-        (i.online ? "on" : "off") +
-        '">' +
-        (i.online ? "online" : "offline") +
-        "</span> " +
-        adoptBadge +
-        "</h3>\n      <div class=\"sub\">" +
-        esc(i.url) +
-        "</div>\n      <div class=\"stat\"><span>queries</span><span>" +
-        (s.queries_total ?? 0) +
-        "</span></div>\n      <div class=\"stat\"><span>blocked</span><span>" +
-        (s.blocked_total ?? 0) +
-        "</span></div>\n      <div class=\"stat\"><span>upstream errs</span><span>" +
-        (s.upstream_errors ?? 0) +
-        "</span></div>\n      <div class=\"stat\"><span>cache</span><span>" +
-        (s.cached ?? 0) +
-        "</span></div>\n      <div class=\"actions\">" +
-        adoptBtn +
-        renameBtn +
-        "</div>\n    ";
-      el.appendChild(card);
-    }
-    document.querySelectorAll("[data-adopt]").forEach((b) => {
-      b.onclick = () => adoptInstance(b.getAttribute("data-adopt"));
-    });
-    document.querySelectorAll("[data-rename]").forEach((b) => {
-      b.onclick = () => renameInstance(b.getAttribute("data-rename"));
-    });
-  }
-
-async function adoptInstance(id) {
-  const code = prompt("Paste the blipd claim code (from its journal, one-time):");
-  if (!code) return;
-  try {
-    await api("/api/instances/" + encodeURIComponent(id) + "/adopt", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ code }),
-    });
-    toast("adopted " + id);
-    refresh();
-  } catch (e) {
-    toast("adopt failed: " + e.message);
+  for (const i of filtered) {
+    const s = i.stats || {};
+    const card = document.createElement("div");
+    card.className = "card";
+    card.innerHTML = `<h3>${esc(i.label || i.id)} <span class="badge ${i.online ? "on" : "off"}">${i.online ? "online" : "offline"}</span></h3>
+      <p class="sub">${esc(i.url)}</p>
+      <div class="stat"><span>Queries</span><span>${s.queries_total ?? 0}</span></div>
+      <div class="stat"><span>Blocked</span><span>${s.blocked_total ?? 0}</span></div>
+      <div class="stat"><span>Upstream errs</span><span>${s.upstream_errors ?? 0}</span></div>
+      <div class="stat"><span>Cache</span><span>${s.cached ?? 0}</span></div>
+      ${i.adopted ? '<div class="stat"><span>Adopted</span><span class="badge on">yes</span></div>' : '<div class="stat"><span>Adopted</span><span class="badge off">no</span></div>'}`;
+    el.appendChild(card);
   }
 }
-
-async function renameInstance(id) {
-  const label = prompt("Enter new label for instance " + id + ":");
-  if (!label) return;
-  try {
-    await api("/api/instances/" + encodeURIComponent(id) + "/label", {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ label }),
-    });
-    toast("renamed " + id);
-    refresh();
-  } catch (e) {
-    toast("rename failed: " + e.message);
-  }
-}
-
-let total = 0;
-function addEvent(e) {
-  const filter = document.getElementById("f-domain")?.value.toLowerCase() || "";
-  if (filter && !((e.domain || "").toLowerCase().includes(filter)) && !((e.client || "").toLowerCase().includes(filter))) return;
-  total++;
-  const ec = document.getElementById("event-count");
-  if (ec) ec.textContent = total + " events";
-  const ul = document.getElementById("events");
-  if (!ul) return;
-  const li = document.createElement("li");
-  const time = new Date(e.at).toLocaleTimeString();
-  const cls = "type-" + e.type;
-  let text = "";
-  if (e.type === "block") text = "BLOCK " + e.domain + " \u2190 " + e.client;
-  else if (e.type === "policy") text = "POLICY " + (e.msg || e.domain);
-  else if (e.type === "health") text = "health ok (q=" + (e.stats ? e.stats.queries_total : 0) + ")";
-  else text = e.type;
-  li.innerHTML = '<span class="t">' + time + '</span><span class="' + cls + '">[' + esc(e.instance) + ']</span><span>' + esc(text) + "</span>";
-  ul.prepend(li);
-  while (ul.children.length > 200) ul.removeChild(ul.lastChild);
-}
-
-// --- Query Log tab ---
-let queryLog = [];
-const queryLogMax = 500;
-
-function addQueryLog(entry) {
-  queryLog.unshift(entry);
-  if (queryLog.length > queryLogMax) queryLog = queryLog.slice(0, queryLogMax);
-  if (!document.getElementById("queries-view").classList.contains("hidden")) {
-    renderQueryLog();
-  }
-}
-
-function renderQueryLog() {
-  const instanceSel = document.getElementById("q-instance");
-  const filter = document.getElementById("q-filter")?.value.toLowerCase() || "";
-  const selectedInstance = instanceSel?.value || "";
-  const tbody = document.querySelector("#q-table tbody");
-  if (!tbody) return;
-
-  // Update instance selector
-  const instances = new Set(queryLog.map((e) => e.instance).filter(Boolean));
-  const currentVal = instanceSel?.value || "";
-  instanceSel.innerHTML = '<option value="">All</option>' + [...instances].map((i) => `<option value="${i}">${i}</option>`).join("");
-  instanceSel.value = currentVal;
-
-  const filterVal = document.getElementById("q-filter")?.value.toLowerCase() || "";
-
-  const filtered = queryLog.filter((e) => {
-    if (instanceSel?.value && e.instance !== instanceSel?.value) return false;
-    const hay = `${e.instance} ${e.client} ${e.domain} ${e.action} ${e.upstream || ""}`.toLowerCase();
-    return hay.includes(filterVal);
-  });
-
-  tbody.innerHTML = filtered
-    .slice(0, 200)
-    .map(
-      (e) => `
-      <tr class="action-${e.action?.toLowerCase() || "pass"}">
-        <td>${new Date(e.at).toLocaleTimeString()}</td>
-        <td>${e.instance || "\u2014"}</td>
-        <td>${e.client || "\u2014"}</td>
-        <td>${e.domain}</td>
-        <td><span class="action-badge action-${e.action?.toLowerCase() || "pass"}">${e.action || "PASS"}</span></td>
-        <td>${e.upstream || "\u2014"}</td>
-      </tr>
-    `
-    )
-    .join("");
-}
-
-function refreshQueryLog() {
-  renderQueryLog();
-}
-
-document.getElementById("q-filter")?.addEventListener("input", renderQueryLog);
-document.getElementById("q-instance")?.addEventListener("change", renderQueryLog);
-document.getElementById("q-clear")?.addEventListener("click", () => {
-  queryLog = [];
-  renderQueryLog();
-});
-
-function connectSSE() {
-  const qs = TOKEN ? "?token=" + encodeURIComponent(TOKEN) : "";
-  const es = new EventSource("/api/events" + qs);
-  es.onmessage = (ev) => {
-    try {
-      const e = JSON.parse(ev.data);
-      addEvent(e);
-      // Also add query log entries for block/pass events
-      if (e.type === "block" || e.type === "pass") {
-        addQueryLog({
-          at: e.at,
-          instance: e.instance,
-          client: e.client,
-          domain: e.domain,
-          action: e.type.toUpperCase(),
-          upstream: e.upstream || "\u2014",
-        });
-      }
-    } catch {}
-  };
-  es.onerror = () => {
-    const c = document.getElementById("conn");
-    c.textContent = "reconnecting...";
-  };
-}
-
-// Tab switching
-document.querySelectorAll(".tab[data-tab]").forEach((t) => {
-  t.addEventListener("click", (e) => {
-    e.preventDefault();
-    switchTab(t.dataset.tab);
-  });
-});
-
-// Handle browser back/forward navigation
-window.addEventListener("popstate", () => {
-  currentTab = getTabFromPath();
-  switchTab(currentTab);
-});
-
-// Modal wiring
-const modal = document.getElementById("modal");
-const addBtn = document.getElementById("add-btn");
-if (addBtn) addBtn.onclick = () => modal.classList.remove("hidden");
-const iCancel = document.getElementById("i-cancel");
-if (iCancel) iCancel.onclick = () => modal.classList.add("hidden");
-const iSave = document.getElementById("i-save");
-if (iSave) {
-  iSave.onclick = async () => {
-    const body = {
-      id: document.getElementById("i-id").value.trim(),
-      label: document.getElementById("i-label").value.trim(),
-      url: document.getElementById("i-url").value.trim(),
-      token: document.getElementById("i-token").value,
-      claim: document.getElementById("i-claim").value.trim(),
-    };
-    if (!body.id || !body.url) return toast("id and url required");
-    try {
-      await api("/api/instances", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-      modal.classList.add("hidden");
-      toast("instance added");
-      if (body.claim) {
-        await api("/api/instances/" + encodeURIComponent(body.id) + "/adopt", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ code: body.claim }),
-        });
-        toast("adopted " + body.id);
-      }
-      refresh();
-    } catch (e) {
-      toast("add failed: " + e.message);
-    }
-  };
-}
-
-function refreshSettings(list) {
-  const upstreamInput = document.getElementById("s-upstream");
-  if (upstreamInput) {
-    // Get upstream from first instance's default policy
-    let upstream = "";
-    for (const i of list) {
-      if (i.stats && i.stats.upstream) {
-        upstream = i.stats.upstream;
-        break;
-      }
-    }
-    upstreamInput.value = upstream;
-  }
-}
+document.getElementById("inst-filter")?.addEventListener("input", () => renderInstances(document.querySelector("#inst-cards")?.dataset?.lastList ? JSON.parse(document.querySelector("#inst-cards").dataset.lastList) : []));
 
 // --- Blocklist ---
-let blocklistDomains = [];
-
+let blDomains = [];
 async function refreshBlocklist() {
   try {
-    const r = await api("/api/blocklist");
-    const data = await r.json();
-    blocklistDomains = data.domains || [];
+    const r = await API("/api/blocklist");
+    const d = await r.json();
+    blDomains = d.domains || [];
     renderBlocklist();
-  } catch (e) {
-    console.error("refreshBlocklist:", e);
-  }
+  } catch (e) {}
 }
-
 function renderBlocklist() {
-  const ul = document.getElementById("blocklist");
+  const ul = document.getElementById("blockList");
   if (!ul) return;
-  const filter = document.getElementById("b-filter")?.value.toLowerCase() || "";
+  const f = (document.getElementById("bl-filter")?.value || "").toLowerCase();
   ul.innerHTML = "";
-  blocklistDomains.forEach((d) => {
-    if (filter && !d.toLowerCase().includes(filter)) return;
+  const filtered = blDomains.filter((d) => !f || d.toLowerCase().includes(f));
+  for (const d of filtered) {
     const li = document.createElement("li");
     li.className = "blocklist-item";
-    li.innerHTML = '<span>' + esc(d) + '</span><button class="mini" data-remove="' + esc(d) + '">Remove</button>';
+    li.innerHTML = `<span>${esc(d)}</span><button class="remove" data-rm="${esc(d)}" title="Remove">&times;</button>`;
     ul.appendChild(li);
-  });
-  document.querySelectorAll("[data-remove]").forEach((b) => {
+  }
+  document.getElementById("bl-count").textContent = blDomains.length + " domain" + (blDomains.length !== 1 ? "s" : "") + (f ? " (filtered)" : "");
+  ul.querySelectorAll("[data-rm]").forEach((b) => {
     b.onclick = async () => {
-      const domain = b.getAttribute("data-remove");
+      const domain = b.getAttribute("data-rm");
       try {
-        await api("/api/blocklist", {
-          method: "DELETE",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ domain }),
-        });
+        await API("/api/blocklist", { method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ domain }) });
         toast("removed " + domain);
         refreshBlocklist();
-      } catch (e) {
-        toast("remove failed: " + e.message);
-      }
+      } catch (e) { toast("remove failed"); }
     };
   });
 }
 
-document.getElementById("b-import-url")?.addEventListener("click", async () => {
-  const url = document.getElementById("b-url")?.value.trim();
+document.getElementById("bl-add")?.addEventListener("click", async () => {
+  const input = document.getElementById("bl-add-input");
+  const domain = input?.value.trim();
+  if (!domain) return toast("domain required");
+  try {
+    await API("/api/blocklist", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ domain }) });
+    toast("added " + domain);
+    input.value = "";
+    refreshBlocklist();
+  } catch (e) { toast("add failed: " + e.message); }
+});
+
+document.getElementById("bl-url-input")?.addEventListener("keydown", (e) => { if (e.key === "Enter") document.getElementById("bl-import-url")?.click(); });
+document.getElementById("bl-import-url")?.addEventListener("click", async () => {
+  const url = document.getElementById("bl-url-input")?.value.trim();
   if (!url) return toast("URL required");
-  const status = document.getElementById("b-import-status");
+  const status = document.getElementById("bl-import-status");
   if (status) status.textContent = "fetching…";
   try {
-    const r = await api("/api/blocklist/import-url", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url }),
-    });
-    const data = await r.json();
-    if (status) status.textContent = `loaded ${data.count} domains`;
-    toast(`imported ${data.count} domains`);
-    document.getElementById("b-url").value = "";
+    const r = await API("/api/blocklist/import-url", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url }) });
+    const d = await r.json();
+    if (status) status.textContent = "loaded " + d.count + " domains";
+    toast("imported " + d.count + " domains");
+    document.getElementById("bl-url-input").value = "";
     refreshBlocklist();
   } catch (e) {
     if (status) status.textContent = "failed";
@@ -495,23 +210,21 @@ document.getElementById("b-import-url")?.addEventListener("click", async () => {
   }
 });
 
-// File import
 let bFileData = null;
-document.getElementById("b-file")?.addEventListener("change", (e) => {
+document.getElementById("bl-file-input")?.addEventListener("change", (e) => {
   const file = e.target.files[0];
-  const nameEl = document.getElementById("b-file-name");
-  const btn = document.getElementById("b-import-file");
-  if (nameEl) nameEl.textContent = file ? file.name : "";
+  const btn = document.getElementById("bl-import-file");
+  const name = document.getElementById("bl-import-status");
   if (btn) btn.disabled = !file;
+  if (name) name.textContent = file ? file.name : "";
   if (!file) { bFileData = null; return; }
   const reader = new FileReader();
   reader.onload = () => { bFileData = reader.result; };
   reader.readAsText(file);
 });
 
-document.getElementById("b-import-file")?.addEventListener("click", async () => {
+document.getElementById("bl-import-file")?.addEventListener("click", async () => {
   if (!bFileData) return toast("no file loaded");
-  // Parse ADBlock format: extract domains from ||domain^ and plain lines
   const lines = bFileData.split("\n");
   const domains = [];
   for (const raw of lines) {
@@ -521,101 +234,64 @@ document.getElementById("b-import-file")?.addEventListener("click", async () => 
     if (line.startsWith("||")) { line = line.slice(2); if (line.includes("^")) line = line.split("^")[0]; }
     else if (line.startsWith("|")) { line = line.slice(1); if (line.includes("^")) line = line.split("^")[0]; }
     if (!line) continue;
-    // Skip if it starts with http (URL)
-    if (line.includes("://")) {
-      try { const u = new URL(line); if (u.hostname) line = u.hostname; else continue; } catch { continue; }
-    }
-    // Basic domain validation
+    if (line.includes("://")) { try { const u = new URL(line); if (u.hostname) line = u.hostname; else continue; } catch { continue; } }
     if (line.includes(".") && !line.startsWith(".") && !line.endsWith(".")) {
       domains.push(line.toLowerCase().replace(/\.+$/, ""));
     }
   }
-  if (!domains.length) return toast("no domains found in file");
-  // Add in batch via repeated calls (UI stays responsive with chunking)
+  if (!domains.length) return toast("no domains found");
   let added = 0;
   for (const d of domains) {
-    try {
-      await api("/api/blocklist", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ domain: d }),
-      });
-      added++;
-    } catch (_) { /* skip dupes/errors */ }
+    try { await API("/api/blocklist", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ domain: d }) }); added++; } catch (_) {}
   }
-  toast(`imported ${added} domains from file`);
+  toast("imported " + added + " domains from file");
   bFileData = null;
-  const fn = document.getElementById("b-file-name");
-  if (fn) fn.textContent = "";
-  const btn = document.getElementById("b-import-file");
-  if (btn) btn.disabled = true;
-  document.getElementById("b-file").value = "";
+  document.getElementById("bl-import-status").textContent = "";
+  document.getElementById("bl-import-file").disabled = true;
+  document.getElementById("bl-file-input").value = "";
   refreshBlocklist();
 });
 
-document.getElementById("b-clear")?.addEventListener("click", async () => {
+document.getElementById("bl-filter")?.addEventListener("input", renderBlocklist);
+document.getElementById("bl-export")?.addEventListener("click", () => { window.open("/api/blocklist/export", "_blank"); });
+document.getElementById("bl-clear")?.addEventListener("click", async () => {
   if (!confirm("Remove ALL domains from the global blocklist?")) return;
-  // Fetch current list and remove each
   try {
-    const r = await api("/api/blocklist");
-    const data = await r.json();
-    const domains = data.domains || [];
-    for (const d of domains) {
-      await api("/api/blocklist", {
-        method: "DELETE",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ domain: d }),
-      });
+    const r = await API("/api/blocklist");
+    const d = await r.json();
+    const domains = d.domains || [];
+    for (const dom of domains) {
+      await API("/api/blocklist", { method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ domain: dom }) });
     }
-    toast(`cleared ${domains.length} domains`);
+    toast("cleared " + domains.length + " domains");
     refreshBlocklist();
-  } catch (e) {
-    toast("clear failed: " + e.message);
-  }
+  } catch (e) { toast("clear failed"); }
 });
 
+// --- Settings ---
+async function refreshSettings(list) {
+  const input = document.getElementById("s-upstream");
+  if (!input) return;
+  for (const i of list) {
+    const s = i.stats;
+    if (s && s.upstream) { input.value = s.upstream; return; }
+  }
+  input.value = "";
+}
 document.getElementById("s-save")?.addEventListener("click", async () => {
   const upstream = document.getElementById("s-upstream")?.value.trim();
   if (!upstream) return toast("upstream required");
-  // Apply to first online instance's default policy
-  const list = await api("/api/instances").then((r) => r.json());
+  const list = await API("/api/instances").then((r) => r.json());
   const online = list.find((i) => i.online);
   if (!online) return toast("no online instances");
   try {
-    await api("/api/instances/" + encodeURIComponent(online.id) + "/policy", {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ id: "default", upstream }),
-    });
+    await API("/api/instances/" + encodeURIComponent(online.id) + "/policy", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: "default", upstream }) });
     toast("upstream saved");
     refresh();
-  } catch (e) {
-    toast("save failed: " + e.message);
-  }
+  } catch (e) { toast("save failed: " + e.message); }
 });
 
-document.getElementById("b-add")?.addEventListener("click", async () => {
-  const domain = document.getElementById("b-domain")?.value.trim() || "";
-  if (!domain) return toast("domain required");
-  try {
-    await api("/api/blocklist", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ domain }),
-    });
-    toast("blocked " + domain);
-    document.getElementById("b-domain").value = "";
-    refreshBlocklist();
-  } catch (e) {
-    toast("add failed: " + e.message);
-  }
-});
-
-document.getElementById("b-filter")?.addEventListener("input", renderBlocklist);
-document.getElementById("b-export")?.addEventListener("click", () => {
-  window.open("/api/blocklist/export", "_blank");
-});
-
+// Init
 refresh();
-connectSSE();
 setInterval(refresh, 5000);
+window.addEventListener("popstate", () => { currentTab = getTab(); switchTab(currentTab); });
