@@ -45,7 +45,8 @@ a{color:var(--accent);text-decoration:none}
 .view{padding:20px 24px;flex:1}
 .view.hidden{display:none}
 
-/* Cards */
+/* Cards Grid */
+.dashboard-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px;margin-bottom:20px;padding:20px 24px}
 .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px;margin-bottom:20px}
 .card{background:var(--surface);border:1px solid #000;border-radius:var(--radius);padding:18px}
 .card h3,.card h4{font-size:13px;color:var(--muted);text-transform:uppercase;letter-spacing:.4px;margin-bottom:8px}
@@ -53,6 +54,8 @@ a{color:var(--accent);text-decoration:none}
 .big.warn{color:var(--warn)}.big.err{color:var(--err)}
 .card small{color:var(--muted);font-size:12px}
 .stat{text-align:center}
+.stat-card .sub{color:var(--muted);font-size:12px;margin-top:8px;text-align:center}
+.stat-card .big{text-align:center}
 
 /* Panels */
 .panel{background:var(--surface);border:1px solid #000;border-radius:var(--radius);padding:16px;margin-bottom:16px}
@@ -117,6 +120,12 @@ a{color:var(--accent);text-decoration:none}
   .sidebar-brand{justify-content:center;padding:14px 8px}
   .view{padding:12px}
 }
+
+/* Collapsed sidebar (desktop toggle) */
+body.sidebar-collapsed #sidebar{width:56px}
+body.sidebar-collapsed .sidebar-brand span:last-child{display:none}
+body.sidebar-collapsed .nav-item{justify-content:center;padding:10px}
+body.sidebar-collapsed .sidebar-brand{justify-content:center;padding:14px 8px}
 
 /* Modal */
 .modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;z-index:200}

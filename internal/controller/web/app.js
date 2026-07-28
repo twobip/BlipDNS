@@ -1,4 +1,4 @@
-// BlipDNS Controller — SPA dashboard
+// BlipDNS Controller — dashboard JS
 const TOKEN = new URLSearchParams(location.search).get("token") || "";
 const AUTH = TOKEN ? "Bearer " + TOKEN : "";
 const API = (path, opts = {}) =>
@@ -20,31 +20,72 @@ function toast(msg) {
 function esc(s) {
   return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
+const $ = (id) => document.getElementById(id);
 
-function getTab() {
+// --- Tab / page detection ---
+// index.html is the SPA with sidebar-nav. Other pages (instances.html,
+// stats.html, queries.html, blocklist.html, settings.html) are standalone
+// pages that share app.js via <script src="app.js">.
+function getPage() {
   const p = location.pathname.replace(/\.html$/, "");
-  if (p === "/blocklist") return "blocklist";
-  if (p === "/instances") return "instances";
-  if (p === "/settings") return "settings";
-  if (p === "/" || p === "") return "dashboard";
+  if (p === "/instances" || p === "/instances.html") return "instances";
+  if (p === "/stats" || p === "/stats.html") return "stats";
+  if (p === "/queries" || p === "/queries.html") return "queries";
+  if (p === "/blocklist" || p === "/blocklist.html") return "blocklist";
+  if (p === "/settings" || p === "/settings.html") return "settings";
   return "dashboard";
 }
-let currentTab = getTab();
+let currentPage = getPage();
+
+// Separate page URLs for each tab (used when navigating from a standalone page)
+const PAGE_URLS = {
+  dashboard: "/",
+  stats: "/stats.html",
+  instances: "/instances.html",
+  queries: "/queries.html",
+  blocklist: "/blocklist.html",
+  settings: "/settings.html",
+};
+
+// SPA view IDs (only on index.html)
+const VIEW_MAP = {
+  dashboard: "dashboard-view",
+  instances: "instances-view",
+  stats: "stats-view",
+  queries: "queries-view",
+  blocklist: "blocklist-view",
+  settings: "settings-view",
+};
+
+const PAGE_TITLES = {
+  dashboard: "Dashboard",
+  stats: "Stats",
+  instances: "Instances",
+  queries: "Queries",
+  blocklist: "Blocklist",
+  settings: "Settings",
+};
 
 function switchTab(tab) {
-  currentTab = tab;
+  currentPage = tab;
+  // Update active nav item
   document.querySelectorAll(".nav-item").forEach((a) => {
     a.classList.toggle("active", a.dataset.nav === tab);
   });
-  document.querySelectorAll(".view").forEach((v) => v.classList.add("hidden"));
-  const map = { dashboard: "dashboard-view", instances: "instances-view", blocklist: "blocklist-view", settings: "settings-view" };
-  const el = document.getElementById(map[tab]);
-  if (el) el.classList.remove("hidden");
-  const titles = { dashboard: "Dashboard", instances: "Instances", blocklist: "Blocklist", settings: "Settings" };
-  document.getElementById("page-title").textContent = titles[tab] || "Dashboard";
-  const paths = { dashboard: "/", instances: "/instances", blocklist: "/blocklist", settings: "/settings" };
-  history.pushState(null, "", paths[tab] || "/");
-  refresh();
+  // If we're on the SPA (index.html), switch views inline
+  const viewId = VIEW_MAP[tab];
+  const view = $(viewId);
+  if (view) {
+    document.querySelectorAll(".view").forEach((v) => v.classList.add("hidden"));
+    view.classList.remove("hidden");
+    const pt = $("page-title");
+    if (pt) pt.textContent = PAGE_TITLES[tab] || "Dashboard";
+    refresh();
+  } else {
+    // On a standalone page, navigate to the separate page
+    const url = PAGE_URLS[tab];
+    if (url) location.href = url + (TOKEN ? "?token=" + encodeURIComponent(TOKEN) : "");
+  }
 }
 document.querySelectorAll(".nav-item").forEach((a) => {
   a.addEventListener("click", (e) => { e.preventDefault(); switchTab(a.dataset.nav); });
@@ -53,21 +94,30 @@ document.querySelectorAll(".nav-item").forEach((a) => {
 async function refresh() {
   try {
     const list = await API("/api/instances").then((r) => r.json());
-    if (currentTab === "dashboard") renderDashboard(list);
-    else if (currentTab === "instances") renderInstances(list.slice().sort(instanceSort));
-    else if (currentTab === "blocklist") refreshBlocklist();
-    else if (currentTab === "settings") refreshSettings(list);
-    const online = list.filter((i) => i.online).length;
-    const conn = document.getElementById("conn");
-    conn.textContent = online + "/" + list.length + " online";
-    conn.className = "badge " + (online === list.length && list.length > 0 ? "on" : online > 0 ? "warn" : "off");
-    document.getElementById("sidebar-status").className = "badge " + conn.className.replace("badge ", "");
+    if (currentPage === "dashboard") renderDashboard(list);
+    else if (currentPage === "instances") renderInstances(list.slice().sort(instanceSort));
+    else if (currentPage === "blocklist") refreshBlocklist();
+    else if (currentPage === "settings") refreshSettings(list);
+    else if (currentPage === "stats") renderStats(list);
+    else if (currentPage === "queries") renderQueries(list);
+    updateConn(list);
   } catch (e) {
-    document.getElementById("conn").textContent = "error";
+    const conn = $("conn");
+    if (conn) { conn.textContent = "error"; conn.className = "badge off"; }
   }
 }
 
-// --- Dashboard ---
+function updateConn(list) {
+  const conn = $("conn");
+  if (!conn) return;
+  const online = list.filter((i) => i.online).length;
+  conn.textContent = online + "/" + list.length + " online";
+  conn.className = "badge " + (online === list.length && list.length > 0 ? "on" : online > 0 ? "warn" : "off");
+  const ss = $("sidebar-status");
+  if (ss) ss.className = "badge " + conn.className.replace("badge ", "");
+}
+
+// --- Dashboard (index.html SPA) ---
 async function renderDashboard(list) {
   let totalQ = 0, totalB = 0, totalE = 0, online = 0;
   for (const i of list) {
@@ -77,11 +127,12 @@ async function renderDashboard(list) {
     totalB += s.blocked_total ?? 0;
     totalE += s.upstream_errors ?? 0;
   }
-  document.getElementById("d-queries").textContent = totalQ.toLocaleString();
-  document.getElementById("d-blocked").textContent = totalB.toLocaleString();
-  document.getElementById("d-errors").textContent = totalE.toLocaleString();
-  document.getElementById("d-instances").textContent = list.length;
-  document.getElementById("d-online").textContent = online;
+  // SPA element IDs
+  setText("d-queries", totalQ.toLocaleString());
+  setText("d-blocked", totalB.toLocaleString());
+  setText("d-errors", totalE.toLocaleString());
+  setText("d-instances", list.length);
+  setText("d-online", online);
   await fetchChart();
 }
 let chart = null;
@@ -93,9 +144,10 @@ async function fetchChart() {
     const labels = stats.map((s) => new Date(s.timestamp).toLocaleTimeString());
     const tq = stats.map((s) => s.total_queries);
     const bq = stats.map((s) => s.blocked_queries);
-    const ctx = document.getElementById("chart-queries").getContext("2d");
+    const ctx = $("chart-queries");
+    if (!ctx) return;
     if (!chart) {
-      chart = new Chart(ctx, {
+      chart = new Chart(ctx.getContext("2d"), {
         type: "line",
         data: {
           labels,
@@ -115,6 +167,54 @@ async function fetchChart() {
   } catch (e) {}
 }
 
+// --- Stats page (stats.html) ---
+function renderStats(list) {
+  let totalQ = 0, totalB = 0, totalE = 0, online = 0;
+  for (const i of list) {
+    if (i.online) online++;
+    const s = i.stats || {};
+    totalQ += s.queries_total ?? 0;
+    totalB += s.blocked_total ?? 0;
+    totalE += s.upstream_errors ?? 0;
+  }
+  setText("total-queries", totalQ.toLocaleString());
+  setText("total-blocked", totalB.toLocaleString());
+  setText("total-upstream-errors", totalE.toLocaleString());
+  setText("online-instances", online);
+  setText("total-instances", list.length);
+}
+
+// --- Queries page (queries.html) ---
+let queryLog = [];
+async function renderQueries(list) {
+  const ul = $("query-log");
+  if (!ul) return;
+  ul.innerHTML = "";
+  try {
+    const entries = await API("/api/queries?limit=200").then((r) => r.json());
+    queryLog = entries || [];
+    renderQueryLog();
+  } catch (e) {
+    ul.innerHTML = '<li class="muted">Error loading query log</li>';
+  }
+}
+function renderQueryLog() {
+  const ul = $("query-log");
+  if (!ul) return;
+  const f = ($("f-domain")?.value || "").toLowerCase();
+  const filtered = f
+    ? queryLog.filter((e) => (e.domain + " " + (e.client || "")).toLowerCase().includes(f))
+    : queryLog;
+  ul.innerHTML = "";
+  for (const e of filtered) {
+    const li = document.createElement("li");
+    const t = new Date(e.at).toLocaleTimeString();
+    li.innerHTML = '<span class="t">[' + t + ']</span> <strong>' + esc(e.domain) + '</strong> ← <span class="muted">' + esc(e.client || "?") + '</span>';
+    ul.appendChild(li);
+  }
+}
+$("f-domain")?.addEventListener("input", renderQueryLog);
+
 // --- Instance menus (three-dots dropdown) ---
 document.addEventListener("click", (e) => {
   const menuBtn = e.target.closest("[data-menu]");
@@ -123,15 +223,11 @@ document.addEventListener("click", (e) => {
     const dropdown = document.querySelector(`[data-menu-for="${CSS.escape(id)}"]`);
     if (dropdown) {
       const isHidden = dropdown.classList.contains("hidden");
-      // Close all other menus first
       document.querySelectorAll(".menu-dropdown:not(.hidden)").forEach((d) => d.classList.add("hidden"));
-      if (isHidden) {
-        dropdown.classList.remove("hidden");
-      }
+      if (isHidden) dropdown.classList.remove("hidden");
     }
     return;
   }
-  // Close menus when clicking outside
   if (!e.target.closest(".menu-dropdown") && !e.target.closest("[data-menu]")) {
     document.querySelectorAll(".menu-dropdown:not(.hidden)").forEach((d) => d.classList.add("hidden"));
   }
@@ -143,7 +239,6 @@ document.addEventListener("click", async (e) => {
   const action = item.getAttribute("data-action");
   const id = item.getAttribute("data-id");
   if (!action || !id) return;
-  // Close the menu
   const dropdown = document.querySelector(`[data-menu-for="${CSS.escape(id)}"]`);
   if (dropdown) dropdown.classList.add("hidden");
 
@@ -167,6 +262,7 @@ document.addEventListener("click", async (e) => {
     }
   }
 });
+
 function instanceSort(a, b) {
   const idA = parseInt(a.id, 10);
   const idB = parseInt(b.id, 10);
@@ -174,10 +270,13 @@ function instanceSort(a, b) {
   return (a.id || "").localeCompare(b.id || "");
 }
 
+// --- Instances ---
+// Handles both SPA (#inst-cards) and standalone page (#instances)
 function renderInstances(list) {
-  const el = document.getElementById("inst-cards");
+  const el = $("inst-cards") || $("instances");
+  if (!el) return;
   el.innerHTML = "";
-  const f = (document.getElementById("inst-filter")?.value || "").toLowerCase();
+  const f = ($("inst-filter")?.value || "").toLowerCase();
   const filtered = list.filter((i) => {
     if (!f) return true;
     return (i.id + " " + (i.label || "") + " " + (i.url || "")).toLowerCase().includes(f);
@@ -208,10 +307,14 @@ function renderInstances(list) {
     ${i.adopted ? '<div class="stat"><span>Adopted</span><span class="badge on">yes</span></div>' : '<div class="stat"><span>Adopted</span><span class="badge off">no</span></div>'}`;
     el.appendChild(card);
   }
-  el.dataset.lastList = JSON.stringify(list);
+  // Store last list for filter input (SPA only has #inst-filter)
+  const cardsEl = $("inst-cards");
+  if (cardsEl) cardsEl.dataset.lastList = JSON.stringify(list);
 }
-document.getElementById("inst-filter")?.addEventListener("input", () => {
-  const list = JSON.parse(document.querySelector("#inst-cards")?.dataset?.lastList || "[]");
+$("inst-filter")?.addEventListener("input", () => {
+  const cardsEl = $("inst-cards");
+  if (!cardsEl) return;
+  const list = JSON.parse(cardsEl.dataset?.lastList || "[]");
   renderInstances(list.slice().sort(instanceSort));
 });
 
@@ -226,9 +329,9 @@ async function refreshBlocklist() {
   } catch (e) {}
 }
 function renderBlocklist() {
-  const ul = document.getElementById("blockList");
+  const ul = $("blockList");
   if (!ul) return;
-  const f = (document.getElementById("bl-filter")?.value || "").toLowerCase();
+  const f = ($("bl-filter")?.value || "").toLowerCase();
   ul.innerHTML = "";
   const filtered = blDomains.filter((d) => !f || d.toLowerCase().includes(f));
   for (const d of filtered) {
@@ -237,7 +340,8 @@ function renderBlocklist() {
     li.innerHTML = `<span>${esc(d)}</span><button class="remove" data-rm="${esc(d)}" title="Remove">&times;</button>`;
     ul.appendChild(li);
   }
-  document.getElementById("bl-count").textContent = blDomains.length + " domain" + (blDomains.length !== 1 ? "s" : "") + (f ? " (filtered)" : "");
+  const countEl = $("bl-count");
+  if (countEl) countEl.textContent = blDomains.length + " domain" + (blDomains.length !== 1 ? "s" : "") + (f ? " (filtered)" : "");
   ul.querySelectorAll("[data-rm]").forEach((b) => {
     b.onclick = async () => {
       const domain = b.getAttribute("data-rm");
@@ -250,8 +354,8 @@ function renderBlocklist() {
   });
 }
 
-document.getElementById("bl-add")?.addEventListener("click", async () => {
-  const input = document.getElementById("bl-add-input");
+$("bl-add")?.addEventListener("click", async () => {
+  const input = $("bl-add-input");
   const domain = input?.value.trim();
   if (!domain) return toast("domain required");
   try {
@@ -262,18 +366,18 @@ document.getElementById("bl-add")?.addEventListener("click", async () => {
   } catch (e) { toast("add failed: " + e.message); }
 });
 
-document.getElementById("bl-url-input")?.addEventListener("keydown", (e) => { if (e.key === "Enter") document.getElementById("bl-import-url")?.click(); });
-document.getElementById("bl-import-url")?.addEventListener("click", async () => {
-  const url = document.getElementById("bl-url-input")?.value.trim();
+$("bl-url-input")?.addEventListener("keydown", (e) => { if (e.key === "Enter") $("bl-import-url")?.click(); });
+$("bl-import-url")?.addEventListener("click", async () => {
+  const url = $("bl-url-input")?.value.trim();
   if (!url) return toast("URL required");
-  const status = document.getElementById("bl-import-status");
+  const status = $("bl-import-status");
   if (status) status.textContent = "fetching…";
   try {
     const r = await API("/api/blocklist/import-url", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url }) });
     const d = await r.json();
     if (status) status.textContent = "loaded " + d.count + " domains";
     toast("imported " + d.count + " domains");
-    document.getElementById("bl-url-input").value = "";
+    $("bl-url-input").value = "";
     refreshBlocklist();
   } catch (e) {
     if (status) status.textContent = "failed";
@@ -282,10 +386,10 @@ document.getElementById("bl-import-url")?.addEventListener("click", async () => 
 });
 
 let bFileData = null;
-document.getElementById("bl-file-input")?.addEventListener("change", (e) => {
+$("bl-file-input")?.addEventListener("change", (e) => {
   const file = e.target.files[0];
-  const btn = document.getElementById("bl-import-file");
-  const name = document.getElementById("bl-import-status");
+  const btn = $("bl-import-file");
+  const name = $("bl-import-status");
   if (btn) btn.disabled = !file;
   if (name) name.textContent = file ? file.name : "";
   if (!file) { bFileData = null; return; }
@@ -294,7 +398,7 @@ document.getElementById("bl-file-input")?.addEventListener("change", (e) => {
   reader.readAsText(file);
 });
 
-document.getElementById("bl-import-file")?.addEventListener("click", async () => {
+$("bl-import-file")?.addEventListener("click", async () => {
   if (!bFileData) return toast("no file loaded");
   const lines = bFileData.split("\n");
   const domains = [];
@@ -317,15 +421,18 @@ document.getElementById("bl-import-file")?.addEventListener("click", async () =>
   }
   toast("imported " + added + " domains from file");
   bFileData = null;
-  document.getElementById("bl-import-status").textContent = "";
-  document.getElementById("bl-import-file").disabled = true;
-  document.getElementById("bl-file-input").value = "";
+  const status = $("bl-import-status");
+  if (status) status.textContent = "";
+  const fbtn = $("bl-import-file");
+  if (fbtn) fbtn.disabled = true;
+  const finput = $("bl-file-input");
+  if (finput) finput.value = "";
   refreshBlocklist();
 });
 
-document.getElementById("bl-filter")?.addEventListener("input", renderBlocklist);
-document.getElementById("bl-export")?.addEventListener("click", () => { window.open("/api/blocklist/export", "_blank"); });
-document.getElementById("bl-clear")?.addEventListener("click", async () => {
+$("bl-filter")?.addEventListener("input", renderBlocklist);
+$("bl-export")?.addEventListener("click", () => { window.open("/api/blocklist/export", "_blank"); });
+$("bl-clear")?.addEventListener("click", async () => {
   if (!confirm("Remove ALL domains from the global blocklist?")) return;
   try {
     const r = await API("/api/blocklist");
@@ -341,7 +448,7 @@ document.getElementById("bl-clear")?.addEventListener("click", async () => {
 
 // --- Settings ---
 async function refreshSettings(list) {
-  const input = document.getElementById("s-upstream");
+  const input = $("s-upstream");
   if (!input) return;
   for (const i of list) {
     const s = i.stats;
@@ -349,8 +456,8 @@ async function refreshSettings(list) {
   }
   input.value = "";
 }
-document.getElementById("s-save")?.addEventListener("click", async () => {
-  const upstream = document.getElementById("s-upstream")?.value.trim();
+$("s-save")?.addEventListener("click", async () => {
+  const upstream = $("s-upstream")?.value.trim();
   if (!upstream) return toast("upstream required");
   const list = await API("/api/instances").then((r) => r.json());
   const online = list.find((i) => i.online);
@@ -362,7 +469,87 @@ document.getElementById("s-save")?.addEventListener("click", async () => {
   } catch (e) { toast("save failed: " + e.message); }
 });
 
-// Init
+// --- Modal (instances.html add instance) ---
+const modal = $("modal");
+const addBtn = $("add-btn");
+if (addBtn) addBtn.onclick = () => { if (modal) modal.classList.remove("hidden"); };
+const iCancel = $("i-cancel");
+if (iCancel) iCancel.onclick = () => { if (modal) modal.classList.add("hidden"); };
+const iSave = $("i-save");
+if (iSave) {
+  iSave.onclick = async () => {
+    const body = {
+      id: $("i-id")?.value.trim(),
+      label: $("i-label")?.value.trim(),
+      url: $("i-url")?.value.trim(),
+      token: $("i-token")?.value,
+      claim: $("i-claim")?.value.trim(),
+    };
+    if (!body.id || !body.url) return toast("id and url required");
+    try {
+      await API("/api/instances", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      if (modal) modal.classList.add("hidden");
+      toast("instance added");
+      if (body.claim) {
+        await API("/api/instances/" + encodeURIComponent(body.id) + "/adopt", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ code: body.claim }),
+        });
+        toast("adopted " + body.id);
+      }
+      refresh();
+    } catch (e) { toast("add failed: " + e.message); }
+  };
+}
+
+// --- Events (Stats page SSE) ---
+let eventCount = 0;
+function addEvent(e) {
+  eventCount++;
+  const ec = $("event-count");
+  if (ec) ec.textContent = eventCount + " events";
+  const ul = $("events");
+  if (!ul) return;
+  const li = document.createElement("li");
+  const time = new Date(e.at).toLocaleTimeString();
+  const cls = "type-" + e.type;
+  let text = "";
+  if (e.type === "block") text = "BLOCK " + e.domain + " ← " + e.client;
+  else if (e.type === "policy") text = "POLICY " + (e.msg || e.domain);
+  else if (e.type === "health") text = "health ok";
+  else text = e.type;
+  li.innerHTML = '<span class="t">[' + time + ']</span><span class="' + cls + '">[' + esc(e.instance) + ']</span><span>' + esc(text) + "</span>";
+  ul.prepend(li);
+  while (ul.children.length > 200) ul.removeChild(ul.lastChild);
+}
+
+function connectSSE() {
+  const qs = TOKEN ? "?token=" + encodeURIComponent(TOKEN) : "";
+  const es = new EventSource("/api/events" + qs);
+  es.onmessage = (ev) => {
+    try { addEvent(JSON.parse(ev.data)); } catch {}
+  };
+  es.onerror = () => {
+    const c = $("conn");
+    if (c) c.textContent = "reconnecting...";
+  };
+}
+
+// --- Init ---
+// Sidebar toggle
+const sbToggle = $("sidebar-toggle");
+if (sbToggle) {
+  sbToggle.onclick = () => {
+    document.body.classList.toggle("sidebar-collapsed");
+  };
+}
+
 refresh();
 setInterval(refresh, 5000);
-window.addEventListener("popstate", () => { currentTab = getTab(); switchTab(currentTab); });
+window.addEventListener("popstate", () => { currentPage = getPage(); refresh(); });
+
+// Connect SSE on stats page
+if (location.pathname.includes("stats")) {
+  connectSSE();
+}

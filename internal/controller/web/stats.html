@@ -7,52 +7,69 @@
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <header>
-    <h1>BlipDNS Controller</h1>
-    <nav class="tabs">
-      <a href="/?token={{TOKEN}}" class="tab" data-tab="dashboard">Dashboard</a>
-      <a href="/stats.html?token={{TOKEN}}" class="tab active" data-tab="stats">Stats</a>
-      <a href="/instances.html?token={{TOKEN}}" class="tab" data-tab="instances">Instances</a>
-    </nav>
-    <div id="conn" class="badge">connecting…</div>
+<aside id="sidebar">
+  <div class="sidebar-brand">
+    <span class="brand-icon">&#x1F511;</span>
+    <span class="brand-text">BlipDNS</span>
+  </div>
+  <nav class="sidebar-nav">
+    <a href="/?token={{TOKEN}}" data-nav="dashboard" class="nav-item">&#x1F4CA; Dashboard</a>
+    <a href="/stats.html?token={{TOKEN}}" data-nav="stats" class="nav-item active">&#x1F4C4; Stats</a>
+    <a href="/instances.html?token={{TOKEN}}" data-nav="instances" class="nav-item">&#x1F4C4; Instances</a>
+    <a href="/blocklist.html?token={{TOKEN}}" data-nav="blocklist" class="nav-item">&#x1F6AE; Blocklist</a>
+    <a href="/settings.html?token={{TOKEN}}" data-nav="settings" class="nav-item">&#x2699; Settings</a>
+  </nav>
+  <div class="sidebar-footer">
+    <span id="sidebar-status" class="badge off">—</span>
+  </div>
+</aside>
+
+<main id="main">
+  <header id="topbar">
+    <button id="sidebar-toggle" class="icon-btn" title="Toggle sidebar">&#9776;</button>
+    <h2 id="page-title">Stats</h2>
+    <div class="topbar-right">
+      <span id="conn" class="badge off">connecting</span>
+    </div>
   </header>
 
-  <main>
-    <section class="dashboard-cards">
+  <section class="view">
+    <div class="dashboard-cards">
       <div class="card stat-card">
         <h3>Total DNS Queries</h3>
-        <div class="big-number" id="total-queries">—</div>
-        <div class="sub">Across all instances</div>
+        <div class="big" id="total-queries">—</div>
+        <small>Across all instances</small>
       </div>
       <div class="card stat-card">
         <h3>Total Blocked</h3>
-        <div class="big-number" id="total-blocked">—</div>
-        <div class="sub">Filtered queries</div>
+        <div class="big warn" id="total-blocked">—</div>
+        <small>Filtered queries</small>
       </div>
       <div class="card stat-card">
         <h3>Total Upstream Errors</h3>
-        <div class="big-number" id="total-upstream-errors">—</div>
-        <div class="sub">Failed upstream requests</div>
+        <div class="big err" id="total-upstream-errors">—</div>
+        <small>Failed upstream requests</small>
       </div>
       <div class="card stat-card">
         <h3>Online Instances</h3>
-        <div class="big-number" id="online-instances">—</div>
-        <div class="sub">of <span id="total-instances">—</span> total</div>
+        <div class="big" id="online-instances">—</div>
+        <small><span id="total-instances">—</span> total</small>
       </div>
-    </section>
+    </div>
 
     <section class="panel">
-      <h2>Fleet Event Stream</h2>
+      <h3>Fleet Event Stream</h3>
       <div class="toolbar">
         <input id="f-domain" placeholder="filter domain/client…" />
         <span id="event-count" class="muted">0 events</span>
       </div>
       <ul id="events" class="events"></ul>
     </section>
-  </main>
+  </section>
+</main>
 
-  <div id="toast" class="toast hidden"></div>
+<div id="toast" class="toast hidden"></div>
 
-  <script src="app.js"></script>
+<script src="app.js"></script>
 </body>
 </html>

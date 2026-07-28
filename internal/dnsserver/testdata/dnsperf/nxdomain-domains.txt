@@ -1,0 +1,8 @@
+this-domain-does-not-exist-12345.com A
+another-nonexistent-domain-67890.net A
+fake-subdomain-that-wont-exist.example.org A
+this-is-a-test-domain-xyz123.com A
+not-a-real-domain-abc.com A
+no-way-this-exists-999.net A
+made-up-domain-testing-42.com A
+random-nonexistent-domain-777.org A

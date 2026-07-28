@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>BlipDNS Controller — Instances</title>
+  <title>BlipDNS Controller — Queries</title>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
@@ -15,7 +15,8 @@
   <nav class="sidebar-nav">
     <a href="/?token={{TOKEN}}" data-nav="dashboard" class="nav-item">&#x1F4CA; Dashboard</a>
     <a href="/stats.html?token={{TOKEN}}" data-nav="stats" class="nav-item">&#x1F4C4; Stats</a>
-    <a href="/instances.html?token={{TOKEN}}" data-nav="instances" class="nav-item active">&#x1F4C4; Instances</a>
+    <a href="/instances.html?token={{TOKEN}}" data-nav="instances" class="nav-item">&#x1F4C4; Instances</a>
+    <a href="/queries.html?token={{TOKEN}}" data-nav="queries" class="nav-item active">&#x1F50D; Queries</a>
     <a href="/blocklist.html?token={{TOKEN}}" data-nav="blocklist" class="nav-item">&#x1F6AE; Blocklist</a>
     <a href="/settings.html?token={{TOKEN}}" data-nav="settings" class="nav-item">&#x2699; Settings</a>
   </nav>
@@ -27,35 +28,20 @@
 <main id="main">
   <header id="topbar">
     <button id="sidebar-toggle" class="icon-btn" title="Toggle sidebar">&#9776;</button>
-    <h2 id="page-title">Instances</h2>
+    <h2 id="page-title">Queries</h2>
     <div class="topbar-right">
       <span id="conn" class="badge off">connecting</span>
     </div>
   </header>
 
   <section class="view">
-    <div class="toolbar"><input id="inst-filter" placeholder="filter id/label/url…"/></div>
-    <div id="inst-cards" class="cards"></div>
+    <div class="toolbar">
+      <input id="f-domain" placeholder="filter domain/client…" />
+    </div>
+    <div id="query-log" class="events"></div>
   </section>
 </main>
 
-<!-- Add instance modal -->
-<div id="modal" class="modal hidden">
-  <div class="modal-box">
-    <h2>Add Instance</h2>
-    <label>ID <input id="i-id" placeholder="office-dns" /></label>
-    <label>Label <input id="i-label" placeholder="Office" /></label>
-    <label>URL <input id="i-url" placeholder="http://10.0.0.5:8444" /></label>
-    <label>Token <input id="i-token" type="password" placeholder="admin token (optional if using claim code)" /></label>
-    <label>Claim code <input id="i-claim" placeholder="e.g. ABCD-1234 (from blipd journal, one-time)" /></label>
-    <div class="modal-actions">
-      <button id="i-cancel">Cancel</button>
-      <button id="i-save" class="btn-primary">Add</button>
-    </div>
-  </div>
-</div>
-
-<button id="add-btn" class="fab" title="Add instance">+</button>
 <div id="toast" class="toast hidden"></div>
 
 <script src="app.js"></script>

@@ -13,10 +13,12 @@
     <span class="brand-text">BlipDNS</span>
   </div>
   <nav class="sidebar-nav">
-    <a href="/" data-nav="dashboard" class="nav-item active">&#x25A3; Dashboard</a>
-    <a href="/instances" data-nav="instances" class="nav-item">&#x25A3; Instances</a>
-    <a href="/blocklist" data-nav="blocklist" class="nav-item">&#x25A3; Blocklist</a>
-    <a href="/settings" data-nav="settings" class="nav-item">&#x25A3; Settings</a>
+    <a href="/" data-nav="dashboard" class="nav-item active">&#x1F4CA; Dashboard</a>
+    <a href="/stats.html?token={{TOKEN}}" data-nav="stats" class="nav-item">&#x1F4C4; Stats</a>
+    <a href="/instances.html?token={{TOKEN}}" data-nav="instances" class="nav-item">&#x1F4C4; Instances</a>
+    <a href="/queries.html?token={{TOKEN}}" data-nav="queries" class="nav-item">&#x1F50D; Queries</a>
+    <a href="/blocklist.html?token={{TOKEN}}" data-nav="blocklist" class="nav-item">&#x1F6AE; Blocklist</a>
+    <a href="/settings.html?token={{TOKEN}}" data-nav="settings" class="nav-item">&#x2699; Settings</a>
   </nav>
   <div class="sidebar-footer">
     <span id="sidebar-status" class="badge off">—</span>
@@ -48,6 +50,32 @@
   <section id="instances-view" class="view hidden">
     <div class="toolbar"><input id="inst-filter" placeholder="filter id/label/url…"/></div>
     <div id="inst-cards" class="cards"></div>
+  </section>
+
+  <!-- Stats -->
+  <section id="stats-view" class="view hidden">
+    <div class="dashboard-cards">
+      <div class="card stat"><h3>Total Queries</h3><div class="big" id="total-queries">—</div><small>total</small></div>
+      <div class="card stat"><h3>Blocked</h3><div class="big warn" id="total-blocked">—</div><small>filtered</small></div>
+      <div class="card stat"><h3>Upstream Errs</h3><div class="big err" id="total-upstream-errors">—</div><small>failed</small></div>
+      <div class="card stat"><h3>Instances</h3><div class="big" id="online-instances">—</div><small><span id="total-instances">—</span> total</small></div>
+    </div>
+    <section class="panel">
+      <h3>Fleet Event Stream</h3>
+      <div class="toolbar">
+        <input id="f-domain" placeholder="filter domain/client…" />
+        <span id="event-count" class="muted">0 events</span>
+      </div>
+      <ul id="events" class="events"></ul>
+    </section>
+  </section>
+
+  <!-- Queries -->
+  <section id="queries-view" class="view hidden">
+    <div class="toolbar">
+      <input id="f-domain" placeholder="filter domain/client…" />
+    </div>
+    <div id="query-log" class="events"></div>
   </section>
 
   <!-- Blocklist — full page for managing entries -->
