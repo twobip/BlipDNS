@@ -1,6 +1,7 @@
-// BlipDNS Controller — dashboard JS
+// BlipDNS Controller — SPA
 const TOKEN = new URLSearchParams(location.search).get("token") || "";
 const AUTH = TOKEN ? "Bearer " + TOKEN : "";
+
 const API = (path, opts = {}) =>
   fetch(path, {
     ...opts,
@@ -10,103 +11,130 @@ const API = (path, opts = {}) =>
     return r;
   });
 
-function toast(msg) {
+const $ = (id) => document.getElementById(id);
+const esc = (s) =>
+  String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+
+function toast(msg, duration = 2600) {
   const t = document.createElement("div");
   t.className = "toast";
   t.textContent = msg;
   document.body.appendChild(t);
-  setTimeout(() => t.remove(), 2600);
+  setTimeout(() => t.remove(), duration);
 }
-function esc(s) {
-  return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
-}
-const $ = (id) => document.getElementById(id);
 
-// --- Tab / page detection ---
-// index.html is the SPA with sidebar-nav. Other pages (instances.html,
-// stats.html, queries.html, blocklist.html, settings.html) are standalone
-// pages that share app.js via <script src="app.js">.
-function getPage() {
-  const p = location.pathname.replace(/\.html$/, "");
-  if (p === "/instances" || p === "/instances.html") return "instances";
-  if (p === "/stats" || p === "/stats.html") return "stats";
-  if (p === "/queries" || p === "/queries.html") return "queries";
-  if (p === "/blocklist" || p === "/blocklist.html") return "blocklist";
-  if (p === "/settings" || p === "/settings.html") return "settings";
-  return "dashboard";
-}
-let currentPage = getPage();
-
-// Separate page URLs for each tab (used when navigating from a standalone page)
-const PAGE_URLS = {
-  dashboard: "/",
-  stats: "/stats.html",
-  instances: "/instances.html",
-  queries: "/queries.html",
-  blocklist: "/blocklist.html",
-  settings: "/settings.html",
-};
-
-// SPA view IDs (only on index.html)
-const VIEW_MAP = {
-  dashboard: "dashboard-view",
-  instances: "instances-view",
-  stats: "stats-view",
-  queries: "queries-view",
-  blocklist: "blocklist-view",
-  settings: "settings-view",
+// ===== Routing =====
+const ROUTES = {
+  "/": "dashboard",
+  "/dashboard": "dashboard",
+  "/instances": "instances",
+  "/queries": "queries",
+  "/blocklist": "blocklist",
+  "/stats": "stats",
+  "/settings": "settings",
 };
 
 const PAGE_TITLES = {
   dashboard: "Dashboard",
-  stats: "Stats",
   instances: "Instances",
   queries: "Queries",
   blocklist: "Blocklist",
+  stats: "Stats",
   settings: "Settings",
 };
 
-function switchTab(tab) {
-  currentPage = tab;
-  // Update active nav item
-  document.querySelectorAll(".nav-item").forEach((a) => {
-    a.classList.toggle("active", a.dataset.nav === tab);
-  });
-  // If we're on the SPA (index.html), switch views inline
-  const viewId = VIEW_MAP[tab];
-  const view = $(viewId);
-  if (view) {
-    document.querySelectorAll(".view").forEach((v) => v.classList.add("hidden"));
-    view.classList.remove("hidden");
-    const pt = $("page-title");
-    if (pt) pt.textContent = PAGE_TITLES[tab] || "Dashboard";
-    refresh();
-  } else {
-    // On a standalone page, navigate to the separate page
-    const url = PAGE_URLS[tab];
-    if (url) location.href = url + (TOKEN ? "?token=" + encodeURIComponent(TOKEN) : "");
+const NAV_ITEMS = [
+  { id: "dashboard", label: "Dashboard", icon: "📊" },
+  { id: "instances", label: "Instances", icon: "🖥️" },
+  { id: "queries", label: "Queries", icon: "🔍" },
+  { id: "stats", label: "Stats", icon: "📈" },
+  { id: "blocklist", label: "Blocklist", icon: "🚫" },
+  { id: "settings", label: "Settings", icon: "⚙️" },
+];
+
+let currentPage = "dashboard";
+let instances = [];
+let chart = null;
+let eventCount = 0;
+let queryLog = [];
+let blDomains = [];
+let sse = null;
+
+function getRoute() {
+  const path = location.pathname.replace(/\/$/, "") || "/";
+  return ROUTES[path] || "dashboard";
+}
+
+function renderNav() {
+  const nav = $("nav");
+  if (!nav) return;
+  nav.innerHTML = "";
+  for (const item of NAV_ITEMS) {
+    const a = document.createElement("a");
+    a.className = "nav-item" + (item.id === currentPage ? " active" : "");
+    a.href = item.id === "dashboard" ? "/{{TOKEN}}" : "/" + item.id + "?token=" + encodeURIComponent(TOKEN);
+    a.dataset.nav = item.id;
+    a.innerHTML = `<span>${item.icon}</span><span>${item.label}</span>`;
+    nav.appendChild(a);
   }
 }
+
+function navigate(tab) {
+  const url = tab === "dashboard" ? "/{{TOKEN}}" : "/" + tab + "?token=" + encodeURIComponent(TOKEN);
+  history.pushState({ page: tab }, "", url);
+  showPage(tab);
+}
+
+function showPage(page) {
+  currentPage = page;
+  // Update nav
+  document.querySelectorAll(".nav-item").forEach((a) => {
+    a.classList.toggle("active", a.dataset.nav === page);
+  });
+  // Show view
+  document.querySelectorAll(".view").forEach((v) => {
+    v.classList.toggle("active", v.id === page + "-view");
+  });
+  // Update title
+  const pt = $("page-title");
+  if (pt) pt.textContent = PAGE_TITLES[page] || "Dashboard";
+  // Page-specific actions
+  if (page === "stats" && !sse) connectSSE();
+  if (page !== "stats" && sse) {
+    sse.close();
+    sse = null;
+  }
+  refresh();
+}
+
+// ===== Init =====
+renderNav();
+
 document.querySelectorAll(".nav-item").forEach((a) => {
-  a.addEventListener("click", (e) => { e.preventDefault(); switchTab(a.dataset.nav); });
+  a.addEventListener("click", (e) => {
+    e.preventDefault();
+    navigate(a.dataset.nav);
+  });
 });
 
-async function refresh() {
-  try {
-    const list = await API("/api/instances").then((r) => r.json());
-    if (currentPage === "dashboard") renderDashboard(list);
-    else if (currentPage === "instances") renderInstances(list.slice().sort(instanceSort));
-    else if (currentPage === "blocklist") refreshBlocklist();
-    else if (currentPage === "settings") refreshSettings(list);
-    else if (currentPage === "stats") renderStats(list);
-    else if (currentPage === "queries") renderQueries(list);
-    updateConn(list);
-  } catch (e) {
-    const conn = $("conn");
-    if (conn) { conn.textContent = "error"; conn.className = "badge off"; }
-  }
-}
+// Sidebar toggle
+const sbToggle = $("sidebar-toggle");
+const sbToggleTop = $("sidebar-toggle-top");
+const toggleSidebar = () => document.body.classList.toggle("sidebar-collapsed");
+if (sbToggle) sbToggle.onclick = toggleSidebar;
+if (sbToggleTop) sbToggleTop.onclick = toggleSidebar;
 
+// Popstate (back/forward)
+window.addEventListener("popstate", () => {
+  const page = getRoute();
+  showPage(page);
+});
+
+// ===== Connection status =====
 function updateConn(list) {
   const conn = $("conn");
   if (!conn) return;
@@ -114,10 +142,31 @@ function updateConn(list) {
   conn.textContent = online + "/" + list.length + " online";
   conn.className = "badge " + (online === list.length && list.length > 0 ? "on" : online > 0 ? "warn" : "off");
   const ss = $("sidebar-status");
-  if (ss) ss.className = "badge " + conn.className.replace("badge ", "");
+  if (ss) ss.className = conn.className;
 }
 
-// --- Dashboard (index.html SPA) ---
+// ===== Refresh =====
+async function refresh() {
+  try {
+    const list = await API("/api/instances").then((r) => r.json());
+    instances = list;
+    if (currentPage === "dashboard") renderDashboard(list);
+    else if (currentPage === "instances") renderInstances(list);
+    else if (currentPage === "queries") renderQueries();
+    else if (currentPage === "blocklist") refreshBlocklist();
+    else if (currentPage === "stats") renderStats(list);
+    else if (currentPage === "settings") refreshSettings(list);
+    updateConn(list);
+  } catch (e) {
+    const conn = $("conn");
+    if (conn) {
+      conn.textContent = "error";
+      conn.className = "badge off";
+    }
+  }
+}
+
+// ===== Dashboard =====
 async function renderDashboard(list) {
   let totalQ = 0, totalB = 0, totalE = 0, online = 0;
   for (const i of list) {
@@ -127,15 +176,14 @@ async function renderDashboard(list) {
     totalB += s.blocked_total ?? 0;
     totalE += s.upstream_errors ?? 0;
   }
-  // SPA element IDs
   setText("d-queries", totalQ.toLocaleString());
   setText("d-blocked", totalB.toLocaleString());
   setText("d-errors", totalE.toLocaleString());
-  setText("d-instances", list.length);
   setText("d-online", online);
+  setText("d-total", list.length);
   await fetchChart();
 }
-let chart = null;
+
 async function fetchChart() {
   try {
     const res = await API("/api/stats?bucket=5m&since=24h");
@@ -156,7 +204,15 @@ async function fetchChart() {
             { label: "Blocked", data: bq, borderColor: "#f87171", backgroundColor: "rgba(248,113,113,.1)", fill: true, tension: .3, pointRadius: 0 },
           ],
         },
-        options: { responsive: true, maintainAspectRatio: false, animation: { duration: 300 }, scales: { x: { display: true, title: { display: true, text: "Time" } }, y: { beginAtZero: true } } },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          animation: { duration: 300 },
+          scales: {
+            x: { display: true, title: { display: true, text: "Time" } },
+            y: { beginAtZero: true },
+          },
+        },
       });
     } else {
       chart.data.labels = labels;
@@ -167,7 +223,7 @@ async function fetchChart() {
   } catch (e) {}
 }
 
-// --- Stats page (stats.html) ---
+// ===== Stats page =====
 function renderStats(list) {
   let totalQ = 0, totalB = 0, totalE = 0, online = 0;
   for (const i of list) {
@@ -184,38 +240,49 @@ function renderStats(list) {
   setText("total-instances", list.length);
 }
 
-// --- Queries page (queries.html) ---
-let queryLog = [];
-async function renderQueries(list) {
-  const ul = $("query-log");
-  if (!ul) return;
-  ul.innerHTML = "";
-  try {
-    const entries = await API("/api/queries?limit=200").then((r) => r.json());
-    queryLog = entries || [];
-    renderQueryLog();
-  } catch (e) {
-    ul.innerHTML = '<li class="muted">Error loading query log</li>';
+// ===== Instances =====
+function renderInstances(list) {
+  const el = $("inst-cards");
+  if (!el) return;
+  el.innerHTML = "";
+  const f = ($("inst-filter")?.value || "").toLowerCase();
+  const filtered = list.filter((i) => {
+    if (!f) return true;
+    return (i.id + " " + (i.label || "") + " " + (i.url || "")).toLowerCase().includes(f);
+  });
+  if (!filtered.length) {
+    el.innerHTML = '<div class="stat-card"><h3>No instances</h3><p class="sub">Add an instance from the controller or via the API.</p></div>';
+    return;
+  }
+  for (const i of filtered) {
+    const s = i.stats || {};
+    const card = document.createElement("div");
+    card.className = "instance-card";
+    card.innerHTML = `
+      <div class="card-head">
+        <h3>${esc(i.label || i.id)} <span class="badge ${i.online ? "on" : "off"}">${i.online ? "online" : "offline"}</span></h3>
+        <div class="menu-btn">
+          <button class="icon-btn" data-menu="${esc(i.id)}" title="Actions">⋯</button>
+          <div class="menu-dropdown hidden" data-menu-for="${esc(i.id)}">
+            <button class="menu-item" data-action="policies" data-id="${esc(i.id)}">Policies</button>
+            <button class="menu-item" data-action="reset-adopt" data-id="${esc(i.id)}">Reset Adoption</button>
+            <button class="menu-item danger" data-action="remove" data-id="${esc(i.id)}">Remove Instance</button>
+          </div>
+        </div>
+      </div>
+      <p class="url">${esc(i.url)}</p>
+      <div class="stat"><span>Queries</span><span>${s.queries_total ?? 0}</span></div>
+      <div class="stat"><span>Blocked</span><span>${s.blocked_total ?? 0}</span></div>
+      <div class="stat"><span>Upstream errs</span><span>${s.upstream_errors ?? 0}</span></div>
+      <div class="stat"><span>Cache</span><span>${s.cached ?? 0}</span></div>
+      <div class="stat"><span>Adopted</span><span class="badge ${i.adopted ? "on" : "off"}">${i.adopted ? "yes" : "no"}</span></div>
+      ${i.ping_avg_ms ? `<div class="stat"><span>Ping avg</span><span>${i.ping_avg_ms.toFixed(1)} ms</span></div>` : ""}
+    `;
+    el.appendChild(card);
   }
 }
-function renderQueryLog() {
-  const ul = $("query-log");
-  if (!ul) return;
-  const f = ($("f-domain")?.value || "").toLowerCase();
-  const filtered = f
-    ? queryLog.filter((e) => (e.domain + " " + (e.client || "")).toLowerCase().includes(f))
-    : queryLog;
-  ul.innerHTML = "";
-  for (const e of filtered) {
-    const li = document.createElement("li");
-    const t = new Date(e.at).toLocaleTimeString();
-    li.innerHTML = '<span class="t">[' + t + ']</span> <strong>' + esc(e.domain) + '</strong> ← <span class="muted">' + esc(e.client || "?") + '</span>';
-    ul.appendChild(li);
-  }
-}
-$("f-domain")?.addEventListener("input", renderQueryLog);
 
-// --- Instance menus (three-dots dropdown) ---
+// Instance menu
 document.addEventListener("click", (e) => {
   const menuBtn = e.target.closest("[data-menu]");
   if (menuBtn) {
@@ -260,66 +327,99 @@ document.addEventListener("click", async (e) => {
     } catch (err) {
       toast("reset failed: " + err.message);
     }
+  } else if (action === "policies") {
+    openPolicyModal(id);
   }
 });
 
-function instanceSort(a, b) {
-  const idA = parseInt(a.id, 10);
-  const idB = parseInt(b.id, 10);
-  if (!isNaN(idA) && !isNaN(idB)) return idA - idB;
-  return (a.id || "").localeCompare(b.id || "");
+// ===== Add Instance Modal =====
+const modal = $("modal");
+const addBtn = $("add-instance-btn");
+if (addBtn) addBtn.onclick = () => { if (modal) modal.classList.remove("hidden"); };
+const iCancel = $("i-cancel");
+if (iCancel) iCancel.onclick = () => { if (modal) modal.classList.add("hidden"); };
+const iSave = $("i-save");
+if (iSave) {
+  iSave.onclick = async () => {
+    const body = {
+      id: $("i-id")?.value.trim(),
+      label: $("i-label")?.value.trim(),
+      url: $("i-url")?.value.trim(),
+      token: $("i-token")?.value,
+      claim: $("i-claim")?.value.trim(),
+    };
+    if (!body.id || !body.url) return toast("id and url required");
+    try {
+      await API("/api/instances", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      if (modal) modal.classList.add("hidden");
+      toast("instance added");
+      if (body.claim) {
+        try {
+          await API("/api/instances/" + encodeURIComponent(body.id) + "/adopt", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ code: body.claim }),
+          });
+          toast("adopted " + body.id);
+        } catch (e) {
+          toast("adoption failed: " + e.message);
+        }
+      }
+      refresh();
+    } catch (e) { toast("add failed: " + e.message); }
+  };
 }
 
-// --- Instances ---
-// Handles both SPA (#inst-cards) and standalone page (#instances)
-function renderInstances(list) {
-  const el = $("inst-cards") || $("instances");
-  if (!el) return;
-  el.innerHTML = "";
-  const f = ($("inst-filter")?.value || "").toLowerCase();
-  const filtered = list.filter((i) => {
-    if (!f) return true;
-    return (i.id + " " + (i.label || "") + " " + (i.url || "")).toLowerCase().includes(f);
-  });
-  if (!filtered.length) {
-    el.innerHTML = '<div class="card"><h3>No instances</h3><p class="sub">Add an instance from the controller or via the API.</p></div>';
-    return;
-  }
-  for (const i of filtered) {
-    const s = i.stats || {};
-    const card = document.createElement("div");
-    card.className = "card";
-    card.innerHTML = `<div class="card-header">
-      <h3>${esc(i.label || i.id)} <span class="badge ${i.online ? "on" : "off"}">${i.online ? "online" : "offline"}</span></h3>
-      <div class="card-actions">
-        <button class="icon-btn" data-menu="${esc(i.id)}" title="Actions">&#8942;</button>
-      </div>
-    </div>
-    <div class="menu-dropdown hidden" data-menu-for="${esc(i.id)}">
-      <button class="menu-item" data-action="reset-adopt" data-id="${esc(i.id)}">Reset Adoption</button>
-      <button class="menu-item danger" data-action="remove" data-id="${esc(i.id)}">Remove Instance</button>
-    </div>
-    <p class="sub">${esc(i.url)}</p>
-    <div class="stat"><span>Queries</span><span>${s.queries_total ?? 0}</span></div>
-    <div class="stat"><span>Blocked</span><span>${s.blocked_total ?? 0}</span></div>
-    <div class="stat"><span>Upstream errs</span><span>${s.upstream_errors ?? 0}</span></div>
-    <div class="stat"><span>Cache</span><span>${s.cached ?? 0}</span></div>
-    ${i.adopted ? '<div class="stat"><span>Adopted</span><span class="badge on">yes</span></div>' : '<div class="stat"><span>Adopted</span><span class="badge off">no</span></div>'}`;
-    el.appendChild(card);
-  }
-  // Store last list for filter input (SPA only has #inst-filter)
-  const cardsEl = $("inst-cards");
-  if (cardsEl) cardsEl.dataset.lastList = JSON.stringify(list);
-}
-$("inst-filter")?.addEventListener("input", () => {
-  const cardsEl = $("inst-cards");
-  if (!cardsEl) return;
-  const list = JSON.parse(cardsEl.dataset?.lastList || "[]");
-  renderInstances(list.slice().sort(instanceSort));
-});
+// ===== Policy Modal =====
+const policyModal = $("policy-modal");
+let policyInstanceId = null;
+let policyEditId = null;
 
-// --- Blocklist ---
-let blDomains = [];
+async function openPolicyModal(instanceId) {
+  policyInstanceId = instanceId;
+  policyEditId = null;
+  $("policy-modal-title").textContent = "Instance Policies";
+  // Load existing policies
+  try {
+    const resp = await API("/api/instances/" + encodeURIComponent(instanceId) + "/policies");
+    const data = await resp.json();
+    const defaultPolicy = data.default || {};
+    const policies = data.policies || [];
+
+    // Build policy list HTML
+    let html = "";
+    if (defaultPolicy.id) {
+      html += `<div class="policy-item" data-pid="${esc(defaultPolicy.id)}">
+        <div class="policy-info">
+          <strong>${esc(defaultPolicy.id)}</strong> <span class="muted">(default)</span>
+        </div>
+        <div class="policy-actions">
+          <button class="icon-btn" data-edit="${esc(defaultPolicy.id)}" title="Edit">✏️</button>
+        </div>
+      </div>`;
+    }
+    for (const p of policies) {
+      html += `<div class="policy-item" data-pid="${esc(p.id)}">
+        <div class="policy-info">
+          <strong>${esc(p.id)}</strong>
+          <span class="muted">${p.networks?.join(", ") || ""}</span>
+        </div>
+        <div class="policy-actions">
+          <button class="icon-btn" data-edit="${esc(p.id)}" title="Edit">✏️</button>
+          <button class="icon-btn danger" data-delete="${esc(p.id)}" title="Delete">🗑️</button>
+        </div>
+      </div>`;
+    }
+    $("policy-modal").querySelector(".policy-list").innerHTML = html;
+    $("policy-modal").querySelector(".policy-list").classList.remove("hidden");
+    $("policy-form").classList.add("hidden");
+  } catch (e) {
+    toast("failed to load policies: " + e.message);
+  }
+  if (policyModal) policyModal.classList.remove("hidden");
+}
+
+// ===== Blocklist =====
 async function refreshBlocklist() {
   try {
     const r = await API("/api/blocklist");
@@ -328,6 +428,7 @@ async function refreshBlocklist() {
     renderBlocklist();
   } catch (e) {}
 }
+
 function renderBlocklist() {
   const ul = $("blockList");
   if (!ul) return;
@@ -336,8 +437,7 @@ function renderBlocklist() {
   const filtered = blDomains.filter((d) => !f || d.toLowerCase().includes(f));
   for (const d of filtered) {
     const li = document.createElement("li");
-    li.className = "blocklist-item";
-    li.innerHTML = `<span>${esc(d)}</span><button class="remove" data-rm="${esc(d)}" title="Remove">&times;</button>`;
+    li.innerHTML = `<span>${esc(d)}</span><button class="rm" data-rm="${esc(d)}" title="Remove">×</button>`;
     ul.appendChild(li);
   }
   const countEl = $("bl-count");
@@ -385,51 +485,6 @@ $("bl-import-url")?.addEventListener("click", async () => {
   }
 });
 
-let bFileData = null;
-$("bl-file-input")?.addEventListener("change", (e) => {
-  const file = e.target.files[0];
-  const btn = $("bl-import-file");
-  const name = $("bl-import-status");
-  if (btn) btn.disabled = !file;
-  if (name) name.textContent = file ? file.name : "";
-  if (!file) { bFileData = null; return; }
-  const reader = new FileReader();
-  reader.onload = () => { bFileData = reader.result; };
-  reader.readAsText(file);
-});
-
-$("bl-import-file")?.addEventListener("click", async () => {
-  if (!bFileData) return toast("no file loaded");
-  const lines = bFileData.split("\n");
-  const domains = [];
-  for (const raw of lines) {
-    let line = raw.trim();
-    if (!line || line.startsWith("!")) continue;
-    if (line.includes("$")) line = line.split("$")[0];
-    if (line.startsWith("||")) { line = line.slice(2); if (line.includes("^")) line = line.split("^")[0]; }
-    else if (line.startsWith("|")) { line = line.slice(1); if (line.includes("^")) line = line.split("^")[0]; }
-    if (!line) continue;
-    if (line.includes("://")) { try { const u = new URL(line); if (u.hostname) line = u.hostname; else continue; } catch { continue; } }
-    if (line.includes(".") && !line.startsWith(".") && !line.endsWith(".")) {
-      domains.push(line.toLowerCase().replace(/\.+$/, ""));
-    }
-  }
-  if (!domains.length) return toast("no domains found");
-  let added = 0;
-  for (const d of domains) {
-    try { await API("/api/blocklist", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ domain: d }) }); added++; } catch (_) {}
-  }
-  toast("imported " + added + " domains from file");
-  bFileData = null;
-  const status = $("bl-import-status");
-  if (status) status.textContent = "";
-  const fbtn = $("bl-import-file");
-  if (fbtn) fbtn.disabled = true;
-  const finput = $("bl-file-input");
-  if (finput) finput.value = "";
-  refreshBlocklist();
-});
-
 $("bl-filter")?.addEventListener("input", renderBlocklist);
 $("bl-export")?.addEventListener("click", () => { window.open("/api/blocklist/export", "_blank"); });
 $("bl-clear")?.addEventListener("click", async () => {
@@ -446,7 +501,42 @@ $("bl-clear")?.addEventListener("click", async () => {
   } catch (e) { toast("clear failed"); }
 });
 
-// --- Settings ---
+// ===== Queries =====
+async function renderQueries() {
+  const ul = $("query-log");
+  if (!ul) return;
+  ul.innerHTML = "";
+  try {
+    const entries = await API("/api/queries?limit=200").then((r) => r.json());
+    queryLog = entries || [];
+    renderQueryLog();
+  } catch (e) {
+    ul.innerHTML = '<li class="muted">Error loading query log</li>';
+  }
+}
+
+function renderQueryLog() {
+  const ul = $("query-log");
+  if (!ul) return;
+  const f = ($("q-filter")?.value || "").toLowerCase();
+  const filtered = f
+    ? queryLog.filter((e) => (e.domain + " " + (e.client || "")).toLowerCase().includes(f))
+    : queryLog;
+  ul.innerHTML = "";
+  for (const e of filtered) {
+    const li = document.createElement("li");
+    const t = new Date(e.at).toLocaleTimeString();
+    const cls = e.action === "BLOCK" ? "type-block" : "type-pass";
+    li.innerHTML = `<span class="t">[${t}]</span> <strong>${esc(e.domain)}</strong> ← <span class="muted">${esc(e.client || "?")}</span> <span class="${cls}">${esc(e.action || "")}</span>`;
+    ul.appendChild(li);
+  }
+  const countEl = $("q-count");
+  if (countEl) countEl.textContent = filtered.length + " entries";
+}
+
+$("q-filter")?.addEventListener("input", renderQueryLog);
+
+// ===== Settings =====
 async function refreshSettings(list) {
   const input = $("s-upstream");
   if (!input) return;
@@ -456,6 +546,7 @@ async function refreshSettings(list) {
   }
   input.value = "";
 }
+
 $("s-save")?.addEventListener("click", async () => {
   const upstream = $("s-upstream")?.value.trim();
   if (!upstream) return toast("upstream required");
@@ -469,42 +560,19 @@ $("s-save")?.addEventListener("click", async () => {
   } catch (e) { toast("save failed: " + e.message); }
 });
 
-// --- Modal (instances.html add instance) ---
-const modal = $("modal");
-const addBtn = $("add-btn");
-if (addBtn) addBtn.onclick = () => { if (modal) modal.classList.remove("hidden"); };
-const iCancel = $("i-cancel");
-if (iCancel) iCancel.onclick = () => { if (modal) modal.classList.add("hidden"); };
-const iSave = $("i-save");
-if (iSave) {
-  iSave.onclick = async () => {
-    const body = {
-      id: $("i-id")?.value.trim(),
-      label: $("i-label")?.value.trim(),
-      url: $("i-url")?.value.trim(),
-      token: $("i-token")?.value,
-      claim: $("i-claim")?.value.trim(),
-    };
-    if (!body.id || !body.url) return toast("id and url required");
-    try {
-      await API("/api/instances", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-      if (modal) modal.classList.add("hidden");
-      toast("instance added");
-      if (body.claim) {
-        await API("/api/instances/" + encodeURIComponent(body.id) + "/adopt", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ code: body.claim }),
-        });
-        toast("adopted " + body.id);
-      }
-      refresh();
-    } catch (e) { toast("add failed: " + e.message); }
+// ===== SSE (Stats page event stream) =====
+function connectSSE() {
+  const qs = TOKEN ? "?token=" + encodeURIComponent(TOKEN) : "";
+  sse = new EventSource("/api/events" + qs);
+  sse.onmessage = (ev) => {
+    try { addEvent(JSON.parse(ev.data)); } catch {}
+  };
+  sse.onerror = () => {
+    const c = $("conn");
+    if (c) c.textContent = "reconnecting...";
   };
 }
 
-// --- Events (Stats page SSE) ---
-let eventCount = 0;
 function addEvent(e) {
   eventCount++;
   const ec = $("event-count");
@@ -519,37 +587,18 @@ function addEvent(e) {
   else if (e.type === "policy") text = "POLICY " + (e.msg || e.domain);
   else if (e.type === "health") text = "health ok";
   else text = e.type;
-  li.innerHTML = '<span class="t">[' + time + ']</span><span class="' + cls + '">[' + esc(e.instance) + ']</span><span>' + esc(text) + "</span>";
+  li.innerHTML = `<span class="t">[${time}]</span><span class="${cls}">[${esc(e.instance)}]</span><span>${esc(text)}</span>`;
   ul.prepend(li);
   while (ul.children.length > 200) ul.removeChild(ul.lastChild);
 }
 
-function connectSSE() {
-  const qs = TOKEN ? "?token=" + encodeURIComponent(TOKEN) : "";
-  const es = new EventSource("/api/events" + qs);
-  es.onmessage = (ev) => {
-    try { addEvent(JSON.parse(ev.data)); } catch {}
-  };
-  es.onerror = () => {
-    const c = $("conn");
-    if (c) c.textContent = "reconnecting...";
-  };
+// ===== Utils =====
+function setText(id, val) {
+  const el = $(id);
+  if (el) el.textContent = val;
 }
 
-// --- Init ---
-// Sidebar toggle
-const sbToggle = $("sidebar-toggle");
-if (sbToggle) {
-  sbToggle.onclick = () => {
-    document.body.classList.toggle("sidebar-collapsed");
-  };
-}
-
+// ===== Init =====
+showPage(getRoute());
 refresh();
 setInterval(refresh, 5000);
-window.addEventListener("popstate", () => { currentPage = getPage(); refresh(); });
-
-// Connect SSE on stats page
-if (location.pathname.includes("stats")) {
-  connectSSE();
-}

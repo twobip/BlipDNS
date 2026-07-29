@@ -415,32 +415,16 @@ func (s *Server) handleBlocklistImportURL(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) serveUI(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/" && r.URL.Path != "/index.html" && r.URL.Path != "/instances" && r.URL.Path != "/instances.html" && r.URL.Path != "/queries" && r.URL.Path != "/queries.html" && r.URL.Path != "/blocklist" && r.URL.Path != "/blocklist.html" && r.URL.Path != "/settings" && r.URL.Path != "/settings.html" && !isUIAsset(r.URL.Path) {
-		http.Error(w, "not found", http.StatusNotFound)
-		return
-	}
-	// The page requires the token; static assets (js/css) are served
-	// unauthenticated so browsers can load them as relative sub-resources.
-	if r.URL.Path == "/" || r.URL.Path == "/index.html" || r.URL.Path == "/instances" || r.URL.Path == "/instances.html" || r.URL.Path == "/queries" || r.URL.Path == "/queries.html" || r.URL.Path == "/blocklist" || r.URL.Path == "/blocklist.html" || r.URL.Path == "/settings" || r.URL.Path == "/settings.html" {
-		if !s.validToken(r) {
-			w.Header().Set("WWW-Authenticate", "Bearer")
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-	}
-	name := strings.TrimPrefix(r.URL.Path, "/")
-	if name == "" {
-		name = "index.html"
-	}
-	b, err := fs.ReadFile(s.ui, name)
-	if err != nil {
-		// SPA fallback to index.html
-		if b, err = fs.ReadFile(s.ui, "index.html"); err != nil {
+	// Static assets (js/css/svg/ico/png) are served unauthenticated so browsers
+	// can load them as relative sub-resources after the token query param is
+	// dropped on sub-resource fetches.
+	if isUIAsset(r.URL.Path) {
+		name := strings.TrimPrefix(r.URL.Path, "/")
+		b, err := fs.ReadFile(s.ui, name)
+		if err != nil {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
-		name = "index.html"
-	}
 		// Inject token into {{TOKEN}} placeholders for nav links
 		tok := r.URL.Query().Get("token")
 		if h := r.Header.Get("Authorization"); len(h) > 7 && strings.EqualFold(h[:7], "Bearer ") {
@@ -449,16 +433,38 @@ func (s *Server) serveUI(w http.ResponseWriter, r *http.Request) {
 		if tok != "" && len(b) > 0 {
 			b = bytes.ReplaceAll(b, []byte("{{TOKEN}}"), []byte(tok))
 		}
-		ct := contentType(name)
-		w.Header().Set("Content-Type", ct)
+		w.Header().Set("Content-Type", contentType(name))
 		_, _ = w.Write(b)
+		return
 	}
+	// Everything else is a SPA route — require the token, then serve index.html.
+	if !s.validToken(r) {
+		w.Header().Set("WWW-Authenticate", "Bearer")
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	b, err := fs.ReadFile(s.ui, "index.html")
+	if err != nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	// Inject token into {{TOKEN}} placeholders for nav links
+	tok := r.URL.Query().Get("token")
+	if h := r.Header.Get("Authorization"); len(h) > 7 && strings.EqualFold(h[:7], "Bearer ") {
+		tok = h[7:]
+	}
+	if tok != "" && len(b) > 0 {
+		b = bytes.ReplaceAll(b, []byte("{{TOKEN}}"), []byte(tok))
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = w.Write(b)
+}
 
 func isUIAsset(p string) bool {
 	switch {
 	case strings.HasSuffix(p, ".js"), strings.HasSuffix(p, ".css"),
-		strings.HasSuffix(p, ".html"), strings.HasSuffix(p, ".svg"),
-		strings.HasSuffix(p, ".ico"), strings.HasSuffix(p, ".png"):
+		strings.HasSuffix(p, ".svg"), strings.HasSuffix(p, ".ico"),
+		strings.HasSuffix(p, ".png"):
 		return true
 	}
 	return false

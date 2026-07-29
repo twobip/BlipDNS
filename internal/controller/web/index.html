@@ -3,118 +3,239 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>BlipDNS — Fleet DNS Controller</title>
+<title>BlipDNS Controller</title>
+<link rel="icon" href="favicon.svg"/>
 <link rel="stylesheet" href="style.css"/>
 </head>
 <body>
-<aside id="sidebar">
-  <div class="sidebar-brand">
-    <span class="brand-icon">&#x1F511;</span>
-    <span class="brand-text">BlipDNS</span>
+  <!-- Sidebar -->
+  <aside id="sidebar" class="sidebar">
+    <div class="sidebar-header">
+      <div class="brand">
+        <span class="brand-icon">🗝️</span>
+        <span class="brand-text">BlipDNS</span>
+      </div>
+      <button id="sidebar-toggle" class="icon-btn" title="Toggle sidebar">☰</button>
+    </div>
+    <nav id="nav" class="nav"></nav>
+    <div class="sidebar-footer">
+      <span id="sidebar-status" class="badge off">—</span>
+    </div>
+  </aside>
+
+  <!-- Main -->
+  <main id="main">
+    <header id="topbar">
+      <button id="sidebar-toggle-top" class="icon-btn" title="Toggle sidebar">☰</button>
+      <h2 id="page-title">Dashboard</h2>
+      <div class="topbar-right">
+        <span id="conn" class="badge off">—</span>
+      </div>
+    </header>
+
+    <div id="content" class="content">
+      <!-- Dashboard -->
+      <section id="dashboard-view" class="view">
+        <div class="grid">
+          <div class="stat-card">
+            <h3>Total Queries</h3>
+            <div class="big" id="d-queries">—</div>
+            <small>All instances</small>
+          </div>
+          <div class="stat-card">
+            <h3>Blocked</h3>
+            <div class="big warn" id="d-blocked">—</div>
+            <small>Filtered queries</small>
+          </div>
+          <div class="stat-card">
+            <h3>Upstream Errors</h3>
+            <div class="big err" id="d-errors">—</div>
+            <small>Failed upstream requests</small>
+          </div>
+          <div class="stat-card">
+            <h3>Online</h3>
+            <div class="big" id="d-online">—</div>
+            <small><span id="d-total">—</span> total instances</small>
+          </div>
+        </div>
+
+        <div class="panel">
+          <h3>Traffic (24h)</h3>
+          <div class="chart-wrap">
+            <canvas id="chart-queries"></canvas>
+          </div>
+        </div>
+      </section>
+
+      <!-- Instances -->
+      <section id="instances-view" class="view hidden">
+        <div class="toolbar">
+          <input id="inst-filter" placeholder="filter id/label/url…" class="search-input"/>
+          <button id="add-instance-btn" class="btn-primary">Add Instance</button>
+        </div>
+        <div id="inst-cards" class="grid"></div>
+      </section>
+
+      <!-- Queries -->
+      <section id="queries-view" class="view hidden">
+        <div class="toolbar">
+          <input id="q-filter" placeholder="filter domain/client…" class="search-input"/>
+          <span id="q-count" class="muted">0 entries</span>
+        </div>
+        <div id="query-log" class="events"></div>
+      </section>
+
+      <!-- Blocklist -->
+      <section id="blocklist-view" class="view hidden">
+        <div class="panel">
+          <h3>Global DNS Blocklist</h3>
+          <p class="sub">Blocked domains apply to ALL clients before per-client policy.</p>
+          <div class="toolbar">
+            <input id="bl-add-input" placeholder="domain.example.com" class="search-input"/>
+            <button id="bl-add" class="btn-primary">Add</button>
+          </div>
+          <div class="toolbar">
+            <input id="bl-url-input" placeholder="AdBlock Plus URL…" class="search-input"/>
+            <button id="bl-import-url" class="btn-primary">Import URL</button>
+          </div>
+          <div class="toolbar">
+            <span id="bl-import-status" class="muted"></span>
+            <input id="bl-filter" placeholder="filter…" class="search-input"/>
+            <button id="bl-export" class="btn">Export</button>
+            <button id="bl-clear" class="btn-danger">Clear All</button>
+          </div>
+          <ul id="blockList" class="list"></ul>
+          <div id="bl-count" class="count"></div>
+        </div>
+      </section>
+
+      <!-- Stats -->
+      <section id="stats-view" class="view hidden">
+        <div class="grid">
+          <div class="stat-card">
+            <h3>Total DNS Queries</h3>
+            <div class="big" id="total-queries">—</div>
+            <small>Across all instances</small>
+          </div>
+          <div class="stat-card">
+            <h3>Total Blocked</h3>
+            <div class="big warn" id="total-blocked">—</div>
+            <small>Filtered queries</small>
+          </div>
+          <div class="stat-card">
+            <h3>Total Upstream Errors</h3>
+            <div class="big err" id="total-upstream-errors">—</div>
+            <small>Failed upstream requests</small>
+          </div>
+          <div class="stat-card">
+            <h3>Online Instances</h3>
+            <div class="big" id="online-instances">—</div>
+            <small><span id="total-instances">—</span> total</small>
+          </div>
+        </div>
+
+        <div class="panel">
+          <h3>Fleet Event Stream</h3>
+          <div class="toolbar">
+            <input id="f-domain" placeholder="filter domain/client…" class="search-input"/>
+            <span id="event-count" class="muted">0 events</span>
+          </div>
+          <ul id="events" class="events"></ul>
+        </div>
+      </section>
+
+      <!-- Settings -->
+      <section id="settings-view" class="view hidden">
+        <div class="panel">
+          <h3>Upstream DNS</h3>
+          <p class="sub">Space-separated specs (udp://host:port or https://host/dns-query).</p>
+          <div class="form-row">
+            <input id="s-upstream" type="text" placeholder="udp://1.1.1.1:53 https://1.1.1.1/dns-query"/>
+          </div>
+          <button id="s-save" class="btn-primary">Save Upstream</button>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <!-- Add Instance Modal -->
+  <div id="modal" class="modal-overlay hidden">
+    <div class="modal-box">
+      <h2>Add Instance</h2>
+      <div class="form-row">
+        <label>ID</label>
+        <input id="i-id" placeholder="office-dns"/>
+      </div>
+      <div class="form-row">
+        <label>Label</label>
+        <input id="i-label" placeholder="Office"/>
+      </div>
+      <div class="form-row">
+        <label>URL</label>
+        <input id="i-url" placeholder="http://10.0.0.5:8444"/>
+      </div>
+      <div class="form-row">
+        <label>Token</label>
+        <input id="i-token" type="password" placeholder="admin token (optional if using claim code)"/>
+      </div>
+      <div class="form-row">
+        <label>Claim code</label>
+        <input id="i-claim" placeholder="e.g. ABCD-1234 (from blipd journal, one-time)"/>
+      </div>
+      <div class="modal-actions">
+        <button id="i-cancel" class="btn">Cancel</button>
+        <button id="i-save" class="btn-primary">Add</button>
+      </div>
+    </div>
   </div>
-  <nav class="sidebar-nav">
-    <a href="/" data-nav="dashboard" class="nav-item active">&#x1F4CA; Dashboard</a>
-    <a href="/stats.html?token={{TOKEN}}" data-nav="stats" class="nav-item">&#x1F4C4; Stats</a>
-    <a href="/instances.html?token={{TOKEN}}" data-nav="instances" class="nav-item">&#x1F4C4; Instances</a>
-    <a href="/queries.html?token={{TOKEN}}" data-nav="queries" class="nav-item">&#x1F50D; Queries</a>
-    <a href="/blocklist.html?token={{TOKEN}}" data-nav="blocklist" class="nav-item">&#x1F6AE; Blocklist</a>
-    <a href="/settings.html?token={{TOKEN}}" data-nav="settings" class="nav-item">&#x2699; Settings</a>
-  </nav>
-  <div class="sidebar-footer">
-    <span id="sidebar-status" class="badge off">—</span>
+
+  <!-- Policy Modal -->
+  <div id="policy-modal" class="modal-overlay hidden">
+    <div class="modal-box">
+      <h2 id="policy-modal-title">New Policy</h2>
+      <div class="form-row">
+        <label>Policy ID</label>
+        <input id="p-id" placeholder="kids"/>
+      </div>
+      <div class="form-row">
+        <label>Networks (CIDR, space-separated)</label>
+        <input id="p-networks" placeholder="192.168.10.0/24 10.0.0.0/8"/>
+      </div>
+      <div class="form-row">
+        <label>Block (one per line)</label>
+        <textarea id="p-block" rows="3" placeholder="ads.example.com&#10;*.tracker.net"></textarea>
+      </div>
+      <div class="form-row">
+        <label>Allow (one per line)</label>
+        <textarea id="p-allow" rows="3" placeholder="good.tracker.net"></textarea>
+      </div>
+      <div class="form-row">
+        <label>Block action</label>
+        <select id="p-action">
+          <option value="nxdomain">nxdomain</option>
+          <option value="refused">refused</option>
+          <option value="zero">zero</option>
+        </select>
+      </div>
+      <div class="form-row">
+        <label><input type="checkbox" id="p-log"/> Log queries</label>
+      </div>
+      <div class="form-row">
+        <label>Upstream (leave blank for default)</label>
+        <input id="p-upstream" placeholder="udp://1.1.1.1:53"/>
+      </div>
+      <div class="modal-actions">
+        <button id="p-cancel" class="btn">Cancel</button>
+        <button id="p-save" class="btn-primary">Save</button>
+      </div>
+    </div>
   </div>
-</aside>
 
-<main id="main">
-  <header id="topbar">
-    <button id="sidebar-toggle" class="icon-btn" title="Toggle sidebar">&#9776;</button>
-    <h2 id="page-title">Dashboard</h2>
-    <div class="topbar-right">
-      <span id="conn" class="badge off">connecting</span>
-      <span id="user-label" class="muted"></span>
-    </div>
-  </header>
+  <!-- Toast -->
+  <div id="toast" class="toast hidden"></div>
 
-  <!-- Dashboard -->
-  <section id="dashboard-view" class="view">
-    <div class="cards">
-      <div class="card stat"><h3>Queries</h3><div class="big" id="d-queries">—</div><small>total</small></div>
-      <div class="card stat"><h3>Blocked</h3><div class="big warn" id="d-blocked">—</div><small>filtered</small></div>
-      <div class="card stat"><h3>Upstream Errs</h3><div class="big err" id="d-errors">—</div><small>failed</small></div>
-      <div class="card stat"><h3>Instances</h3><div class="big" id="d-instances">—</div><small><span id="d-online">0</span> online</small></div>
-    </div>
-    <section class="panel"><h3>Query Volume (24h)</h3><div class="chart-wrap"><canvas id="chart-queries" height="200"></canvas></div></section>
-  </section>
-
-  <!-- Instances -->
-  <section id="instances-view" class="view hidden">
-    <div class="toolbar"><input id="inst-filter" placeholder="filter id/label/url…"/></div>
-    <div id="inst-cards" class="cards"></div>
-  </section>
-
-  <!-- Stats -->
-  <section id="stats-view" class="view hidden">
-    <div class="dashboard-cards">
-      <div class="card stat"><h3>Total Queries</h3><div class="big" id="total-queries">—</div><small>total</small></div>
-      <div class="card stat"><h3>Blocked</h3><div class="big warn" id="total-blocked">—</div><small>filtered</small></div>
-      <div class="card stat"><h3>Upstream Errs</h3><div class="big err" id="total-upstream-errors">—</div><small>failed</small></div>
-      <div class="card stat"><h3>Instances</h3><div class="big" id="online-instances">—</div><small><span id="total-instances">—</span> total</small></div>
-    </div>
-    <section class="panel">
-      <h3>Fleet Event Stream</h3>
-      <div class="toolbar">
-        <input id="f-domain" placeholder="filter domain/client…" />
-        <span id="event-count" class="muted">0 events</span>
-      </div>
-      <ul id="events" class="events"></ul>
-    </section>
-  </section>
-
-  <!-- Queries -->
-  <section id="queries-view" class="view hidden">
-    <div class="toolbar">
-      <input id="f-domain" placeholder="filter domain/client…" />
-    </div>
-    <div id="query-log" class="events"></div>
-  </section>
-
-  <!-- Blocklist — full page for managing entries -->
-  <section id="blocklist-view" class="view hidden">
-    <div class="panel blocklist-panel">
-      <h3>Global DNS Blocklist</h3>
-      <p class="sub">Blocked domains apply to ALL clients before per-client policy.</p>
-      <div class="blocklist-actions">
-        <input id="bl-add-input" placeholder="domain.example.com"/>
-        <button id="bl-add" class="btn-primary">Add</button>
-      </div>
-      <div class="blocklist-actions">
-        <input id="bl-url-input" placeholder="AdBlock Plus URL…"/>
-        <button id="bl-import-url" class="btn-primary">Import URL</button>
-        <label class="btn-file"><input type="file" id="bl-file-input" accept=".txt,.csv,.conf" hidden/>Choose File</label>
-        <button id="bl-import-file" class="btn-primary" disabled>Import File</button>
-      </div>
-      <div class="blocklist-actions toolbar">
-        <span id="bl-import-status" class="muted"></span>
-        <input id="bl-filter" placeholder="filter…"/>
-        <button id="bl-export">Export</button>
-        <button id="bl-clear" class="btn-danger">Clear All</button>
-      </div>
-      <ul id="blockList" class="blocklist"></ul>
-      <div id="bl-count" class="muted"></div>
-    </div>
-  </section>
-
-  <!-- Settings -->
-  <section id="settings-view" class="view hidden">
-    <div class="panel">
-      <h3>Upstream DNS</h3>
-      <p class="sub">Space-separated specs (udp://host:port or https://host/dns-query).</p>
-      <div class="form-row"><input id="s-upstream" type="text" placeholder="udp://1.1.1.1:53 https://1.1.1.1/dns-query"/></div>
-      <button id="s-save" class="btn-primary">Save Upstream</button>
-    </div>
-  </section>
-</main>
-
-<script src="app.js"></script>
+  <!-- Chart.js (loaded from CDN) -->
+  <script src="https://unpkg.com/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <script src="app.js"></script>
 </body>
 </html>
