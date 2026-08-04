@@ -8,234 +8,349 @@
 <link rel="stylesheet" href="style.css"/>
 </head>
 <body>
-  <!-- Sidebar -->
-  <aside id="sidebar" class="sidebar">
-    <div class="sidebar-header">
-      <div class="brand">
-        <span class="brand-icon">🗝️</span>
-        <span class="brand-text">BlipDNS</span>
+<div class="app">
+  <!-- ============ SIDEBAR ============ -->
+  <aside class="sidebar" id="sidebar">
+    <div class="sidebar-brand">
+      <div class="brand-mark">
+        <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.6 3.8 5.7 3.8 9S14.5 18.4 12 21c-2.5-2.6-3.8-5.7-3.8-9S9.5 5.6 12 3z"/>
+        </svg>
       </div>
-      <button id="sidebar-toggle" class="icon-btn" title="Toggle sidebar">☰</button>
+      <div>
+        <div class="brand-text">Blip<b>DNS</b></div>
+        <div class="brand-sub">Controller</div>
+      </div>
     </div>
-    <nav id="nav" class="nav"></nav>
+
+    <nav class="nav" id="nav"><!-- rendered by app.js --></nav>
+
     <div class="sidebar-footer">
-      <span id="sidebar-status" class="badge off">—</span>
+      <span class="dot on" id="fleet-dot"></span>
+      <span class="version" id="fleet-status">connecting…</span>
     </div>
   </aside>
 
-  <!-- Main -->
-  <main id="main">
-    <header id="topbar">
-      <button id="sidebar-toggle-top" class="icon-btn" title="Toggle sidebar">☰</button>
-      <h2 id="page-title">Dashboard</h2>
+  <!-- ============ MAIN ============ -->
+  <main class="main">
+    <header class="topbar">
+      <div class="topbar-title">
+        <h1 id="page-title">Dashboard</h1>
+        <p id="page-sub">Fleet overview</p>
+      </div>
       <div class="topbar-right">
-        <span id="conn" class="badge off">—</span>
+        <span class="badge" id="conn">—</span>
+        <span class="badge accent hidden" id="token-pill" title="Authenticated to control plane">✓</span>
+        <button class="icon-btn" id="sidebar-toggle" title="Toggle sidebar">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18M3 12h18M9 18h12"/></svg>
+        </button>
       </div>
     </header>
 
-    <div id="content" class="content">
-      <!-- Dashboard -->
-      <section id="dashboard-view" class="view">
-        <div class="grid">
-          <div class="stat-card">
-            <h3>Total Queries</h3>
-            <div class="big" id="d-queries">—</div>
-            <small>All instances</small>
+    <div class="stack">
+
+      <!-- ================= DASHBOARD ================= -->
+      <section id="view-dashboard" class="view">
+        <div class="grid grid-4">
+          <div class="stat">
+            <div class="stat-icon i-blue">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 20h20M6 16V8m6 8V4m6 12v-6"/></svg>
+            </div>
+            <div class="stat-label">Total Queries</div>
+            <div class="stat-value" id="d-queries">—</div>
+            <div class="stat-sub">across all instances</div>
           </div>
-          <div class="stat-card">
-            <h3>Blocked</h3>
-            <div class="big warn" id="d-blocked">—</div>
-            <small>Filtered queries</small>
+          <div class="stat">
+            <div class="stat-icon i-red">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="m9 9 6 6m0-6-6 6"/></svg>
+            </div>
+            <div class="stat-label">Blocked</div>
+            <div class="stat-value" id="d-blocked">—</div>
+            <div class="stat-sub"><span class="down" id="d-blockrate">—</span> filter rate</div>
           </div>
-          <div class="stat-card">
-            <h3>Upstream Errors</h3>
-            <div class="big err" id="d-errors">—</div>
-            <small>Failed upstream requests</small>
+          <div class="stat">
+            <div class="stat-icon i-amber">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>
+            </div>
+            <div class="stat-label">Upstream Errors</div>
+            <div class="stat-value" id="d-errors">—</div>
+            <div class="stat-sub">failed upstream requests</div>
           </div>
-          <div class="stat-card">
-            <h3>Online</h3>
-            <div class="big" id="d-online">—</div>
-            <small><span id="d-total">—</span> total instances</small>
+          <div class="stat">
+            <div class="stat-icon i-green">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 7.5h.01M7 16.5h.01"/></svg>
+            </div>
+            <div class="stat-label">Instances Online</div>
+            <div class="stat-value" id="d-online">—</div>
+            <div class="stat-sub"><span id="d-total">—</span> total</div>
           </div>
         </div>
 
         <div class="panel">
-          <h3>Traffic (24h)</h3>
-          <div class="chart-wrap">
-            <canvas id="chart-queries"></canvas>
+          <div class="panel-head">
+            <h3>Traffic</h3>
+            <span class="spacer"></span>
+            <div class="seg" id="chart-range">
+              <button data-r="1h" class="">1h</button>
+              <button data-r="6h">6h</button>
+              <button data-r="24h" class="active">24h</button>
+              <button data-r="168h">7d</button>
+            </div>
           </div>
-        </div>
-      </section>
-
-      <!-- Instances -->
-      <section id="instances-view" class="view hidden">
-        <div class="toolbar">
-          <input id="inst-filter" placeholder="filter id/label/url…" class="search-input"/>
-          <button id="add-instance-btn" class="btn-primary">Add Instance</button>
-        </div>
-        <div id="inst-cards" class="grid"></div>
-      </section>
-
-      <!-- Queries -->
-      <section id="queries-view" class="view hidden">
-        <div class="toolbar">
-          <input id="q-filter" placeholder="filter domain/client…" class="search-input"/>
-          <span id="q-count" class="muted">0 entries</span>
-        </div>
-        <div id="query-log" class="events"></div>
-      </section>
-
-      <!-- Blocklist -->
-      <section id="blocklist-view" class="view hidden">
-        <div class="panel">
-          <h3>Global DNS Blocklist</h3>
-          <p class="sub">Blocked domains apply to ALL clients before per-client policy.</p>
-          <div class="toolbar">
-            <input id="bl-add-input" placeholder="domain.example.com" class="search-input"/>
-            <button id="bl-add" class="btn-primary">Add</button>
-          </div>
-          <div class="toolbar">
-            <input id="bl-url-input" placeholder="AdBlock Plus URL…" class="search-input"/>
-            <button id="bl-import-url" class="btn-primary">Import URL</button>
-          </div>
-          <div class="toolbar">
-            <span id="bl-import-status" class="muted"></span>
-            <input id="bl-filter" placeholder="filter…" class="search-input"/>
-            <button id="bl-export" class="btn">Export</button>
-            <button id="bl-clear" class="btn-danger">Clear All</button>
-          </div>
-          <ul id="blockList" class="list"></ul>
-          <div id="bl-count" class="count"></div>
-        </div>
-      </section>
-
-      <!-- Stats -->
-      <section id="stats-view" class="view hidden">
-        <div class="grid">
-          <div class="stat-card">
-            <h3>Total DNS Queries</h3>
-            <div class="big" id="total-queries">—</div>
-            <small>Across all instances</small>
-          </div>
-          <div class="stat-card">
-            <h3>Total Blocked</h3>
-            <div class="big warn" id="total-blocked">—</div>
-            <small>Filtered queries</small>
-          </div>
-          <div class="stat-card">
-            <h3>Total Upstream Errors</h3>
-            <div class="big err" id="total-upstream-errors">—</div>
-            <small>Failed upstream requests</small>
-          </div>
-          <div class="stat-card">
-            <h3>Online Instances</h3>
-            <div class="big" id="online-instances">—</div>
-            <small><span id="total-instances">—</span> total</small>
-          </div>
+          <div class="chart-wrap"><canvas id="chart-queries"></canvas></div>
         </div>
 
         <div class="panel">
-          <h3>Fleet Event Stream</h3>
-          <div class="toolbar">
-            <input id="f-domain" placeholder="filter domain/client…" class="search-input"/>
-            <span id="event-count" class="muted">0 events</span>
-          </div>
-          <ul id="events" class="events"></ul>
+          <div class="panel-head"><h3>Instances</h3><span class="spacer"></span><a href="#" data-goto="instances">View all →</a></div>
+          <div id="d-instances"><!-- rows --></div>
         </div>
       </section>
 
-      <!-- Settings -->
-      <section id="settings-view" class="view hidden">
-        <div class="panel">
-          <h3>Upstream DNS</h3>
-          <p class="sub">Space-separated specs (udp://host:port or https://host/dns-query).</p>
-          <div class="form-row">
-            <input id="s-upstream" type="text" placeholder="udp://1.1.1.1:53 https://1.1.1.1/dns-query"/>
+      <!-- ================= INSTANCES ================= -->
+      <section id="view-instances" class="view hidden">
+        <div class="row">
+          <div class="search grow" style="max-width:320px">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+            <input class="input" id="inst-filter" placeholder="Filter id / label / url…"/>
           </div>
-          <button id="s-save" class="btn-primary">Save Upstream</button>
+          <span class="muted" id="inst-count"></span>
+          <span class="right"></span>
+          <button class="btn btn-primary" id="add-instance-btn">
+            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+            Add Instance
+          </button>
+        </div>
+        <div class="table-wrap">
+          <table class="tbl">
+            <thead><tr>
+              <th>Instance</th><th>Status</th><th class="num">Queries</th><th class="num">Blocked</th>
+              <th class="num">Cache</th><th class="num">Ping</th><th>Adopted</th><th></th>
+            </tr></thead>
+            <tbody id="inst-tbody"></tbody>
+          </table>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head"><h3>Live Events</h3><span class="spacer"></span><span class="badge on" id="ev-live">live</span></div>
+          <ul class="feed" id="d-events"></ul>
         </div>
       </section>
-    </div>
+
+      <!-- ================= QUERIES / LOGS ================= -->
+      <section id="view-queries" class="view hidden">
+        <div class="row">
+          <div class="seg" id="q-action-seg">
+            <button data-a="" class="active">All</button>
+            <button data-a="PASS">Allowed</button>
+            <button data-a="BLOCK">Blocked</button>
+          </div>
+          <div class="search grow" style="max-width:320px">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+            <input class="input" id="q-filter" placeholder="Filter domain / client / instance…"/>
+          </div>
+          <select class="select" id="q-instance"><option value="">All instances</option></select>
+          <span class="right"></span>
+          <button class="btn" id="q-refresh">
+            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-2.6-6.3M21 3v6h-6"/></svg>
+            Refresh
+          </button>
+          <span class="muted" id="q-count">0 entries</span>
+        </div>
+        <div class="table-wrap">
+          <table class="tbl">
+            <thead><tr><th>Time</th><th>Domain</th><th>Action</th><th>Client</th><th>Instance</th></tr></thead>
+            <tbody id="q-tbody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- ================= BLOCKLIST ================= -->
+      <section id="view-blocklist" class="view hidden">
+        <div class="grid grid-2">
+          <div class="panel">
+            <div class="panel-head"><h3>Add Domain</h3><span class="spacer"></span><span class="badge accent" id="bl-count">0</span></div>
+            <div class="panel-body">
+              <div class="row">
+                <div class="search grow">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+                  <input class="input" id="bl-add-input" placeholder="domain.example.com"/>
+                </div>
+                <button class="btn btn-primary" id="bl-add">Add</button>
+              </div>
+              <div class="divider mt"></div>
+              <div class="field mt">
+                <label>Import remote blocklist</label>
+                <div class="row">
+                  <div class="search grow">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7"/><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"/></svg>
+                    <input class="input" id="bl-url-input" placeholder="https://raw.githubusercontent.com/ookangzheng/blah/master/adblock.txt"/>
+                  </div>
+                  <button class="btn" id="bl-import-url">
+                    <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 3v12m0 0 4-4m-4 4-4-4M4 21h16"/></svg>
+                    Import
+                  </button>
+                </div>
+                <span class="hint" id="bl-import-status">Fetch Adblock-Plus format lists such as <span class="mono">oisd.nl</span>.</span>
+              </div>
+              <div class="row mt">
+                <button class="btn" id="bl-export">Export .txt</button>
+                <button class="btn btn-danger" id="bl-clear">Clear all</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-head"><h3>Blocked Domains</h3><span class="spacer"></span>
+              <div class="search" style="width:200px">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+                <input class="input" id="bl-filter" placeholder="Filter…"/>
+              </div>
+            </div>
+            <ul class="list" id="bl-list" style="max-height:440px; overflow-y:auto"></ul>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head"><h3>Per-Instance Policies</h3><span class="spacer"></span><span class="muted">Scope allow / block rules &amp; upstreams to specific networks</span></div>
+          <div class="table-wrap" style="border:none; box-shadow:none">
+            <table class="tbl">
+              <thead><tr><th>Instance</th><th>Policies</th><th></th></tr></thead>
+              <tbody id="pol-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- ================= SETTINGS ================= -->
+      <section id="view-settings" class="view hidden">
+        <div class="grid grid-2">
+          <div class="panel">
+            <div class="panel-head"><h3>Upstream DNS</h3><span class="spacer"></span><span class="badge accent">default policy</span></div>
+            <div class="panel-body">
+              <div class="field">
+                <label>Upstream resolvers</label>
+                <input class="input" id="s-upstream" placeholder="udp://1.1.1.1:53 https://1.1.1.1/dns-query"/>
+                <span class="hint">Space-separated specs. Leave blank to use each instance's compiled default.</span>
+              </div>
+              <button class="btn btn-primary mt" id="s-save-upstream">Save</button>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-head"><h3>Blocklist Sync</h3><span class="spacer"></span><span class="badge" id="s-blsync">—</span></div>
+            <div class="panel-body">
+              <div class="field">
+                <label>Source URL</label>
+                <input class="input" id="s-bl-url" placeholder="https://oisd.nl/"/>
+                <div class="row mt">
+                  <button class="btn" id="s-fetch">Fetch now</button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-head"><h3>About</h3></div>
+            <div class="panel-body">
+              <div class="row"><span class="muted" style="width:120px">Controller</span><span class="mono" id="s-ctrl-ver">—</span></div>
+              <div class="row mt"><span class="muted" style="width:120px">Instances</span><span id="s-inst-count">—</span></div>
+              <div class="row mt"><span class="muted" style="width:120px">Auth</span><span class="badge accent">token-gated</span></div>
+            </div>
+          </div>
+
+          <div class="panel" style="border-style:dashed; border-color:var(--border-2); background:transparent">
+            <div class="panel-body">
+              <h3 style="margin:0 0 6px">Reset &amp; destroy</h3>
+              <p class="muted" style="font-size:13px">Remove an instance from the fleet. Destructive — no undo.</p>
+              <button class="btn btn-danger" id="s-reset-demo" disabled>Manage via Instances page</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+    </div><!-- /stack -->
   </main>
+</div>
 
-  <!-- Add Instance Modal -->
-  <div id="modal" class="modal-overlay hidden">
-    <div class="modal-box">
-      <h2>Add Instance</h2>
-      <div class="form-row">
-        <label>ID</label>
-        <input id="i-id" placeholder="office-dns"/>
+<!-- ============ INSTANCE MODAL ============ -->
+<div class="overlay hidden" id="modal-instance">
+  <div class="modal">
+    <div class="modal-head"><h3 id="inst-modal-title">Add Instance</h3><button class="icon-btn x" data-close="modal-instance">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button></div>
+    <div class="modal-body">
+      <div class="form-grid">
+        <div class="field"><label>ID</label><input class="input" id="i-id" placeholder="office-dns"/></div>
+        <div class="field"><label>Label</label><input class="input" id="i-label" placeholder="Office"/></div>
       </div>
-      <div class="form-row">
-        <label>Label</label>
-        <input id="i-label" placeholder="Office"/>
-      </div>
-      <div class="form-row">
-        <label>URL</label>
-        <input id="i-url" placeholder="http://10.0.0.5:8444"/>
-      </div>
-      <div class="form-row">
-        <label>Token</label>
-        <input id="i-token" type="password" placeholder="admin token (optional if using claim code)"/>
-      </div>
-      <div class="form-row">
-        <label>Claim code</label>
-        <input id="i-claim" placeholder="e.g. ABCD-1234 (from blipd journal, one-time)"/>
-      </div>
-      <div class="modal-actions">
-        <button id="i-cancel" class="btn">Cancel</button>
-        <button id="i-save" class="btn-primary">Add</button>
+      <div class="field"><label>Management URL</label><input class="input" id="i-url" placeholder="http://10.0.0.5:8444"/></div>
+      <div class="form-grid">
+        <div class="field"><label>Token <span class="faint">(or use claim code)</span></label><input class="input" id="i-token" type="password" placeholder="admin token"/></div>
+        <div class="field"><label>Claim code <span class="faint">(one-time bootstrap)</span></label><input class="input" id="i-claim" placeholder="ABCD-1234"/></div>
       </div>
     </div>
-  </div>
-
-  <!-- Policy Modal -->
-  <div id="policy-modal" class="modal-overlay hidden">
-    <div class="modal-box">
-      <h2 id="policy-modal-title">New Policy</h2>
-      <div class="form-row">
-        <label>Policy ID</label>
-        <input id="p-id" placeholder="kids"/>
-      </div>
-      <div class="form-row">
-        <label>Networks (CIDR, space-separated)</label>
-        <input id="p-networks" placeholder="192.168.10.0/24 10.0.0.0/8"/>
-      </div>
-      <div class="form-row">
-        <label>Block (one per line)</label>
-        <textarea id="p-block" rows="3" placeholder="ads.example.com&#10;*.tracker.net"></textarea>
-      </div>
-      <div class="form-row">
-        <label>Allow (one per line)</label>
-        <textarea id="p-allow" rows="3" placeholder="good.tracker.net"></textarea>
-      </div>
-      <div class="form-row">
-        <label>Block action</label>
-        <select id="p-action">
-          <option value="nxdomain">nxdomain</option>
-          <option value="refused">refused</option>
-          <option value="zero">zero</option>
-        </select>
-      </div>
-      <div class="form-row">
-        <label><input type="checkbox" id="p-log"/> Log queries</label>
-      </div>
-      <div class="form-row">
-        <label>Upstream (leave blank for default)</label>
-        <input id="p-upstream" placeholder="udp://1.1.1.1:53"/>
-      </div>
-      <div class="modal-actions">
-        <button id="p-cancel" class="btn">Cancel</button>
-        <button id="p-save" class="btn-primary">Save</button>
-      </div>
+    <div class="modal-foot">
+      <button class="btn" data-close="modal-instance">Cancel</button>
+      <button class="btn btn-primary" id="i-save">Add Instance</button>
     </div>
   </div>
+</div>
 
-  <!-- Toast -->
-  <div id="toast" class="toast hidden"></div>
+<!-- ============ POLICY MODAL ============ -->
+<div class="overlay hidden" id="modal-policy">
+  <div class="modal modal-lg">
+    <div class="modal-head"><h3 id="pol-title">Policies — <span id="pol-inst">…</span></h3><button class="icon-btn x" data-close="modal-policy">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button></div>
+    <div class="modal-body">
+      <div id="pol-list">
+        <div class="panel" style="background:transparent">
+          <div class="table-wrap" style="border:none; box-shadow:none">
+            <table class="tbl"><thead><tr><th>ID</th><th>Networks</th><th>Block</th><th>Action</th><th></th></tr></thead>
+              <tbody id="pol-list-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="row mt"><button class="btn" id="pol-new">+ New Policy</button></div>
+      </div>
+      <div id="pol-edit" class="hidden">
+        <div class="form-grid">
+          <div class="field"><label>Policy ID</label><input class="input" id="p-id" placeholder="kids"/></div>
+          <div class="field"><label>Block action</label>
+            <select class="select" id="p-action"><option value="nxdomain">nxdomain</option><option value="refused">refused</option><option value="zero">zero / 0.0.0.0</option></select>
+          </div>
+        </div>
+        <div class="field"><label>Networks <span class="faint">(space-separated CIDR)</span></label><input class="input" id="p-networks" placeholder="192.168.10.0/24 10.0.0.0/8"/></div>
+        <div class="form-grid">
+          <div class="field"><label>Block <span class="faint">(one per line)</span></label><textarea class="input" id="p-block" rows="4" placeholder="ads.example.com&#10;*.tracker.net"></textarea></div>
+          <div class="field"><label>Allow <span class="faint">(one per line)</span></label><textarea class="input" id="p-allow" rows="4" placeholder="good.tracker.net"></textarea></div>
+        </div>
+        <div class="field"><label>Upstream <span class="faint">(blank = default)</span></label><input class="input" id="p-upstream" placeholder="udp://1.1.1.1:53"/></div>
+        <div class="field"><label class="row" style="gap:8px"><input type="checkbox" id="p-log" style="accent-color:var(--accent)"/> <span>Log matching queries</span></label></div>
+      </div>
+    </div>
+    <div class="modal-foot" id="pol-foot">
+      <button class="btn" id="pol-back" style="display:none">← Back</button>
+      <span class="spacer grow"></span>
+      <button class="btn" data-close="modal-policy">Close</button>
+      <button class="btn btn-primary hidden" id="p-save">Save Policy</button>
+    </div>
+  </div>
+</div>
 
-  <!-- Chart.js (loaded from CDN) -->
-  <script src="https://unpkg.com/chart.js@4.4.1/dist/chart.umd.min.js"></script>
-  <script src="app.js"></script>
+<!-- ============ CONFIRM MODAL ============ -->
+<div class="overlay hidden" id="modal-confirm">
+  <div class="modal" style="max-width:420px">
+    <div class="modal-head"><h3 id="cf-title">Confirm</h3></div>
+    <div class="modal-body"><p id="cf-msg" class="muted" style="margin:0"></p></div>
+    <div class="modal-foot">
+      <button class="btn" data-close="modal-confirm">Cancel</button>
+      <button class="btn btn-danger" id="cf-ok">Confirm</button>
+    </div>
+  </div>
+</div>
+
+<div class="toasts" id="toasts"></div>
+
+<script src="https://unpkg.com/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script src="app.js"></script>
 </body>
 </html>
