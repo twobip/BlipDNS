@@ -1,7 +1,6 @@
 package controller
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"io/fs"
@@ -14,55 +13,72 @@ import (
 
 // Server is the blipc controller HTTP + UI server.
 type Server struct {
-	token string
+	auth  *Auth
 	fleet *Fleet
 	ui    fs.FS // embedded web assets (index.html etc.)
 }
 
 // NewServer builds the controller HTTP server. ui may be nil (API-only).
-func NewServer(token string, fleet *Fleet, ui fs.FS) *Server {
-	return &Server{token: token, fleet: fleet, ui: ui}
+// username/password configure the login gate; empty password => closed auth.
+func NewServer(username, password string, fleet *Fleet, ui fs.FS) *Server {
+	return &Server{auth: NewAuth(username, password), fleet: fleet, ui: ui}
 }
 
 // Handler returns the controller's HTTP handler (API + UI).
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
-	// API (token-gated)
+	// Login / logout are unauthenticated (login obviously; logout is idempotent).
+	mux.HandleFunc("/api/login", s.handleLogin)
+	mux.HandleFunc("/api/logout", s.handleLogout)
+
+	// API (session-gated)
 	api := func(h func(http.ResponseWriter, *http.Request)) http.HandlerFunc {
-		return s.auth(h)
+		return s.requireAuth(h)
 	}
 	mux.HandleFunc("/api/instances", api(s.handleInstances))
 	mux.HandleFunc("/api/instances/", api(s.handleInstance)) // /add /delete /policies /policy /adopt /adopt/status /adopt/reset /label /query-log
 	mux.HandleFunc("/api/queries", api(s.handleQueries))     // query log
-	mux.HandleFunc("/api/stats", api(s.handleStats))           // aggregated query stats for graphs
+	mux.HandleFunc("/api/stats", api(s.handleStats))         // aggregated query stats for graphs
 	mux.HandleFunc("/api/events", api(s.handleEvents))
 	mux.HandleFunc("/api/health", api(s.handleHealth))
 
-	// Blocklist (token-gated)
-	mux.HandleFunc("/api/blocklist", api(s.handleBlocklist))                   // GET list / POST add / DELETE remove
-	mux.HandleFunc("/api/blocklist/export", api(s.handleBlocklistExport))     // GET text
+	// Blocklist (session-gated)
+	mux.HandleFunc("/api/blocklist", api(s.handleBlocklist))                     // GET list / POST add / DELETE remove
+	mux.HandleFunc("/api/blocklist/export", api(s.handleBlocklistExport))        // GET text
 	mux.HandleFunc("/api/blocklist/import-url", api(s.handleBlocklistImportURL)) // POST fetch from URL
 
-	// UI: the page itself requires the token, but static assets (js/css) are
-	// served unauthenticated. Browsers fetch sub-resources like /app.js as
-	// relative URLs, which drop the ?token= query — gating them would 401 and
-	// leave the console stuck on "connecting". The assets hold no secrets; the
-	// control plane (/api/*) stays fully token-gated.
+	// UI: login page is public; static assets (js/css) are public; everything
+	// else requires a session. Assets hold no secrets and must load as relative
+	// sub-resources; the control plane (/api/*) stays session-gated.
 	if s.ui != nil {
-		mux.Handle("/", http.HandlerFunc(s.serveUI))
+		mux.Handle("/", s.securityHeaders(http.HandlerFunc(s.serveUI)))
 	} else {
 		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "blipc: no UI embedded (API only)", http.StatusNotFound)
 		})
 	}
-	return mux
+	return s.securityHeaders(mux)
 }
 
-func (s *Server) auth(h http.HandlerFunc) http.HandlerFunc {
+// securityHeaders applies defense-in-depth headers to every response.
+func (s *Server) securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("X-XSS-Protection", "1; mode=block")
+		w.Header().Set("Content-Security-Policy",
+			"default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; "+
+				"script-src 'self' https://unpkg.com; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'")
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (s *Server) requireAuth(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !s.validToken(r) {
-			w.Header().Set("WWW-Authenticate", "Bearer")
+		if !s.auth.Authed(r) {
+			w.Header().Set("WWW-Authenticate", "Bearer realm=\"blipc\"")
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -70,19 +86,48 @@ func (s *Server) auth(h http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// validToken reports whether the request carries the server's token, either as
-// a Bearer header or a ?token= query parameter.
-func (s *Server) validToken(r *http.Request) bool {
-	if s.token == "" {
-		return true
+// handleLogin authenticates a username/password and mints a session cookie.
+func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
 	}
-	tok := r.Header.Get("Authorization")
-	if len(tok) > 7 && strings.EqualFold(tok[:7], "Bearer ") {
-		tok = tok[7:]
-	} else if q := r.URL.Query().Get("token"); q != "" {
-		tok = q
+	var req struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
 	}
-	return tok == s.token
+	// bound the body so a giant payload can't be slurped
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if !s.auth.Configured() {
+		http.Error(w, "authentication not configured", http.StatusForbidden)
+		return
+	}
+	id, err := s.auth.Login(req.Username, req.Password, ClientIP(r))
+	if err != nil {
+		if err == errLocked {
+			http.Error(w, "too many attempts", http.StatusTooManyRequests)
+			return
+		}
+		http.Error(w, "invalid credentials", http.StatusUnauthorized)
+		return
+	}
+	s.auth.MintCookie(w, r, id)
+	writeJSON(w, map[string]bool{"ok": true})
+}
+
+// handleLogout invalidates the session and clears the cookie.
+func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	s.auth.Destroy(r)
+	s.auth.ClearCookie(w, r)
+	writeJSON(w, map[string]bool{"ok": true})
 }
 
 func writeJSON(w http.ResponseWriter, v interface{}) {
@@ -414,10 +459,11 @@ func (s *Server) handleBlocklistImportURL(w http.ResponseWriter, r *http.Request
 	writeJSON(w, map[string]interface{}{"ok": true, "count": len(s.fleet.Blocklist().List())})
 }
 
+// serveUI dispatches inbound HTTP to embedded assets (public) or the SPA
+// (session-gated) or the login page (public).
 func (s *Server) serveUI(w http.ResponseWriter, r *http.Request) {
-	// Static assets (js/css/svg/ico/png) are served unauthenticated so browsers
-	// can load them as relative sub-resources after the token query param is
-	// dropped on sub-resource fetches.
+	// Public static assets: js/css/svg/ico/png embed token-free, served without
+	// a session so browsers can load them as relative sub-resources.
 	if isUIAsset(r.URL.Path) {
 		name := strings.TrimPrefix(r.URL.Path, "/")
 		b, err := fs.ReadFile(s.ui, name)
@@ -425,36 +471,32 @@ func (s *Server) serveUI(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
-		// Inject token into {{TOKEN}} placeholders for nav links
-		tok := r.URL.Query().Get("token")
-		if h := r.Header.Get("Authorization"); len(h) > 7 && strings.EqualFold(h[:7], "Bearer ") {
-			tok = h[7:]
-		}
-		if tok != "" && len(b) > 0 {
-			b = bytes.ReplaceAll(b, []byte("{{TOKEN}}"), []byte(tok))
-		}
 		w.Header().Set("Content-Type", contentType(name))
 		_, _ = w.Write(b)
 		return
 	}
-	// Everything else is a SPA route — require the token, then serve index.html.
-	if !s.validToken(r) {
-		w.Header().Set("WWW-Authenticate", "Bearer")
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+
+	// Public login page (must be reachable without a session).
+	if r.URL.Path == "/login" || r.URL.Path == "/login.html" {
+		b, err := fs.ReadFile(s.ui, "login.html")
+		if err != nil {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write(b)
+		return
+	}
+
+	// Everything else is a session-gated SPA route.
+	if !s.auth.Authed(r) {
+		http.Redirect(w, r, "/login", http.StatusFound)
 		return
 	}
 	b, err := fs.ReadFile(s.ui, "index.html")
 	if err != nil {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
-	}
-	// Inject token into {{TOKEN}} placeholders for nav links
-	tok := r.URL.Query().Get("token")
-	if h := r.Header.Get("Authorization"); len(h) > 7 && strings.EqualFold(h[:7], "Bearer ") {
-		tok = h[7:]
-	}
-	if tok != "" && len(b) > 0 {
-		b = bytes.ReplaceAll(b, []byte("{{TOKEN}}"), []byte(tok))
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = w.Write(b)
@@ -490,5 +532,3 @@ func mustJSON(v interface{}) string {
 	b, _ := json.Marshal(v)
 	return string(b)
 }
-
-var _ = time.Now

@@ -20,8 +20,9 @@ import (
 const version = "blipc/0.1.0"
 
 type config struct {
-	Listen   string                     `yaml:"listen"`
-	Token    string                     `yaml:"token"`
+	Listen    string                      `yaml:"listen"`
+	Username  string                      `yaml:"username"`
+	Password  string                      `yaml:"password"`
 	Instances []controller.InstanceConfig `yaml:"instances"`
 }
 
@@ -33,8 +34,11 @@ func main() {
 	if err != nil {
 		log.Fatalf("blipc: %v", err)
 	}
-	if cfg.Token == "" {
-		cfg.Token = os.Getenv("BLIPC_TOKEN")
+	if cfg.Username == "" {
+		cfg.Username = os.Getenv("BLIPC_USER")
+	}
+	if cfg.Password == "" {
+		cfg.Password = os.Getenv("BLIPC_PASS")
 	}
 	if cfg.Listen == "" {
 		cfg.Listen = "0.0.0.0:8500"
@@ -49,7 +53,7 @@ func main() {
 		}
 	}
 
-	srv := controller.NewServer(cfg.Token, fleet, controller.UI())
+	srv := controller.NewServer(cfg.Username, cfg.Password, fleet, controller.UI())
 	httpSrv := &http.Server{
 		Addr:    cfg.Listen,
 		Handler: srv.Handler(),

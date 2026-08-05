@@ -8,10 +8,10 @@ import (
 // Bus is a thread-safe broadcast hub with a bounded ring buffer of recent
 // events for late-joining SSE clients.
 type Bus struct {
-	mu      sync.Mutex
-	subs    map[chan Event]struct{}
-	buffer  []Event
-	cap     int
+	mu     sync.Mutex
+	subs   map[chan Event]struct{}
+	buffer []Event
+	cap    int
 }
 
 // NewBus creates a bus retaining up to cap recent events.

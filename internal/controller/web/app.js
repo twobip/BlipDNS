@@ -3,15 +3,16 @@
    Wired to the blipc control-plane API.
    ============================================================ */
 
-/* ---------- token / auth ---------- */
-const TOKEN = new URLSearchParams(location.search).get("token") || "";
-const AUTH = TOKEN ? "Bearer " + TOKEN : "";
-
+/* ---------- API client (session-cookie auth) ---------- */
+// Static assets are public; all /api/* calls carry the HttpOnly session cookie
+// automatically (same-origin). A 401 means the session expired/lost — bounce to
+// the login page.
 const API = (path, opts = {}) =>
-  fetch(path, {
-    ...opts,
-    headers: { ...(opts.headers || {}), Authorization: AUTH },
-  }).then((r) => {
+  fetch(path, opts).then((r) => {
+    if (r.status === 401 && !location.pathname.startsWith("/login")) {
+      location.href = "/login";
+      throw new Error("session expired");
+    }
     if (!r.ok) return r.text().then((t) => { throw new Error((t || r.statusText) || (r.status + " " + r.statusText)); });
     return r;
   });
@@ -75,7 +76,7 @@ function renderNav() {
     const a = document.createElement("a");
     a.className = "nav-item" + (item.id === current ? " active" : "");
     a.dataset.nav = item.id;
-    a.href = "/" + item.id + (TOKEN ? "?token=" + encodeURIComponent(TOKEN) : "");
+    a.href = "/" + item.id;
     a.innerHTML = `<span class="nav-icon">${item.icon}</span><span>${item.label}</span>`;
     a.addEventListener("click", (e) => { e.preventDefault(); go(item.id); });
     nav.appendChild(a);
@@ -87,8 +88,7 @@ function go(page, push = true) {
   document.querySelectorAll(".nav-item").forEach((a) => a.classList.toggle("active", a.dataset.nav === page));
   document.querySelectorAll(".view").forEach((v) => v.classList.toggle("hidden", v.id !== "view-" + page));
   if (push) {
-    const qs = TOKEN ? "?token=" + encodeURIComponent(TOKEN) : "";
-    history.pushState({ page }, "", "/" + page + qs);
+    history.pushState({ page }, "", "/" + page);
   }
   const t = TITLES[page] || ["", ""];
   $("page-title").innerHTML = t[0];
@@ -144,7 +144,6 @@ function updateConn() {
   const dot = $("fleet-dot"), st = $("fleet-status");
   if (dot) dot.className = "dot " + (instances.length && on === instances.length ? "on" : on > 0 ? "warn" : instances.length ? "err" : "off");
   if (st) st.textContent = on + "/" + instances.length + " online";
-  if (TOKEN) { const p = $("token-pill"); if (p) p.classList.remove("hidden"); }
 }
 
 /* ---------- dashboard ---------- */
@@ -242,7 +241,7 @@ function cgrad(ctx, rgb) {
 function connectSSE() {
   if (sse) return;
   try {
-    const src = new EventSource("/api/events" + (TOKEN ? "?token=" + encodeURIComponent(TOKEN) : ""));
+    const src = new EventSource("/api/events");
     sse = src;
     src.onopen = () => { $("ev-live").className = "badge on"; };
     src.onmessage = (m) => {
@@ -542,6 +541,12 @@ renderEvents();
 /* sidebar toggle */
 $("sidebar-toggle").onclick = () => document.body.classList.toggle("sidebar-collapsed");
 
+/* logout */
+$("logout-btn").onclick = async () => {
+  try { await fetch("/api/logout", { method: "POST" }); } catch (e) {}
+  location.href = "/login";
+};
+
 /* initial route */
 const initial = (location.pathname.replace(/\/+$/, "") || "/").replace(/^\//, "");
 go(NAV.some((n) => n.id === initial) ? initial : "dashboard", false);
@@ -607,7 +612,7 @@ $("bl-import-url").onclick = async () => {
 };
 $("bl-url-input").addEventListener("keydown", (e) => { if (e.key === "Enter") $("bl-import-url").click(); });
 $("bl-filter").addEventListener("input", renderBlocklist);
-$("bl-export").onclick = () => window.open("/api/blocklist/export" + (TOKEN ? "?token=" + encodeURIComponent(TOKEN) : ""), "_blank");
+$("bl-export").onclick = () => window.open("/api/blocklist/export", "_blank");
 $("bl-clear").onclick = () => {
   confirmDialog("Clear entire blocklist?", "This removes every blocked domain. This cannot be undone.", async () => {
     let n = 0;

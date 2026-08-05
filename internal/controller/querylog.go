@@ -27,9 +27,9 @@ type QueryLogEntry struct {
 
 // TimeSeriesPoint represents a single point in a time series
 type TimeSeriesPoint struct {
-	Timestamp  time.Time `json:"timestamp"`
-	TotalQueries int     `json:"total_queries"`
-	BlockedQueries int   `json:"blocked_queries"`
+	Timestamp      time.Time `json:"timestamp"`
+	TotalQueries   int       `json:"total_queries"`
+	BlockedQueries int       `json:"blocked_queries"`
 }
 
 // NewQueryLogStore creates a new query log store backed by SQLite
@@ -142,10 +142,10 @@ func (s *QueryLogStore) GetQueryStats(ctx context.Context, instance string, buck
 			return nil, err
 		}
 		ts, _ := time.Parse("2006-01-02 15:04:05", tsStr)
-		
+
 		// Calculate bucket key (unix timestamp truncated to bucket size)
 		bucketKey := ts.Unix() / int64(bucketSize.Seconds())
-		
+
 		if _, ok := buckets[bucketKey]; !ok {
 			buckets[bucketKey] = &TimeSeriesPoint{
 				Timestamp: ts.Truncate(bucketSize),
@@ -162,7 +162,7 @@ func (s *QueryLogStore) GetQueryStats(ctx context.Context, instance string, buck
 	for _, v := range buckets {
 		results = append(results, *v)
 	}
-	
+
 	// Sort by timestamp
 	for i := 0; i < len(results)-1; i++ {
 		for j := i + 1; j < len(results); j++ {

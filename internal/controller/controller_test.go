@@ -1,11 +1,11 @@
 package controller
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -19,9 +19,9 @@ import (
 func fakeBlipd(t *testing.T, token, claimCode string, health *control.HealthResponse, stats *control.StatsResponse, policies *control.ListResponse) *httptest.Server {
 	t.Helper()
 	var (
-		mu        sync.Mutex
-		adopted   bool
-		curCode   = claimCode
+		mu      sync.Mutex
+		adopted bool
+		curCode = claimCode
 	)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/health", func(w http.ResponseWriter, r *http.Request) {
@@ -179,30 +179,113 @@ func TestBusRingBuffer(t *testing.T) {
 }
 
 func TestServerAuth(t *testing.T) {
-		fleet := NewFleet("/tmp/blip-test-config.yaml")
-	srv := NewServer("secret", fleet, nil)
-	// unauthenticated
+	fleet := NewFleet("/tmp/blip-test-config.yaml")
+	srv := NewServer("admin", "secret", fleet, nil)
+	// unauthenticated -> 401
 	rec := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/api/instances", nil))
 	if rec.Code != http.StatusUnauthorized {
-		t.Errorf("expected 401, got %d", rec.Code)
+		t.Errorf("expected 401 unauth, got %d", rec.Code)
 	}
-	// with token
+	// old Bearer token must NOT work anymore (token removed)
 	req := httptest.NewRequest("GET", "/api/instances", nil)
 	req.Header.Set("Authorization", "Bearer secret")
 	rec2 := httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec2, req)
-	if rec2.Code != http.StatusOK {
-		t.Errorf("expected 200 with token, got %d", rec2.Code)
+	if rec2.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 for Bearer token, got %d", rec2.Code)
 	}
-	// token via query
-	req3 := httptest.NewRequest("GET", "/api/instances?token=secret", nil)
-	rec3 := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec3, req3)
-	if rec3.Code != http.StatusOK {
-		t.Errorf("expected 200 with ?token, got %d", rec3.Code)
+	// correct login -> 200 + session cookie
+	good, _ := json.Marshal(map[string]string{"username": "admin", "password": "secret"})
+	req = httptest.NewRequest("POST", "/api/login", bytes.NewReader(good))
+	rec4 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec4, req)
+	if rec4.Code != http.StatusOK {
+		t.Fatalf("expected 200 login, got %d", rec4.Code)
 	}
-	_ = strings.TrimSpace
+	cookies := rec4.Result().Cookies()
+	if len(cookies) == 0 {
+		t.Fatal("expected session cookie")
+	}
+	var sid string
+	for _, c := range cookies {
+		if c.Name == sessionCookie {
+			sid = c.Value
+		}
+	}
+	if sid == "" {
+		t.Fatal("no session cookie set")
+	}
+	// session cookie -> 200 on protected API
+	req = httptest.NewRequest("GET", "/api/instances", nil)
+	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: sid})
+	rec5 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec5, req)
+	if rec5.Code != http.StatusOK {
+		t.Errorf("expected 200 with session cookie, got %d", rec5.Code)
+	}
+	// logout -> cookie invalidated
+	lout := httptest.NewRequest("POST", "/api/logout", nil)
+	lout.AddCookie(&http.Cookie{Name: sessionCookie, Value: sid})
+	rec6 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec6, lout)
+	req = httptest.NewRequest("GET", "/api/instances", nil)
+	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: sid})
+	rec7 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec7, req)
+	if rec7.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 after logout, got %d", rec7.Code)
+	}
+}
+
+// TestServerBruteForce verifies the per-IP login lockout after repeated failures.
+func TestServerBruteForce(t *testing.T) {
+	fleet := NewFleet("/tmp/blip-test-config.yaml")
+	srv := NewServer("admin", "secret", fleet, nil)
+	bad, _ := json.Marshal(map[string]string{"username": "admin", "password": "wrong"})
+	for i := 0; i < maxLoginFails; i++ {
+		req := httptest.NewRequest("POST", "/api/login", bytes.NewReader(bad))
+		rec := httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rec, req)
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("expected 401 wrong login %d, got %d", i, rec.Code)
+		}
+	}
+	// rate-limited after maxLoginFails
+	req := httptest.NewRequest("POST", "/api/login", bytes.NewReader(bad))
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Errorf("expected 429 after %d fails, got %d", maxLoginFails, rec.Code)
+	}
+	// even a correct password is rejected while locked out
+	good, _ := json.Marshal(map[string]string{"username": "admin", "password": "secret"})
+	req = httptest.NewRequest("POST", "/api/login", bytes.NewReader(good))
+	rec = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Errorf("expected 429 for correct creds while locked, got %d", rec.Code)
+	}
+}
+
+// TestServerOpenAuthClosed verifies an unconfigured (empty password) controller
+// rejects all logins instead of opening the control plane.
+func TestServerOpenAuthClosed(t *testing.T) {
+	fleet := NewFleet("/tmp/blip-test-config.yaml")
+	srv := NewServer("", "", fleet, nil)
+	good, _ := json.Marshal(map[string]string{"username": "admin", "password": "secret"})
+	req := httptest.NewRequest("POST", "/api/login", bytes.NewReader(good))
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("expected 403 for unconfigured auth, got %d", rec.Code)
+	}
+	// and the API stays locked
+	rec2 := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec2, httptest.NewRequest("GET", "/api/instances", nil))
+	if rec2.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401, got %d", rec2.Code)
+	}
 }
 
 // TestFleetAdopt verifies the claim-code bootstrap: a request-scoped Add (as
