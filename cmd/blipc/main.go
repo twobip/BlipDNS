@@ -62,9 +62,13 @@ func main() {
 			log.Printf("blipc: instance %s: %v", ic.ID, err)
 		}
 	}
+	// Restore the last merged blocklist into RAM from the local DB so a restart
+	// blocks immediately, then seed the sources and fetch fresh data in the
+	// background; instances pick the list up via the poll reconcile / push.
+	if err := fleet.LoadBlocklistCache(ctx); err != nil {
+		log.Printf("blipc: blocklist cache: %v", err)
+	}
 	if len(cfg.BlocklistSources) > 0 {
-		// Seed the sources and fetch them in the background; instances pick
-		// the merged list up via the poll reconcile / push after import.
 		fleet.SetBlocklistSources(ctx, cfg.BlocklistSources)
 	}
 

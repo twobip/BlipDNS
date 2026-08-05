@@ -455,6 +455,7 @@ func (s *Server) handleBlocklist(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.fleet.Blocklist().Add(req.Domain)
+		s.fleet.persistBlocklist()
 		writeJSON(w, map[string]string{"ok": "added"})
 	case http.MethodDelete:
 		var req struct {
@@ -469,6 +470,7 @@ func (s *Server) handleBlocklist(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.fleet.Blocklist().Remove(req.Domain)
+		s.fleet.persistBlocklist()
 		writeJSON(w, map[string]string{"ok": "removed"})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -529,6 +531,7 @@ func (s *Server) handleBlocklistSources(w http.ResponseWriter, r *http.Request) 
 			// Saving an empty source list clears the blocklist.
 			s.fleet.SetBlocklistSources(r.Context(), nil)
 			s.fleet.Blocklist().FromDomains(nil)
+			s.fleet.persistBlocklist()
 			writeJSON(w, map[string]interface{}{"ok": true, "count": 0})
 			return
 		}

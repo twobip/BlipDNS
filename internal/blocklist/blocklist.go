@@ -10,11 +10,13 @@ package blocklist
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -414,6 +416,39 @@ func normalizeDomain(s string) string {
 		}
 	}
 	return s
+}
+
+// SaveCache atomically writes the current list to path as JSON so a restart
+// can reload it into RAM without re-fetching the sources.
+func (b *Blocklist) SaveCache(path string) error {
+	data, err := json.Marshal(b.List())
+	if err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0640); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+// LoadCache returns a blocklist restored from a previously saved cache file.
+// It returns (nil, nil) when no cache exists; a corrupt file is an error.
+func LoadCache(path string) (*Blocklist, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var list []string
+	if err := json.Unmarshal(data, &list); err != nil {
+		return nil, err
+	}
+	bl := New()
+	bl.FromDomains(list)
+	return bl, nil
 }
 
 // hashString returns an FNV-1a 32-bit hash as a uint64 (for the checksum sum).

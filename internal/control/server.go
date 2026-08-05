@@ -36,6 +36,10 @@ type Server struct {
 	watchMu   sync.Mutex
 	watchers  map[chan WatchEvent]struct{}
 
+	// blocklistCachePath persists a received blocklist to disk so a restart
+	// keeps blocking without waiting for the controller to re-push.
+	blocklistCachePath string
+
 	// adoption (claim-code bootstrap)
 	adoptMu    sync.Mutex
 	adopted    bool
@@ -228,7 +232,8 @@ func (s *Server) handleListPolicies(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, out)
 }
 
-func (s *Server) handlePolicy(w http.ResponseWriter, r *http.Request) {	switch r.Method {
+func (s *Server) handlePolicy(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
 	case http.MethodPut, http.MethodPost:
 		var req SetPolicyRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -265,6 +270,12 @@ func (s *Server) handlePolicy(w http.ResponseWriter, r *http.Request) {	switch r
 	}
 }
 
+// SetBlocklistCache enables persisting each received blocklist to path, so a
+// blipd restart can restore it into RAM instantly. Pass "" to disable.
+func (s *Server) SetBlocklistCache(path string) {
+	s.blocklistCachePath = path
+}
+
 // handleBlocklist replaces the instance's global blocklist with the given
 // domains. It accepts a large payload (multi-million entry lists).
 func (s *Server) handleBlocklist(w http.ResponseWriter, r *http.Request) {
@@ -284,6 +295,14 @@ func (s *Server) handleBlocklist(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.blocklist.FromDomains(req.Domains)
+	if s.blocklistCachePath != "" {
+		path := s.blocklistCachePath
+		go func() {
+			if err := s.blocklist.SaveCache(path); err != nil {
+				log.Printf("blipd: blocklist cache: %v", err)
+			}
+		}()
+	}
 	writeJSON(w, AckResponse{OK: true, Msg: "blocklist updated"})
 }
 

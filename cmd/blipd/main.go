@@ -47,6 +47,16 @@ func main() {
 	}
 
 	bl := blocklist.New()
+	// Restore the last persisted list into RAM first, so a restart blocks
+	// immediately; the sources (if any) overwrite it with fresh data.
+	if cfg.BlocklistCacheFile != "" {
+		if cached, err := blocklist.LoadCache(cfg.BlocklistCacheFile); err != nil {
+			log.Printf("blipd: blocklist cache: %v", err)
+		} else if cached != nil && cached.Count() > 0 {
+			bl = cached
+			log.Printf("blipd: restored %d blocklist domains from cache", cached.Count())
+		}
+	}
 	if urls := blocklistSources(cfg); len(urls) > 0 {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()
@@ -54,6 +64,9 @@ func main() {
 			log.Printf("blipd: blocklist load: %v (continuing without blocklist)", err)
 		} else {
 			log.Printf("blipd: blocklist loaded from %d sources (%d domains)", res.Sources, res.Domains)
+			if cfg.BlocklistCacheFile != "" {
+				_ = bl.SaveCache(cfg.BlocklistCacheFile)
+			}
 			if cfg.BlocklistUpdateHours > 0 {
 				go func() {
 					ticker := time.NewTicker(time.Duration(cfg.BlocklistUpdateHours) * time.Hour)
@@ -64,6 +77,9 @@ func main() {
 							log.Printf("blipd: blocklist refresh: %v", err)
 						} else {
 							log.Printf("blipd: blocklist refreshed (%d domains)", res.Domains)
+							if cfg.BlocklistCacheFile != "" {
+								_ = bl.SaveCache(cfg.BlocklistCacheFile)
+							}
 						}
 					}
 				}()
@@ -101,6 +117,9 @@ func main() {
 		}
 		srv.SetMgmtToken(cfg.AdminToken)
 		srv.ControlServer().ConfigureAdoption(cfg.StateFile, cfg.InstanceID)
+		if cfg.BlocklistCacheFile != "" {
+			srv.ControlServer().SetBlocklistCache(cfg.BlocklistCacheFile)
+		}
 		go func() {
 			admin := &http.Server{Addr: cfg.AdminAddr, Handler: srv.ControlServer().Handler()}
 			log.Printf("blipd: management API on %s", cfg.AdminAddr)

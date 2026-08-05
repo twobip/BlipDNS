@@ -19,6 +19,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"testing"
 )
 
@@ -26,9 +27,9 @@ func TestIsBlocked(t *testing.T) {
 	b := New()
 	b.Add("ads.example.com")
 	tests := []struct {
-		host   string
-		want   bool
-		desc   string
+		host string
+		want bool
+		desc string
 	}{
 		{"ads.example.com", true, "exact match"},
 		{"sub.ads.example.com", true, "subdomain"},
@@ -283,5 +284,42 @@ func TestLoadFromURLsAllFailed(t *testing.T) {
 	}
 	if b.Count() != 0 {
 		t.Error("expected empty blocklist after all sources failed")
+	}
+}
+
+func TestCacheRoundtrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "blocklist.cache")
+	b := New()
+	b.Add("ads.example.com")
+	b.Add("*.tracker.net")
+
+	if err := b.SaveCache(path); err != nil {
+		t.Fatalf("SaveCache: %v", err)
+	}
+	if !b.IsBlocked("ads.example.com") {
+		t.Error("original list lost its entry after SaveCache")
+	}
+
+	restored, err := LoadCache(path)
+	if err != nil {
+		t.Fatalf("LoadCache: %v", err)
+	}
+	if restored == nil || restored.Count() != 2 {
+		t.Fatalf("restored count = %v, want 2", restored.Count())
+	}
+	if !restored.IsBlocked("ads.example.com") || !restored.IsBlocked("sub.tracker.net") {
+		t.Error("restored list does not block expected hosts")
+	}
+	if restored.Checksum() != b.Checksum() {
+		t.Error("restored checksum differs from original")
+	}
+
+	// A missing cache is not an error.
+	missing, err := LoadCache(filepath.Join(t.TempDir(), "nope"))
+	if err != nil {
+		t.Fatalf("LoadCache missing file: %v", err)
+	}
+	if missing != nil {
+		t.Error("expected nil blocklist for missing cache file")
 	}
 }

@@ -62,23 +62,24 @@ func (o *InstanceOverride) IsEmpty() bool {
 
 // Fleet holds all instances, the event bus, and the global blocklist.
 type Fleet struct {
-	mu                   sync.RWMutex
-	instances            map[string]*Instance
-	bus                  *Bus
-	http                 *http.Client
-	now                  func() time.Time
-	logfn                func(Event)
-	queryLog             *QueryLogStore               // persistent query log
-	blocklist            *blocklist.Blocklist         // global DNS blocklist
-	blocklistSources     []string                     // Pi-hole style source URLs (AdBlock Plus / hosts)
-	blMu                 sync.Mutex                   // guards blocklist status + import job
-	blRunning            bool
-	blGen                int
-	blCancel             context.CancelFunc
-	blStatus             BlocklistStatus
-	configPath           string                       // path to controller config YAML (for persisting tokens)
-	defaultPolicy        *control.Policy              // fleet-wide default policy (source of truth)
-	overrides            map[string]*InstanceOverride // per-instance partial configs (diff vs default)
+	mu               sync.RWMutex
+	instances        map[string]*Instance
+	bus              *Bus
+	http             *http.Client
+	now              func() time.Time
+	logfn            func(Event)
+	queryLog         *QueryLogStore       // persistent query log
+	blocklistDB      *BlocklistStore      // persisted copy of the merged blocklist
+	blocklist        *blocklist.Blocklist // global DNS blocklist
+	blocklistSources []string             // Pi-hole style source URLs (AdBlock Plus / hosts)
+	blMu             sync.Mutex           // guards blocklist status + import job
+	blRunning        bool
+	blGen            int
+	blCancel         context.CancelFunc
+	blStatus         BlocklistStatus
+	configPath       string                       // path to controller config YAML (for persisting tokens)
+	defaultPolicy    *control.Policy              // fleet-wide default policy (source of truth)
+	overrides        map[string]*InstanceOverride // per-instance partial configs (diff vs default)
 }
 
 // BlocklistStatus is a point-in-time view of the controller's blocklist
@@ -97,15 +98,17 @@ type BlocklistStatus struct {
 // NewFleet creates an empty fleet with a default event buffer.
 func NewFleet(configPath string) *Fleet {
 	queryLog, _ := NewQueryLogStore("/var/lib/blipc/querylog.db")
+	blocklistDB, _ := NewBlocklistStore("/var/lib/blipc/blocklist.db")
 	return &Fleet{
-		instances:  make(map[string]*Instance),
-		bus:        NewBus(500),
-		http:       &http.Client{Timeout: 10 * time.Second},
-		now:        time.Now,
-		queryLog:   queryLog,
-		blocklist:  blocklist.New(),
-		configPath: configPath,
-		overrides:  make(map[string]*InstanceOverride),
+		instances:   make(map[string]*Instance),
+		bus:         NewBus(500),
+		http:        &http.Client{Timeout: 10 * time.Second},
+		now:         time.Now,
+		queryLog:    queryLog,
+		blocklistDB: blocklistDB,
+		blocklist:   blocklist.New(),
+		configPath:  configPath,
+		overrides:   make(map[string]*InstanceOverride),
 	}
 }
 
@@ -580,6 +583,42 @@ func (f *Fleet) ImportBlocklist() {
 	f.startBlocklistImport()
 }
 
+// LoadBlocklistCache restores the last persisted merged list into RAM at
+// startup, so a restart blocks immediately without re-fetching sources, and
+// pushes it to instances so they are covered even before a fresh import.
+func (f *Fleet) LoadBlocklistCache(ctx context.Context) error {
+	if f.blocklistDB == nil {
+		return nil
+	}
+	set, err := f.blocklistDB.LoadSet(ctx)
+	if err != nil {
+		return err
+	}
+	if len(set) == 0 {
+		return nil
+	}
+	f.blocklist.FromDomainsMap(set)
+	f.blMu.Lock()
+	f.blStatus.Domains = f.blocklist.Count()
+	f.blMu.Unlock()
+	log.Printf("blipc: restored %d blocklist domains from local cache", len(set))
+	f.pushBlocklist(ctx)
+	return nil
+}
+
+// persistBlocklist snapshots the current in-memory list to the local DB in the
+// background, so the next restart can load it without re-fetching sources.
+func (f *Fleet) persistBlocklist() {
+	if f.blocklistDB == nil {
+		return
+	}
+	go func() {
+		if err := f.blocklistDB.ReplaceAll(context.Background(), f.blocklist.List()); err != nil {
+			log.Printf("blipc: warning: failed to persist blocklist: %v", err)
+		}
+	}()
+}
+
 // cancelBlocklistImport stops any in-flight import.
 func (f *Fleet) cancelBlocklistImport() {
 	f.blMu.Lock()
@@ -636,6 +675,7 @@ func (f *Fleet) runBlocklistImport(ctx context.Context, gen int) {
 		f.blMu.Unlock()
 		// Clear the list on every instance too (sources were dropped).
 		f.pushBlocklist(context.Background())
+		f.persistBlocklist()
 		return
 	}
 	res, err := f.blocklist.LoadFromURLs(ctx, urls, &blocklist.LoadOptions{
@@ -666,6 +706,9 @@ func (f *Fleet) runBlocklistImport(ctx context.Context, gen int) {
 	if res == nil || res.Domains == 0 {
 		return
 	}
+	// Persist the merged list so a controller restart loads it into RAM
+	// instantly instead of re-fetching every source.
+	f.persistBlocklist()
 	// Distribute the merged list to instances (background; a large list takes
 	// a while to ship over the management API).
 	if results := f.pushBlocklist(context.Background()); results != nil {

@@ -29,6 +29,7 @@ type Config struct {
 	BlocklistURL         string           `yaml:"blocklist_url"`          // AdBlock Plus feed URL (optional, legacy single)
 	BlocklistURLs        []string         `yaml:"blocklist_urls"`         // one or more ABP/hosts feeds (Pi-hole style)
 	BlocklistUpdateHours int              `yaml:"blocklist_update_hours"` // refresh interval (0 = no auto-refresh)
+	BlocklistCacheFile   string           `yaml:"blocklist_cache_file"`   // persisted snapshot restored into RAM at startup
 	Default              *filter.Policy   `yaml:"default_policy"`
 	Policies             []*filter.Policy `yaml:"policies"`
 }
@@ -37,15 +38,16 @@ type Config struct {
 // localhost, forwards to Cloudflare over UDP with DoH failover).
 func Default() *Config {
 	return &Config{
-		DNSAddr:           "127.0.0.1:5353",
-		DoHAddr:           "127.0.0.1:8443",
-		AdminAddr:         "127.0.0.1:8443",
-		Upstream:          "udp://1.1.1.1:53 https://1.1.1.1/dns-query",
-		CacheCap:          1 * time.Hour,
-		CacheSize:         10000,
-		CacheWarmCount:    100,
-		CacheWarmAhead:    30 * time.Second,
-		CacheWarmInterval: 10 * time.Second,
+		DNSAddr:            "127.0.0.1:5353",
+		DoHAddr:            "127.0.0.1:8443",
+		AdminAddr:          "127.0.0.1:8443",
+		Upstream:           "udp://1.1.1.1:53 https://1.1.1.1/dns-query",
+		CacheCap:           1 * time.Hour,
+		CacheSize:          10000,
+		CacheWarmCount:     100,
+		CacheWarmAhead:     30 * time.Second,
+		CacheWarmInterval:  10 * time.Second,
+		BlocklistCacheFile: "/var/lib/blipd/blocklist.cache",
 	}
 }
 
