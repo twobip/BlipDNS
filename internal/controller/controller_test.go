@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -13,10 +15,28 @@ import (
 	"github.com/twobip/BlipDNS/internal/control"
 )
 
+// policyRec records every policy pushed to a fake blipd.
+type policyRec struct {
+	mu      sync.Mutex
+	applied []*control.Policy
+}
+
+func (r *policyRec) snapshot() []*control.Policy {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]*control.Policy, len(r.applied))
+	copy(out, r.applied)
+	return out
+}
+
 // fakeBlipd is a minimal blipd management API for controller tests. It
 // supports the claim-code adoption handshake: unauthenticated /adopt/status,
 // POST /adopt with the code returns a token once, then rejects re-adopt.
 func fakeBlipd(t *testing.T, token, claimCode string, health *control.HealthResponse, stats *control.StatsResponse, policies *control.ListResponse) *httptest.Server {
+	return fakeBlipdWithRec(t, token, claimCode, health, stats, policies, nil)
+}
+
+func fakeBlipdWithRec(t *testing.T, token, claimCode string, health *control.HealthResponse, stats *control.StatsResponse, policies *control.ListResponse, rec *policyRec) *httptest.Server {
 	t.Helper()
 	var (
 		mu      sync.Mutex
@@ -36,7 +56,16 @@ func fakeBlipd(t *testing.T, token, claimCode string, health *control.HealthResp
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		writeJSONH(w, stats)
+		st := *stats
+		// Model a real blipd: the store default reflects the last pushed policy.
+		if rec != nil {
+			rec.mu.Lock()
+			if n := len(rec.applied); n > 0 {
+				st.Upstream = rec.applied[n-1].Upstream
+			}
+			rec.mu.Unlock()
+		}
+		writeJSONH(w, &st)
 	})
 	mux.HandleFunc("/api/v1/policies", func(w http.ResponseWriter, r *http.Request) {
 		writeJSONH(w, policies)
@@ -44,6 +73,11 @@ func fakeBlipd(t *testing.T, token, claimCode string, health *control.HealthResp
 	mux.HandleFunc("/api/v1/policy", func(w http.ResponseWriter, r *http.Request) {
 		var req control.SetPolicyRequest
 		_ = json.NewDecoder(r.Body).Decode(&req)
+		if rec != nil {
+			rec.mu.Lock()
+			rec.applied = append(rec.applied, &req.Policy)
+			rec.mu.Unlock()
+		}
 		writeJSONH(w, map[string]string{"ok": "set", "id": req.Policy.ID})
 	})
 	mux.HandleFunc("/api/v1/adopt/status", func(w http.ResponseWriter, r *http.Request) {
@@ -163,6 +197,132 @@ func TestParseQueryTS(t *testing.T) {
 		if got := parseQueryTS(c.in).Unix(); got != c.want {
 			t.Errorf("parseQueryTS(%q) = %d, want %d", c.in, got, c.want)
 		}
+	}
+}
+
+func TestFleetSetDefaultPolicy(t *testing.T) {
+	recA, recB := &policyRec{}, &policyRec{}
+	srvA := fakeBlipdWithRec(t, "t", "", &control.HealthResponse{OK: true}, &control.StatsResponse{}, &control.ListResponse{}, recA)
+	defer srvA.Close()
+	srvB := fakeBlipdWithRec(t, "t", "", &control.HealthResponse{OK: true}, &control.StatsResponse{}, &control.ListResponse{}, recB)
+	defer srvB.Close()
+
+	cfgPath := filepath.Join(t.TempDir(), "blipc.yaml")
+	fleet := NewFleet(cfgPath)
+	ctx := context.Background()
+	if err := fleet.Add(ctx, InstanceConfig{ID: "a", URL: srvA.URL, Token: "t"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := fleet.Add(ctx, InstanceConfig{ID: "b", URL: srvB.URL, Token: "t"}); err != nil {
+		t.Fatal(err)
+	}
+
+	up := "udp://8.8.8.8:53|2 https://1.1.1.1/dns-query|1"
+	res := fleet.SetDefaultPolicy(ctx, &control.Policy{Upstream: up, BlockAction: "nxdomain"})
+	if res["a"] != "ok" || res["b"] != "ok" {
+		t.Fatalf("expected both instances ok, got %+v", res)
+	}
+	// both instances must have received the fleet default policy. The exact
+	// count may exceed 1 if a poll races the synchronous push, so check that
+	// every recorded push carries the fleet config.
+	for name, rec := range map[string]*policyRec{"a": recA, "b": recB} {
+		got := rec.snapshot()
+		if len(got) < 1 {
+			t.Fatalf("instance %s: expected at least 1 policy push, got %d", name, len(got))
+		}
+		for _, p := range got {
+			if p.Upstream != up {
+				t.Errorf("instance %s: upstream = %q, want %q", name, p.Upstream, up)
+			}
+		}
+	}
+	// policy must have been persisted to the controller config
+	b, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(b, []byte("default_policy:")) || !bytes.Contains(b, []byte(up)) {
+		t.Errorf("default policy not persisted in %s:\n%s", cfgPath, b)
+	}
+}
+
+func TestFleetSetDefaultPolicyReconcileOnAdd(t *testing.T) {
+	rec := &policyRec{}
+	srv := fakeBlipdWithRec(t, "t", "", &control.HealthResponse{OK: true}, &control.StatsResponse{}, &control.ListResponse{}, rec)
+	defer srv.Close()
+
+	fleet := NewFleet("/tmp/blip-test-config.yaml")
+	fleet.SetDefault(&control.Policy{Upstream: "udp://1.1.1.1:53", BlockAction: "nxdomain"})
+	// instance is added AFTER the fleet config exists; it must be pushed
+	// immediately (and stay applied so the poll loop doesn't duplicate it).
+	if err := fleet.Add(context.Background(), InstanceConfig{ID: "a", URL: srv.URL, Token: "t"}); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(200 * time.Millisecond) // let any poll-driven re-push happen
+	got := rec.snapshot()
+	if len(got) != 1 {
+		t.Fatalf("expected exactly 1 push (no duplicate from poll), got %d", len(got))
+	}
+	if got[0].Upstream != "udp://1.1.1.1:53" {
+		t.Errorf("pushed upstream = %q", got[0].Upstream)
+	}
+}
+
+func TestFleetSetDefaultPolicyRoundTrip(t *testing.T) {
+	fleet := NewFleet("/tmp/blip-test-config.yaml")
+	if d := fleet.DefaultPolicy(); d != nil {
+		t.Fatal("expected no default policy initially")
+	}
+	fleet.SetDefault(&control.Policy{Upstream: "https://1.1.1.1/dns-query|1", BlockAction: "refused", Log: true})
+	d := fleet.DefaultPolicy()
+	if d == nil || d.Upstream != "https://1.1.1.1/dns-query|1" {
+		t.Fatalf("unexpected default policy: %+v", d)
+	}
+	if d.ID != "default" {
+		t.Errorf("expected ID normalized to default, got %q", d.ID)
+	}
+}
+
+// TestFleetReconcileRestartRevert simulates a blipd restart: the instance's
+// store reverts to its own (empty) config, so the controller must re-push the
+// fleet default on a subsequent poll.
+func TestFleetReconcileRestartRevert(t *testing.T) {
+	pollInterval = 100 * time.Millisecond
+	defer func() { pollInterval = 5 * time.Second }()
+	rec := &policyRec{}
+	srv := fakeBlipdWithRec(t, "t", "", &control.HealthResponse{OK: true}, &control.StatsResponse{}, &control.ListResponse{}, rec)
+	defer srv.Close()
+
+	fleet := NewFleet("/tmp/blip-test-config.yaml")
+	fleet.SetDefault(&control.Policy{Upstream: "udp://1.1.1.1:53"})
+	if err := fleet.Add(context.Background(), InstanceConfig{ID: "a", URL: srv.URL, Token: "t"}); err != nil {
+		t.Fatal(err)
+	}
+
+	waitFor := func(n int, msg string) []*control.Policy {
+		deadline := time.After(3 * time.Second)
+		for {
+			got := rec.snapshot()
+			if len(got) >= n {
+				return got
+			}
+			select {
+			case <-deadline:
+				t.Fatal(msg)
+			case <-time.After(20 * time.Millisecond):
+			}
+		}
+	}
+	waitFor(1, "initial push never happened")
+
+	// Simulate restart revert: blipd's store loses the pushed policy.
+	rec.mu.Lock()
+	rec.applied = nil
+	rec.mu.Unlock()
+
+	got := waitFor(1, "no re-push after simulated restart revert")
+	if got[0].Upstream != "udp://1.1.1.1:53" {
+		t.Fatalf("unexpected re-push content: %+v", got[0])
 	}
 }
 

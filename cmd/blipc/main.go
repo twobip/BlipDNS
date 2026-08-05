@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/twobip/BlipDNS/internal/control"
 	"github.com/twobip/BlipDNS/internal/controller"
 	"gopkg.in/yaml.v3"
 )
@@ -20,10 +21,11 @@ import (
 const version = "blipc/0.1.0"
 
 type config struct {
-	Listen    string                      `yaml:"listen"`
-	Username  string                      `yaml:"username"`
-	Password  string                      `yaml:"password"`
-	Instances []controller.InstanceConfig `yaml:"instances"`
+	Listen        string                      `yaml:"listen"`
+	Username      string                      `yaml:"username"`
+	Password      string                      `yaml:"password"`
+	DefaultPolicy *control.Policy             `yaml:"default_policy"`
+	Instances     []controller.InstanceConfig `yaml:"instances"`
 }
 
 func main() {
@@ -45,6 +47,9 @@ func main() {
 	}
 
 	fleet := controller.NewFleet(*cfgPath)
+	if cfg.DefaultPolicy != nil {
+		fleet.SetDefault(cfg.DefaultPolicy)
+	}
 	ctx := context.Background()
 	for _, ic := range cfg.Instances {
 		ic = controller.ResolveTokenFile(ic)

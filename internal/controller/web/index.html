@@ -228,7 +228,7 @@
       <section id="view-settings" class="view hidden">
         <div class="grid grid-2">
           <div class="panel">
-            <div class="panel-head"><h3>Upstream DNS</h3><span class="spacer"></span><span class="badge accent">default policy</span></div>
+            <div class="panel-head"><h3>Upstream DNS</h3><span class="spacer"></span><span class="badge accent">fleet-wide</span></div>
             <div class="panel-body">
               <div class="field">
                 <label>Upstream resolvers <span class="faint">priority 1 = primary, auto-failover on failure</span></label>
@@ -236,7 +236,10 @@
                 <button class="btn btn-sm" id="s-up-add">+ Add upstream</button>
                 <span class="hint">Each row is one resolver, tried in priority order (lower first). Leave the list empty to use each instance's compiled default.</span>
               </div>
-              <button class="btn btn-primary mt" id="s-save-upstream">Save</button>
+              <div class="row mt">
+                <button class="btn btn-primary" id="s-save-upstream">Save</button>
+                <span class="hint" id="s-up-status"></span>
+              </div>
             </div>
           </div>
 

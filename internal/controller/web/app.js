@@ -589,19 +589,19 @@ function collectUpstreams() {
     prio: parseInt(row.querySelector(".up-prio").value, 10) || 0,
   }));
 }
-let savedDefaultPolicy = null; // current default policy from the online instance
+let savedDefaultPolicy = null; // fleet default policy held by blipc
 async function refreshSettings() {
   $("s-ctrl-ver").textContent = "blipc";
   $("s-inst-count").textContent = instances.length + (instances.some((i) => i.online) ? " (" + instances.filter((i) => i.online).length + " online)" : "");
-  // populate upstream from first online instance default policy
+  // The fleet-wide default policy lives on blipc and is distributed to all
+  // instances, so we no longer read it from an individual blipd.
   try {
-    const online = instances.find((i) => i.online);
-    if (online) {
-      const r = await API("/api/instances/" + encodeURIComponent(online.id) + "/policies");
-      const d = await r.json();
-      savedDefaultPolicy = d.default || { id: "default" };
-      renderUpstreamList(parseUpstreamSpec(savedDefaultPolicy.upstream));
-    }
+    const r = await API("/api/settings");
+    const d = await r.json();
+    savedDefaultPolicy = d.default_policy || { id: "default" };
+    renderUpstreamList(parseUpstreamSpec(savedDefaultPolicy.upstream));
+    const online = instances.filter((i) => i.online).length;
+    $("s-up-status").textContent = savedDefaultPolicy.upstream ? `saved on blipc · pushed to ${online}/${instances.length} online instances` : "";
   } catch {}
 }
 
@@ -725,13 +725,20 @@ $("s-up-add").onclick = () => {
 };
 $("s-save-upstream").onclick = async () => {
   const up = serializeUpstreams(collectUpstreams());
-  const online = instances.find((i) => i.online);
-  if (!online) return toast("no online instance to configure", "err");
   const body = { id: "default", networks: [], block: [], allow: [], block_action: "nxdomain", log: true, ...(savedDefaultPolicy || {}), upstream: up };
+  const st = $("s-up-status");
+  st.textContent = "saving…";
   try {
-    await API("/api/instances/" + encodeURIComponent(online.id) + "/policy", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-    toast("default upstream saved on " + online.id);
-  } catch (e) { toast("save failed: " + e.message, "err"); }
+    const r = await API("/api/settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ default_policy: body }) });
+    const d = await r.json();
+    savedDefaultPolicy = body;
+    const applied = d.applied || {};
+    const ids = Object.keys(applied);
+    const ok = ids.filter((k) => applied[k] === "ok").length;
+    const failed = ids.filter((k) => applied[k] !== "ok");
+    st.textContent = ids.length ? `saved on blipc · pushed to ${ok}/${ids.length} instances` + (failed.length ? ` · errors: ${failed.join(", ")}` : "") : "saved on blipc · no instances to push to yet";
+    toast("fleet default upstream saved" + (ids.length ? ` (${ok}/${ids.length} instances)` : ""));
+  } catch (e) { st.textContent = ""; toast("save failed: " + e.message, "err"); }
 };
 $("s-fetch").onclick = async () => {
   const u = ($("s-bl-url").value || "").trim();

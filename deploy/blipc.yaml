@@ -3,6 +3,15 @@ listen: "0.0.0.0:8500"
 # or a trusted management VLAN. Set a secret here (or via BLIPC_TOKEN) for
 # production; the UI is then accessed with ?token=<secret>.
 token: ""
+# Fleet-wide default policy (upstreams etc.). blipc is the source of truth:
+# it persists this and distributes it to every blipd instance on save, and to
+# instances as they come online / are adopted. Edited from the web UI too.
+# upstream supports the same spec + |priority syntax as blipd (see blipd.yaml).
+default_policy:
+  id: "default"
+  upstream: "udp://1.1.1.1:53|1 https://1.1.1.1/dns-query|2"
+  block_action: "nxdomain"
+  log: true
 instances:
   # Add blipd instances here, or via the web UI at runtime.
   # token may be a literal, an "@/path" file, or an "/abs/path" file.

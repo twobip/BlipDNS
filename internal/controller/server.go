@@ -42,6 +42,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/stats", api(s.handleStats))         // aggregated query stats for graphs
 	mux.HandleFunc("/api/events", api(s.handleEvents))
 	mux.HandleFunc("/api/health", api(s.handleHealth))
+	mux.HandleFunc("/api/settings", api(s.handleSettings)) // fleet-wide default config
 
 	// Blocklist (session-gated)
 	mux.HandleFunc("/api/blocklist", api(s.handleBlocklist))                     // GET list / POST add / DELETE remove
@@ -292,6 +293,33 @@ func (s *Server) handleInstance(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]string{"ok": "removed", "id": id})
 	default:
 		http.Error(w, "not found", http.StatusNotFound)
+	}
+}
+
+// handleSettings reads/updates the fleet-wide default policy. blipc is the
+// source of truth; PUT persists it and distributes it to every instance.
+func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, map[string]interface{}{
+			"default_policy": s.fleet.DefaultPolicy(),
+		})
+	case http.MethodPut:
+		var req struct {
+			DefaultPolicy *control.Policy `json:"default_policy"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if req.DefaultPolicy == nil {
+			http.Error(w, "default_policy required", http.StatusBadRequest)
+			return
+		}
+		applied := s.fleet.SetDefaultPolicy(r.Context(), req.DefaultPolicy)
+		writeJSON(w, map[string]interface{}{"ok": true, "applied": applied})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
 }
 

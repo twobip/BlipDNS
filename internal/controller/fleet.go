@@ -58,6 +58,8 @@ type Fleet struct {
 	updateStopCh         chan struct{}        // channel to stop the updater goroutine
 	updateMu             sync.Mutex           // protects updateStopCh
 	configPath           string               // path to controller config YAML (for persisting tokens)
+	defaultPolicy        *control.Policy      // fleet-wide default policy (source of truth)
+	configVer            uint64               // bumped on every config change; instances reconcile against it
 }
 
 // NewFleet creates an empty fleet with a default event buffer.
@@ -137,6 +139,93 @@ func (f *Fleet) List() []*InstanceStatus {
 	return out
 }
 
+// DefaultPolicy returns the fleet-wide default policy (may be nil).
+func (f *Fleet) DefaultPolicy() *control.Policy {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return f.defaultPolicy
+}
+
+// SetDefault records the fleet-wide default policy without distributing it.
+// Used at startup (config load); instances pick it up via the poll reconcile.
+func (f *Fleet) SetDefault(p *control.Policy) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if p != nil {
+		p.ID = "default"
+	}
+	f.defaultPolicy = p
+	f.configVer++
+}
+
+// SetDefaultPolicy records the fleet-wide default policy, persists it to the
+// controller config, and pushes it to every managed instance. It returns the
+// per-instance outcome ("ok" or an error message).
+func (f *Fleet) SetDefaultPolicy(ctx context.Context, p *control.Policy) map[string]string {
+	f.SetDefault(p)
+	if f.configPath != "" {
+		if err := f.saveConfig(); err != nil {
+			log.Printf("blipc: warning: failed to persist default policy: %v", err)
+		}
+	}
+	return f.pushDefault(ctx)
+}
+
+// pushDefault sends the current fleet default policy to all instances that
+// have an admin token and marks their applied config version on success.
+func (f *Fleet) pushDefault(ctx context.Context) map[string]string {
+	f.mu.RLock()
+	p := f.defaultPolicy
+	ver := f.configVer
+	insts := make([]*Instance, 0, len(f.instances))
+	for _, i := range f.instances {
+		insts = append(insts, i)
+	}
+	f.mu.RUnlock()
+	results := make(map[string]string, len(insts))
+	if p == nil {
+		return results
+	}
+	for _, i := range insts {
+		if !i.hasToken() {
+			results[i.Config.ID] = "not adopted"
+			continue
+		}
+		if err := i.ctl().SetPolicy(ctx, p); err != nil {
+			results[i.Config.ID] = err.Error()
+			continue
+		}
+		i.markConfigApplied(ver)
+		results[i.Config.ID] = "ok"
+	}
+	return results
+}
+
+// maybePushConfig converges an instance to the fleet default policy. It
+// pushes when the instance has not yet applied the current config version
+// (newly added/adopted, or the fleet config changed) or when its reported
+// default upstream diverges from the fleet default (it restarted and reverted
+// to its own config). Called from the instance poll loop.
+func (f *Fleet) maybePushConfig(ctx context.Context, i *Instance, reported *control.StatsResponse) {
+	f.mu.RLock()
+	p := f.defaultPolicy
+	ver := f.configVer
+	f.mu.RUnlock()
+	if p == nil || ver == 0 || !i.hasToken() {
+		return
+	}
+	rep := ""
+	if reported != nil {
+		rep = reported.Upstream
+	}
+	if i.configApplied(ver) && rep == p.Upstream {
+		return
+	}
+	if err := i.ctl().SetPolicy(ctx, p); err == nil {
+		i.markConfigApplied(ver)
+	}
+}
+
 func (f *Fleet) get(id string) *Instance {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
@@ -184,6 +273,8 @@ func (f *Fleet) Adopt(ctx context.Context, id, code string) error {
 				log.Printf("blipc: warning: failed to persist adopted token: %v", err)
 			}
 		}
+		// Newly adopted instance: hand it the fleet config.
+		f.maybePushConfig(context.Background(), inst, nil)
 	}
 	f.bus.Publish(Event{InstanceID: id, Instance: inst.Config.Label, Type: "status", At: f.now(), Msg: "adopted"})
 	return nil
@@ -305,10 +396,11 @@ func (f *Fleet) saveConfig() error {
 	}
 
 	type fullConfig struct {
-		Listen    string           `yaml:"listen"`
-		Username  string           `yaml:"username"`
-		Password  string           `yaml:"password"`
-		Instances []InstanceConfig `yaml:"instances"`
+		Listen        string           `yaml:"listen"`
+		Username      string           `yaml:"username"`
+		Password      string           `yaml:"password"`
+		DefaultPolicy *control.Policy  `yaml:"default_policy"`
+		Instances     []InstanceConfig `yaml:"instances"`
 	}
 
 	var cfg fullConfig
@@ -325,8 +417,10 @@ func (f *Fleet) saveConfig() error {
 		instances = append(instances, inst.Config)
 		inst.mu.RUnlock()
 	}
+	def := f.defaultPolicy
 	f.mu.RUnlock()
 	cfg.Instances = instances
+	cfg.DefaultPolicy = def
 
 	out, err := yaml.Marshal(cfg)
 	if err != nil {

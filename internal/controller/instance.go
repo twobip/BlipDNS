@@ -44,6 +44,7 @@ type Instance struct {
 	pingSumMs   float64
 	pingAvgMs   float64
 	pingLastMs  float64
+	appliedVer  uint64 // fleet config version last successfully applied
 }
 
 // pollInterval is how often the controller polls an instance's health/stats.
@@ -92,6 +93,27 @@ func (i *Instance) ctl() *control.Client {
 	return i.client
 }
 
+// hasToken reports whether the instance has an admin token (i.e. adopted).
+func (i *Instance) hasToken() bool {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.Config.Token != ""
+}
+
+// configApplied reports whether the instance has applied fleet config version
+// ver (which may be 0 when no config has been pushed yet).
+func (i *Instance) configApplied(ver uint64) bool {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.appliedVer == ver
+}
+
+func (i *Instance) markConfigApplied(ver uint64) {
+	i.mu.Lock()
+	i.appliedVer = ver
+	i.mu.Unlock()
+}
+
 func (i *Instance) poll(ctx context.Context) {
 	c := i.ctl()
 	start := time.Now()
@@ -123,6 +145,9 @@ func (i *Instance) poll(ctx context.Context) {
 			InstanceID: i.Config.ID, Instance: i.Config.Label,
 			Type: "health", At: i.fleet.now(), Health: h, Stats: s,
 		})
+		// Converge the instance to the fleet default config if it is behind
+		// (newly added/adopted, restarted, or reverted to its own config).
+		i.fleet.maybePushConfig(ctx, i, s)
 		// Also log to query log
 		if i.fleet.queryLog != nil && s != nil {
 			_ = i.fleet.queryLog.Insert(ctx, QueryLogEntry{
