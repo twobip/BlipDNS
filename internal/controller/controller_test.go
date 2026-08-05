@@ -149,6 +149,23 @@ func TestFleetSetPolicy(t *testing.T) {
 	}
 }
 
+func TestParseQueryTS(t *testing.T) {
+	cases := []struct {
+		in   string
+		want int64
+	}{
+		{"2026-08-05 23:03:06.93714156 +0100 BST m=+90.005342660", 1785967386},
+		{"2026-08-05 21:00:00", 1785963600},
+		{"2026-08-05T20:00:00.123456+01:00", 1785956400},
+		{"garbage", time.Time{}.Unix()},
+	}
+	for _, c := range cases {
+		if got := parseQueryTS(c.in).Unix(); got != c.want {
+			t.Errorf("parseQueryTS(%q) = %d, want %d", c.in, got, c.want)
+		}
+	}
+}
+
 func TestBusRingBuffer(t *testing.T) {
 	b := NewBus(3)
 	for i := 0; i < 5; i++ {

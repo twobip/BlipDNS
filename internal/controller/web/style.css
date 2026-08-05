@@ -317,6 +317,56 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
 .row-actions .icon-btn { width: 28px; height: 28px; }
 .empty-row td { text-align: center; padding: 48px 20px; }
 
+/* ============================================================
+   QUERY LOG
+   ============================================================ */
+#view-queries .table-wrap { max-height: calc(100vh - 280px); min-height: 320px; overflow-y: auto; }
+
+#view-queries .tbl tbody tr:hover td { background: rgba(255,255,255,.025); }
+#view-queries .tbl tbody tr:nth-child(even):not(.q-row-block) td { background: rgba(255,255,255,.012); }
+
+/* blocked rows get a red tint + accent edge */
+#view-queries .tbl tbody tr.q-row-block td { background: rgba(247,107,107,.05); }
+#view-queries .tbl tbody tr.q-row-block td:first-child { box-shadow: inset 3px 0 0 rgba(247,107,107,.55); }
+#view-queries .tbl tbody tr.q-row-block:hover td { background: rgba(247,107,107,.07); }
+
+.q-time { color: var(--muted); font-size: 12px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+
+.q-domain { max-width: 360px; }
+.q-globe { color: var(--faint); display: inline-grid; place-items: center; vertical-align: middle; margin-right: 8px; }
+.q-globe svg { width: 14px; height: 14px; }
+.q-dom {
+  font-size: 13px; font-weight: 600; color: var(--text); letter-spacing: -0.01em;
+  max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  display: inline-block; vertical-align: middle;
+}
+.q-copy { width: 24px; height: 24px; border: none; background: transparent; opacity: 0; margin-left: 6px; vertical-align: middle; transition: all .12s; }
+#view-queries .tbl tbody tr:hover .q-copy { opacity: 1; }
+.q-copy:hover { background: var(--surface-3); color: var(--text); }
+.q-copy svg { width: 13px; height: 13px; }
+
+.badge-action { display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px; min-width: 84px; justify-content: center; }
+.badge-action svg { width: 12px; height: 12px; }
+
+.q-client { max-width: 220px; }
+.q-cicon { color: var(--faint); display: inline-grid; place-items: center; vertical-align: middle; margin-right: 7px; }
+.q-cicon svg { width: 14px; height: 14px; }
+.q-client .mono { color: var(--text-2); font-size: 12px; max-width: 170px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-block; vertical-align: middle; }
+
+.q-ips { white-space: nowrap; }
+.q-chip {
+  display: inline-block; font-family: var(--mono); font-size: 11.5px;
+  padding: 2px 9px; border-radius: 6px; margin: 2px 5px 2px 0;
+  background: var(--surface-3); border: 1px solid var(--border); color: var(--text-2);
+  cursor: pointer; transition: all .12s;
+}
+.q-chip:hover { color: var(--text); border-color: var(--accent-2); background: var(--surface-2); }
+.q-chip-more { font-size: 11.5px; color: var(--faint); font-family: var(--mono); }
+.q-ips-empty { color: var(--faint); }
+
+.q-inst { white-space: nowrap; color: var(--text-2); font-size: 12.5px; }
+.q-inst .dot { margin-right: 7px; }
+
 /* ---------- sparkline-ish progress ---------- */
 .meter { width: 60px; height: 5px; border-radius: 4px; background: var(--surface-3); overflow: hidden; display:inline-block; vertical-align: middle; }
 .meter > i { display: block; height: 100%; border-radius: 4px; background: var(--accent-grad); }

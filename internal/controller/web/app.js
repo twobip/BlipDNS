@@ -45,6 +45,8 @@ const IC = {
   check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>',
   warn: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.8 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.8a2 2 0 0 0-3.4 0z"/><path d="M12 9v4m0 4h.01"/></svg>',
   arrow: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14m-6-6 6 6-6 6"/></svg>',
+  globe: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.6 3.8 5.7 3.8 9S14.5 18.4 12 21c-2.5-2.6-3.8-5.7-3.8-9S9.5 5.6 12 3z"/></svg>',
+  device: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg>',
 };
 
 /* ---------- routing ---------- */
@@ -367,15 +369,26 @@ async function renderQueries() {
       tb.innerHTML = `<tr class="empty-row"><td colspan="6"><div class="empty"><div class="empty-ic">${IC.query}</div><h4>No queries</h4><p>Nothing matched in the last 24 hours.</p></div></td></tr>`;
       return;
     }
-    tb.innerHTML = list.map((r) => `<tr>
-      <td class="mono" style="white-space:nowrap"><span class="t" data-t="${esc(r.timestamp)}">…</span></td>
-      <td><span class="mono">${esc(r.domain)}</span></td>
-      <td><span class="badge ${(r.action||"").toUpperCase()==="BLOCK"?"err":"on"}">${esc(r.action)}</span></td>
-      <td class="mono">${esc(r.client)}</td>
-      <td class="mono">${esc((r.ips||[]).join(", "))}</td>
-      <td>${esc(r.instance)}</td>
-    </tr>`).join("");
-    tb.querySelectorAll(".t").forEach((t) => { t.textContent = relTime(t.dataset.t); });
+    tb.innerHTML = list.map((r) => {
+      const action = (r.action || "").toUpperCase();
+      const isBlock = action === "BLOCK";
+      const inst = instances.find((i) => (i.label || i.id) === r.instance);
+      const actionLabel = isBlock ? "Blocked" : action === "PASS" ? "Allowed" : esc(action || "—");
+      const actionBadge = isBlock ? "err" : action === "PASS" ? "on" : "";
+      return `<tr class="${isBlock ? "q-row-block" : ""}">
+        <td class="q-time"><span class="t" data-t="${esc(r.timestamp)}" title="${esc(r.timestamp)}">…</span></td>
+        <td class="q-domain">
+          <span class="q-globe">${IC.globe}</span>
+          <span class="mono q-dom" title="${esc(r.domain)}">${esc(r.domain)}</span>
+          <button class="icon-btn q-copy" data-copy="${esc(r.domain)}" title="Copy domain">${IC.copy}</button>
+        </td>
+        <td><span class="badge badge-action ${actionBadge}">${isBlock ? IC.block : action === "PASS" ? IC.arrow : ""}${actionLabel}</span></td>
+        <td class="q-client"><span class="q-cicon">${IC.device}</span><span class="mono" title="${esc(r.client)}">${esc(r.client)}</span></td>
+        <td class="q-ips">${ipsHtml(r.ips)}</td>
+        <td class="q-inst"><span class="dot ${inst && inst.online ? "on" : "off"}"></span>${esc(inst ? (inst.label || inst.id) : r.instance)}</td>
+      </tr>`;
+    }).join("");
+    tb.querySelectorAll(".t").forEach((t) => { t.textContent = timeAgo(t.dataset.t); });
   } catch (e) {
     tb.innerHTML = `<tr class="empty-row"><td colspan="6"><div class="empty"><div class="empty-ic">${IC.warn}</div><h4>Query log unavailable</h4><p>${esc(e.message)}</p></div></td></tr>`;
   }
@@ -385,6 +398,28 @@ function propsInstanceOptions() {
   const cur = sel.value;
   const labels = [...new Set(instances.map((i) => i.label || i.id || ""))].filter(Boolean);
   sel.innerHTML = `<option value="">All instances</option>` + labels.map((l) => `<option value="${esc(l)}" ${l === cur ? "selected" : ""}>${esc(l)}</option>`).join("");
+}
+
+function ipsHtml(ips) {
+  const list = ips || [];
+  if (!list.length) return `<span class="q-ips-empty">—</span>`;
+  const shown = list.slice(0, 2);
+  const extra = list.length - shown.length;
+  return shown.map((ip) => `<span class="q-chip" data-copy="${esc(ip)}" title="Copy ${esc(ip)}">${esc(ip)}</span>`).join("") +
+    (extra > 0 ? `<span class="q-chip-more" title="${esc(list.join(", "))}">+${extra}</span>` : "");
+}
+
+async function copyText(s) {
+  try {
+    if (navigator.clipboard?.writeText) { await navigator.clipboard.writeText(s); }
+    else {
+      const ta = document.createElement("textarea");
+      ta.value = s; ta.style.position = "fixed"; ta.style.opacity = "0";
+      document.body.appendChild(ta); ta.select();
+      document.execCommand("copy"); ta.remove();
+    }
+    toast("copied " + s);
+  } catch { toast("copy failed", "err"); }
 }
 
 /* ---------- blocklist ---------- */
@@ -578,6 +613,10 @@ $("inst-tbody").addEventListener("click", (e) => {
 $("q-filter").addEventListener("input", (e) => { qState.filter = e.target.value; renderQueries(); });
 $("q-instance").addEventListener("change", (e) => { qState.inst = e.target.value; renderQueries(); });
 $("q-refresh").onclick = renderQueries;
+$("q-tbody").addEventListener("click", (e) => {
+  const c = e.target.closest("[data-copy]"); if (!c) return;
+  copyText(c.dataset.copy);
+});
 document.querySelectorAll("#q-action-seg button").forEach((b) => b.onclick = () => {
   document.querySelectorAll("#q-action-seg button").forEach((x) => x.classList.remove("active"));
   b.classList.add("active");
@@ -654,5 +693,5 @@ loadBlocklist();
 connectSSE();
 refresh();
 refreshSettings();
-pollTimer = setInterval(() => { if (current === "dashboard" || current === "instances") refresh(); }, 5000);
+pollTimer = setInterval(() => { if (current === "dashboard" || current === "instances" || current === "queries") refresh(); }, 5000);
 setInterval(() => { fetchChart(); }, 60000); // refresh chart periodically

@@ -117,7 +117,7 @@ func (s *QueryLogStore) Query(ctx context.Context, instance, filter string, sinc
 		if err := rows.Scan(&e.ID, &ts, &e.Instance, &e.Client, &e.Domain, &e.Action, &e.Upstream, &ips); err != nil {
 			return nil, err
 		}
-		e.Timestamp, _ = time.Parse("2006-01-02 15:04:05", ts)
+		e.Timestamp = parseQueryTS(ts)
 		if ips.Valid && ips.String != "" {
 			e.IPs = strings.Split(ips.String, ",")
 		}
@@ -151,7 +151,7 @@ func (s *QueryLogStore) GetQueryStats(ctx context.Context, instance string, buck
 		if err := rows.Scan(&tsStr, &action); err != nil {
 			return nil, err
 		}
-		ts, _ := time.Parse("2006-01-02 15:04:05", tsStr)
+		ts := parseQueryTS(tsStr)
 
 		// Calculate bucket key (unix timestamp truncated to bucket size)
 		bucketKey := ts.Unix() / int64(bucketSize.Seconds())
@@ -199,4 +199,20 @@ func (s *QueryLogStore) cleanupLoop() {
 // Close closes the database connection
 func (s *QueryLogStore) Close() error {
 	return s.db.Close()
+}
+
+// parseQueryTS parses the timestamp formats written to SQLite. Entries are
+// stored as Go's time.Time.String() text (including a trailing monotonic
+// "m=…" reading), but older rows may hold RFC3339Nano or the bare
+// "2006-01-02 15:04:05" form, so try each in turn.
+func parseQueryTS(s string) time.Time {
+	if i := strings.LastIndex(s, " m="); i > 0 {
+		s = s[:i]
+	}
+	for _, layout := range []string{time.RFC3339Nano, "2006-01-02 15:04:05.999999999 -0700 MST", "2006-01-02 15:04:05"} {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t
+		}
+	}
+	return time.Time{}
 }
