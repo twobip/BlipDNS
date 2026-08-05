@@ -15,6 +15,10 @@
 package blocklist
 
 import (
+	"context"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 )
 
@@ -149,5 +153,135 @@ func TestConcurrentAccess(t *testing.T) {
 	}
 	for i := 0; i < 10; i++ {
 		<-done
+	}
+}
+
+func TestWildcardSemantics(t *testing.T) {
+	b := New()
+	b.FromDomains([]string{"*.ads.net"})
+	for host, want := range map[string]bool{
+		"sub.ads.net":     true,
+		"a.b.ads.net":     true,
+		"ads.net":         false,
+		"notads.net":      false,
+		"x.ads.net.other": false,
+	} {
+		if got := b.IsBlocked(host); got != want {
+			t.Errorf("IsBlocked(%q) = %v, want %v", host, got, want)
+		}
+	}
+}
+
+func TestChecksumOrderIndependent(t *testing.T) {
+	b := New()
+	b.FromDomains([]string{"a.com", "b.com", "c.net"})
+	base := b.Checksum()
+	b2 := New()
+	b2.FromDomains([]string{"c.net", "a.com", "b.com"})
+	if base != b2.Checksum() {
+		t.Errorf("checksums differ for same set in different order: %d vs %d", base, b2.Checksum())
+	}
+	b.Add("d.org")
+	b.Remove("d.org")
+	if base != b.Checksum() {
+		t.Errorf("checksum changed after add+remove of same domain")
+	}
+}
+
+func TestFromDomainsMap(t *testing.T) {
+	b := New()
+	b.FromDomainsMap(map[string]struct{}{"evil.com": {}, "*.wild.net": {}, "bad": {}})
+	if !b.IsBlocked("evil.com") || !b.IsBlocked("x.wild.net") || b.IsBlocked("wild.net") {
+		t.Error("FromDomainsMap normalization failed")
+	}
+	if b.IsBlocked("bad") {
+		t.Error("single-label domain should be rejected")
+	}
+}
+
+func TestLoadFromURLsMixedFormats(t *testing.T) {
+	abp := `! Title: test
+## ad-slot
+||ads.example.com^$script
+|http://tracker.example.net^
+plain.example.org
+||banner.example.com^
+`
+	hosts := `127.0.0.1 localhost
+0.0.0.0 hostfile.example.io
+# comment
+0.0.0.0 hostfile.example.io
+`
+	var progressed bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/abp.txt":
+			io.WriteString(w, abp)
+		case "/hosts":
+			io.WriteString(w, hosts)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	b := New()
+	res, err := b.LoadFromURLs(context.Background(), []string{srv.URL + "/abp.txt", srv.URL + "/hosts"}, &LoadOptions{
+		Progress: func(Progress) { progressed = true },
+	})
+	if err != nil {
+		t.Fatalf("LoadFromURLs: %v", err)
+	}
+	if res.Failed != 0 || res.Domains != 5 {
+		t.Fatalf("result = %+v, want 0 failed / 5 domains", res)
+	}
+	if !progressed {
+		t.Error("progress callback was not invoked")
+	}
+	for _, d := range []string{"ads.example.com", "tracker.example.net", "plain.example.org", "banner.example.com", "hostfile.example.io"} {
+		if !b.IsBlocked(d) {
+			t.Errorf("expected %q blocked", d)
+		}
+	}
+	if b.IsBlocked("example.com") || b.IsBlocked("localhost") {
+		t.Error("unexpected entries blocked")
+	}
+}
+
+func TestLoadFromURLsPartialFailure(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/ok" {
+			http.NotFound(w, r)
+			return
+		}
+		io.WriteString(w, "||good.example.com^\n")
+	}))
+	defer srv.Close()
+
+	b := New()
+	res, err := b.LoadFromURLs(context.Background(), []string{srv.URL + "/ok", srv.URL + "/missing"}, nil)
+	if err != nil {
+		t.Fatalf("LoadFromURLs with partial failure: %v", err)
+	}
+	if res.Failed != 1 || res.Domains != 1 {
+		t.Fatalf("result = %+v, want 1 failed / 1 domain", res)
+	}
+	if !b.IsBlocked("good.example.com") {
+		t.Error("expected good.example.com blocked despite one failed source")
+	}
+}
+
+func TestLoadFromURLsAllFailed(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	b := New()
+	if _, err := b.LoadFromURLs(context.Background(), []string{srv.URL + "/x", srv.URL + "/y"}, nil); err == nil {
+		t.Fatal("expected error when all sources fail")
+	}
+	if b.Count() != 0 {
+		t.Error("expected empty blocklist after all sources failed")
 	}
 }

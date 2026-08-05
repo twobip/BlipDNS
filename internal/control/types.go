@@ -33,6 +33,8 @@ type StatsResponse struct {
 	UpstreamErr  uint64         `json:"upstream_errors"`
 	PerClient    map[string]uint64 `json:"per_client,omitempty"`
 	Upstream     string         `json:"upstream,omitempty"`
+	BlocklistCount int          `json:"blocklist_count,omitempty"`
+	BlocklistHash  uint64       `json:"blocklist_hash,omitempty"`
 }
 
 // ListResponse returns the default (nil ID indicates default) plus all policies.
@@ -43,6 +45,12 @@ type ListResponse struct {
 
 type SetPolicyRequest struct {
 	Policy Policy `json:"policy"`
+}
+
+// SetBlocklistRequest replaces the instance's global blocklist with the given
+// domains (already normalized, plain "domain" or "*.root" wildcard entries).
+type SetBlocklistRequest struct {
+	Domains []string `json:"domains"`
 }
 
 type DeletePolicyRequest struct {

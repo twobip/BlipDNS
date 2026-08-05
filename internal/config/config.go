@@ -26,7 +26,8 @@ type Config struct {
 	CacheWarmCount       int              `yaml:"cache_warm_count"`       // most-popular entries kept fresh (0 = off)
 	CacheWarmAhead       time.Duration    `yaml:"cache_warm_ahead"`       // refresh popular entries when TTL drops below this
 	CacheWarmInterval    time.Duration    `yaml:"cache_warm_interval"`    // how often to check for stale popular entries
-	BlocklistURL         string           `yaml:"blocklist_url"`          // AdBlock Plus feed URL (optional)
+	BlocklistURL         string           `yaml:"blocklist_url"`          // AdBlock Plus feed URL (optional, legacy single)
+	BlocklistURLs        []string         `yaml:"blocklist_urls"`         // one or more ABP/hosts feeds (Pi-hole style)
 	BlocklistUpdateHours int              `yaml:"blocklist_update_hours"` // refresh interval (0 = no auto-refresh)
 	Default              *filter.Policy   `yaml:"default_policy"`
 	Policies             []*filter.Policy `yaml:"policies"`

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/fs"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -47,7 +48,9 @@ func (s *Server) Handler() http.Handler {
 	// Blocklist (session-gated)
 	mux.HandleFunc("/api/blocklist", api(s.handleBlocklist))                     // GET list / POST add / DELETE remove
 	mux.HandleFunc("/api/blocklist/export", api(s.handleBlocklistExport))        // GET text
-	mux.HandleFunc("/api/blocklist/import-url", api(s.handleBlocklistImportURL)) // POST fetch from URL
+	mux.HandleFunc("/api/blocklist/sources", api(s.handleBlocklistSources))      // PUT sources + import / GET status
+	mux.HandleFunc("/api/blocklist/status", api(s.handleBlocklistStatus))        // GET import progress
+	mux.HandleFunc("/api/blocklist/import-url", api(s.handleBlocklistImportURL)) // POST fetch from URL (legacy)
 
 	// UI: login page is public; static assets (js/css) are public; everything
 	// else requires a session. Assets hold no secrets and must load as relative
@@ -428,8 +431,16 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleBlocklist(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
+		domains := s.fleet.Blocklist().List()
+		if lim := r.URL.Query().Get("limit"); lim != "" {
+			if n, err := strconv.Atoi(lim); err == nil && n > 0 && len(domains) > n {
+				domains = domains[:n]
+			}
+		}
 		writeJSON(w, map[string]interface{}{
-			"domains": s.fleet.Blocklist().List(),
+			"domains": domains,
+			"sources": s.fleet.BlocklistSources(),
+			"status":  s.fleet.BlocklistStatus(),
 		})
 	case http.MethodPost:
 		var req struct {
@@ -491,11 +502,50 @@ func (s *Server) handleBlocklistImportURL(w http.ResponseWriter, r *http.Request
 		http.Error(w, "url required", http.StatusBadRequest)
 		return
 	}
-	if err := s.fleet.Blocklist().LoadFromURL(r.Context(), req.URL); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+	// Treat the URL as the (sole) source, Pi-hole style, and import async so a
+	// huge list never blocks the request.
+	s.fleet.SetBlocklistSources(r.Context(), []string{req.URL})
+	writeJSON(w, map[string]interface{}{"ok": true, "running": true})
+}
+
+// handleBlocklistSources manages the Pi-hole style source URLs.
+func (s *Server) handleBlocklistSources(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, map[string]interface{}{
+			"sources": s.fleet.BlocklistSources(),
+			"status":  s.fleet.BlocklistStatus(),
+		})
+	case http.MethodPut, http.MethodPost:
+		var req struct {
+			URLs []string `json:"urls"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		urls := cleanURLs(req.URLs)
+		if len(urls) == 0 {
+			// Saving an empty source list clears the blocklist.
+			s.fleet.SetBlocklistSources(r.Context(), nil)
+			s.fleet.Blocklist().FromDomains(nil)
+			writeJSON(w, map[string]interface{}{"ok": true, "count": 0})
+			return
+		}
+		s.fleet.SetBlocklistSources(r.Context(), urls)
+		writeJSON(w, map[string]interface{}{"ok": true, "running": true, "sources": urls})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// handleBlocklistStatus reports import progress / last result.
+func (s *Server) handleBlocklistStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	writeJSON(w, map[string]interface{}{"ok": true, "count": len(s.fleet.Blocklist().List())})
+	writeJSON(w, s.fleet.BlocklistStatus())
 }
 
 // serveUI dispatches inbound HTTP to embedded assets (public) or the SPA

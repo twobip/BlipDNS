@@ -17,6 +17,7 @@ type InstanceStatus struct {
 	Online       bool                    `json:"online"`
 	Adopted      bool                    `json:"adopted"`
 	ConfigSynced bool                    `json:"config_synced"`
+	BlocklistSynced bool                 `json:"blocklist_synced"`
 	Health       *control.HealthResponse `json:"health,omitempty"`
 	Stats        *control.StatsResponse  `json:"stats,omitempty"`
 	LastOK       time.Time               `json:"last_ok"`
@@ -47,6 +48,7 @@ type Instance struct {
 	pingLastMs  float64
 	appliedHash string // hash of the effective config last successfully applied
 	lastUpstr   string // default upstream the instance last reported (for drift detection)
+	blHash      uint64 // checksum of the blocklist last successfully pushed
 }
 
 // pollInterval is how often the controller polls an instance's health/stats.
@@ -120,6 +122,30 @@ func (i *Instance) markConfigAppliedWith(hash, upstr string) {
 	i.mu.Unlock()
 }
 
+// blocklistApplied reports whether the instance has the blocklist with the
+// given checksum (empty checksum means none has ever been pushed).
+func (i *Instance) blocklistApplied(hash uint64) bool {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.blHash == hash
+}
+
+// reportedBlocklistHash returns the blocklist checksum the instance reported
+// in its latest stats (0 when unknown).
+func reportedBlocklistHash(s *control.StatsResponse) uint64 {
+	if s == nil {
+		return 0
+	}
+	return s.BlocklistHash
+}
+
+// markBlocklistApplied records the checksum of the blocklist just pushed.
+func (i *Instance) markBlocklistApplied(hash uint64) {
+	i.mu.Lock()
+	i.blHash = hash
+	i.mu.Unlock()
+}
+
 func (i *Instance) poll(ctx context.Context) {
 	c := i.ctl()
 	start := time.Now()
@@ -166,6 +192,8 @@ func (i *Instance) poll(ctx context.Context) {
 		// Converge the instance to the fleet default config if it is behind
 		// (newly added/adopted, restarted, or reverted to its own config).
 		i.fleet.maybePushConfig(ctx, i, s)
+		// Converge the instance's global blocklist the same way.
+		i.fleet.maybePushBlocklist(ctx, i, s)
 		// Also log to query log
 		if i.fleet.queryLog != nil && s != nil {
 			_ = i.fleet.queryLog.Insert(ctx, QueryLogEntry{
@@ -237,6 +265,7 @@ func (i *Instance) status() *InstanceStatus {
 	}
 	applied := i.appliedHash
 	reportedUpstream := i.lastUpstr
+	repBlHash := reportedBlocklistHash(i.stats)
 	i.mu.RUnlock()
 	// Snapshot the fleet's expected config hash and upstream outside the
 	// instance lock (they read fleet state) and mark synced when both match.
@@ -247,6 +276,9 @@ func (i *Instance) status() *InstanceStatus {
 		}
 		st.ConfigSynced = synced
 	}
+	// Blocklist is synced when the checksum the instance reports matches the
+	// fleet's (trust what the instance actually has, not what we pushed).
+	st.BlocklistSynced = i.fleet.Blocklist().Checksum() != 0 && i.fleet.Blocklist().Checksum() == repBlHash
 	if ad, err := i.ctl().AdoptStatus(context.Background()); err == nil {
 		st.Adopted = ad.Adopted
 	}

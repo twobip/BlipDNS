@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -69,13 +70,28 @@ type Fleet struct {
 	logfn                func(Event)
 	queryLog             *QueryLogStore               // persistent query log
 	blocklist            *blocklist.Blocklist         // global DNS blocklist
-	blocklistURL         string                       // URL to fetch blocklist from (AdBlock Plus format)
-	blocklistUpdateHours int                          // update interval in hours (0 = disabled)
-	updateStopCh         chan struct{}                // channel to stop the updater goroutine
-	updateMu             sync.Mutex                   // protects updateStopCh
+	blocklistSources     []string                     // Pi-hole style source URLs (AdBlock Plus / hosts)
+	blMu                 sync.Mutex                   // guards blocklist status + import job
+	blRunning            bool
+	blGen                int
+	blCancel             context.CancelFunc
+	blStatus             BlocklistStatus
 	configPath           string                       // path to controller config YAML (for persisting tokens)
 	defaultPolicy        *control.Policy              // fleet-wide default policy (source of truth)
 	overrides            map[string]*InstanceOverride // per-instance partial configs (diff vs default)
+}
+
+// BlocklistStatus is a point-in-time view of the controller's blocklist
+// sources, the current import job (if any), and the merged list state.
+type BlocklistStatus struct {
+	Running     bool      `json:"running"`
+	SourceTotal int       `json:"source_total"`
+	SourceDone  int       `json:"source_done"`
+	CurrentURL  string    `json:"current_url"`
+	Domains     int       `json:"domains"`
+	LastUpdate  time.Time `json:"last_update"`
+	Errors      []string  `json:"errors,omitempty"`
+	Sources     []string  `json:"sources"`
 }
 
 // NewFleet creates an empty fleet with a default event buffer.
@@ -435,8 +451,9 @@ func (f *Fleet) Adopt(ctx context.Context, id, code string) error {
 				log.Printf("blipc: warning: failed to persist adopted token: %v", err)
 			}
 		}
-		// Newly adopted instance: hand it the fleet config.
+		// Newly adopted instance: hand it the fleet config and blocklist.
 		f.maybePushConfig(context.Background(), inst, nil)
+		f.maybePushBlocklist(context.Background(), inst, nil)
 	}
 	f.bus.Publish(Event{InstanceID: id, Instance: inst.Config.Label, Type: "status", At: f.now(), Msg: "adopted"})
 	return nil
@@ -523,6 +540,216 @@ func (f *Fleet) Blocklist() *blocklist.Blocklist {
 	return f.blocklist
 }
 
+// BlocklistSources returns the configured source URLs.
+func (f *Fleet) BlocklistSources() []string {
+	f.blMu.Lock()
+	defer f.blMu.Unlock()
+	return append([]string(nil), f.blocklistSources...)
+}
+
+// BlocklistStatus returns the current source list and import job state.
+func (f *Fleet) BlocklistStatus() BlocklistStatus {
+	f.blMu.Lock()
+	defer f.blMu.Unlock()
+	st := f.blStatus
+	st.Sources = append([]string(nil), f.blocklistSources...)
+	if !st.Running && f.blocklist != nil {
+		st.Domains = f.blocklist.Count()
+	}
+	return st
+}
+
+// SetBlocklistSources replaces the source URLs, persists them to the config,
+// and starts a background import job. The HTTP caller returns immediately;
+// progress is visible via BlocklistStatus.
+func (f *Fleet) SetBlocklistSources(ctx context.Context, urls []string) {
+	f.blMu.Lock()
+	f.blocklistSources = cleanURLs(urls)
+	f.blMu.Unlock()
+	if f.configPath != "" {
+		if err := f.saveConfig(); err != nil {
+			log.Printf("blipc: warning: failed to persist blocklist sources: %v", err)
+		}
+	}
+	f.startBlocklistImport()
+}
+
+// ImportBlocklist starts a background import of the current sources. No-op if
+// one is already running.
+func (f *Fleet) ImportBlocklist() {
+	f.startBlocklistImport()
+}
+
+// cancelBlocklistImport stops any in-flight import.
+func (f *Fleet) cancelBlocklistImport() {
+	f.blMu.Lock()
+	defer f.blMu.Unlock()
+	if f.blCancel != nil {
+		f.blCancel()
+		f.blCancel = nil
+	}
+}
+
+func (f *Fleet) startBlocklistImport() {
+	f.blMu.Lock()
+	f.blGen++
+	gen := f.blGen
+	if f.blCancel != nil {
+		f.blCancel() // cancel any in-flight import; the new one supersedes it
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	f.blCancel = cancel
+	f.blRunning = true
+	f.blStatus = BlocklistStatus{Running: true, SourceTotal: len(f.blocklistSources)}
+	f.blMu.Unlock()
+	go f.runBlocklistImport(ctx, gen)
+}
+
+// runBlocklistImport fetches and merges all sources, then distributes the
+// merged list to every instance. Runs in the background so a huge list (e.g.
+// oisd.big) never blocks the web UI. gen lets a superseding import claim the
+// status while an older one winds down.
+func (f *Fleet) runBlocklistImport(ctx context.Context, gen int) {
+	current := func() bool {
+		f.blMu.Lock()
+		defer f.blMu.Unlock()
+		return f.blGen == gen
+	}
+	defer func() {
+		if !current() {
+			return // a newer import owns the status now
+		}
+		f.blMu.Lock()
+		f.blRunning = false
+		f.blCancel = nil
+		f.blStatus.Running = false
+		f.blStatus.Domains = f.blocklist.Count()
+		f.blStatus.LastUpdate = f.now()
+		f.blMu.Unlock()
+		f.bus.Publish(Event{Type: "status", At: f.now(), Msg: "blocklist update finished"})
+	}()
+
+	urls := f.BlocklistSources()
+	if len(urls) == 0 {
+		f.blMu.Lock()
+		f.blStatus.Errors = []string{"no blocklist sources configured"}
+		f.blMu.Unlock()
+		// Clear the list on every instance too (sources were dropped).
+		f.pushBlocklist(context.Background())
+		return
+	}
+	res, err := f.blocklist.LoadFromURLs(ctx, urls, &blocklist.LoadOptions{
+		Progress: func(p blocklist.Progress) {
+			if !current() {
+				return
+			}
+			f.blMu.Lock()
+			f.blStatus.CurrentURL = p.URL
+			f.blStatus.SourceDone = p.SourceDone
+			f.blStatus.SourceTotal = p.SourceTotal
+			f.blStatus.Domains = p.Domains
+			f.blMu.Unlock()
+		},
+	})
+	if !current() {
+		return
+	}
+	f.blMu.Lock()
+	if err != nil {
+		f.blStatus.Errors = append(f.blStatus.Errors, err.Error())
+	}
+	if res != nil {
+		f.blStatus.Errors = append(f.blStatus.Errors, res.Errors...)
+	}
+	f.blMu.Unlock()
+
+	if res == nil || res.Domains == 0 {
+		return
+	}
+	// Distribute the merged list to instances (background; a large list takes
+	// a while to ship over the management API).
+	if results := f.pushBlocklist(context.Background()); results != nil {
+		if !current() {
+			return
+		}
+		f.blMu.Lock()
+		msgs := make([]string, 0, len(results))
+		for id, r := range results {
+			if r != "ok" {
+				msgs = append(msgs, id+": "+r)
+			}
+		}
+		if len(msgs) > 0 {
+			f.blStatus.Errors = append(f.blStatus.Errors, "distribution: "+strings.Join(msgs, "; "))
+		}
+		f.blMu.Unlock()
+	}
+}
+
+// pushBlocklist sends the controller's merged blocklist to every instance and
+// records the applied checksum on success. An empty list clears the instances.
+func (f *Fleet) pushBlocklist(ctx context.Context) map[string]string {
+	domains := f.blocklist.List()
+	hash := f.blocklist.Checksum()
+
+	f.mu.RLock()
+	insts := make([]*Instance, 0, len(f.instances))
+	for _, i := range f.instances {
+		insts = append(insts, i)
+	}
+	f.mu.RUnlock()
+
+	results := make(map[string]string, len(insts))
+	for _, i := range insts {
+		if !i.hasToken() {
+			results[i.Config.ID] = "not adopted"
+			continue
+		}
+		if err := i.ctl().SetBlocklist(ctx, domains); err != nil {
+			results[i.Config.ID] = err.Error()
+			continue
+		}
+		i.markBlocklistApplied(hash)
+		results[i.Config.ID] = "ok"
+	}
+	return results
+}
+
+// maybePushBlocklist converges an instance's blocklist, trusting what the
+// instance reports (via stats) over our own bookkeeping: it re-pushes whenever
+// the reported checksum differs from the fleet's, which covers restarts (a
+// freshly started blipd has an empty list) and clears (an empty fleet list
+// must be distributed to un-block on the instance).
+func (f *Fleet) maybePushBlocklist(ctx context.Context, i *Instance, reported *control.StatsResponse) {
+	if !i.hasToken() {
+		return
+	}
+	hash := f.blocklist.Checksum()
+	rep := uint64(0)
+	if reported != nil {
+		rep = reported.BlocklistHash
+	}
+	if rep == hash {
+		i.markBlocklistApplied(hash)
+		return
+	}
+	if err := i.ctl().SetBlocklist(ctx, f.blocklist.List()); err == nil {
+		i.markBlocklistApplied(hash)
+	}
+}
+
+// cleanURLs trims whitespace and drops empty entries, preserving order.
+func cleanURLs(urls []string) []string {
+	out := make([]string, 0, len(urls))
+	for _, u := range urls {
+		u = strings.TrimSpace(u)
+		if u != "" {
+			out = append(out, u)
+		}
+	}
+	return out
+}
+
 // LoadConfig adds instances from a YAML config file (instances: section).
 func (f *Fleet) LoadConfig(ctx context.Context, path string) error {
 	if path == "" {
@@ -563,6 +790,7 @@ func (f *Fleet) saveConfig() error {
 		Password         string                       `yaml:"password"`
 		DefaultPolicy    *control.Policy              `yaml:"default_policy"`
 		InstancePolicies map[string]*InstanceOverride `yaml:"instance_overrides"`
+		BlocklistSources []string                     `yaml:"blocklist_sources"`
 		Instances        []InstanceConfig             `yaml:"instances"`
 	}
 
@@ -583,9 +811,11 @@ func (f *Fleet) saveConfig() error {
 	def := f.defaultPolicy
 	overs := f.overrides
 	f.mu.RUnlock()
+	blSources := f.BlocklistSources()
 	cfg.Instances = instances
 	cfg.DefaultPolicy = def
 	cfg.InstancePolicies = overs
+	cfg.BlocklistSources = blSources
 
 	out, err := yaml.Marshal(cfg)
 	if err != nil {

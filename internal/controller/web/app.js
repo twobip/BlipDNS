@@ -47,6 +47,7 @@ const IC = {
   arrow: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14m-6-6 6 6-6 6"/></svg>',
   globe: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.6 3.8 5.7 3.8 9S14.5 18.4 12 21c-2.5-2.6-3.8-5.7-3.8-9S9.5 5.6 12 3z"/></svg>',
   device: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg>',
+  x: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12"/></svg>',
 };
 
 /* ---------- routing ---------- */
@@ -435,23 +436,102 @@ async function copyText(s) {
 
 /* ---------- blocklist ---------- */
 let polCache = {};
+let blSources = [];
+let blStatus = { running: false, domains: 0 };
+let blStatusTimer = null;
 async function loadBlocklist() {
-  try { const r = await API("/api/blocklist"); const d = await r.json(); blDomains = d.domains || []; renderBlocklist(); } catch (e) {}
+  try {
+    const r = await API("/api/blocklist?limit=2000");
+    const d = await r.json();
+    blDomains = d.domains || [];
+    if (Array.isArray(d.sources)) blSources = d.sources.slice();
+    if (d.status) blStatus = d.status;
+    renderBlocklist();
+    renderBlSources();
+    renderBlStatus();
+    if (blStatus.running) startBlStatusPoll();
+  } catch (e) {}
 }
 function renderBlocklist() {
   const f = ($("bl-filter")?.value || "").toLowerCase();
   const list = blDomains.filter((d) => !f || d.includes(f));
-  $("bl-count").textContent = blDomains.length;
+  $("bl-count").textContent = blStatus.domains || blDomains.length;
   const ul = $("bl-list");
   if (!list.length) {
-    ul.innerHTML = `<div class="empty"><div class="empty-ic">${IC.block}</div><h4>Nothing blocked</h4><p>Add a domain or import a list like oisd.nl.</p></div>`;
+    const hint = blStatus.domains > 2000 ? `${fmt(blStatus.domains)} blocked · showing first 2000` : "";
+    ul.innerHTML = `<div class="empty"><div class="empty-ic">${IC.block}</div><h4>Nothing blocked</h4><p>Add a domain or add sources like oisd.nl below.</p>${hint ? `<p class="hint">${hint}</p>` : ""}</div>`;
     return;
   }
-  ul.innerHTML = list.map((d) => `<li><span class="mono grow">${esc(d)}</span><button class="icon-btn" data-rm="${esc(d)}" title="Remove">${IC.trash}</button></li>`).join("");
+  const shown = list.slice(0, 500);
+  ul.innerHTML = shown.map((d) => `<li><span class="mono grow">${esc(d)}</span><button class="icon-btn" data-rm="${esc(d)}" title="Remove">${IC.trash}</button></li>`).join("");
+  if (list.length > shown.length) {
+    ul.insertAdjacentHTML("beforeend", `<li class="muted" style="padding:8px 12px">showing ${shown.length} of ${fmt(list.length)} (filter to narrow)</li>`);
+  }
   ul.querySelectorAll("[data-rm]").forEach((b) => b.onclick = async () => {
     try { await API("/api/blocklist", { method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ domain: b.dataset.rm }) }); toast("removed " + b.dataset.rm); loadBlocklist(); }
     catch (e) { toast("remove failed", "err"); }
   });
+}
+function renderBlSources() {
+  const targets = [
+    [$("bl-sources"), "bl", (u) => removeSource(u)],
+    [$("s-bl-sources"), "s", null],
+  ];
+  for (const [el, _pfx, rm] of targets) {
+    if (!el) continue;
+    el.innerHTML = blSources.length
+      ? blSources.map((u) => `<div class="row" style="gap:8px"><span class="mono grow" title="${esc(u)}">${esc(u)}</span>${rm ? `<button class="icon-btn" data-rm-src="${esc(u)}" title="Remove source">${IC.x}</button>` : ""}</div>`).join("")
+      : `<span class="hint">No sources. Add a list URL above and hit Update now.</span>`;
+  }
+  const blEl = $("bl-sources");
+  if (blEl) blEl.querySelectorAll("[data-rm-src]").forEach((b) => b.onclick = () => removeSource(b.dataset.rmSrc));
+}
+function renderBlStatus() {
+  const st = $("bl-import-status");
+  const badge = $("s-blsync");
+  if (st) {
+    if (blStatus.running) {
+      const n = blStatus.source_total || blStatus.sources?.length || 1;
+      st.innerHTML = `<b>Syncing…</b> ${blStatus.source_done || 0}/${n} ${esc(blStatus.current_url || "")} · <b>${fmt(blStatus.domains)}</b> domains`;
+    } else if (blStatus.last_update) {
+      const errs = (blStatus.errors || []).filter(Boolean).length;
+      st.innerHTML = `${blSources.length} source${blSources.length === 1 ? "" : "s"} · <b>${fmt(blStatus.domains)}</b> domains · updated ${esc(new Date(blStatus.last_update).toLocaleTimeString())}${errs ? ` · <span style="color:var(--danger)">${errs} error${errs > 1 ? "s" : ""}</span>` : ""}`;
+    } else {
+      st.innerHTML = "No sources yet. Add list URLs (AdBlock Plus or hosts format) and hit Update now.";
+    }
+  }
+  if (badge) {
+    if (blStatus.running) { badge.textContent = "syncing…"; badge.classList.add("accent"); }
+    else if (blSources.length) { badge.textContent = `${blSources.length} src · ${fmt(blStatus.domains)}`; badge.classList.remove("accent"); }
+    else { badge.textContent = "off"; badge.classList.remove("accent"); }
+  }
+}
+function removeSource(u) {
+  blSources = blSources.filter((s) => s !== u);
+  renderBlSources();
+}
+function startBlStatusPoll() {
+  if (blStatusTimer) return;
+  blStatusTimer = setInterval(async () => {
+    try {
+      const r = await API("/api/blocklist/status");
+      const d = await r.json();
+      blStatus = d;
+      renderBlStatus();
+      if (!d.running) { clearInterval(blStatusTimer); blStatusTimer = null; loadBlocklist(); }
+    } catch (e) {}
+  }, 1000);
+}
+async function updateBlocklist() {
+  const urls = blSources.filter((u) => u.trim());
+  if (!urls.length) return toast("add at least one source URL", "err");
+  const st = $("bl-import-status");
+  st.innerHTML = "<b>Syncing…</b>";
+  try {
+    await API("/api/blocklist/sources", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ urls }) });
+    toast("fetching blocklist sources");
+    startBlStatusPoll();
+  } catch (e) { st.textContent = "failed: " + e.message; toast("update failed: " + e.message, "err"); }
 }
 
 async function renderPolicies() {
@@ -734,26 +814,25 @@ $("bl-add").onclick = async () => {
   catch (e) { toast("add failed: " + e.message, "err"); }
 };
 $("bl-add-input").addEventListener("keydown", (e) => { if (e.key === "Enter") $("bl-add").click(); });
-$("bl-import-url").onclick = async () => {
+$("bl-url-input").addEventListener("keydown", (e) => { if (e.key === "Enter") $("bl-url-add").click(); });
+$("bl-url-add").onclick = () => {
   const u = ($("bl-url-input").value || "").trim();
-  if (!u) return toast("URL required", "err");
-  const st = $("bl-import-status"); st.textContent = "fetching…";
-  try {
-    const r = await API("/api/blocklist/import-url", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: u }) });
-    const d = await r.json();
-    st.innerHTML = `Loaded <b>${fmt(d.count)}</b> domains.`;
-    toast("imported " + fmt(d.count) + " domains"); $("bl-url-input").value = ""; loadBlocklist();
-  } catch (e) { st.textContent = "failed: " + e.message; toast("import failed: " + e.message, "err"); }
+  if (!u) return toast("enter a source URL", "err");
+  if (!/^https?:\/\//i.test(u)) return toast("URL must start with http(s)://", "err");
+  if (blSources.includes(u)) return toast("source already added", "err");
+  blSources.push(u);
+  $("bl-url-input").value = "";
+  renderBlSources();
 };
-$("bl-url-input").addEventListener("keydown", (e) => { if (e.key === "Enter") $("bl-import-url").click(); });
+$("bl-update").onclick = updateBlocklist;
 $("bl-filter").addEventListener("input", renderBlocklist);
 $("bl-export").onclick = () => window.open("/api/blocklist/export", "_blank");
 $("bl-clear").onclick = () => {
-  confirmDialog("Clear entire blocklist?", "This removes every blocked domain. This cannot be undone.", async () => {
-    let n = 0;
+  confirmDialog("Clear entire blocklist?", "This removes every blocked domain and drops all sources. This cannot be undone.", async () => {
     try {
-      for (const d of blDomains) { await API("/api/blocklist", { method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ domain: d }) }); n++; }
-      toast("cleared " + n + " domains"); loadBlocklist();
+      await API("/api/blocklist/sources", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ urls: [] }) });
+      blSources = [];
+      toast("cleared blocklist"); loadBlocklist();
     } catch (e) { toast("clear failed", "err"); }
   });
 };
@@ -800,9 +879,9 @@ $("s-save-upstream").onclick = async () => {
 };
 $("s-scope").addEventListener("change", (e) => { scopeState = e.target.value; loadScopeEditor(); });
 $("s-fetch").onclick = async () => {
-  const u = ($("s-bl-url").value || "").trim();
-  if (!u) return toast("enter a URL", "err");
-  try { await API("/api/blocklist/import-url", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: u }) }); toast("blocklist fetched"); loadBlocklist(); }
+  const urls = blSources.filter((u) => u.trim());
+  if (!urls.length) return toast("no blocklist sources configured", "err");
+  try { await API("/api/blocklist/sources", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ urls }) }); toast("fetching blocklist sources"); startBlStatusPoll(); }
   catch (e) { toast("failed: " + e.message, "err"); }
 };
 

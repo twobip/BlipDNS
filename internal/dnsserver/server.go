@@ -63,7 +63,7 @@ func New(cfg Config) (*Server, error) {
 	}
 	c := cache.New(cfg.CacheCap, cfg.CacheSize)
 	cnt := &control.Counters{}
-	ctrl := control.NewServer("", cfg.Store, c, cnt, cfg.Version)
+	ctrl := control.NewServerWithBlocklist("", cfg.Store, c, cnt, cfg.Version, cfg.Blocklist)
 	s := &Server{
 		cfg:   cfg,
 		cache: c,

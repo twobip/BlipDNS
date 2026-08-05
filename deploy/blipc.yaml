@@ -12,6 +12,13 @@ default_policy:
   upstream: "udp://1.1.1.1:53|1 https://1.1.1.1/dns-query|2"
   block_action: "nxdomain"
   log: true
+# Pi-hole style blocklist sources: one or more AdBlock Plus (ABP) or hosts
+# format lists. blipc fetches + merges them, then pushes the merged list to
+# every blipd instance (and re-pushes on poll if an instance drifts). Edit
+# from the web UI (Rules & Blocklist page) too. Empty list = nothing blocked.
+# blocklist_sources:
+#   - https://big.oisd.nl/domainswild2
+#   - https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts
 instances:
   # Add blipd instances here, or via the web UI at runtime.
   # token may be a literal, an "@/path" file, or an "/abs/path" file.

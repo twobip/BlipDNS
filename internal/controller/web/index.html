@@ -182,18 +182,22 @@
               </div>
               <div class="divider mt"></div>
               <div class="field mt">
-                <label>Import remote blocklist</label>
+                <label>Blocklist sources <span class="faint">AdBlock Plus / hosts lists, Pi-hole style</span></label>
+                <div id="bl-sources"></div>
                 <div class="row">
                   <div class="search grow">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7"/><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"/></svg>
-                    <input class="input" id="bl-url-input" placeholder="https://raw.githubusercontent.com/ookangzheng/blah/master/adblock.txt"/>
+                    <input class="input" id="bl-url-input" placeholder="https://big.oisd.nl/domainswild2"/>
                   </div>
-                  <button class="btn" id="bl-import-url">
-                    <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 3v12m0 0 4-4m-4 4-4-4M4 21h16"/></svg>
-                    Import
-                  </button>
+                  <button class="btn" id="bl-url-add">+ Add</button>
                 </div>
-                <span class="hint" id="bl-import-status">Fetch Adblock-Plus format lists such as <span class="mono">oisd.nl</span>.</span>
+                <div class="row mt">
+                  <button class="btn btn-primary" id="bl-update">
+                    <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 3v12m0 0 4-4m-4 4-4-4M4 21h16"/></svg>
+                    Update now
+                  </button>
+                  <span class="hint" id="bl-import-status">Fetch, merge and distribute the sources to every instance.</span>
+                </div>
               </div>
               <div class="row mt">
                 <button class="btn" id="bl-export">Export .txt</button>
@@ -252,12 +256,15 @@
             <div class="panel-head"><h3>Blocklist Sync</h3><span class="spacer"></span><span class="badge" id="s-blsync">—</span></div>
             <div class="panel-body">
               <div class="field">
-                <label>Source URL</label>
-                <input class="input" id="s-bl-url" placeholder="https://oisd.nl/"/>
+                <label>Sources</label>
+                <div id="s-bl-sources"></div>
+                <span class="hint">Edit sources on the <a href="/blocklist">Rules &amp; Blocklist</a> page.</span>
                 <div class="row mt">
                   <button class="btn" id="s-fetch">Fetch now</button>
                 </div>
               </div>
+            </div>
+          </div>
             </div>
           </div>
 

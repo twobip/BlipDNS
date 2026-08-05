@@ -4,12 +4,14 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
 	"sync"
 	"time"
 
+	"github.com/twobip/BlipDNS/internal/blocklist"
 	"github.com/twobip/BlipDNS/internal/cache"
 	"github.com/twobip/BlipDNS/internal/filter"
 )
@@ -23,15 +25,16 @@ type StatsCollector interface {
 // It also exposes an unauthenticated claim-code adoption handshake so a
 // controller can bootstrap trust once without the operator copying tokens.
 type Server struct {
-	token    string
-	store    *filter.Store
-	cache    *cache.Cache
-	stats    StatsCollector
-	started  time.Time
-	version  string
-	mu       sync.RWMutex
-	watchMu  sync.Mutex
-	watchers map[chan WatchEvent]struct{}
+	token     string
+	store     *filter.Store
+	cache     *cache.Cache
+	stats     StatsCollector
+	blocklist *blocklist.Blocklist
+	started   time.Time
+	version   string
+	mu        sync.RWMutex
+	watchMu   sync.Mutex
+	watchers  map[chan WatchEvent]struct{}
 
 	// adoption (claim-code bootstrap)
 	adoptMu    sync.Mutex
@@ -45,14 +48,21 @@ type Server struct {
 
 // NewServer builds a management API server guarded by token.
 func NewServer(token string, store *filter.Store, c *cache.Cache, stats StatsCollector, version string) *Server {
+	return NewServerWithBlocklist(token, store, c, stats, version, nil)
+}
+
+// NewServerWithBlocklist builds a management API server that can also receive
+// a controller-managed global blocklist (nil disables the endpoint).
+func NewServerWithBlocklist(token string, store *filter.Store, c *cache.Cache, stats StatsCollector, version string, bl *blocklist.Blocklist) *Server {
 	return &Server{
-		token:    token,
-		store:    store,
-		cache:    c,
-		stats:    stats,
-		started:  time.Now(),
-		version:  version,
-		watchers: make(map[chan WatchEvent]struct{}),
+		token:     token,
+		store:     store,
+		cache:     c,
+		stats:     stats,
+		blocklist: bl,
+		started:   time.Now(),
+		version:   version,
+		watchers:  make(map[chan WatchEvent]struct{}),
 	}
 }
 
@@ -144,6 +154,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/stats", s.auth(s.handleStats))
 	mux.HandleFunc("/api/v1/policies", s.auth(s.handleListPolicies))
 	mux.HandleFunc("/api/v1/policy", s.auth(s.handlePolicy))
+	mux.HandleFunc("/api/v1/blocklist", s.auth(s.handleBlocklist))
 	mux.HandleFunc("/api/v1/watch", s.auth(s.handleWatch))
 	// unauthenticated adoption handshake
 	mux.HandleFunc("/api/v1/adopt/status", s.handleAdoptStatus)
@@ -196,6 +207,11 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		if def, _ := s.store.All(); def != nil {
 			st.Upstream = def.Upstream
 		}
+		// Report the active global blocklist so the controller can detect drift.
+		if s.blocklist != nil {
+			st.BlocklistCount = s.blocklist.Count()
+			st.BlocklistHash = s.blocklist.Checksum()
+		}
 	}
 	writeJSON(w, st)
 }
@@ -212,8 +228,7 @@ func (s *Server) handleListPolicies(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, out)
 }
 
-func (s *Server) handlePolicy(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
+func (s *Server) handlePolicy(w http.ResponseWriter, r *http.Request) {	switch r.Method {
 	case http.MethodPut, http.MethodPost:
 		var req SetPolicyRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -248,6 +263,28 @@ func (s *Server) handlePolicy(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+// handleBlocklist replaces the instance's global blocklist with the given
+// domains. It accepts a large payload (multi-million entry lists).
+func (s *Server) handleBlocklist(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut && r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.blocklist == nil {
+		http.Error(w, "blocklist not configured", http.StatusServiceUnavailable)
+		return
+	}
+	dec := json.NewDecoder(io.LimitReader(r.Body, 1<<31)) // 2 GiB cap
+	dec.UseNumber()
+	var req SetBlocklistRequest
+	if err := dec.Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	s.blocklist.FromDomains(req.Domains)
+	writeJSON(w, AckResponse{OK: true, Msg: "blocklist updated"})
 }
 
 func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request) {

@@ -19,6 +19,17 @@ import (
 
 const version = "blipd/0.1.0"
 
+// blocklistSources merges the legacy single URL with the new plural list.
+func blocklistSources(cfg *config.Config) []string {
+	if len(cfg.BlocklistURLs) > 0 {
+		return cfg.BlocklistURLs
+	}
+	if cfg.BlocklistURL != "" {
+		return []string{cfg.BlocklistURL}
+	}
+	return nil
+}
+
 func main() {
 	cfgPath := flag.String("config", "", "path to YAML config")
 	flag.Parse()
@@ -36,28 +47,23 @@ func main() {
 	}
 
 	bl := blocklist.New()
-	if cfg.BlocklistURL != "" {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	if urls := blocklistSources(cfg); len(urls) > 0 {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()
-		if err := bl.LoadFromURL(ctx, cfg.BlocklistURL); err != nil {
-			log.Printf("blipd: blocklist load %s: %v (continuing without blocklist)", cfg.BlocklistURL, err)
+		if res, err := bl.LoadFromURLs(ctx, urls, nil); err != nil {
+			log.Printf("blipd: blocklist load: %v (continuing without blocklist)", err)
 		} else {
-			log.Printf("blipd: blocklist loaded from %s (%d domains)", cfg.BlocklistURL, len(bl.List()))
+			log.Printf("blipd: blocklist loaded from %d sources (%d domains)", res.Sources, res.Domains)
 			if cfg.BlocklistUpdateHours > 0 {
 				go func() {
 					ticker := time.NewTicker(time.Duration(cfg.BlocklistUpdateHours) * time.Hour)
 					defer ticker.Stop()
-					for {
-						select {
-						case <-ctx.Done():
-							return
-						case <-ticker.C:
-							log.Printf("blipd: refreshing blocklist from %s", cfg.BlocklistURL)
-							if err := bl.LoadFromURL(context.Background(), cfg.BlocklistURL); err != nil {
-								log.Printf("blipd: blocklist refresh: %v", err)
-							} else {
-								log.Printf("blipd: blocklist refreshed (%d domains)", len(bl.List()))
-							}
+					for range ticker.C {
+						log.Printf("blipd: refreshing blocklist from %d sources", len(urls))
+						if res, err := bl.LoadFromURLs(context.Background(), urls, nil); err != nil {
+							log.Printf("blipd: blocklist refresh: %v", err)
+						} else {
+							log.Printf("blipd: blocklist refreshed (%d domains)", res.Domains)
 						}
 					}
 				}()

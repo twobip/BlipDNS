@@ -90,6 +90,35 @@ func (c *Client) SetPolicy(ctx context.Context, p *Policy) error {
 	return c.do(ctx, http.MethodPut, "/api/v1/policy", &req, nil)
 }
 
+// SetBlocklist replaces the instance's global blocklist. Large lists (e.g.
+// oisd.big, ~2M domains) produce payloads of tens of MB, so this uses a much
+// longer timeout than the default client.
+func (c *Client) SetBlocklist(ctx context.Context, domains []string) error {
+	req := SetBlocklistRequest{Domains: domains}
+	body, err := json.Marshal(req)
+	if err != nil {
+		return err
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPut, c.base+"/api/v1/blocklist", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	httpReq.Header.Set("Authorization", "Bearer "+c.token)
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	slow := &http.Client{Timeout: 10 * time.Minute}
+	resp, err := slow.Do(httpReq)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("control: set blocklist -> %d: %s", resp.StatusCode, string(b))
+	}
+	return nil
+}
+
 func (c *Client) DeletePolicy(ctx context.Context, id string) error {
 	return c.do(ctx, http.MethodDelete, "/api/v1/policy?id="+id, nil, nil)
 }

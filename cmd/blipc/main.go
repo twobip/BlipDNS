@@ -26,6 +26,7 @@ type config struct {
 	Password          string                                  `yaml:"password"`
 	DefaultPolicy     *control.Policy                         `yaml:"default_policy"`
 	InstanceOverrides map[string]*controller.InstanceOverride `yaml:"instance_overrides"`
+	BlocklistSources  []string                                `yaml:"blocklist_sources"`
 	Instances         []controller.InstanceConfig             `yaml:"instances"`
 }
 
@@ -60,6 +61,11 @@ func main() {
 		if err := fleet.Add(ctx, ic); err != nil {
 			log.Printf("blipc: instance %s: %v", ic.ID, err)
 		}
+	}
+	if len(cfg.BlocklistSources) > 0 {
+		// Seed the sources and fetch them in the background; instances pick
+		// the merged list up via the poll reconcile / push after import.
+		fleet.SetBlocklistSources(ctx, cfg.BlocklistSources)
 	}
 
 	srv := controller.NewServer(cfg.Username, cfg.Password, fleet, controller.UI())
