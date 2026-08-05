@@ -447,6 +447,73 @@ func TestFleetConfigSynced(t *testing.T) {
 	}
 }
 
+// TestAggregateStats verifies persisted stats survive restarts: deltas between
+// consecutive samples are summed, and a counter decrease (instance restart) is
+// treated as a fresh baseline rather than a negative delta.
+func TestAggregateStats(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "stats.db")
+	store, err := NewQueryLogStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	// base on a 30s boundary so bucket grouping is deterministic
+	base := time.Unix(time.Now().Unix()/30*30, 0).Add(-2 * time.Hour)
+	add := func(off time.Duration, q, b, e uint64) {
+		if err := store.AddStatsSample(ctx, StatsSample{Timestamp: base.Add(off), Instance: "a", Queries: q, Blocked: b, Errors: e}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	add(0, 100, 5, 1)
+	add(10*time.Second, 130, 7, 2)
+	add(20*time.Second, 200, 20, 5)
+	add(30*time.Second, 40, 2, 1) // instance restarted: counters dropped
+	add(40*time.Second, 70, 4, 2)
+
+	agg, err := store.AggregateStats(ctx, "", 30*time.Second, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if agg.TotalQueries != 170 {
+		t.Errorf("total_queries = %d, want 170", agg.TotalQueries)
+	}
+	if agg.BlockedQueries != 19 {
+		t.Errorf("blocked_queries = %d, want 19", agg.BlockedQueries)
+	}
+	if agg.UpstreamErrors != 6 {
+		t.Errorf("upstream_errors = %d, want 6", agg.UpstreamErrors)
+	}
+	if pi := agg.PerInstance["a"]; pi == nil || pi.Queries != 170 {
+		t.Errorf("per-instance a = %+v, want queries 170", pi)
+	}
+	if len(agg.Series) != 2 {
+		t.Fatalf("expected 2 buckets, got %d: %+v", len(agg.Series), agg.Series)
+	}
+	// series must be sorted and sum back to the totals
+	var sumQ, sumB int
+	for i, p := range agg.Series {
+		sumQ += p.TotalQueries
+		sumB += p.BlockedQueries
+		if i > 0 && agg.Series[i-1].Timestamp.After(p.Timestamp) {
+			t.Error("series not sorted by timestamp")
+		}
+	}
+	if sumQ != agg.TotalQueries || sumB != agg.BlockedQueries {
+		t.Errorf("series sums %d/%d != totals %d/%d", sumQ, sumB, agg.TotalQueries, agg.BlockedQueries)
+	}
+
+	// A window starting at the last sample must produce zero (no baseline yet).
+	agg2, err := store.AggregateStats(ctx, "", time.Minute, base.Add(50*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if agg2.TotalQueries != 0 {
+		t.Errorf("expected empty window totals, got %d", agg2.TotalQueries)
+	}
+}
+
 func TestBusRingBuffer(t *testing.T) {
 	b := NewBus(3)
 	for i := 0; i < 5; i++ {

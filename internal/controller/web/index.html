@@ -61,7 +61,7 @@
             </div>
             <div class="stat-label">Total Queries</div>
             <div class="stat-value" id="d-queries">—</div>
-            <div class="stat-sub">across all instances</div>
+            <div class="stat-sub">across all instances · <span id="d-range-hint">1 day</span></div>
           </div>
           <div class="stat">
             <div class="stat-icon i-red">
@@ -93,12 +93,12 @@
           <div class="panel-head">
             <h3>Traffic</h3>
             <span class="spacer"></span>
-            <div class="seg" id="chart-range">
-              <button data-r="1h" class="">1h</button>
-              <button data-r="6h">6h</button>
-              <button data-r="24h" class="active">24h</button>
-              <button data-r="168h">7d</button>
-            </div>
+            <select class="select" id="d-range" title="Statistics range">
+              <option value="1h">1 hour</option>
+              <option value="1d" selected>1 day</option>
+              <option value="1w">1 week</option>
+              <option value="1mo">1 month</option>
+            </select>
           </div>
           <div class="chart-wrap"><canvas id="chart-queries"></canvas></div>
         </div>

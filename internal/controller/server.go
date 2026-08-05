@@ -389,12 +389,12 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 			since = time.Now().Add(-d)
 		}
 	}
-	stats, err := s.fleet.queryLog.GetQueryStats(r.Context(), instance, bucketSize, since)
+	agg, err := s.fleet.queryLog.AggregateStats(r.Context(), instance, bucketSize, since)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
-	writeJSON(w, stats)
+	writeJSON(w, agg)
 }
 
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {

@@ -145,6 +145,17 @@ func (i *Instance) poll(ctx context.Context) {
 	if serr == nil {
 		i.stats = s
 		i.lastUpstr = s.Upstream
+		// Persist cumulative counters so the dashboard statistics survive
+		// restarts of blipd or blipc (deltas are computed at query time).
+		if i.fleet.queryLog != nil {
+			_ = i.fleet.queryLog.AddStatsSample(ctx, StatsSample{
+				Timestamp: time.Now(),
+				Instance:  i.Config.ID,
+				Queries:   s.QueriesTotal,
+				Blocked:   s.BlockedTotal,
+				Errors:    s.UpstreamErr,
+			})
+		}
 	}
 	i.mu.Unlock()
 	if herr == nil {

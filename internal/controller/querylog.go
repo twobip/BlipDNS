@@ -34,6 +34,33 @@ type TimeSeriesPoint struct {
 	BlockedQueries int       `json:"blocked_queries"`
 }
 
+// StatsSample is a periodic snapshot of an instance's cumulative counters.
+// Deltas between consecutive samples are computed at query time, so the series
+// survives both controller and instance restarts without double counting.
+type StatsSample struct {
+	ID        int64
+	Timestamp time.Time
+	Instance  string
+	Queries   uint64 // cumulative since instance (re)start
+	Blocked   uint64
+	Errors    uint64
+}
+
+// PerInstanceStats is the aggregate of a single instance over a time range.
+type PerInstanceStats struct {
+	Queries int `json:"queries"`
+	Blocked int `json:"blocked"`
+}
+
+// StatsAggregate is the aggregated statistics for a time range.
+type StatsAggregate struct {
+	TotalQueries   int                          `json:"total_queries"`
+	BlockedQueries int                          `json:"blocked_queries"`
+	UpstreamErrors int                          `json:"upstream_errors"`
+	PerInstance    map[string]*PerInstanceStats `json:"per_instance"`
+	Series         []TimeSeriesPoint            `json:"series"`
+}
+
 // NewQueryLogStore creates a new query log store backed by SQLite
 func NewQueryLogStore(dbPath string) (*QueryLogStore, error) {
 	db, err := sql.Open("sqlite", dbPath)
@@ -60,6 +87,15 @@ func NewQueryLogStore(dbPath string) (*QueryLogStore, error) {
 	);
 	CREATE INDEX IF NOT EXISTS idx_query_log_timestamp ON query_log(timestamp);
 	CREATE INDEX IF NOT EXISTS idx_query_log_instance ON query_log(instance);
+	CREATE TABLE IF NOT EXISTS stats_samples (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		timestamp DATETIME NOT NULL,
+		instance TEXT NOT NULL,
+		queries INTEGER NOT NULL,
+		blocked INTEGER NOT NULL,
+		errors INTEGER NOT NULL
+	);
+	CREATE INDEX IF NOT EXISTS idx_stats_samples_timestamp ON stats_samples(timestamp);
 	`
 	if _, err := db.Exec(schema); err != nil {
 		return nil, fmt.Errorf("create schema: %w", err)
@@ -126,17 +162,26 @@ func (s *QueryLogStore) Query(ctx context.Context, instance, filter string, sinc
 	return results, rows.Err()
 }
 
-// GetQueryStats returns aggregated query counts per time bucket for the last 24 hours
-func (s *QueryLogStore) GetQueryStats(ctx context.Context, instance string, bucketSize time.Duration, since time.Time) ([]TimeSeriesPoint, error) {
-	// SQLite doesn't have native time bucketing, so we'll do it in Go
-	// First, fetch all relevant entries
-	query := `SELECT timestamp, action FROM query_log WHERE timestamp >= ? AND domain != 'health_check'`
-	args := []interface{}{since}
+// AddStatsSample records a snapshot of an instance's cumulative counters.
+func (s *QueryLogStore) AddStatsSample(ctx context.Context, e StatsSample) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO stats_samples (timestamp, instance, queries, blocked, errors) VALUES (?, ?, ?, ?, ?)`,
+		e.Timestamp, e.Instance, e.Queries, e.Blocked, e.Errors)
+	return err
+}
 
+// AggregateStats returns the totals, per-instance breakdown and per-bucket
+// time series for the given range. Deltas are computed between consecutive
+// samples per instance, so a counter decrease (instance restart) is treated as
+// a reset whose full value counts as new activity.
+func (s *QueryLogStore) AggregateStats(ctx context.Context, instance string, bucketSize time.Duration, since time.Time) (*StatsAggregate, error) {
+	query := `SELECT timestamp, instance, queries, blocked, errors FROM stats_samples WHERE timestamp >= ?`
+	args := []interface{}{since}
 	if instance != "" {
 		query += " AND instance = ?"
 		args = append(args, instance)
 	}
+	query += " ORDER BY timestamp ASC"
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -144,55 +189,80 @@ func (s *QueryLogStore) GetQueryStats(ctx context.Context, instance string, buck
 	}
 	defer rows.Close()
 
-	// Bucket the data
+	agg := &StatsAggregate{PerInstance: make(map[string]*PerInstanceStats)}
+	last := make(map[string]StatsSample) // last cumulative counters per instance
 	buckets := make(map[int64]*TimeSeriesPoint)
+	secs := int64(bucketSize.Seconds())
 	for rows.Next() {
-		var tsStr, action string
-		if err := rows.Scan(&tsStr, &action); err != nil {
+		var tsStr, inst string
+		var q, b, e uint64
+		if err := rows.Scan(&tsStr, &inst, &q, &b, &e); err != nil {
 			return nil, err
 		}
 		ts := parseQueryTS(tsStr)
 
-		// Calculate bucket key (unix timestamp truncated to bucket size)
-		bucketKey := ts.Unix() / int64(bucketSize.Seconds())
+		dq, db, de := uint64(0), uint64(0), uint64(0)
+		if prev, ok := last[inst]; ok {
+			dq = counterDelta(q, prev.Queries)
+			db = counterDelta(b, prev.Blocked)
+			de = counterDelta(e, prev.Errors)
+		}
+		last[inst] = StatsSample{Timestamp: ts, Instance: inst, Queries: q, Blocked: b, Errors: e}
 
-		if _, ok := buckets[bucketKey]; !ok {
-			buckets[bucketKey] = &TimeSeriesPoint{
-				Timestamp: ts.Truncate(bucketSize),
-			}
+		agg.TotalQueries += int(dq)
+		agg.BlockedQueries += int(db)
+		agg.UpstreamErrors += int(de)
+		pi := agg.PerInstance[inst]
+		if pi == nil {
+			pi = &PerInstanceStats{}
+			agg.PerInstance[inst] = pi
 		}
-		buckets[bucketKey].TotalQueries++
-		if action == "BLOCK" {
-			buckets[bucketKey].BlockedQueries++
+		pi.Queries += int(dq)
+		pi.Blocked += int(db)
+
+		bk := ts.Unix() / secs
+		pt := buckets[bk]
+		if pt == nil {
+			pt = &TimeSeriesPoint{Timestamp: time.Unix(bk*secs, 0)}
+			buckets[bk] = pt
 		}
+		pt.TotalQueries += int(dq)
+		pt.BlockedQueries += int(db)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 
-	// Convert to sorted slice
-	var results []TimeSeriesPoint
 	for _, v := range buckets {
-		results = append(results, *v)
+		agg.Series = append(agg.Series, *v)
 	}
-
-	// Sort by timestamp
-	for i := 0; i < len(results)-1; i++ {
-		for j := i + 1; j < len(results); j++ {
-			if results[i].Timestamp.After(results[j].Timestamp) {
-				results[i], results[j] = results[j], results[i]
+	for i := 0; i < len(agg.Series)-1; i++ {
+		for j := i + 1; j < len(agg.Series); j++ {
+			if agg.Series[i].Timestamp.After(agg.Series[j].Timestamp) {
+				agg.Series[i], agg.Series[j] = agg.Series[j], agg.Series[i]
 			}
 		}
 	}
-
-	return results, rows.Err()
+	return agg, nil
 }
 
-// cleanupLoop removes entries older than 24 hours
+// counterDelta returns the increase of a counter between samples, treating a
+// decrease as an instance restart: the full new value counts as new activity.
+func counterDelta(cur, prev uint64) uint64 {
+	if cur >= prev {
+		return cur - prev
+	}
+	return cur
+}
+
+// cleanupLoop removes old query log entries (24h) and stats samples (1 month).
 func (s *QueryLogStore) cleanupLoop() {
 	ticker := time.NewTicker(1 * time.Hour)
 	defer ticker.Stop()
 	for range ticker.C {
 		ctx := context.Background()
-		cutoff := time.Now().Add(-24 * time.Hour)
-		s.db.ExecContext(ctx, `DELETE FROM query_log WHERE timestamp < ?`, cutoff)
+		s.db.ExecContext(ctx, `DELETE FROM query_log WHERE timestamp < ?`, time.Now().Add(-24*time.Hour))
+		s.db.ExecContext(ctx, `DELETE FROM stats_samples WHERE timestamp < ?`, time.Now().Add(-31*24*time.Hour))
 	}
 }
 

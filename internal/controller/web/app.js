@@ -116,7 +116,7 @@ function toast(msg, kind = "ok") {
 let instances = [];
 let blDomains = [];
 let chart = null;
-let chartRange = "24h";
+let chartRange = "1d";
 let sse = null, evLive = false;
 let pollTimer = null;
 
@@ -149,21 +149,25 @@ function updateConn() {
 }
 
 /* ---------- dashboard ---------- */
+// d-range maps a dropdown value to a backend `since` window and chart bucket.
+const STAT_RANGES = {
+  "1h":  { since: "1h",  bucket: "10s", label: "1 hour" },
+  "1d":  { since: "24h", bucket: "5m",  label: "1 day" },
+  "1w":  { since: "168h", bucket: "1h", label: "1 week" },
+  "1mo": { since: "720h", bucket: "6h", label: "1 month" },
+};
+
+// Dashboard totals come from blipc's persisted stats samples (SQLite), so they
+// survive blipd/blipc restarts. renderDashboard only updates live status;
+// fetchStats loads the range-scoped numbers, per-instance breakdown and chart.
 async function renderDashboard() {
-  let tq = 0, tb = 0, te = 0, on = 0;
-  for (const i of instances) { if (i.online) on++; const s = i.stats || {}; tq += s.queries_total ?? 0; tb += s.blocked_total ?? 0; te += s.upstream_errors ?? 0; }
-  $("d-queries").textContent = fmt(tq);
-  $("d-blocked").textContent = fmt(tb);
-  $("d-errors").textContent = fmt(te);
+  const on = instances.filter((i) => i.online).length;
   $("d-online").textContent = on;
   $("d-total").textContent = instances.length;
-  $("d-blockrate").textContent = tq ? (tb / tq * 100).toFixed(1) + "%" : "0%";
-  renderDashInstances();
-  if (on === 0) { /* still try chart from global stats */ }
-  fetchChart();
+  fetchStats();
 }
 
-function renderDashInstances() {
+function renderDashInstances(perInstance) {
   const el = $("d-instances");
   const list = instances.slice().sort((a, b) => (a.id || "").localeCompare(b.id || ""));
   if (!list.length) {
@@ -172,8 +176,8 @@ function renderDashInstances() {
     return;
   }
   el.innerHTML = list.map((i) => {
-    const s = i.stats || {};
-    const rate = s.queries_total ? (s.blocked_total / s.queries_total * 100).toFixed(0) : 0;
+    const pi = (perInstance && perInstance[i.id]) || {};
+    const rate = pi.queries ? (pi.blocked / pi.queries * 100).toFixed(0) : 0;
     return `<div class="row" style="padding:12px 20px; border-bottom:1px solid var(--hairline)">
       <span class="dot ${i.online ? "on" : "off"}"></span>
       <div class="grow" style="min-width:0">
@@ -181,7 +185,7 @@ function renderDashInstances() {
         <div class="cell-sub mono" style="overflow:hidden;text-overflow:ellipsis">${esc(i.url || "")}</div>
       </div>
       <div class="num" style="text-align:right">
-        <div style="font-variant-numeric:tabular-nums;font-weight:600">${fmt(s.queries_total ?? 0)}</div>
+        <div style="font-variant-numeric:tabular-nums;font-weight:600">${fmt(pi.queries ?? 0)}</div>
         <div class="cell-sub"><span class="meter"><i style="width:${Math.min(100, rate)}%"></i></span> ${rate}% blk</div>
       </div>
     </div>`;
@@ -189,15 +193,21 @@ function renderDashInstances() {
 }
 
 /* ---------- chart ---------- */
-async function fetchChart() {
+async function fetchStats() {
   const ctx = $("chart-queries");
-  if (!ctx) return;
-  const since = { "1h": "1h", "6h": "6h", "24h": "24h", "168h": "168h" }[chartRange] || "24h";
-  const bucket = chartRange === "168h" ? "1h" : chartRange === "24h" ? "5m" : chartRange === "6h" ? "1m" : "10s";
+  const rng = STAT_RANGES[chartRange] || STAT_RANGES["1d"];
   try {
-    const res = await API(`/api/stats?bucket=${bucket}&since=${since}`);
-    const stats = await res.json();
-    if (!stats || !stats.length) return;
+    const res = await API(`/api/stats?bucket=${rng.bucket}&since=${rng.since}`);
+    const d = await res.json();
+    if (!d || !d.series) return;
+    $("d-queries").textContent = fmt(d.total_queries ?? 0);
+    $("d-blocked").textContent = fmt(d.blocked_queries ?? 0);
+    $("d-errors").textContent = fmt(d.upstream_errors ?? 0);
+    $("d-blockrate").textContent = d.total_queries ? (d.blocked_queries / d.total_queries * 100).toFixed(1) + "%" : "0%";
+    $("d-range-hint").textContent = rng.label;
+    renderDashInstances(d.per_instance);
+    if (!ctx) return;
+    const stats = d.series;
     const labels = stats.map((s) => new Date(s.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }));
     const tq = stats.map((s) => s.total_queries);
     const bq = stats.map((s) => s.blocked_queries);
@@ -711,11 +721,9 @@ document.querySelectorAll("#q-action-seg button").forEach((b) => b.onclick = () 
 });
 
 /* chart range */
-document.querySelectorAll("#chart-range button").forEach((b) => b.onclick = () => {
-  document.querySelectorAll("#chart-range button").forEach((x) => x.classList.remove("active"));
-  b.classList.add("active");
-  chartRange = b.dataset.r;
-  fetchChart();
+$("d-range").addEventListener("change", (e) => {
+  chartRange = e.target.value;
+  fetchStats();
 });
 
 /* blocklist */
@@ -807,4 +815,4 @@ connectSSE();
 refresh();
 refreshSettings();
 pollTimer = setInterval(() => { if (current === "dashboard" || current === "instances" || current === "queries") refresh(); }, 5000);
-setInterval(() => { fetchChart(); }, 60000); // refresh chart periodically
+setInterval(() => { if (current === "dashboard") fetchStats(); }, 60000); // refresh chart/stats periodically
