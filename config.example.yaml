@@ -8,12 +8,27 @@ admin_token: "test-token"
 #   https://host/dns-query  - DNS-over-HTTPS (RFC 8484)
 #   doh://host/dns-query    - DNS-over-HTTPS (shorthand)
 # Multiple specs provide failover (tried in order).
+# An optional |priority suffix sets the failover order explicitly (lower
+# number is tried first); specs without a suffix use their position (1-based).
+# A resolver that fails is skipped for a short cooldown so a down primary
+# fails over to the next priority immediately instead of stalling requests.
 # Examples:
 #   upstream: "udp://1.1.1.1:53 udp://8.8.8.8:53"
 #   upstream: "https://1.1.1.1/dns-query https://8.8.8.8/dns-query"
 #   upstream: "udp://1.1.1.1:53 https://1.1.1.1/dns-query"  # UDP primary, DoH failover
+#   upstream: "udp://8.8.8.8:53|2 https://1.1.1.1/dns-query|1"  # DoH is primary
 upstream: "udp://1.1.1.1:53 https://1.1.1.1/dns-query"
+# DNS response cache (in-RAM). cache_cap caps how long any response may be
+# cached regardless of its record TTL; cache_size bounds the number of cached
+# responses (0 = unlimited, entries dropped on TTL expiry only).
 cache_cap: 1h
+cache_size: 10000
+# Warm refresh: the most-popular N cached responses are re-resolved before
+# they go stale so repeat clients always get fresh answers. Set count to 0
+# to disable.
+cache_warm_count: 100
+cache_warm_ahead: 30s
+cache_warm_interval: 10s
 
 default_policy:
   id: "default"

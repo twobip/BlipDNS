@@ -20,7 +20,7 @@ func mkMsg(name string, ttl uint32) *dns.Msg {
 }
 
 func TestSetGetDecrementsTTL(t *testing.T) {
-	c := New(time.Hour)
+	c := New(time.Hour, 0)
 	k := Key(mkMsg("a.test", 60))
 	c.Set(k, mkMsg("a.test", 60))
 	got, ok := c.Get(k)
@@ -33,7 +33,7 @@ func TestSetGetDecrementsTTL(t *testing.T) {
 }
 
 func TestExpiry(t *testing.T) {
-	c := New(time.Hour)
+	c := New(time.Hour, 0)
 	c.now = func() time.Time { return time.Unix(1000, 0) }
 	// inject an entry expiring at 1010
 	k := Key(mkMsg("a.test", 5))
@@ -52,7 +52,7 @@ func TestExpiry(t *testing.T) {
 }
 
 func TestCoalesce(t *testing.T) {
-	c := New(time.Hour)
+	c := New(time.Hour, 0)
 	var calls int
 	var mu sync.Mutex
 	fn := func() (*dns.Msg, error) {
@@ -73,5 +73,85 @@ func TestCoalesce(t *testing.T) {
 	wg.Wait()
 	if calls != 1 {
 		t.Errorf("expected single upstream call, got %d", calls)
+	}
+}
+
+func TestEvictLeastRecentlyUsed(t *testing.T) {
+	c := New(time.Hour, 2)
+	c.Set("k1", mkMsg("a.test", 60))
+	c.Set("k2", mkMsg("b.test", 60))
+	// promote k1 to most-recently-used
+	if _, ok := c.Get("k1"); !ok {
+		t.Fatal("expected k1 hit")
+	}
+	c.Set("k3", mkMsg("c.test", 60)) // k2 is now LRU -> evicted
+	if _, ok := c.Get("k2"); ok {
+		t.Error("expected k2 to be evicted")
+	}
+	if _, ok := c.Get("k1"); !ok {
+		t.Error("expected k1 to survive (it was used most recently)")
+	}
+	if _, ok := c.Get("k3"); !ok {
+		t.Error("expected k3 present")
+	}
+	if c.Len() != 2 {
+		t.Errorf("len = %d, want 2", c.Len())
+	}
+}
+
+func TestSetPreservesHits(t *testing.T) {
+	c := New(time.Hour, 0)
+	k := Key(mkMsg("a.test", 60))
+	c.Set(k, mkMsg("a.test", 60))
+	_, _ = c.Get(k)
+	_, _ = c.Get(k)
+	c.Set(k, mkMsg("a.test", 60)) // refresh, must keep hit count
+	if got := c.Popular(0); len(got) != 1 || c.items[k].hits != 2 {
+		t.Errorf("expected refreshed entry to keep 2 hits, got %d", c.items[k].hits)
+	}
+}
+
+func TestPopularOrdering(t *testing.T) {
+	c := New(time.Hour, 0)
+	c.Set("k1", mkMsg("a.test", 60))
+	c.Set("k2", mkMsg("b.test", 60))
+	c.Set("k3", mkMsg("c.test", 60))
+	_, _ = c.Get("k1")
+	_, _ = c.Get("k1")
+	_, _ = c.Get("k1")
+	_, _ = c.Get("k2")
+	got := c.Popular(2)
+	if len(got) != 2 || got[0] != "k1" || got[1] != "k2" {
+		t.Errorf("expected [k1 k2], got %v", got)
+	}
+}
+
+func TestStaleLookahead(t *testing.T) {
+	c := New(time.Hour, 0)
+	c.now = func() time.Time { return time.Unix(1000, 0) }
+	k := Key(mkMsg("a.test", 5)) // expires at 1005
+	c.Set(k, mkMsg("a.test", 5))
+	if c.Stale(k, time.Second) {
+		t.Error("not stale yet: 4s left, lookahead 1s")
+	}
+	if !c.Stale(k, 10*time.Second) {
+		t.Error("should be stale: 4s left, lookahead 10s")
+	}
+	c.now = func() time.Time { return time.Unix(1010, 0) } // expired
+	if !c.Stale(k, 0) {
+		t.Error("should be stale once expired")
+	}
+	if c.Stale("missing", 0) {
+		t.Error("missing key is not stale")
+	}
+}
+
+func TestParseKey(t *testing.T) {
+	name, qtype, qclass, ok := ParseKey("example.com.|1|1")
+	if !ok || name != "example.com." || qtype != dns.TypeA || qclass != dns.ClassINET {
+		t.Errorf("bad ParseKey result: %q %d %d %v", name, qtype, qclass, ok)
+	}
+	if _, _, _, ok := ParseKey("garbage"); ok {
+		t.Error("expected parse failure on malformed key")
 	}
 }

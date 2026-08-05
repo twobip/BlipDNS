@@ -23,14 +23,14 @@ type StatsCollector interface {
 // It also exposes an unauthenticated claim-code adoption handshake so a
 // controller can bootstrap trust once without the operator copying tokens.
 type Server struct {
-	token   string
-	store   *filter.Store
-	cache   *cache.Cache
-	stats   StatsCollector
-	started time.Time
-	version string
-	mu      sync.RWMutex
-	watchMu sync.Mutex
+	token    string
+	store    *filter.Store
+	cache    *cache.Cache
+	stats    StatsCollector
+	started  time.Time
+	version  string
+	mu       sync.RWMutex
+	watchMu  sync.Mutex
 	watchers map[chan WatchEvent]struct{}
 
 	// adoption (claim-code bootstrap)
@@ -221,7 +221,12 @@ func (s *Server) handlePolicy(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		fp := toFilter(&req.Policy)
-		if err := s.store.SetPolicy(fp); err != nil {
+		if req.Policy.ID == "default" {
+			// The "default" policy replaces the store's fallback, so it applies
+			// to clients that match no scoped policy (the settings panel edits
+			// this via id "default").
+			s.store.SetDefault(fp)
+		} else if err := s.store.SetPolicy(fp); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}

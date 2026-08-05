@@ -66,15 +66,19 @@ func main() {
 	}
 
 	srv, err := dnsserver.New(dnsserver.Config{
-		DNSAddr:    cfg.DNSAddr,
-		DoHAddr:    cfg.DoHAddr,
-		CertFile:   cfg.CertFile,
-		KeyFile:    cfg.KeyFile,
-		Upstream:   cfg.Upstream,
-		CacheCap:   cfg.CacheCap,
-		Store:      store,
-		Version:    version,
-		Blocklist:  bl,
+		DNSAddr:           cfg.DNSAddr,
+		DoHAddr:           cfg.DoHAddr,
+		CertFile:          cfg.CertFile,
+		KeyFile:           cfg.KeyFile,
+		Upstream:          cfg.Upstream,
+		CacheCap:          cfg.CacheCap,
+		CacheSize:         cfg.CacheSize,
+		CacheWarmCount:    cfg.CacheWarmCount,
+		CacheWarmAhead:    cfg.CacheWarmAhead,
+		CacheWarmInterval: cfg.CacheWarmInterval,
+		Store:             store,
+		Version:           version,
+		Blocklist:         bl,
 	})
 	if err != nil {
 		log.Fatalf("blipd: %v", err)

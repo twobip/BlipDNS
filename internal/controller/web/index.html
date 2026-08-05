@@ -231,9 +231,10 @@
             <div class="panel-head"><h3>Upstream DNS</h3><span class="spacer"></span><span class="badge accent">default policy</span></div>
             <div class="panel-body">
               <div class="field">
-                <label>Upstream resolvers</label>
-                <input class="input" id="s-upstream" placeholder="udp://1.1.1.1:53 https://1.1.1.1/dns-query"/>
-                <span class="hint">Space-separated specs. Leave blank to use each instance's compiled default.</span>
+                <label>Upstream resolvers <span class="faint">priority 1 = primary, auto-failover on failure</span></label>
+                <div id="s-upstream-list"></div>
+                <button class="btn btn-sm" id="s-up-add">+ Add upstream</button>
+                <span class="hint">Each row is one resolver, tried in priority order (lower first). Leave the list empty to use each instance's compiled default.</span>
               </div>
               <button class="btn btn-primary mt" id="s-save-upstream">Save</button>
             </div>

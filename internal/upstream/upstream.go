@@ -10,6 +10,10 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/miekg/dns"
@@ -100,24 +104,59 @@ func (r *DoHResolver) Resolve(ctx context.Context, q *dns.Msg) (*dns.Msg, error)
 	return out, nil
 }
 
-// MultiResolver tries each resolver in order until one succeeds.
+// MultiResolver tries each resolver in priority order until one succeeds and
+// remembers which resolvers are currently failing so a down upstream is
+// skipped for a short cooldown instead of stalling every request.
 type MultiResolver struct {
 	resolvers []Resolver
+	mu        sync.Mutex
+	downUntil []time.Time
+	cooldown  time.Duration
 }
 
-// NewMulti wraps resolvers with failover semantics.
+// NewMulti wraps resolvers with failover semantics. Resolvers are tried in
+// the order given; the caller is expected to order them by priority.
 func NewMulti(resolvers ...Resolver) *MultiResolver {
-	return &MultiResolver{resolvers: resolvers}
+	return &MultiResolver{
+		resolvers: resolvers,
+		downUntil: make([]time.Time, len(resolvers)),
+		cooldown:  15 * time.Second,
+	}
 }
 
 func (m *MultiResolver) Resolve(ctx context.Context, q *dns.Msg) (*dns.Msg, error) {
+	m.mu.Lock()
+	now := time.Now()
+	var order []int
+	allDown := true
+	for i := range m.resolvers {
+		if !m.downUntil[i].After(now) {
+			order = append(order, i)
+			allDown = false
+		}
+	}
+	if allDown { // everything tripped: retry all in order this pass
+		order = make([]int, len(m.resolvers))
+		for i := range order {
+			order[i] = i
+		}
+		m.downUntil = make([]time.Time, len(m.resolvers))
+	}
+	m.mu.Unlock()
+
 	var lastErr error
-	for _, r := range m.resolvers {
-		resp, err := r.Resolve(ctx, q)
+	for _, i := range order {
+		resp, err := m.resolvers[i].Resolve(ctx, q)
 		if err == nil {
+			m.mu.Lock()
+			m.downUntil[i] = time.Time{}
+			m.mu.Unlock()
 			return resp, nil
 		}
 		lastErr = err
+		m.mu.Lock()
+		m.downUntil[i] = now.Add(m.cooldown)
+		m.mu.Unlock()
 	}
 	if lastErr == nil {
 		lastErr = fmt.Errorf("upstream: no resolvers configured")
@@ -125,26 +164,77 @@ func (m *MultiResolver) Resolve(ctx context.Context, q *dns.Msg) (*dns.Msg, erro
 	return nil, lastErr
 }
 
-// FromSpec builds a Resolver from a URL-style spec:
-//   - "udp://host:port"  -> UDPResolver
-//   - "https://host/dns-query" or "doh://host/dns-query" -> DoHResolver
-// Multiple specs joined by space or comma form a MultiResolver with failover.
-func FromSpec(spec string) (Resolver, error) {
-	var rs []Resolver
-	for _, s := range splitSpec(spec) {
+// Spec describes a single upstream entry parsed from a spec string.
+type Spec struct {
+	Type     string // "udp" or "doh"
+	Address  string // host:port (udp) or host/path (doh), scheme stripped
+	Priority int    // lower = higher priority (tried first)
+}
+
+// ParseSpec splits a spec string into individual entries, sorted by priority.
+// Each token is a URL-style spec ("udp://host:port", "https://host/path" or
+// "doh://host/path") with an optional "|priority" suffix, e.g.
+// "udp://1.1.1.1:53|1". Tokens without a priority keep their position
+// (1-based) as priority, so plain space-separated lists still fail over
+// left to right.
+func ParseSpec(spec string) ([]Spec, error) {
+	tokens := splitSpec(spec)
+	if len(tokens) == 0 {
+		return nil, fmt.Errorf("upstream: empty spec")
+	}
+	out := make([]Spec, len(tokens))
+	for i, tok := range tokens {
+		raw, prio := splitPriority(tok)
+		if prio <= 0 {
+			prio = i + 1
+		}
+		var s Spec
 		switch {
-		case len(s) >= 6 && s[:6] == "udp://":
-			rs = append(rs, NewUDP(s[6:]))
-		case len(s) >= 6 && s[:6] == "doh://":
-			rs = append(rs, NewDoH("https://"+s[6:]))
-		case len(s) >= 8 && s[:8] == "https://":
-			rs = append(rs, NewDoH(s))
+		case strings.HasPrefix(raw, "udp://"):
+			s = Spec{Type: "udp", Address: raw[len("udp://"):], Priority: prio}
+		case strings.HasPrefix(raw, "doh://"):
+			s = Spec{Type: "doh", Address: raw[len("doh://"):], Priority: prio}
+		case strings.HasPrefix(raw, "https://"):
+			s = Spec{Type: "doh", Address: raw[len("https://"):], Priority: prio}
 		default:
-			return nil, fmt.Errorf("upstream: unrecognized spec %q", s)
+			return nil, fmt.Errorf("upstream: unrecognized spec %q", tok)
+		}
+		out[i] = s
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Priority < out[j].Priority })
+	return out, nil
+}
+
+// splitPriority separates an optional "|N" priority suffix from a spec token.
+func splitPriority(tok string) (string, int) {
+	if i := strings.LastIndex(tok, "|"); i > 0 {
+		if p, err := strconv.Atoi(tok[i+1:]); err == nil {
+			return tok[:i], p
 		}
 	}
-	if len(rs) == 0 {
-		return nil, fmt.Errorf("upstream: empty spec")
+	return tok, 0
+}
+
+// FromSpec builds a Resolver from a URL-style spec string:
+//   - "udp://host:port"  -> UDPResolver
+//   - "https://host/dns-query" or "doh://host/dns-query" -> DoHResolver
+//   - an optional "|priority" suffix sets failover order
+//
+// Multiple specs joined by space or comma form a MultiResolver that is tried
+// in priority order (lowest number first) with failover.
+func FromSpec(spec string) (Resolver, error) {
+	specs, err := ParseSpec(spec)
+	if err != nil {
+		return nil, err
+	}
+	rs := make([]Resolver, len(specs))
+	for i, s := range specs {
+		switch s.Type {
+		case "udp":
+			rs[i] = NewUDP(s.Address)
+		case "doh":
+			rs[i] = NewDoH("https://" + s.Address)
+		}
 	}
 	if len(rs) == 1 {
 		return rs[0], nil

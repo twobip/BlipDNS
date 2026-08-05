@@ -5,6 +5,7 @@ import (
 	"net"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/twobip/BlipDNS/internal/cache"
 	"github.com/twobip/BlipDNS/internal/filter"
@@ -50,7 +51,7 @@ func newTestServer(t *testing.T) (*Server, *recUp) {
 	up := &recUp{answer: map[string]string{"allowed.test.": "9.9.9.9"}}
 	srv := &Server{
 		cfg:   Config{Store: store, Upstream: ""},
-		cache: cache.New(0),
+		cache: cache.New(0, 0),
 		up:    up,
 	}
 	return srv, up
@@ -112,5 +113,40 @@ func TestUpstreamMultiConstruct(t *testing.T) {
 	_, err := upstream.FromSpec("https://1.1.1.1/dns-query https://8.8.8.8/dns-query")
 	if err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestRefreshPopularRefreshesStale(t *testing.T) {
+	srv, up := newTestServer(t)
+
+	// warm the cache from the live path (recUp answers carry TTL 60)
+	q := new(dns.Msg)
+	q.SetQuestion("allowed.test.", dns.TypeA)
+	resp := srv.serve(context.Background(), net.ParseIP("10.0.0.1"), q)
+	if resp.Rcode != dns.RcodeSuccess {
+		t.Fatalf("rc=%d", resp.Rcode)
+	}
+	up.mu.Lock()
+	before := up.calls
+	up.mu.Unlock()
+	resp = srv.serve(context.Background(), net.ParseIP("10.0.0.1"), q)
+	if up.calls != before {
+		t.Fatal("expected second serve to hit cache")
+	}
+
+	// a generous lookahead makes the (fresh) entry count as stale
+	srv.cfg.CacheWarmAhead = 2 * time.Minute
+	srv.refreshPopular()
+
+	// refreshPopular re-resolved via the default upstream and re-cached
+	up.mu.Lock()
+	refreshed := up.calls > before
+	up.mu.Unlock()
+	if !refreshed {
+		t.Fatal("expected refreshPopular to re-resolve the stale entry")
+	}
+	k := cache.Key(q)
+	if srv.cache.Stale(k, 0) {
+		t.Error("expected refreshed entry to no longer be stale")
 	}
 }

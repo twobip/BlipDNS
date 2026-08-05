@@ -541,6 +541,55 @@ async function savePolicy() {
 }
 
 /* ---------- settings ---------- */
+function parseUpstreamSpec(str) {
+  return (String(str || "").match(/\S+/g) || []).map((tok, i) => {
+    let spec = tok, prio = i + 1;
+    if (tok.includes("|")) { const p = parseInt(tok.split("|")[1], 10); if (p > 0) prio = p; spec = tok.split("|")[0]; }
+    let type = "udp", addr = spec;
+    if (spec.startsWith("udp://")) addr = spec.slice(6);
+    else if (spec.startsWith("https://")) { type = "doh"; addr = spec.slice(8); }
+    else if (spec.startsWith("doh://")) { type = "doh"; addr = spec.slice(6); }
+    return { type, addr, prio };
+  });
+}
+function serializeUpstreams(rows) {
+  const specs = [];
+  for (const row of rows) {
+    const addr = (row.addr || "").trim();
+    if (!addr) continue;
+    specs.push((row.type === "doh" ? "https://" : "udp://") + addr + "|" + (row.prio > 0 ? row.prio : 1));
+  }
+  return specs.join(" ");
+}
+function upstreamRow(u) {
+  const row = document.createElement("div");
+  row.className = "row up-row";
+  const ph = u.type === "doh" ? "1.1.1.1/dns-query" : "1.1.1.1:53";
+  row.innerHTML = `
+    <select class="select up-type" style="width:104px">
+      <option value="udp" ${u.type === "doh" ? "" : "selected"}>UDP</option>
+      <option value="doh" ${u.type === "doh" ? "selected" : ""}>DoH / HTTPS</option>
+    </select>
+    <input class="input grow up-addr" placeholder="${ph}" value="${esc(u.addr)}"/>
+    <input class="input up-prio" type="number" min="1" title="Priority — lower = higher priority" style="width:72px" value="${u.prio || ""}"/>
+    <button class="icon-btn up-del" title="Remove">${IC.trash}</button>`;
+  row.querySelector(".up-del").onclick = () => row.remove();
+  return row;
+}
+function renderUpstreamList(list) {
+  const wrap = $("s-upstream-list");
+  wrap.innerHTML = "";
+  for (const u of list) wrap.appendChild(upstreamRow(u));
+  if (!list.length) wrap.innerHTML = `<div class="hint" style="padding:2px 0 6px">No upstreams configured — instances use their compiled default.</div>`;
+}
+function collectUpstreams() {
+  return [...document.querySelectorAll("#s-upstream-list .up-row")].map((row) => ({
+    type: row.querySelector(".up-type").value,
+    addr: row.querySelector(".up-addr").value,
+    prio: parseInt(row.querySelector(".up-prio").value, 10) || 0,
+  }));
+}
+let savedDefaultPolicy = null; // current default policy from the online instance
 async function refreshSettings() {
   $("s-ctrl-ver").textContent = "blipc";
   $("s-inst-count").textContent = instances.length + (instances.some((i) => i.online) ? " (" + instances.filter((i) => i.online).length + " online)" : "");
@@ -550,7 +599,8 @@ async function refreshSettings() {
     if (online) {
       const r = await API("/api/instances/" + encodeURIComponent(online.id) + "/policies");
       const d = await r.json();
-      $("s-upstream").value = d.default?.upstream || "";
+      savedDefaultPolicy = d.default || { id: "default" };
+      renderUpstreamList(parseUpstreamSpec(savedDefaultPolicy.upstream));
     }
   } catch {}
 }
@@ -669,12 +719,17 @@ $("pol-new").onclick = newPolicy;
 $("p-save").onclick = savePolicy;
 
 /* settings */
+$("s-up-add").onclick = () => {
+  const prios = collectUpstreams().map((r) => r.prio).filter((p) => p > 0);
+  $("s-upstream-list").appendChild(upstreamRow({ type: "udp", addr: "", prio: (prios.length ? Math.max(...prios) + 1 : 1) }));
+};
 $("s-save-upstream").onclick = async () => {
-  const up = $("s-upstream").value.trim();
+  const up = serializeUpstreams(collectUpstreams());
   const online = instances.find((i) => i.online);
   if (!online) return toast("no online instance to configure", "err");
+  const body = { id: "default", networks: [], block: [], allow: [], block_action: "nxdomain", log: true, ...(savedDefaultPolicy || {}), upstream: up };
   try {
-    await API("/api/instances/" + encodeURIComponent(online.id) + "/policy", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: "default", upstream: up, networks: [], block: [], allow: [], block_action: "nxdomain", log: true }) });
+    await API("/api/instances/" + encodeURIComponent(online.id) + "/policy", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
     toast("default upstream saved on " + online.id);
   } catch (e) { toast("save failed: " + e.message, "err"); }
 };

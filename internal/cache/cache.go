@@ -1,10 +1,15 @@
 // Package cache provides a TTL-aware DNS response cache with request
-// coalescing (singleflight) to suppress cache stampedes.
+// coalescing (singleflight) to suppress cache stampedes. The cache is
+// size-bounded (LRU eviction) and tracks how often each response is served
+// so the most popular entries can be refreshed before they go stale.
 package cache
 
 import (
+	"container/list"
 	"context"
+	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -13,29 +18,40 @@ import (
 )
 
 type entry struct {
+	key    string
 	msg    *dns.Msg
 	expire time.Time
+	hits   uint64
+	elem   *list.Element
 }
 
-// Cache stores DNS responses keyed by (name, type, class).
+// Cache stores DNS responses keyed by (name, type, class). When maxEntries
+// is exceeded the least-recently-used entry is evicted. Each entry records
+// the number of times it has been served (hits) for popularity tracking.
 type Cache struct {
-	mu      sync.RWMutex
-	items   map[string]entry
-	ttlCap  time.Duration
-	group   singleflight.Group
-	now     func() time.Time
+	mu         sync.RWMutex
+	items      map[string]*entry
+	lru        *list.List
+	ttlCap     time.Duration
+	maxEntries int
+	group      singleflight.Group
+	now        func() time.Time
 }
 
 // New creates a Cache. ttlCap is the maximum time a response may be cached
-// regardless of its record TTL.
-func New(ttlCap time.Duration) *Cache {
+// regardless of its record TTL. maxEntries bounds the number of cached
+// responses in memory; 0 disables the limit (entries are then dropped only
+// on expiry).
+func New(ttlCap time.Duration, maxEntries int) *Cache {
 	if ttlCap <= 0 {
 		ttlCap = time.Hour
 	}
 	return &Cache{
-		items:  make(map[string]entry),
-		ttlCap: ttlCap,
-		now:    time.Now,
+		items:      make(map[string]*entry),
+		lru:        list.New(),
+		ttlCap:     ttlCap,
+		maxEntries: maxEntries,
+		now:        time.Now,
 	}
 }
 
@@ -46,6 +62,20 @@ func Key(m *dns.Msg) string {
 	}
 	q := m.Question[0]
 	return q.Name + "|" + strconv.Itoa(int(q.Qtype)) + "|" + strconv.Itoa(int(q.Qclass))
+}
+
+// ParseKey reconstructs the (name, qtype, qclass) triple from a Key string.
+func ParseKey(k string) (name string, qtype, qclass uint16, ok bool) {
+	parts := strings.Split(k, "|")
+	if len(parts) != 3 {
+		return "", 0, 0, false
+	}
+	t, errT := strconv.ParseUint(parts[1], 10, 16)
+	cl, errC := strconv.ParseUint(parts[2], 10, 16)
+	if errT != nil || errC != nil {
+		return "", 0, 0, false
+	}
+	return parts[0], uint16(t), uint16(cl), true
 }
 
 func minTTL(m *dns.Msg) time.Duration {
@@ -75,21 +105,26 @@ func minTTL(m *dns.Msg) time.Duration {
 }
 
 // Get returns a fresh copy of a cached response with decremented TTLs, or
-// (nil, false) on miss/expiry.
+// (nil, false) on miss/expiry. A hit bumps the entry's popularity count and
+// marks it most-recently-used so it survives LRU eviction.
 func (c *Cache) Get(k string) (*dns.Msg, bool) {
 	if k == "" {
 		return nil, false
 	}
-	c.mu.RLock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	e, ok := c.items[k]
-	c.mu.RUnlock()
 	if !ok {
 		return nil, false
 	}
 	now := c.now()
 	if now.After(e.expire) {
+		delete(c.items, k)
+		c.lru.Remove(e.elem)
 		return nil, false
 	}
+	e.hits++
+	c.lru.MoveToFront(e.elem)
 	remaining := e.expire.Sub(now)
 	out := e.msg.Copy()
 	for _, rr := range out.Answer {
@@ -102,7 +137,9 @@ func (c *Cache) Get(k string) (*dns.Msg, bool) {
 	return out, true
 }
 
-// Set stores a response, capping its lifetime at ttlCap.
+// Set stores a response, capping its lifetime at ttlCap and evicting the
+// least-recently-used entry if the cache is over its size limit. Setting an
+// existing key refreshes its value and TTL but preserves its hit count.
 func (c *Cache) Set(k string, m *dns.Msg) {
 	if k == "" || m == nil {
 		return
@@ -112,8 +149,30 @@ func (c *Cache) Set(k string, m *dns.Msg) {
 		ttl = c.ttlCap
 	}
 	c.mu.Lock()
-	c.items[k] = entry{msg: m.Copy(), expire: c.now().Add(ttl)}
-	c.mu.Unlock()
+	defer c.mu.Unlock()
+	now := c.now()
+	if e, ok := c.items[k]; ok {
+		e.msg = m.Copy()
+		e.expire = now.Add(ttl)
+		c.lru.MoveToFront(e.elem)
+		return
+	}
+	e := &entry{key: k, msg: m.Copy(), expire: now.Add(ttl)}
+	e.elem = c.lru.PushFront(e)
+	c.items[k] = e
+	c.evictLocked()
+}
+
+func (c *Cache) evictLocked() {
+	for c.maxEntries > 0 && c.lru.Len() > c.maxEntries {
+		last := c.lru.Back()
+		if last == nil {
+			return
+		}
+		e := last.Value.(*entry)
+		delete(c.items, e.key)
+		c.lru.Remove(last)
+	}
 }
 
 // Do returns a cached response if present, otherwise runs fn (coalescing
@@ -140,5 +199,36 @@ func (c *Cache) Do(ctx context.Context, k string, fn func() (*dns.Msg, error)) (
 func (c *Cache) Len() int {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return len(c.items)
+	return c.lru.Len()
+}
+
+// Popular returns the keys of the n most-served cached responses, most
+// popular first. Pass 0 or a negative n to get all keys.
+func (c *Cache) Popular(n int) []string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	keys := make([]string, 0, len(c.items))
+	for k := range c.items {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		return c.items[keys[i]].hits > c.items[keys[j]].hits
+	})
+	if n > 0 && n < len(keys) {
+		keys = keys[:n]
+	}
+	return keys
+}
+
+// Stale reports whether the entry for k is missing, already expired, or will
+// expire within lookahead — i.e. it should be refreshed now. It does not
+// count as a hit.
+func (c *Cache) Stale(k string, lookahead time.Duration) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	e, ok := c.items[k]
+	if !ok {
+		return false
+	}
+	return c.now().Add(lookahead).After(e.expire)
 }

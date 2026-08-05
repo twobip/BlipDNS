@@ -22,30 +22,34 @@ import (
 
 // Config configures a Server.
 type Config struct {
-	DNSAddr   string // "127.0.0.1:53"
-	DoHAddr   string // "127.0.0.1:8443"
-	CertFile  string // optional TLS for DoH
-	KeyFile   string // optional TLS for DoH
-	Upstream  string // upstream spec(s)
-	CacheCap  time.Duration
-	Store     *filter.Store
-	Version   string
-	Blocklist *blocklist.Blocklist // global blocklist applied before per-client policy
+	DNSAddr           string // "127.0.0.1:53"
+	DoHAddr           string // "127.0.0.1:8443"
+	CertFile          string // optional TLS for DoH
+	KeyFile           string // optional TLS for DoH
+	Upstream          string // upstream spec(s)
+	CacheCap          time.Duration
+	CacheSize         int           // max cached responses in RAM (0 = unlimited)
+	CacheWarmCount    int           // most-popular entries to auto-refresh (0 = off)
+	CacheWarmAhead    time.Duration // refresh a popular entry when its TTL drops below this
+	CacheWarmInterval time.Duration // how often to run the warm-refresh loop
+	Store             *filter.Store
+	Version           string
+	Blocklist         *blocklist.Blocklist // global blocklist applied before per-client policy
 }
 
 // Server is the DNS + DoH resolver.
 type Server struct {
-	cfg    Config
-	cache  *cache.Cache
-	up     upstream.Resolver
-	ctrl   *control.Server
-	cnt    *control.Counters
-	logfn  func(client, domain string)
-	udp    *dns.Server
-	tcp    *dns.Server
-	doch   *http.Server
-	close  chan struct{}
-	once   sync.Once
+	cfg   Config
+	cache *cache.Cache
+	up    upstream.Resolver
+	ctrl  *control.Server
+	cnt   *control.Counters
+	logfn func(client, domain string)
+	udp   *dns.Server
+	tcp   *dns.Server
+	doch  *http.Server
+	close chan struct{}
+	once  sync.Once
 }
 
 // New builds a Server. If cfg.Store is nil a permissive default is used.
@@ -57,7 +61,7 @@ func New(cfg Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	c := cache.New(cfg.CacheCap)
+	c := cache.New(cfg.CacheCap, cfg.CacheSize)
 	cnt := &control.Counters{}
 	ctrl := control.NewServer("", cfg.Store, c, cnt, cfg.Version)
 	s := &Server{
@@ -243,8 +247,67 @@ func (s *Server) serve(ctx context.Context, clientIP net.IP, req *dns.Msg) *dns.
 	return out
 }
 
+// startWarmLoop periodically re-resolves the most popular cached responses
+// shortly before they expire, so heavy hitters never go stale for clients.
+func (s *Server) startWarmLoop() {
+	if s.cfg.CacheWarmCount <= 0 {
+		return
+	}
+	interval := s.cfg.CacheWarmInterval
+	if interval <= 0 {
+		interval = 10 * time.Second
+	}
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-s.close:
+				return
+			case <-ticker.C:
+				s.refreshPopular()
+			}
+		}
+	}()
+}
+
+// refreshPopular resolves the top CacheWarmCount cached keys that are stale
+// (expired, or expiring within CacheWarmAhead) using the default upstream and
+// re-caches the fresh responses. Best-effort: failures are skipped and the
+// next pass retries.
+func (s *Server) refreshPopular() {
+	keys := s.cache.Popular(s.cfg.CacheWarmCount)
+	if len(keys) == 0 {
+		return
+	}
+	ahead := s.cfg.CacheWarmAhead
+	if ahead <= 0 {
+		ahead = 30 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	for _, k := range keys {
+		if !s.cache.Stale(k, ahead) {
+			continue
+		}
+		name, qtype, qclass, ok := cache.ParseKey(k)
+		if !ok {
+			continue
+		}
+		req := new(dns.Msg)
+		req.RecursionDesired = true
+		req.Question = []dns.Question{{Name: name, Qtype: qtype, Qclass: qclass}}
+		m, err := s.up.Resolve(ctx, req)
+		if err != nil {
+			continue
+		}
+		s.cache.Set(k, m)
+	}
+}
+
 // Start launches UDP, TCP and DoH listeners (DoH blocks).
 func (s *Server) Start() error {
+	s.startWarmLoop()
 	dh := s.Handler()
 	s.doch = &http.Server{Addr: s.cfg.DoHAddr, Handler: dh, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second}
 
