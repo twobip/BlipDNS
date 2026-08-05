@@ -195,18 +195,11 @@ func (s *Server) serve(ctx context.Context, clientIP net.IP, req *dns.Msg) *dns.
 		return resp
 	}
 
-		// Notify pass event for query log
-		if log && s.logfn != nil {
-			s.logfn(clientIP.String(), q.Name)
-		}
-		s.ctrl.Notify(control.WatchEvent{
-			Type:   "pass",
-			At:     time.Now(),
-			Client: clientIP.String(),
-			Domain: q.Name,
-		})
+	if log && s.logfn != nil {
+		s.logfn(clientIP.String(), q.Name)
+	}
 
-		// Use policy-specific upstream if provided, else fall back to global
+	// Use policy-specific upstream if provided, else fall back to global
 	resolver := s.up
 	if upstreamOverride != "" {
 		var err error
@@ -229,6 +222,24 @@ func (s *Server) serve(ctx context.Context, clientIP net.IP, req *dns.Msg) *dns.
 	}
 	out.Id = req.Id
 	out.Question = req.Question
+
+	// Notify pass event for query log (with resolved IPs)
+	var ips []string
+	for _, rr := range out.Answer {
+		switch a := rr.(type) {
+		case *dns.A:
+			ips = append(ips, a.A.String())
+		case *dns.AAAA:
+			ips = append(ips, a.AAAA.String())
+		}
+	}
+	s.ctrl.Notify(control.WatchEvent{
+		Type:   "pass",
+		At:     time.Now(),
+		Client: clientIP.String(),
+		Domain: q.Name,
+		IPs:    ips,
+	})
 	return out
 }
 

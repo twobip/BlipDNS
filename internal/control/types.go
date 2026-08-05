@@ -61,6 +61,7 @@ type WatchEvent struct {
 	Stats  *StatsResponse `json:"stats,omitempty"`
 	Client string         `json:"client,omitempty"`
 	Domain string         `json:"domain,omitempty"`
+	IPs    []string       `json:"ips,omitempty"`
 }
 
 // ---- adoption (claim-code bootstrap) ----

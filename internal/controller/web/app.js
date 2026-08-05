@@ -356,6 +356,7 @@ async function renderQueries() {
     const res = await API("/api/queries?instance=" + encodeURIComponent(qState.inst) + sinceQ);
     const rows = await res.json();
     const list = rows.filter((r) => {
+      if (!r.domain) return false;
       if (qState.filter && !(r.domain + " " + r.client + " " + r.instance).toLowerCase().includes(qState.filter.toLowerCase())) return false;
       if (qState.action && (r.action || "").toUpperCase() !== qState.action) return false;
       return true;
@@ -363,7 +364,7 @@ async function renderQueries() {
     propsInstanceOptions();
     $("q-count").textContent = list.length + " entries (shown)";
     if (!list.length) {
-      tb.innerHTML = `<tr class="empty-row"><td colspan="5"><div class="empty"><div class="empty-ic">${IC.query}</div><h4>No queries</h4><p>Nothing matched in the last 24 hours.</p></div></td></tr>`;
+      tb.innerHTML = `<tr class="empty-row"><td colspan="6"><div class="empty"><div class="empty-ic">${IC.query}</div><h4>No queries</h4><p>Nothing matched in the last 24 hours.</p></div></td></tr>`;
       return;
     }
     tb.innerHTML = list.map((r) => `<tr>
@@ -371,11 +372,12 @@ async function renderQueries() {
       <td><span class="mono">${esc(r.domain)}</span></td>
       <td><span class="badge ${(r.action||"").toUpperCase()==="BLOCK"?"err":"on"}">${esc(r.action)}</span></td>
       <td class="mono">${esc(r.client)}</td>
+      <td class="mono">${esc((r.ips||[]).join(", "))}</td>
       <td>${esc(r.instance)}</td>
     </tr>`).join("");
     tb.querySelectorAll(".t").forEach((t) => { t.textContent = relTime(t.dataset.t); });
   } catch (e) {
-    tb.innerHTML = `<tr class="empty-row"><td colspan="5"><div class="empty"><div class="empty-ic">${IC.warn}</div><h4>Query log unavailable</h4><p>${esc(e.message)}</p></div></td></tr>`;
+    tb.innerHTML = `<tr class="empty-row"><td colspan="6"><div class="empty"><div class="empty-ic">${IC.warn}</div><h4>Query log unavailable</h4><p>${esc(e.message)}</p></div></td></tr>`;
   }
 }
 function propsInstanceOptions() {

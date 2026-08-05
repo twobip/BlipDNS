@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -16,13 +17,14 @@ type QueryLogStore struct {
 
 // QueryLogEntry represents a single DNS query event
 type QueryLogEntry struct {
-	ID        int64
-	Timestamp time.Time
-	Instance  string
-	Client    string
-	Domain    string
-	Action    string // "BLOCK" or "PASS"
-	Upstream  string
+	ID        int64     `json:"id"`
+	Timestamp time.Time `json:"timestamp"`
+	Instance  string    `json:"instance"`
+	Client    string    `json:"client"`
+	Domain    string    `json:"domain"`
+	Action    string    `json:"action"`
+	Upstream  string    `json:"upstream,omitempty"`
+	IPs       []string  `json:"ips,omitempty"`
 }
 
 // TimeSeriesPoint represents a single point in a time series
@@ -53,7 +55,8 @@ func NewQueryLogStore(dbPath string) (*QueryLogStore, error) {
 		client TEXT NOT NULL,
 		domain TEXT NOT NULL,
 		action TEXT NOT NULL,
-		upstream TEXT
+		upstream TEXT,
+		ips TEXT
 	);
 	CREATE INDEX IF NOT EXISTS idx_query_log_timestamp ON query_log(timestamp);
 	CREATE INDEX IF NOT EXISTS idx_query_log_instance ON query_log(instance);
@@ -61,6 +64,8 @@ func NewQueryLogStore(dbPath string) (*QueryLogStore, error) {
 	if _, err := db.Exec(schema); err != nil {
 		return nil, fmt.Errorf("create schema: %w", err)
 	}
+	// Add ips column to existing databases (no-op if already present)
+	_, _ = db.Exec("ALTER TABLE query_log ADD COLUMN ips TEXT")
 
 	// Start cleanup goroutine
 	store := &QueryLogStore{db: db}
@@ -71,15 +76,16 @@ func NewQueryLogStore(dbPath string) (*QueryLogStore, error) {
 
 // Insert adds a new query log entry
 func (s *QueryLogStore) Insert(ctx context.Context, e QueryLogEntry) error {
+	ips := strings.Join(e.IPs, ",")
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO query_log (timestamp, instance, client, domain, action, upstream) VALUES (?, ?, ?, ?, ?, ?)`,
-		e.Timestamp, e.Instance, e.Client, e.Domain, e.Action, e.Upstream)
+		`INSERT INTO query_log (timestamp, instance, client, domain, action, upstream, ips) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		e.Timestamp, e.Instance, e.Client, e.Domain, e.Action, e.Upstream, ips)
 	return err
 }
 
 // Query returns entries within the time range
 func (s *QueryLogStore) Query(ctx context.Context, instance, filter string, since time.Time, limit int) ([]QueryLogEntry, error) {
-	query := `SELECT id, timestamp, instance, client, domain, action, upstream FROM query_log WHERE timestamp >= ?`
+	query := `SELECT id, timestamp, instance, client, domain, action, upstream, ips FROM query_log WHERE timestamp >= ? AND domain != 'health_check'`
 	args := []interface{}{since}
 
 	if instance != "" {
@@ -107,10 +113,14 @@ func (s *QueryLogStore) Query(ctx context.Context, instance, filter string, sinc
 	for rows.Next() {
 		var e QueryLogEntry
 		var ts string
-		if err := rows.Scan(&e.ID, &ts, &e.Instance, &e.Client, &e.Domain, &e.Action, &e.Upstream); err != nil {
+		var ips sql.NullString
+		if err := rows.Scan(&e.ID, &ts, &e.Instance, &e.Client, &e.Domain, &e.Action, &e.Upstream, &ips); err != nil {
 			return nil, err
 		}
 		e.Timestamp, _ = time.Parse("2006-01-02 15:04:05", ts)
+		if ips.Valid && ips.String != "" {
+			e.IPs = strings.Split(ips.String, ",")
+		}
 		results = append(results, e)
 	}
 	return results, rows.Err()
@@ -120,7 +130,7 @@ func (s *QueryLogStore) Query(ctx context.Context, instance, filter string, sinc
 func (s *QueryLogStore) GetQueryStats(ctx context.Context, instance string, bucketSize time.Duration, since time.Time) ([]TimeSeriesPoint, error) {
 	// SQLite doesn't have native time bucketing, so we'll do it in Go
 	// First, fetch all relevant entries
-	query := `SELECT timestamp, action FROM query_log WHERE timestamp >= ?`
+	query := `SELECT timestamp, action FROM query_log WHERE timestamp >= ? AND domain != 'health_check'`
 	args := []interface{}{since}
 
 	if instance != "" {

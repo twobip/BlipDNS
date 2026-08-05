@@ -163,6 +163,7 @@ func (i *Instance) watch(ctx context.Context) {
 					Domain:    e.Domain,
 					Action:    strings.ToUpper(e.Type), // "BLOCK" or "PASS"
 					Upstream:  "",
+					IPs:       e.IPs,
 				})
 			}
 		})
