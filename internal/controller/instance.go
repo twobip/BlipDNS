@@ -11,18 +11,19 @@ import (
 
 // InstanceStatus is a point-in-time view of an instance.
 type InstanceStatus struct {
-	ID          string                  `json:"id"`
-	Label       string                  `json:"label"`
-	URL         string                  `json:"url"`
-	Online      bool                    `json:"online"`
-	Adopted     bool                    `json:"adopted"`
-	Health      *control.HealthResponse `json:"health,omitempty"`
-	Stats       *control.StatsResponse  `json:"stats,omitempty"`
-	LastOK      time.Time               `json:"last_ok"`
-	Err         string                  `json:"error,omitempty"`
-	PingAvgMs   float64                 `json:"ping_avg_ms"`
-	PingLastMs  float64                 `json:"ping_last_ms"`
-	PingSamples int                     `json:"ping_samples"`
+	ID           string                  `json:"id"`
+	Label        string                  `json:"label"`
+	URL          string                  `json:"url"`
+	Online       bool                    `json:"online"`
+	Adopted      bool                    `json:"adopted"`
+	ConfigSynced bool                    `json:"config_synced"`
+	Health       *control.HealthResponse `json:"health,omitempty"`
+	Stats        *control.StatsResponse  `json:"stats,omitempty"`
+	LastOK       time.Time               `json:"last_ok"`
+	Err          string                  `json:"error,omitempty"`
+	PingAvgMs    float64                 `json:"ping_avg_ms"`
+	PingLastMs   float64                 `json:"ping_last_ms"`
+	PingSamples  int                     `json:"ping_samples"`
 }
 
 // Instance is a managed blipd with background poll + watch loops.
@@ -44,7 +45,8 @@ type Instance struct {
 	pingSumMs   float64
 	pingAvgMs   float64
 	pingLastMs  float64
-	appliedVer  uint64 // fleet config version last successfully applied
+	appliedHash string // hash of the effective config last successfully applied
+	lastUpstr   string // default upstream the instance last reported (for drift detection)
 }
 
 // pollInterval is how often the controller polls an instance's health/stats.
@@ -100,17 +102,21 @@ func (i *Instance) hasToken() bool {
 	return i.Config.Token != ""
 }
 
-// configApplied reports whether the instance has applied fleet config version
-// ver (which may be 0 when no config has been pushed yet).
-func (i *Instance) configApplied(ver uint64) bool {
+// configApplied reports whether the instance has applied the config with the
+// given hash (empty hash means no config has ever been pushed).
+func (i *Instance) configApplied(hash string) bool {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
-	return i.appliedVer == ver
+	return i.appliedHash == hash
 }
 
-func (i *Instance) markConfigApplied(ver uint64) {
+// markConfigAppliedWith records the applied config and the upstream it
+// carries, so the synced indicator flips immediately after a push instead of
+// waiting for the next poll to observe it.
+func (i *Instance) markConfigAppliedWith(hash, upstr string) {
 	i.mu.Lock()
-	i.appliedVer = ver
+	i.appliedHash = hash
+	i.lastUpstr = upstr
 	i.mu.Unlock()
 }
 
@@ -138,6 +144,7 @@ func (i *Instance) poll(ctx context.Context) {
 	}
 	if serr == nil {
 		i.stats = s
+		i.lastUpstr = s.Upstream
 	}
 	i.mu.Unlock()
 	if herr == nil {
@@ -204,7 +211,6 @@ func (i *Instance) watch(ctx context.Context) {
 
 func (i *Instance) status() *InstanceStatus {
 	i.mu.RLock()
-	defer i.mu.RUnlock()
 	st := &InstanceStatus{
 		ID:          i.Config.ID,
 		Label:       i.Config.Label,
@@ -217,6 +223,18 @@ func (i *Instance) status() *InstanceStatus {
 		PingAvgMs:   i.pingAvgMs,
 		PingLastMs:  i.pingLastMs,
 		PingSamples: i.pingSamples,
+	}
+	applied := i.appliedHash
+	reportedUpstream := i.lastUpstr
+	i.mu.RUnlock()
+	// Snapshot the fleet's expected config hash and upstream outside the
+	// instance lock (they read fleet state) and mark synced when both match.
+	if want, ok := i.fleet.wantConfig(i.Config.ID); ok {
+		synced := applied == want.hash
+		if synced && want.upstream != "" && reportedUpstream != want.upstream {
+			synced = false
+		}
+		st.ConfigSynced = synced
 	}
 	if ad, err := i.ctl().AdoptStatus(context.Background()); err == nil {
 		st.Adopted = ad.Adopted

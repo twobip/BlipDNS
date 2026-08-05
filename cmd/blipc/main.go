@@ -21,11 +21,12 @@ import (
 const version = "blipc/0.1.0"
 
 type config struct {
-	Listen        string                      `yaml:"listen"`
-	Username      string                      `yaml:"username"`
-	Password      string                      `yaml:"password"`
-	DefaultPolicy *control.Policy             `yaml:"default_policy"`
-	Instances     []controller.InstanceConfig `yaml:"instances"`
+	Listen            string                                  `yaml:"listen"`
+	Username          string                                  `yaml:"username"`
+	Password          string                                  `yaml:"password"`
+	DefaultPolicy     *control.Policy                         `yaml:"default_policy"`
+	InstanceOverrides map[string]*controller.InstanceOverride `yaml:"instance_overrides"`
+	Instances         []controller.InstanceConfig             `yaml:"instances"`
 }
 
 func main() {
@@ -49,6 +50,9 @@ func main() {
 	fleet := controller.NewFleet(*cfgPath)
 	if cfg.DefaultPolicy != nil {
 		fleet.SetDefault(cfg.DefaultPolicy)
+	}
+	for id, o := range cfg.InstanceOverrides {
+		fleet.SetOverride(id, o)
 	}
 	ctx := context.Background()
 	for _, ic := range cfg.Instances {

@@ -6,6 +6,8 @@ package controller
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -43,6 +45,20 @@ type InstanceConfig struct {
 	Claim string `yaml:"claim" json:"claim"` // one-time claim code (optional bootstrap)
 }
 
+// InstanceOverride is a partial per-instance config: only fields that are set
+// differ from the fleet default; everything else falls through to it. Stored
+// on blipc and pushed (merged with the default) to that instance only.
+type InstanceOverride struct {
+	Upstream    *string `json:"upstream,omitempty" yaml:"upstream,omitempty"`
+	BlockAction *string `json:"block_action,omitempty" yaml:"block_action,omitempty"`
+	Log         *bool   `json:"log,omitempty" yaml:"log,omitempty"`
+}
+
+// IsEmpty reports whether the override changes nothing.
+func (o *InstanceOverride) IsEmpty() bool {
+	return o == nil || (o.Upstream == nil && o.BlockAction == nil && o.Log == nil)
+}
+
 // Fleet holds all instances, the event bus, and the global blocklist.
 type Fleet struct {
 	mu                   sync.RWMutex
@@ -51,15 +67,15 @@ type Fleet struct {
 	http                 *http.Client
 	now                  func() time.Time
 	logfn                func(Event)
-	queryLog             *QueryLogStore       // persistent query log
-	blocklist            *blocklist.Blocklist // global DNS blocklist
-	blocklistURL         string               // URL to fetch blocklist from (AdBlock Plus format)
-	blocklistUpdateHours int                  // update interval in hours (0 = disabled)
-	updateStopCh         chan struct{}        // channel to stop the updater goroutine
-	updateMu             sync.Mutex           // protects updateStopCh
-	configPath           string               // path to controller config YAML (for persisting tokens)
-	defaultPolicy        *control.Policy      // fleet-wide default policy (source of truth)
-	configVer            uint64               // bumped on every config change; instances reconcile against it
+	queryLog             *QueryLogStore               // persistent query log
+	blocklist            *blocklist.Blocklist         // global DNS blocklist
+	blocklistURL         string                       // URL to fetch blocklist from (AdBlock Plus format)
+	blocklistUpdateHours int                          // update interval in hours (0 = disabled)
+	updateStopCh         chan struct{}                // channel to stop the updater goroutine
+	updateMu             sync.Mutex                   // protects updateStopCh
+	configPath           string                       // path to controller config YAML (for persisting tokens)
+	defaultPolicy        *control.Policy              // fleet-wide default policy (source of truth)
+	overrides            map[string]*InstanceOverride // per-instance partial configs (diff vs default)
 }
 
 // NewFleet creates an empty fleet with a default event buffer.
@@ -73,6 +89,7 @@ func NewFleet(configPath string) *Fleet {
 		queryLog:   queryLog,
 		blocklist:  blocklist.New(),
 		configPath: configPath,
+		overrides:  make(map[string]*InstanceOverride),
 	}
 }
 
@@ -155,12 +172,11 @@ func (f *Fleet) SetDefault(p *control.Policy) {
 		p.ID = "default"
 	}
 	f.defaultPolicy = p
-	f.configVer++
 }
 
 // SetDefaultPolicy records the fleet-wide default policy, persists it to the
-// controller config, and pushes it to every managed instance. It returns the
-// per-instance outcome ("ok" or an error message).
+// controller config, and pushes every instance's effective config to it. It
+// returns the per-instance outcome ("ok" or an error message).
 func (f *Fleet) SetDefaultPolicy(ctx context.Context, p *control.Policy) map[string]string {
 	f.SetDefault(p)
 	if f.configPath != "" {
@@ -168,61 +184,207 @@ func (f *Fleet) SetDefaultPolicy(ctx context.Context, p *control.Policy) map[str
 			log.Printf("blipc: warning: failed to persist default policy: %v", err)
 		}
 	}
-	return f.pushDefault(ctx)
+	return f.pushConfigs(ctx)
 }
 
-// pushDefault sends the current fleet default policy to all instances that
-// have an admin token and marks their applied config version on success.
-func (f *Fleet) pushDefault(ctx context.Context) map[string]string {
-	f.mu.RLock()
+// effectivePolicy merges the fleet default with the per-instance override:
+// every set override field wins, everything else falls through to the default.
+// If there is no override and no default it returns nil.
+func (f *Fleet) effectivePolicy(instID string) (*control.Policy, string) {
 	p := f.defaultPolicy
-	ver := f.configVer
+	o := f.overrides[instID]
+	if o == nil {
+		if p == nil {
+			return nil, ""
+		}
+		return p, effectiveHash(p)
+	}
+	// Sparse override: start from the default and apply the set fields.
+	merged := clonePolicy(p)
+	if merged == nil {
+		merged = &control.Policy{ID: "default"}
+	}
+	if o.Upstream != nil {
+		merged.Upstream = *o.Upstream
+	}
+	if o.BlockAction != nil {
+		merged.BlockAction = *o.BlockAction
+	}
+	if o.Log != nil {
+		merged.Log = *o.Log
+	}
+	return merged, effectiveHash(merged)
+}
+
+// wantConfig returns the config a given instance should currently have applied:
+// the effective (merged) policy hash plus its upstream. ok is false when there
+// is no config at all, in which case synced is undefined.
+type wantConfigResult struct {
+	hash     string
+	upstream string
+}
+
+func (f *Fleet) wantConfig(instID string) (wantConfigResult, bool) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	eff, hash := f.effectivePolicy(instID)
+	if eff == nil || hash == "" {
+		return wantConfigResult{}, false
+	}
+	return wantConfigResult{hash: hash, upstream: eff.Upstream}, true
+}
+
+// effectiveHash returns a stable fingerprint of the config an instance should
+// have right now. Instances are synced iff their applied hash matches.
+func effectiveHash(p *control.Policy) string {
+	b, err := json.Marshal(p)
+	if err != nil {
+		return ""
+	}
+	return fmt.Sprintf("%x", sha256.Sum256(b))
+}
+
+// clonePolicy deep-copies a policy so overriding doesn't mutate the shared default.
+func clonePolicy(p *control.Policy) *control.Policy {
+	if p == nil {
+		return nil
+	}
+	out := *p
+	out.Networks = append([]string(nil), p.Networks...)
+	out.Block = append([]string(nil), p.Block...)
+	out.Allow = append([]string(nil), p.Allow...)
+	return &out
+}
+
+// SetOverride records a sparse per-instance config without persisting or
+// pushing. Used at startup (config load); the poll reconcile distributes it.
+func (f *Fleet) SetOverride(id string, o *InstanceOverride) {
+	if o == nil || o.IsEmpty() {
+		return
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.overrides[id] = o
+}
+
+// SetInstanceOverride records a sparse per-instance config (only fields that
+// differ from the fleet default), persists it, and pushes it to the instance.
+// If the override is empty the override is removed entirely.
+func (f *Fleet) SetInstanceOverride(ctx context.Context, id string, o *InstanceOverride) map[string]string {
+	f.mu.Lock()
+	if o.IsEmpty() {
+		delete(f.overrides, id)
+	} else {
+		f.overrides[id] = o
+	}
+	f.mu.Unlock()
+	if f.configPath != "" {
+		if err := f.saveConfig(); err != nil {
+			log.Printf("blipc: warning: failed to persist instance override: %v", err)
+		}
+	}
+	return f.pushInstance(ctx, id)
+}
+
+// InstanceOverrideOf returns the sparse override for an instance (may be nil).
+func (f *Fleet) InstanceOverrideOf(id string) *InstanceOverride {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return f.overrides[id]
+}
+
+// InstanceOverrides returns a copy of all per-instance overrides.
+func (f *Fleet) InstanceOverrides() map[string]*InstanceOverride {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	out := make(map[string]*InstanceOverride, len(f.overrides))
+	for id, o := range f.overrides {
+		cp := *o
+		out[id] = &cp
+	}
+	return out
+}
+
+// pushConfigs sends each instance's effective config to it and marks its
+// applied config hash on success.
+func (f *Fleet) pushConfigs(ctx context.Context) map[string]string {
+	f.mu.RLock()
 	insts := make([]*Instance, 0, len(f.instances))
 	for _, i := range f.instances {
 		insts = append(insts, i)
 	}
 	f.mu.RUnlock()
 	results := make(map[string]string, len(insts))
-	if p == nil {
-		return results
-	}
 	for _, i := range insts {
-		if !i.hasToken() {
-			results[i.Config.ID] = "not adopted"
+		f.mu.RLock()
+		eff, _ := f.effectivePolicy(i.Config.ID)
+		f.mu.RUnlock()
+		if eff == nil {
+			results[i.Config.ID] = "no config"
 			continue
 		}
-		if err := i.ctl().SetPolicy(ctx, p); err != nil {
+		if err := i.ctl().SetPolicy(ctx, eff); err != nil {
 			results[i.Config.ID] = err.Error()
 			continue
 		}
-		i.markConfigApplied(ver)
+		i.markConfigAppliedWith(f.appliedHashFor(i.Config.ID), eff.Upstream)
 		results[i.Config.ID] = "ok"
 	}
 	return results
 }
 
-// maybePushConfig converges an instance to the fleet default policy. It
-// pushes when the instance has not yet applied the current config version
-// (newly added/adopted, or the fleet config changed) or when its reported
-// default upstream diverges from the fleet default (it restarted and reverted
-// to its own config). Called from the instance poll loop.
+// pushInstance sends one instance's effective config to it. Used when a
+// per-instance override is saved. Returns a single-entry result map.
+func (f *Fleet) pushInstance(ctx context.Context, id string) map[string]string {
+	i := f.get(id)
+	if i == nil {
+		return map[string]string{id: "unknown instance"}
+	}
+	f.mu.RLock()
+	eff, _ := f.effectivePolicy(id)
+	f.mu.RUnlock()
+	if eff == nil {
+		return map[string]string{id: "no config"}
+	}
+	if !i.hasToken() {
+		return map[string]string{id: "not adopted"}
+	}
+	if err := i.ctl().SetPolicy(ctx, eff); err != nil {
+		return map[string]string{id: err.Error()}
+	}
+	i.markConfigAppliedWith(f.appliedHashFor(id), eff.Upstream)
+	return map[string]string{id: "ok"}
+}
+
+// appliedHashFor returns the hash an instance should have applied right now.
+func (f *Fleet) appliedHashFor(instID string) string {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	_, h := f.effectivePolicy(instID)
+	return h
+}
+
+// maybePushConfig converges an instance to its effective config. It pushes
+// when the instance has not yet applied the current config hash (newly
+// added/adopted, or the fleet config changed) or when its reported default
+// upstream diverges from the effective config (it restarted and reverted to
+// its own config). Called from the instance poll loop.
 func (f *Fleet) maybePushConfig(ctx context.Context, i *Instance, reported *control.StatsResponse) {
 	f.mu.RLock()
-	p := f.defaultPolicy
-	ver := f.configVer
+	eff, hash := f.effectivePolicy(i.Config.ID)
 	f.mu.RUnlock()
-	if p == nil || ver == 0 || !i.hasToken() {
+	if eff == nil || hash == "" || !i.hasToken() {
 		return
 	}
 	rep := ""
 	if reported != nil {
 		rep = reported.Upstream
 	}
-	if i.configApplied(ver) && rep == p.Upstream {
+	if i.configApplied(hash) && rep == eff.Upstream {
 		return
 	}
-	if err := i.ctl().SetPolicy(ctx, p); err == nil {
-		i.markConfigApplied(ver)
+	if err := i.ctl().SetPolicy(ctx, eff); err == nil {
+		i.markConfigAppliedWith(hash, eff.Upstream)
 	}
 }
 
@@ -396,11 +558,12 @@ func (f *Fleet) saveConfig() error {
 	}
 
 	type fullConfig struct {
-		Listen        string           `yaml:"listen"`
-		Username      string           `yaml:"username"`
-		Password      string           `yaml:"password"`
-		DefaultPolicy *control.Policy  `yaml:"default_policy"`
-		Instances     []InstanceConfig `yaml:"instances"`
+		Listen           string                       `yaml:"listen"`
+		Username         string                       `yaml:"username"`
+		Password         string                       `yaml:"password"`
+		DefaultPolicy    *control.Policy              `yaml:"default_policy"`
+		InstancePolicies map[string]*InstanceOverride `yaml:"instance_overrides"`
+		Instances        []InstanceConfig             `yaml:"instances"`
 	}
 
 	var cfg fullConfig
@@ -418,9 +581,11 @@ func (f *Fleet) saveConfig() error {
 		inst.mu.RUnlock()
 	}
 	def := f.defaultPolicy
+	overs := f.overrides
 	f.mu.RUnlock()
 	cfg.Instances = instances
 	cfg.DefaultPolicy = def
+	cfg.InstancePolicies = overs
 
 	out, err := yaml.Marshal(cfg)
 	if err != nil {

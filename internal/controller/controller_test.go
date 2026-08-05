@@ -326,6 +326,127 @@ func TestFleetReconcileRestartRevert(t *testing.T) {
 	}
 }
 
+// TestFleetInstanceOverride verifies a sparse per-instance config is merged
+// over the fleet default, pushed only to that instance, persisted, and that
+// clearing it reverts the instance to the default.
+func TestFleetInstanceOverride(t *testing.T) {
+	recA, recB := &policyRec{}, &policyRec{}
+	srvA := fakeBlipdWithRec(t, "t", "", &control.HealthResponse{OK: true}, &control.StatsResponse{}, &control.ListResponse{}, recA)
+	defer srvA.Close()
+	srvB := fakeBlipdWithRec(t, "t", "", &control.HealthResponse{OK: true}, &control.StatsResponse{}, &control.ListResponse{}, recB)
+	defer srvB.Close()
+
+	cfgPath := filepath.Join(t.TempDir(), "blipc.yaml")
+	fleet := NewFleet(cfgPath)
+	ctx := context.Background()
+	if err := fleet.Add(ctx, InstanceConfig{ID: "a", URL: srvA.URL, Token: "t"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := fleet.Add(ctx, InstanceConfig{ID: "b", URL: srvB.URL, Token: "t"}); err != nil {
+		t.Fatal(err)
+	}
+
+	defUp := "udp://1.1.1.1:53"
+	ovrUp := "https://9.9.9.9/dns-query|1"
+	res := fleet.SetDefaultPolicy(ctx, &control.Policy{Upstream: defUp, BlockAction: "nxdomain", Log: true})
+	if res["a"] != "ok" || res["b"] != "ok" {
+		t.Fatalf("expected both ok, got %+v", res)
+	}
+	recA.mu.Lock()
+	recA.applied = nil
+	recA.mu.Unlock()
+	recB.mu.Lock()
+	recB.applied = nil
+	recB.mu.Unlock()
+
+	// sparse override: only upstream differs; everything else falls through
+	// to the default.
+	res = fleet.SetInstanceOverride(ctx, "a", &InstanceOverride{Upstream: &ovrUp})
+	if res["a"] != "ok" {
+		t.Fatalf("expected instance a ok, got %+v", res)
+	}
+	got := recA.snapshot()
+	if len(got) != 1 {
+		t.Fatalf("expected 1 push to a, got %d", len(got))
+	}
+	if got[0].Upstream != ovrUp {
+		t.Errorf("instance a upstream = %q, want override %q", got[0].Upstream, ovrUp)
+	}
+	if got[0].BlockAction != "nxdomain" || !got[0].Log {
+		t.Errorf("override must merge default fields, got %+v", got[0])
+	}
+	if got[0].ID != "default" {
+		t.Errorf("merged policy ID = %q, want default (store default)", got[0].ID)
+	}
+	if n := len(recB.snapshot()); n != 0 {
+		t.Errorf("instance b must NOT receive the override, got %d pushes", n)
+	}
+	if o := fleet.InstanceOverrideOf("a"); o == nil || o.Upstream == nil || *o.Upstream != ovrUp {
+		t.Errorf("unexpected override for a: %+v", o)
+	}
+
+	// override persisted as a sparse diff
+	b, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(b, []byte("instance_overrides:")) || !bytes.Contains(b, []byte(ovrUp)) {
+		t.Errorf("instance override not persisted:\n%s", b)
+	}
+
+	// clearing the override reverts the instance to the fleet default
+	res = fleet.SetInstanceOverride(ctx, "a", &InstanceOverride{})
+	if res["a"] != "ok" {
+		t.Fatalf("expected clear ok, got %+v", res)
+	}
+	if o := fleet.InstanceOverrideOf("a"); o != nil {
+		t.Errorf("override should be removed after clear, got %+v", o)
+	}
+	got = recA.snapshot()
+	if len(got) != 2 {
+		t.Fatalf("expected 1 push after clear (back to default), got %d", len(got))
+	}
+	if got[1].Upstream != defUp {
+		t.Errorf("instance a upstream after clear = %q, want default %q", got[1].Upstream, defUp)
+	}
+}
+
+// TestFleetConfigSynced verifies the ConfigSynced status flag: false until the
+// first poll pushes the effective config, then true and stable.
+func TestFleetConfigSynced(t *testing.T) {
+	pollInterval = 100 * time.Millisecond
+	defer func() { pollInterval = 5 * time.Second }()
+	rec := &policyRec{}
+	srv := fakeBlipdWithRec(t, "t", "", &control.HealthResponse{OK: true}, &control.StatsResponse{}, &control.ListResponse{}, rec)
+	defer srv.Close()
+
+	fleet := NewFleet("/tmp/blip-test-config.yaml")
+	fleet.SetDefault(&control.Policy{Upstream: "udp://1.1.1.1:53", BlockAction: "nxdomain"})
+	if err := fleet.Add(context.Background(), InstanceConfig{ID: "a", URL: srv.URL, Token: "t"}); err != nil {
+		t.Fatal(err)
+	}
+	// not synced until the first reconcile push lands
+	if st := fleet.List()[0]; st.ConfigSynced {
+		t.Error("expected not synced before first push")
+	}
+	deadline := time.After(3 * time.Second)
+	for {
+		if st := fleet.List()[0]; st.ConfigSynced {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("instance never reported synced")
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	// stable across further polls
+	time.Sleep(150 * time.Millisecond)
+	if st := fleet.List()[0]; !st.ConfigSynced {
+		t.Error("expected still synced after subsequent polls")
+	}
+}
+
 func TestBusRingBuffer(t *testing.T) {
 	b := NewBus(3)
 	for i := 0; i < 5; i++ {

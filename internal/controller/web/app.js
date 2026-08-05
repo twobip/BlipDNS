@@ -285,8 +285,8 @@ function renderInstances() {
   $("inst-count").textContent = list.length + " of " + instances.length;
   if (!list.length) {
     tb.innerHTML = instances.length
-      ? `<tr class="empty-row"><td colspan="8"><div class="empty"><div class="empty-ic">${IC.query}</div><h4>No matching instances</h4><p>Try a different filter.</p></div></td></tr>`
-      : `<tr class="empty-row"><td colspan="8"><div class="empty"><div class="empty-ic">${IC.inst}</div><h4>No instances yet</h4><p>Add your first blipd resolver to get started.</p><button class="btn btn-primary" id="inst-empty-add">+ Add Instance</button></div></td></tr>`;
+      ? `<tr class="empty-row"><td colspan="9"><div class="empty"><div class="empty-ic">${IC.query}</div><h4>No matching instances</h4><p>Try a different filter.</p></div></td></tr>`
+      : `<tr class="empty-row"><td colspan="9"><div class="empty"><div class="empty-ic">${IC.inst}</div><h4>No instances yet</h4><p>Add your first blipd resolver to get started.</p><button class="btn btn-primary" id="inst-empty-add">+ Add Instance</button></div></td></tr>`;
     const b = $("inst-empty-add"); if (b) b.onclick = openInstanceModal;
     return;
   }
@@ -304,6 +304,7 @@ function renderInstances() {
       <td class="num">${fmt(s.cached ?? 0)}</td>
       <td class="num mono">${ping}</td>
       <td><span class="badge ${i.adopted ? "on" : "off"}">${i.adopted ? "adopted" : "pending"}</span></td>
+      <td>${i.config_synced ? '<span class="badge on">synced</span>' : (i.online ? '<span class="badge warn">pending</span>' : '<span class="badge off">—</span>')}</td>
       <td>
         <div class="row-actions">
           <button class="icon-btn" data-act="policies" data-id="${esc(i.id)}" title="Policies">${IC.shield}</button>
@@ -590,18 +591,53 @@ function collectUpstreams() {
   }));
 }
 let savedDefaultPolicy = null; // fleet default policy held by blipc
+let savedOverrides = {};       // sparse per-instance overrides keyed by instance id
+let scopeState = "default";    // "default" or an instance id
+
+function renderScopeSelect() {
+  const sel = $("s-scope");
+  sel.innerHTML = "";
+  const opt = (v, label) => {
+    const o = document.createElement("option");
+    o.value = v; o.textContent = label; sel.appendChild(o);
+  };
+  opt("default", "Fleet-wide default");
+  for (const i of instances) {
+    opt(i.id, "instance: " + (i.label || i.id) + (savedOverrides[i.id] ? " (custom)" : ""));
+  }
+  if (!instances.some((i) => i.id === scopeState)) scopeState = "default";
+  sel.value = scopeState;
+}
+
+function loadScopeEditor() {
+  renderScopeSelect();
+  const badge = $("s-scope-badge");
+  if (scopeState === "default") {
+    badge.textContent = "fleet-wide";
+    badge.className = "badge accent";
+    renderUpstreamList(parseUpstreamSpec(savedDefaultPolicy.upstream));
+    $("s-scope-hint").textContent = "Applies to every instance that doesn't have its own override.";
+  } else {
+    badge.textContent = "instance";
+    badge.className = "badge purple";
+    const o = savedOverrides[scopeState];
+    renderUpstreamList(parseUpstreamSpec(o && o.upstream));
+    $("s-scope-hint").textContent = "Only for this instance. Fields you leave unset inherit the fleet-wide default.";
+  }
+}
+
 async function refreshSettings() {
   $("s-ctrl-ver").textContent = "blipc";
   $("s-inst-count").textContent = instances.length + (instances.some((i) => i.online) ? " (" + instances.filter((i) => i.online).length + " online)" : "");
-  // The fleet-wide default policy lives on blipc and is distributed to all
-  // instances, so we no longer read it from an individual blipd.
+  // The fleet config lives on blipc (default policy + sparse per-instance
+  // overrides) and is distributed to the instances.
   try {
     const r = await API("/api/settings");
     const d = await r.json();
     savedDefaultPolicy = d.default_policy || { id: "default" };
-    renderUpstreamList(parseUpstreamSpec(savedDefaultPolicy.upstream));
-    const online = instances.filter((i) => i.online).length;
-    $("s-up-status").textContent = savedDefaultPolicy.upstream ? `saved on blipc · pushed to ${online}/${instances.length} online instances` : "";
+    savedOverrides = d.instance_overrides || {};
+    loadScopeEditor();
+    $("s-up-status").textContent = "";
   } catch {}
 }
 
@@ -725,21 +761,36 @@ $("s-up-add").onclick = () => {
 };
 $("s-save-upstream").onclick = async () => {
   const up = serializeUpstreams(collectUpstreams());
-  const body = { id: "default", networks: [], block: [], allow: [], block_action: "nxdomain", log: true, ...(savedDefaultPolicy || {}), upstream: up };
   const st = $("s-up-status");
   st.textContent = "saving…";
+  let body, msg;
+  if (scopeState === "default") {
+    body = { default_policy: { id: "default", networks: [], block: [], allow: [], block_action: "nxdomain", log: true, ...(savedDefaultPolicy || {}), upstream: up } };
+    msg = "fleet default upstream saved";
+  } else {
+    body = { scope: "instance", instance: scopeState, override: up ? { upstream: up } : {} };
+    msg = "instance override saved";
+  }
   try {
-    const r = await API("/api/settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ default_policy: body }) });
+    const r = await API("/api/settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
     const d = await r.json();
-    savedDefaultPolicy = body;
+    if (scopeState === "default") {
+      savedDefaultPolicy = body.default_policy;
+    } else if (up) {
+      savedOverrides[scopeState] = { upstream: up };
+    } else {
+      delete savedOverrides[scopeState];
+    }
     const applied = d.applied || {};
     const ids = Object.keys(applied);
     const ok = ids.filter((k) => applied[k] === "ok").length;
     const failed = ids.filter((k) => applied[k] !== "ok");
-    st.textContent = ids.length ? `saved on blipc · pushed to ${ok}/${ids.length} instances` + (failed.length ? ` · errors: ${failed.join(", ")}` : "") : "saved on blipc · no instances to push to yet";
-    toast("fleet default upstream saved" + (ids.length ? ` (${ok}/${ids.length} instances)` : ""));
+    st.textContent = ids.length ? `saved on blipc · pushed to ${ok}/${ids.length} instance${ids.length > 1 ? "s" : ""}` + (failed.length ? ` · errors: ${failed.join(", ")}` : "") : "saved on blipc · no instance to push to yet";
+    toast(msg + (ids.length ? ` (${ok}/${ids.length})` : ""));
+    renderScopeSelect();
   } catch (e) { st.textContent = ""; toast("save failed: " + e.message, "err"); }
 };
+$("s-scope").addEventListener("change", (e) => { scopeState = e.target.value; loadScopeEditor(); });
 $("s-fetch").onclick = async () => {
   const u = ($("s-bl-url").value || "").trim();
   if (!u) return toast("enter a URL", "err");

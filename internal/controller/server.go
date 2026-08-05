@@ -296,27 +296,38 @@ func (s *Server) handleInstance(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleSettings reads/updates the fleet-wide default policy. blipc is the
-// source of truth; PUT persists it and distributes it to every instance.
+// handleSettings reads/updates the fleet default policy and per-instance
+// overrides. blipc is the source of truth; PUT persists the change and
+// distributes the effective config (default for the fleet scope, merged
+// default+override for an instance scope).
 func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		writeJSON(w, map[string]interface{}{
-			"default_policy": s.fleet.DefaultPolicy(),
+			"default_policy":     s.fleet.DefaultPolicy(),
+			"instance_overrides": s.fleet.InstanceOverrides(),
 		})
 	case http.MethodPut:
 		var req struct {
-			DefaultPolicy *control.Policy `json:"default_policy"`
+			Scope    string            `json:"scope"`
+			Policy   *control.Policy   `json:"default_policy"`
+			Instance string            `json:"instance"`
+			Override *InstanceOverride `json:"override"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		if req.DefaultPolicy == nil {
+		if req.Scope == "instance" && req.Instance != "" {
+			applied := s.fleet.SetInstanceOverride(r.Context(), req.Instance, req.Override)
+			writeJSON(w, map[string]interface{}{"ok": true, "applied": applied})
+			return
+		}
+		if req.Policy == nil {
 			http.Error(w, "default_policy required", http.StatusBadRequest)
 			return
 		}
-		applied := s.fleet.SetDefaultPolicy(r.Context(), req.DefaultPolicy)
+		applied := s.fleet.SetDefaultPolicy(r.Context(), req.Policy)
 		writeJSON(w, map[string]interface{}{"ok": true, "applied": applied})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
