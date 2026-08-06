@@ -1141,7 +1141,7 @@ $("s-clear-querylog").onclick = () => {
 /* settings link from dashboard/overview */
 document.querySelectorAll("[data-goto]").forEach((a) => a.addEventListener("click", (e) => {
   e.preventDefault();
-  if (a.dataset.gotoAction) setQueryAction(a.dataset.gotoAction);
+  if (a.dataset.gotoAction !== undefined) setQueryAction(a.dataset.gotoAction);
   go(a.dataset.goto);
 }));
 
