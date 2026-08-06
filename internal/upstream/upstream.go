@@ -191,7 +191,7 @@ func ParseSpec(spec string) ([]Spec, error) {
 		var s Spec
 		switch {
 		case strings.HasPrefix(raw, "udp://"):
-			s = Spec{Type: "udp", Address: raw[len("udp://"):], Priority: prio}
+			s = Spec{Type: "udp", Address: ensurePort(raw[len("udp://"):]), Priority: prio}
 		case strings.HasPrefix(raw, "doh://"):
 			s = Spec{Type: "doh", Address: raw[len("doh://"):], Priority: prio}
 		case strings.HasPrefix(raw, "https://"):
@@ -203,6 +203,20 @@ func ParseSpec(spec string) ([]Spec, error) {
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Priority < out[j].Priority })
 	return out, nil
+}
+
+// ensurePort appends ":53" to a UDP host when no port is present, so
+// "udp://192.168.30.221" resolves to 192.168.30.221:53 instead of failing to
+// dial. IPv6 hosts are bracketed correctly.
+func ensurePort(addr string) string {
+	if addr == "" {
+		return addr
+	}
+	if _, _, err := net.SplitHostPort(addr); err == nil {
+		return addr
+	}
+	host := strings.TrimSuffix(strings.TrimPrefix(addr, "["), "]")
+	return net.JoinHostPort(host, "53")
 }
 
 // splitPriority separates an optional "|N" priority suffix from a spec token.

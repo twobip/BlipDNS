@@ -106,6 +106,22 @@ func TestParseSpecNoTrailingPrioritySuffix(t *testing.T) {
 	}
 }
 
+func TestParseSpecDefaultUDPPort(t *testing.T) {
+	got, err := ParseSpec("udp://192.168.30.221|1 udp://8.8.8.8:53 udp://[::1]|2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"192.168.30.221:53", "8.8.8.8:53", "[::1]:53"}
+	if len(got) != len(want) {
+		t.Fatalf("got %d specs, want %d", len(got), len(want))
+	}
+	for i, w := range want {
+		if got[i].Address != w {
+			t.Errorf("spec[%d].Address = %q, want %q", i, got[i].Address, w)
+		}
+	}
+}
+
 func TestFromSpecPriorityOrder(t *testing.T) {
 	r, err := FromSpec("udp://8.8.8.8:53|2 udp://1.1.1.1:53|1")
 	if err != nil {
