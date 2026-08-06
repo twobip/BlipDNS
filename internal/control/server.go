@@ -57,6 +57,8 @@ type Server struct {
 
 	// dohCtrl drives the optional plain-HTTP DoH listener at runtime.
 	dohCtrl DoHController
+	// rlCtrl drives the per-client DNS query rate limit at runtime.
+	rlCtrl RateLimitController
 }
 
 // DoHController is the piece of the DNS server the management API can reconfigure
@@ -80,6 +82,31 @@ func (s *Server) SetDoHController(c DoHController) {
 func (s *Server) dohController() DoHController {
 	s.mu.RLock()
 	c := s.dohCtrl
+	s.mu.RUnlock()
+	return c
+}
+
+// RateLimitController is the piece of the DNS server the management API can
+// reconfigure at runtime: the per-client query rate limit (QPS). The controller
+// reports it back via stats so its poll loop can converge it.
+type RateLimitController interface {
+	SetRateLimit(qps, burst int) error
+	RateLimitQPS() int
+}
+
+// SetRateLimitController wires the DNS server (which owns its rate limiter)
+// into the management API so Settings changes can tune the per-client rate
+// limit live.
+func (s *Server) SetRateLimitController(c RateLimitController) {
+	s.mu.Lock()
+	s.rlCtrl = c
+	s.mu.Unlock()
+}
+
+// rateLimitController returns the wired rate-limit controller (may be nil).
+func (s *Server) rateLimitController() RateLimitController {
+	s.mu.RLock()
+	c := s.rlCtrl
 	s.mu.RUnlock()
 	return c
 }
@@ -197,7 +224,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/policies", s.auth(s.handleListPolicies))
 	mux.HandleFunc("/api/v1/policy", s.auth(s.handlePolicy))
 	mux.HandleFunc("/api/v1/blocklist", s.auth(s.handleBlocklist))
-	mux.HandleFunc("/api/v1/doh", s.auth(s.handleDoH)) // toggle plain-HTTP DoH
+	mux.HandleFunc("/api/v1/doh", s.auth(s.handleDoH))             // toggle plain-HTTP DoH
+	mux.HandleFunc("/api/v1/ratelimit", s.auth(s.handleRateLimit)) // per-client QPS
 	mux.HandleFunc("/api/v1/watch", s.auth(s.handleWatch))
 	// unauthenticated adoption handshake
 	mux.HandleFunc("/api/v1/adopt/status", s.handleAdoptStatus)
@@ -277,6 +305,11 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		if dc := s.dohController(); dc != nil {
 			st.DohHTTPAddr = dc.DoHHTTPAddr()
 		}
+		// Report the per-client rate limit so the controller can converge it
+		// and surface it in the UI.
+		if ifc := s.rateLimitController(); ifc != nil {
+			st.RateLimitQPS = ifc.RateLimitQPS()
+		}
 	}
 	writeJSON(w, st)
 }
@@ -309,6 +342,40 @@ func (s *Server) handleDoH(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, AckResponse{OK: true, Msg: "doh http addr set"})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// handleRateLimit gets/sets the per-client DNS query rate limit (QPS). The
+// controller pushes this from the Settings page; an empty/qps=0 disables it.
+func (s *Server) handleRateLimit(w http.ResponseWriter, r *http.Request) {
+	rc := s.rateLimitController()
+	if rc == nil {
+		http.Error(w, "rate limit control not available on this instance", http.StatusServiceUnavailable)
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, map[string]interface{}{"qps": rc.RateLimitQPS()})
+	case http.MethodPut, http.MethodPost:
+		var req SetRateLimitRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if req.QPS < 0 {
+			http.Error(w, "qps must be >= 0", http.StatusBadRequest)
+			return
+		}
+		if req.Burst < 0 {
+			req.Burst = 0
+		}
+		if err := rc.SetRateLimit(req.QPS, req.Burst); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, AckResponse{OK: true, Msg: "rate limit set"})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}

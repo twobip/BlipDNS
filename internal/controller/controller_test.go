@@ -64,9 +64,10 @@ func fakeBlipd(t *testing.T, token, claimCode string, health *control.HealthResp
 func fakeBlipdWithRec(t *testing.T, token, claimCode string, health *control.HealthResponse, stats *control.StatsResponse, policies *control.ListResponse, rec *policyRec, doh *dohRec) *httptest.Server {
 	t.Helper()
 	var (
-		mu      sync.Mutex
-		adopted bool
-		curCode = claimCode
+		mu        sync.Mutex
+		adopted   bool
+		curCode   = claimCode
+		appliedRL []int
 	)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/health", func(w http.ResponseWriter, r *http.Request) {
@@ -132,6 +133,30 @@ func fakeBlipdWithRec(t *testing.T, token, claimCode string, health *control.Hea
 				doh.applied(req.HTTPAddr)
 			}
 			writeJSONH(w, map[string]string{"ok": "set", "addr": req.HTTPAddr})
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+	mux.HandleFunc("/api/v1/ratelimit", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+token {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		switch r.Method {
+		case http.MethodGet:
+			q := 0
+			if len(appliedRL) > 0 {
+				q = appliedRL[len(appliedRL)-1]
+			}
+			writeJSONH(w, map[string]int{"qps": q})
+		case http.MethodPut, http.MethodPost:
+			var req control.SetRateLimitRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			appliedRL = append(appliedRL, req.QPS)
+			writeJSONH(w, map[string]int{"qps": req.QPS, "burst": req.Burst})
 		default:
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}

@@ -11,6 +11,7 @@ type Counters struct {
 	queries    uint64
 	blocked    uint64
 	upErr      uint64
+	rateLimited uint64
 	perClient  map[string]uint64
 }
 
@@ -50,6 +51,26 @@ func (c *Counters) AddUpErr() {
 	c.mu.Unlock()
 }
 
+// AddRateLimited records a query dropped for exceeding the per-client limit.
+func (c *Counters) AddRateLimited() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	c.rateLimited++
+	c.mu.Unlock()
+}
+
+// RateLimited returns the count of queries dropped for rate limiting.
+func (c *Counters) RateLimited() uint64 {
+	if c == nil {
+		return 0
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.rateLimited
+}
+
 // Stats returns a snapshot for the management API.
 func (c *Counters) Stats() *StatsResponse {
 	c.mu.Lock()
@@ -63,6 +84,7 @@ func (c *Counters) Stats() *StatsResponse {
 		QueriesTotal: c.queries,
 		BlockedTotal: c.blocked,
 		UpstreamErr:  c.upErr,
+		RateLimited:  c.rateLimited,
 		PerClient:    per,
 	}
 }

@@ -194,6 +194,8 @@ func (i *Instance) poll(ctx context.Context) {
 		i.fleet.maybePushConfig(ctx, i, s)
 		// Converge the optional plain-HTTP DoH listener the same way.
 		i.fleet.maybePushDoH(ctx, i, s)
+		// Converge the per-client DNS rate limit the same way.
+		i.fleet.maybePushRateLimit(ctx, i, s)
 		// Converge the instance's global blocklist the same way.
 		i.fleet.maybePushBlocklist(ctx, i, s)
 		// Also log to query log

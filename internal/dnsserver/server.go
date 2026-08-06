@@ -5,8 +5,8 @@
 package dnsserver
 
 import (
-	"crypto/tls"
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"log"
@@ -31,14 +31,16 @@ const maxDNSQueryParam = 8192
 
 // Config configures a Server.
 type Config struct {
-	DNSAddr           string // "127.0.0.1:53"
-	DoHAddr           string // "127.0.0.1:8443"
-	CertFile          string // optional explicit TLS cert/key for DoH
-	KeyFile           string // optional explicit TLS cert/key for DoH
-	DoHTLS            bool   // serve DoH over HTTPS on DoHAddr (self-signed cert generated when no CertFile/KeyFile)
-	DoHHTTPAddr       string // also accept plain-HTTP DoH on this addr ("" = off; toggleable at runtime by the controller)
+	DNSAddr           string           // "127.0.0.1:53"
+	DoHAddr           string           // "127.0.0.1:8443"
+	CertFile          string           // optional explicit TLS cert/key for DoH
+	KeyFile           string           // optional explicit TLS cert/key for DoH
+	DoHTLS            bool             // serve DoH over HTTPS on DoHAddr (self-signed cert generated when no CertFile/KeyFile)
+	DoHHTTPAddr       string           // also accept plain-HTTP DoH on this addr ("" = off; toggleable at runtime by the controller)
+	RateLimitQPS      int              // per-client DNS QPS limit (0 = unlimited; toggleable at runtime by the controller)
+	RateLimitBurst    int              // per-client burst above QPS (0 = auto = QPS, min 1)
 	TLSCert           *tls.Certificate // in-memory cert+key (e.g. generated self-signed) used when DoHTLS
-	Upstream          string // upstream spec(s)
+	Upstream          string           // upstream spec(s)
 	CacheCap          time.Duration
 	CacheSize         int           // max cached responses in RAM (0 = unlimited)
 	CacheWarmCount    int           // most-popular entries to auto-refresh (0 = off)
@@ -62,11 +64,13 @@ type Server struct {
 	tcp   *dns.Server
 	doch  *http.Server
 	// Optional plain-HTTP DoH listener, toggled at runtime by the controller.
-	dohPlainMu  sync.Mutex
-	dohPlain    *http.Server
+	dohPlainMu   sync.Mutex
+	dohPlain     *http.Server
 	dohPlainAddr string
-	close chan struct{}
-	once  sync.Once
+	close        chan struct{}
+	once         sync.Once
+	// rl enforces the per-client DNS query rate limit (configurable live).
+	rl *rateLimiter
 }
 
 // New builds a Server. If cfg.Store is nil a permissive default is used.
@@ -87,10 +91,17 @@ func New(cfg Config) (*Server, error) {
 		up:    up,
 		ctrl:  ctrl,
 		cnt:   cnt,
+		rl:    newRateLimiter(),
 		close: make(chan struct{}),
 	}
-	// Let the management API toggle the optional plain-HTTP DoH listener.
+	// Let the management API toggle the optional plain-HTTP DoH listener and
+	// the per-client rate limit at runtime.
 	ctrl.SetDoHController(s)
+	ctrl.SetRateLimitController(s)
+	// Seed the rate limit from config (controller can override later).
+	if cfg.RateLimitQPS > 0 {
+		_ = s.SetRateLimit(cfg.RateLimitQPS, cfg.RateLimitBurst)
+	}
 	return s, nil
 }
 
@@ -206,6 +217,21 @@ func (s *Server) serve(ctx context.Context, clientIP net.IP, clientID string, re
 		client = clientIP.String()
 	}
 	s.cnt.AddQuery(client)
+	// Per-client rate limit (DoH client-id or source IP). Excess queries are
+	// dropped with REFUSED so abusive clients can't exhaust upstream.
+	if s.rl != nil && !s.rl.allow(client) {
+		s.cnt.AddRateLimited()
+		s.ctrl.Notify(control.WatchEvent{
+			Type:       "pass", // not blocked, just throttled
+			At:         time.Now(),
+			Client:     client,
+			DurationUs: time.Since(start).Microseconds(),
+		})
+		resp := new(dns.Msg)
+		resp.SetReply(req)
+		resp.Rcode = dns.RcodeRefused
+		return resp
+	}
 	resp := new(dns.Msg)
 	resp.SetReply(req)
 	if len(req.Question) == 0 {
@@ -496,6 +522,25 @@ func (s *Server) DoHHTTPAddr() string {
 	s.dohPlainMu.Lock()
 	defer s.dohPlainMu.Unlock()
 	return s.dohPlainAddr
+}
+
+// SetRateLimit configures the per-client DNS query rate limit (QPS). A qps of 0
+// disables rate limiting. burst is the per-client burst above qps; <= 0 means
+// auto (qps, min 1).
+func (s *Server) SetRateLimit(qps, burst int) error {
+	if s.rl == nil {
+		return nil
+	}
+	s.rl.set(qps, burst)
+	return nil
+}
+
+// RateLimitQPS returns the current per-client QPS limit (0 = unlimited).
+func (s *Server) RateLimitQPS() int {
+	if s.rl == nil {
+		return 0
+	}
+	return s.rl.qps()
 }
 
 // stopDoHPlainLocked stops the plain-HTTP DoH listener; caller holds dohPlainMu.

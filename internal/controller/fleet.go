@@ -57,11 +57,14 @@ type InstanceOverride struct {
 	// DoHHTTPAddr, when set, makes this instance accept plain-HTTP DoH on the
 	// given addr ("" = off) instead of inheriting the fleet-wide setting.
 	DoHHTTPAddr *string `json:"doh_http_addr,omitempty" yaml:"doh_http_addr,omitempty"`
+	// RateLimitQPS, when set, overrides the fleet-wide DNS query rate limit
+	// (QPS per client) for this instance. 0 disables rate limiting.
+	RateLimitQPS *int `json:"rate_limit_qps,omitempty" yaml:"rate_limit_qps,omitempty"`
 }
 
 // IsEmpty reports whether the override changes nothing.
 func (o *InstanceOverride) IsEmpty() bool {
-	return o == nil || (o.Upstream == nil && o.BlockAction == nil && o.Log == nil && o.DoHHTTPAddr == nil)
+	return o == nil || (o.Upstream == nil && o.BlockAction == nil && o.Log == nil && o.DoHHTTPAddr == nil && o.RateLimitQPS == nil)
 }
 
 // Fleet holds all instances, the event bus, and the global blocklist.
@@ -90,6 +93,7 @@ type Fleet struct {
 	defaultPolicy    *control.Policy              // fleet-wide default policy (source of truth)
 	overrides        map[string]*InstanceOverride // per-instance partial configs (diff vs default)
 	dohHTTPAddr      string                       // fleet-wide plain-HTTP DoH address ("", off)
+	rateLimitQPS     int                          // fleet-wide DNS per-client QPS limit (0 = disabled)
 }
 
 // BlocklistStatus is a point-in-time view of the controller's blocklist
@@ -377,7 +381,35 @@ func (f *Fleet) effectiveDoHHTTPAddr(id string) string {
 	return f.dohHTTPAddr
 }
 
-// mergeOverride layers a partial override (the fields the caller wants to set)
+// RateLimitQPS returns the fleet-wide DNS per-client QPS limit (0 = disabled).
+func (f *Fleet) RateLimitQPS() int {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return f.rateLimitQPS
+}
+
+// SetRateLimitQPSDefault records the fleet-wide DNS per-client QPS limit
+// without pushing it. Used at startup from the controller config.
+func (f *Fleet) SetRateLimitQPSDefault(qps int) {
+	if qps < 0 {
+		qps = 0
+	}
+	f.mu.Lock()
+	f.rateLimitQPS = qps
+	f.mu.Unlock()
+}
+
+// effectiveRateLimitQPS returns the per-client QPS limit an instance should
+// report: its own override if set, otherwise the fleet-wide default.
+func (f *Fleet) effectiveRateLimitQPS(id string) int {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	if o := f.overrides[id]; o != nil && o.RateLimitQPS != nil {
+		return *o.RateLimitQPS
+	}
+	return f.rateLimitQPS
+}
+
 // on top of the existing one, preserving fields the caller did not send. This
 // keeps saving the upstream editor from wiping a previously saved DoH override
 // and vice-versa.
@@ -416,6 +448,43 @@ func (f *Fleet) SetDoHHTTPAddr(ctx context.Context, addr string) map[string]stri
 	return f.pushDoH(ctx)
 }
 
+// SetRateLimitQPS sets the fleet-wide DNS per-client QPS limit, persists it,
+// and pushes the effective value (default or per-instance override) to every
+// adopted instance.
+func (f *Fleet) SetRateLimitQPS(ctx context.Context, qps int) map[string]string {
+	f.SetRateLimitQPSDefault(qps)
+	if f.configPath != "" {
+		if err := f.saveConfig(); err != nil {
+			log.Printf("blipc: warning: failed to persist rate limit setting: %v", err)
+		}
+	}
+	return f.pushRateLimit(ctx)
+}
+
+// pushRateLimit distributes the effective DNS rate limit to every instance.
+func (f *Fleet) pushRateLimit(ctx context.Context) map[string]string {
+	f.mu.RLock()
+	insts := make([]*Instance, 0, len(f.instances))
+	for _, i := range f.instances {
+		insts = append(insts, i)
+	}
+	f.mu.RUnlock()
+	results := make(map[string]string, len(insts))
+	for _, i := range insts {
+		if !i.hasToken() {
+			results[i.Config.ID] = "not adopted"
+			continue
+		}
+		qps := f.effectiveRateLimitQPS(i.Config.ID)
+		if err := i.ctl().SetRateLimit(ctx, qps, 0); err != nil {
+			results[i.Config.ID] = err.Error()
+			continue
+		}
+		results[i.Config.ID] = "ok"
+	}
+	return results
+}
+
 // pushDoH distributes the effective plain-HTTP DoH address to every instance.
 func (f *Fleet) pushDoH(ctx context.Context) map[string]string {
 	f.mu.RLock()
@@ -432,6 +501,11 @@ func (f *Fleet) pushDoH(ctx context.Context) map[string]string {
 		}
 		want := f.effectiveDoHHTTPAddr(i.Config.ID)
 		if err := i.ctl().SetDoHHTTPAddr(ctx, want); err != nil {
+			results[i.Config.ID] = err.Error()
+			continue
+		}
+		qps := f.effectiveRateLimitQPS(i.Config.ID)
+		if err := i.ctl().SetRateLimit(ctx, qps, 0); err != nil {
 			results[i.Config.ID] = err.Error()
 			continue
 		}
@@ -454,6 +528,23 @@ func (f *Fleet) maybePushDoH(ctx context.Context, i *Instance, reported *control
 	}
 	if err := i.ctl().SetDoHHTTPAddr(ctx, want); err != nil {
 		log.Printf("blipc: reconcile doh for %s: %v", i.Config.ID, err)
+	}
+}
+
+// maybePushRateLimit converges an instance's DNS rate limit to its fleet default
+// (or per-instance override) when the instance reports a divergent value — e.g
+// after a restart it reverted to its own YAML.
+func (f *Fleet) maybePushRateLimit(ctx context.Context, i *Instance, reported *control.StatsResponse) {
+	want := f.effectiveRateLimitQPS(i.Config.ID)
+	rep := -1
+	if reported != nil {
+		rep = reported.RateLimitQPS
+	}
+	if rep == want || !i.hasToken() {
+		return
+	}
+	if err := i.ctl().SetRateLimit(ctx, want, 0); err != nil {
+		log.Printf("blipc: reconcile rate limit for %s: %v", i.Config.ID, err)
 	}
 }
 
@@ -1380,6 +1471,7 @@ func (f *Fleet) saveConfig() error {
 		DefaultPolicy        *control.Policy              `yaml:"default_policy"`
 		InstancePolicies     map[string]*InstanceOverride `yaml:"instance_overrides"`
 		DoHHTTPAddr          string                       `yaml:"doh_http_addr"`
+		RateLimitQPS         int                          `yaml:"rate_limit_qps"`
 		BlocklistSources     []string                     `yaml:"blocklist_sources"`
 		BlocklistUpdateHours int                          `yaml:"blocklist_update_hours"`
 		Instances            []InstanceConfig             `yaml:"instances"`
@@ -1408,6 +1500,7 @@ func (f *Fleet) saveConfig() error {
 	cfg.DefaultPolicy = def
 	cfg.InstancePolicies = overs
 	cfg.DoHHTTPAddr = f.DoHHTTPAddr()
+	cfg.RateLimitQPS = f.RateLimitQPS()
 	cfg.BlocklistSources = blSources
 	cfg.BlocklistUpdateHours = autoHours
 

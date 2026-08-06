@@ -42,6 +42,13 @@ type StatsResponse struct {
 	// DohHTTPAddr is the additional plain-HTTP DoH listener address an
 	// instance accepts ("" = off). Lets the controller reconcile it.
 	DohHTTPAddr string `json:"doh_http_addr,omitempty"`
+	// RateLimitQPS is the per-client DNS query rate limit in queries/second
+	// applied by this instance (0 = unlimited). Reported so the controller can
+	// reconcile it.
+	RateLimitQPS int `json:"rate_limit_qps,omitempty"`
+	// RateLimited counts queries dropped because they exceeded the per-client
+	// rate limit.
+	RateLimited uint64 `json:"rate_limited,omitempty"`
 }
 
 // ListResponse returns the default (nil ID indicates default) plus all policies.
@@ -58,6 +65,14 @@ type SetPolicyRequest struct {
 // http_addr disables it.
 type SetDoHRequest struct {
 	HTTPAddr string `json:"http_addr"`
+}
+
+// SetRateLimitRequest sets the per-client DNS query rate limit (QPS). A QPS of
+// 0 disables rate limiting. Burst is the maximum burst above QPS; if <= 0 it
+// defaults to QPS (min 1).
+type SetRateLimitRequest struct {
+	QPS   int `json:"qps"`
+	Burst int `json:"burst,omitempty"`
 }
 
 // SetBlocklistRequest replaces the instance's global blocklist with the given

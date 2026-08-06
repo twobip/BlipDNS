@@ -28,6 +28,7 @@ type config struct {
 	DefaultPolicy        *control.Policy                         `yaml:"default_policy"`
 	InstanceOverrides    map[string]*controller.InstanceOverride `yaml:"instance_overrides"`
 	DoHHTTPAddr          string                                  `yaml:"doh_http_addr"`
+	RateLimitQPS         int                                     `yaml:"rate_limit_qps"`
 	BlocklistSources     []string                                `yaml:"blocklist_sources"`
 	BlocklistUpdateHours int                                     `yaml:"blocklist_update_hours"`
 	Instances            []controller.InstanceConfig             `yaml:"instances"`
@@ -64,6 +65,9 @@ func main() {
 	}
 	if cfg.DoHHTTPAddr != "" {
 		fleet.SetDoHDefault(cfg.DoHHTTPAddr)
+	}
+	if cfg.RateLimitQPS > 0 {
+		fleet.SetRateLimitQPSDefault(cfg.RateLimitQPS)
 	}
 	ctx := context.Background()
 	for _, ic := range cfg.Instances {

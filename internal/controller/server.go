@@ -316,14 +316,16 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			"default_policy":     s.fleet.DefaultPolicy(),
 			"instance_overrides": s.fleet.InstanceOverrides(),
 			"doh_http_addr":      s.fleet.DoHHTTPAddr(),
+			"rate_limit_qps":     s.fleet.RateLimitQPS(),
 		})
 	case http.MethodPut:
 		var req struct {
-			Scope       string            `json:"scope"`
-			Policy      *control.Policy   `json:"default_policy"`
-			Instance    string            `json:"instance"`
-			Override    *InstanceOverride `json:"override"`
-			DoHHTTPAddr *string           `json:"doh_http_addr"`
+			Scope        string            `json:"scope"`
+			Policy       *control.Policy   `json:"default_policy"`
+			Instance     string            `json:"instance"`
+			Override     *InstanceOverride `json:"override"`
+			DoHHTTPAddr  *string           `json:"doh_http_addr"`
+			RateLimitQPS *int              `json:"rate_limit_qps"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -352,6 +354,26 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			applied := s.fleet.SetDoHHTTPAddr(r.Context(), addr)
+			writeJSON(w, map[string]interface{}{"ok": true, "applied": applied})
+			return
+		}
+		// Per-client DNS rate limit (fleet-wide or per-instance).
+		if req.RateLimitQPS != nil {
+			qps := *req.RateLimitQPS
+			if qps < 0 {
+				qps = 0
+			}
+			if req.Scope == "instance" && req.Instance != "" {
+				existing := s.fleet.InstanceOverrideOf(req.Instance)
+				merged := mergeOverride(existing, &InstanceOverride{RateLimitQPS: req.RateLimitQPS})
+				if qps == 0 {
+					merged.RateLimitQPS = nil
+				}
+				applied := s.fleet.SetInstanceOverride(r.Context(), req.Instance, merged)
+				writeJSON(w, map[string]interface{}{"ok": true, "applied": applied})
+				return
+			}
+			applied := s.fleet.SetRateLimitQPS(r.Context(), qps)
 			writeJSON(w, map[string]interface{}{"ok": true, "applied": applied})
 			return
 		}

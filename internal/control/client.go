@@ -129,6 +129,12 @@ func (c *Client) SetDoHHTTPAddr(ctx context.Context, addr string) error {
 	return c.do(ctx, http.MethodPut, "/api/v1/doh", &SetDoHRequest{HTTPAddr: addr}, nil)
 }
 
+// SetRateLimit configures the instance's per-client DNS rate limit (QPS). A qps
+// of 0 disables rate limiting.
+func (c *Client) SetRateLimit(ctx context.Context, qps, burst int) error {
+	return c.do(ctx, http.MethodPut, "/api/v1/ratelimit", &SetRateLimitRequest{QPS: qps, Burst: burst}, nil)
+}
+
 // AdoptStatus fetches the instance's adoption state (unauthenticated).
 func (c *Client) AdoptStatus(ctx context.Context) (*AdoptStatus, error) {
 	var st AdoptStatus
