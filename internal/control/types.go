@@ -10,6 +10,7 @@ import "time"
 type Policy struct {
 	ID          string   `json:"id" yaml:"id"`
 	Networks    []string `json:"networks" yaml:"networks"`
+	Clients     []string `json:"clients" yaml:"clients"`
 	Allow       []string `json:"allow" yaml:"allow"`
 	Block       []string `json:"block" yaml:"block"`
 	BlockAction string   `json:"block_action" yaml:"block_action"`

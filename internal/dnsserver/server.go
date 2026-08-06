@@ -88,10 +88,13 @@ func (s *Server) SetMgmtToken(tok string) { s.ctrl.SetToken(tok) }
 // matching policy has Log enabled.
 func (s *Server) SetBlockLogger(fn func(client, domain string)) { s.logfn = fn }
 
-// Handler returns the DoH handler (RFC 8484).
+// Handler returns the DoH handler (RFC 8484). Requests to
+// /dns-query/{client-id} carry a client identity used for per-client policy
+// matching and query-log attribution (e.g. /dns-query/phone).
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/dns-query", s.handleDoH)
+	mux.HandleFunc("/dns-query/", s.handleDoH)
 	return mux
 }
 
@@ -136,7 +139,8 @@ func (s *Server) handleDoH(w http.ResponseWriter, r *http.Request) {
 	}
 
 	clientIP := clientIPFromReq(r)
-	resp := s.serve(ctx, clientIP, req)
+	clientID := clientIDFromPath(r.URL.Path)
+	resp := s.serve(ctx, clientIP, clientID, req)
 	buf, err := resp.Pack()
 	if err != nil {
 		http.Error(w, "pack error", http.StatusInternalServerError)
@@ -151,14 +155,20 @@ func (s *Server) handleDoH(w http.ResponseWriter, r *http.Request) {
 // ServeDNS implements dns.Handler for classic DNS.
 func (s *Server) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
 	clientIP, _, _ := net.SplitHostPort(w.RemoteAddr().String())
-	resp := s.serve(context.Background(), net.ParseIP(clientIP), req)
+	resp := s.serve(context.Background(), net.ParseIP(clientIP), "", req)
 	_ = w.WriteMsg(resp)
 }
 
-// serve is the unified query path: filter -> cache -> upstream.
-func (s *Server) serve(ctx context.Context, clientIP net.IP, req *dns.Msg) *dns.Msg {
+// serve is the unified query path: filter -> cache -> upstream. clientID is
+// the optional DoH client identity from /dns-query/{client-id}; it overrides
+// the IP as the log identity and can select a per-client policy.
+func (s *Server) serve(ctx context.Context, clientIP net.IP, clientID string, req *dns.Msg) *dns.Msg {
 	start := time.Now()
-	s.cnt.AddQuery(clientIP.String())
+	client := clientID
+	if client == "" {
+		client = clientIP.String()
+	}
+	s.cnt.AddQuery(client)
 	resp := new(dns.Msg)
 	resp.SetReply(req)
 	if len(req.Question) == 0 {
@@ -175,33 +185,33 @@ func (s *Server) serve(ctx context.Context, clientIP net.IP, req *dns.Msg) *dns.
 		s.cnt.AddBlocked()
 		s.ctrl.Notify(control.WatchEvent{
 			Type: "block", At: time.Now(),
-			Client: clientIP.String(), Domain: domain,
+			Client: client, Domain: domain,
 			DurationUs: time.Since(start).Microseconds(),
 		})
 		if s.logfn != nil {
-			s.logfn(clientIP.String(), domain)
+			s.logfn(client, domain)
 		}
 		applyBlockAction(resp, q, s.cfg.BlockAction)
 		return resp
 	}
 
-	blocked, action, upstreamOverride, log := s.cfg.Store.Classify(clientIP, domain)
+	blocked, action, upstreamOverride, log := s.cfg.Store.Classify(clientIP, clientID, domain)
 	if blocked {
 		s.cnt.AddBlocked()
 		s.ctrl.Notify(control.WatchEvent{
 			Type: "block", At: time.Now(),
-			Client: clientIP.String(), Domain: domain,
+			Client: client, Domain: domain,
 			DurationUs: time.Since(start).Microseconds(),
 		})
 		if log && s.logfn != nil {
-			s.logfn(clientIP.String(), domain)
+			s.logfn(client, domain)
 		}
 		applyBlockAction(resp, q, action)
 		return resp
 	}
 
 	if log && s.logfn != nil {
-		s.logfn(clientIP.String(), domain)
+		s.logfn(client, domain)
 	}
 
 	// Use policy-specific upstream if provided, else fall back to global
@@ -241,7 +251,7 @@ func (s *Server) serve(ctx context.Context, clientIP net.IP, req *dns.Msg) *dns.
 	s.ctrl.Notify(control.WatchEvent{
 		Type:   "pass",
 		At:     time.Now(),
-		Client: clientIP.String(),
+		Client: client,
 		Domain: domain,
 		IPs:    ips,
 		// Cached=true when the answer came from the response cache.

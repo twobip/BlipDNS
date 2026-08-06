@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"net"
 	"net/http"
+	"strings"
 )
 
 func base64urlDecode(s string) ([]byte, error) {
@@ -12,6 +13,19 @@ func base64urlDecode(s string) ([]byte, error) {
 		s += string("===="[:4-len(s)%4])
 	}
 	return base64.URLEncoding.DecodeString(s)
+}
+
+// clientIDFromPath extracts an optional DoH client identity from a request
+// path of the form "/dns-query/{client-id}". The bare "/dns-query" path (or a
+// malformed one) yields "". The identifier may be a DNS label, IP, or any
+// short printable token up to 64 characters.
+func clientIDFromPath(p string) string {
+	p = strings.TrimPrefix(p, "/dns-query")
+	p = strings.Trim(p, "/")
+	if p == "" || len(p) > 64 || strings.ContainsAny(p, "/?# \t") {
+		return ""
+	}
+	return p
 }
 
 func clientIPFromReq(r *http.Request) net.IP {

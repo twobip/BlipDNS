@@ -2,7 +2,10 @@ package dnsserver
 
 import (
 	"context"
+	"encoding/base64"
 	"net"
+	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -62,7 +65,7 @@ func TestServeBlocks(t *testing.T) {
 	srv, _ := newTestServer(t)
 	q := new(dns.Msg)
 	q.SetQuestion("blocked.test.", dns.TypeA)
-	resp := srv.serve(context.Background(), net.ParseIP("10.0.0.1"), q)
+	resp := srv.serve(context.Background(), net.ParseIP("10.0.0.1"), "", q)
 	if resp.Rcode != dns.RcodeNameError {
 		t.Errorf("blocked query rc=%d want NXDOMAIN", resp.Rcode)
 	}
@@ -84,7 +87,7 @@ func TestServeBlocklistZeroAction(t *testing.T) {
 
 	q := new(dns.Msg)
 	q.SetQuestion("ads.example.net.", dns.TypeA)
-	resp := srv.serve(context.Background(), net.ParseIP("192.168.1.5"), q)
+	resp := srv.serve(context.Background(), net.ParseIP("192.168.1.5"), "", q)
 	if resp.Rcode != dns.RcodeSuccess {
 		t.Fatalf("zero-action A rc=%d want NOERROR", resp.Rcode)
 	}
@@ -97,7 +100,7 @@ func TestServeBlocklistZeroAction(t *testing.T) {
 	}
 
 	q.SetQuestion("ads.example.net.", dns.TypeAAAA)
-	resp = srv.serve(context.Background(), net.ParseIP("192.168.1.5"), q)
+	resp = srv.serve(context.Background(), net.ParseIP("192.168.1.5"), "", q)
 	if resp.Rcode != dns.RcodeSuccess {
 		t.Fatalf("zero-action AAAA rc=%d want NOERROR", resp.Rcode)
 	}
@@ -108,7 +111,7 @@ func TestServeBlocklistZeroAction(t *testing.T) {
 
 	// Non-address queries get an empty NOERROR.
 	q.SetQuestion("ads.example.net.", dns.TypeMX)
-	resp = srv.serve(context.Background(), net.ParseIP("192.168.1.5"), q)
+	resp = srv.serve(context.Background(), net.ParseIP("192.168.1.5"), "", q)
 	if resp.Rcode != dns.RcodeSuccess || len(resp.Answer) != 0 {
 		t.Errorf("zero-action MX rc=%d answers=%d, want NOERROR with no records", resp.Rcode, len(resp.Answer))
 	}
@@ -118,7 +121,7 @@ func TestServeBlocklistRefusedAction(t *testing.T) {
 	srv := blSrv(t, "refused")
 	q := new(dns.Msg)
 	q.SetQuestion("ads.example.net.", dns.TypeA)
-	resp := srv.serve(context.Background(), net.ParseIP("192.168.1.5"), q)
+	resp := srv.serve(context.Background(), net.ParseIP("192.168.1.5"), "", q)
 	if resp.Rcode != dns.RcodeRefused {
 		t.Errorf("refused-action rc=%d want REFUSED", resp.Rcode)
 	}
@@ -128,7 +131,7 @@ func TestServeBlocklistDefaultIsNXDOMAIN(t *testing.T) {
 	srv := blSrv(t, "")
 	q := new(dns.Msg)
 	q.SetQuestion("ads.example.net.", dns.TypeA)
-	resp := srv.serve(context.Background(), net.ParseIP("192.168.1.5"), q)
+	resp := srv.serve(context.Background(), net.ParseIP("192.168.1.5"), "", q)
 	if resp.Rcode != dns.RcodeNameError {
 		t.Errorf("default-action rc=%d want NXDOMAIN", resp.Rcode)
 	}
@@ -144,7 +147,7 @@ func TestServeStoreZeroActionSynthesizesZero(t *testing.T) {
 	}
 	q := new(dns.Msg)
 	q.SetQuestion("zp.test.", dns.TypeA)
-	resp := srv.serve(context.Background(), net.ParseIP("192.168.77.5"), q)
+	resp := srv.serve(context.Background(), net.ParseIP("192.168.77.5"), "", q)
 	if resp.Rcode != dns.RcodeSuccess {
 		t.Fatalf("rc=%d want NOERROR", resp.Rcode)
 	}
@@ -165,7 +168,7 @@ func TestServeStripsRootDotFromLoggedDomain(t *testing.T) {
 
 	q := new(dns.Msg)
 	q.SetQuestion("blocked.test.", dns.TypeA)
-	resp := srv.serve(context.Background(), net.ParseIP("10.0.0.1"), q)
+	resp := srv.serve(context.Background(), net.ParseIP("10.0.0.1"), "", q)
 	if resp.Rcode != dns.RcodeNameError {
 		t.Fatalf("blocked query rc=%d want NXDOMAIN", resp.Rcode)
 	}
@@ -180,7 +183,7 @@ func TestServeResolvesAndCaches(t *testing.T) {
 	q.SetQuestion("allowed.test.", dns.TypeA)
 	q.Id = 0x1234
 
-	resp := srv.serve(context.Background(), net.ParseIP("10.0.0.1"), q)
+	resp := srv.serve(context.Background(), net.ParseIP("10.0.0.1"), "", q)
 	if resp.Rcode != dns.RcodeSuccess {
 		t.Fatalf("allowed query rc=%d", resp.Rcode)
 	}
@@ -198,7 +201,7 @@ func TestServeResolvesAndCaches(t *testing.T) {
 	// second identical query must be served from cache (no extra upstream call)
 	q2 := new(dns.Msg)
 	q2.SetQuestion("allowed.test.", dns.TypeA)
-	_ = srv.serve(context.Background(), net.ParseIP("10.0.0.1"), q2)
+	_ = srv.serve(context.Background(), net.ParseIP("10.0.0.1"), "", q2)
 	if up.calls != 1 {
 		t.Errorf("expected 1 upstream call (2nd cached), got %d", up.calls)
 	}
@@ -209,7 +212,7 @@ func TestServeDefaultAllowsUnknownClient(t *testing.T) {
 	// client outside 10.0.0.0/8 -> default policy (none) -> allowed
 	q := new(dns.Msg)
 	q.SetQuestion("blocked.test.", dns.TypeA)
-	resp := srv.serve(context.Background(), net.ParseIP("192.168.1.5"), q)
+	resp := srv.serve(context.Background(), net.ParseIP("192.168.1.5"), "", q)
 	if resp.Rcode != dns.RcodeSuccess {
 		t.Errorf("non-policy client should be allowed, rc=%d", resp.Rcode)
 	}
@@ -229,14 +232,14 @@ func TestRefreshPopularRefreshesStale(t *testing.T) {
 	// warm the cache from the live path (recUp answers carry TTL 60)
 	q := new(dns.Msg)
 	q.SetQuestion("allowed.test.", dns.TypeA)
-	resp := srv.serve(context.Background(), net.ParseIP("10.0.0.1"), q)
+	resp := srv.serve(context.Background(), net.ParseIP("10.0.0.1"), "", q)
 	if resp.Rcode != dns.RcodeSuccess {
 		t.Fatalf("rc=%d", resp.Rcode)
 	}
 	up.mu.Lock()
 	before := up.calls
 	up.mu.Unlock()
-	resp = srv.serve(context.Background(), net.ParseIP("10.0.0.1"), q)
+	resp = srv.serve(context.Background(), net.ParseIP("10.0.0.1"), "", q)
 	if up.calls != before {
 		t.Fatal("expected second serve to hit cache")
 	}
@@ -255,5 +258,91 @@ func TestRefreshPopularRefreshesStale(t *testing.T) {
 	k := cache.Key(q)
 	if srv.cache.Stale(k, 0) {
 		t.Error("expected refreshed entry to no longer be stale")
+	}
+}
+
+// A DoH client ID selects a per-client policy and becomes the log identity.
+func TestServeClientIDPolicyAndIdentity(t *testing.T) {
+	srv, _ := newTestServer(t)
+	if err := srv.cfg.Store.SetPolicy(&filter.Policy{
+		ID: "kids", Clients: []string{"kids-tablet"}, Block: []string{"cid.test"}, Log: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var got string
+	srv.logfn = func(client, _ string) { got = client }
+
+	q := new(dns.Msg)
+	q.SetQuestion("cid.test.", dns.TypeA)
+	// With the client ID the policy blocks and logs the client ID.
+	resp := srv.serve(context.Background(), net.ParseIP("10.0.0.1"), "kids-tablet", q)
+	if resp.Rcode != dns.RcodeNameError {
+		t.Errorf("client-id block rc=%d want NXDOMAIN", resp.Rcode)
+	}
+	if got != "kids-tablet" {
+		t.Errorf("logged client = %q, want %q", got, "kids-tablet")
+	}
+	// Without the client ID the same IP is not blocked.
+	resp = srv.serve(context.Background(), net.ParseIP("10.0.0.1"), "", q)
+	if resp.Rcode == dns.RcodeNameError {
+		t.Error("expected query without client id to pass")
+	}
+}
+
+func TestClientIDFromPath(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"/dns-query", ""},
+		{"/dns-query/", ""},
+		{"/dns-query/client1", "client1"},
+		{"/dns-query/kids-tablet", "kids-tablet"},
+		{"/dns-query/phone/extra", ""},
+		{"/dns-query/" + strings.Repeat("x", 65), ""},
+	}
+	for _, c := range cases {
+		if got := clientIDFromPath(c.in); got != c.want {
+			t.Errorf("clientIDFromPath(%q)=%q want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// The DoH handler resolves /dns-query/{client-id} and applies the matching
+// policy to the query.
+func TestDoHHandlerClientIDRouting(t *testing.T) {
+	srv, _ := newTestServer(t)
+	if err := srv.cfg.Store.SetPolicy(&filter.Policy{
+		ID: "kids", Clients: []string{"kids-tablet"}, Block: []string{"cid.test"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	h := srv.Handler()
+
+	msg := new(dns.Msg)
+	msg.SetQuestion("cid.test.", dns.TypeA)
+	wire, err := msg.Pack()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dnsQ := base64.RawURLEncoding.EncodeToString(wire)
+
+	// /dns-query/kids-tablet -> blocked (policy matched by client ID).
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest("GET", "/dns-query/kids-tablet?dns="+dnsQ, nil))
+	resp := new(dns.Msg)
+	if err := resp.Unpack(w.Body.Bytes()); err != nil {
+		t.Fatalf("unpack: %v", err)
+	}
+	if resp.Rcode != dns.RcodeNameError {
+		t.Errorf("doh client-id rc=%d want NXDOMAIN", resp.Rcode)
+	}
+
+	// Plain /dns-query -> not blocked.
+	w2 := httptest.NewRecorder()
+	h.ServeHTTP(w2, httptest.NewRequest("GET", "/dns-query?dns="+dnsQ, nil))
+	resp2 := new(dns.Msg)
+	if err := resp2.Unpack(w2.Body.Bytes()); err != nil {
+		t.Fatalf("unpack 2: %v", err)
+	}
+	if resp2.Rcode == dns.RcodeNameError {
+		t.Error("expected plain /dns-query not to be blocked")
 	}
 }

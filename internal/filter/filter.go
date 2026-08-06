@@ -7,6 +7,7 @@ package filter
 
 import (
 	"net"
+	"sort"
 	"strings"
 	"sync"
 )
@@ -23,10 +24,11 @@ const (
 // DefaultAction is used when a policy omits BlockAction.
 const DefaultAction = ActionNXDOMAIN
 
-// Policy describes filtering for a set of client networks.
+// Policy describes filtering for a set of client networks or DoH client IDs.
 type Policy struct {
 	ID          string   `json:"id" yaml:"id"`
 	Networks    []string `json:"networks" yaml:"networks"`       // CIDR strings
+	Clients     []string `json:"clients" yaml:"clients"`         // DoH client IDs (exact match, e.g. "/dns-query/phone")
 	Allow       []string `json:"allow" yaml:"allow"`             // whitelist (exact/suffix/*.wild)
 	Block       []string `json:"block" yaml:"block"`             // blacklist (exact/suffix/*.wild)
 	BlockAction BlockAction `json:"block_action" yaml:"block_action"`
@@ -122,18 +124,20 @@ type netEntry struct {
 	policy *compiledPolicy
 }
 
-// Store maps client IPs to policies and classifies queries.
+// Store maps client IPs and DoH client IDs to policies and classifies queries.
 type Store struct {
 	mu       sync.RWMutex
 	defaults *compiledPolicy
 	policies map[string]*compiledPolicy // by ID
 	nets     []netEntry
+	byClient map[string]*compiledPolicy // by DoH client ID
 }
 
 // NewStore creates a Store with the given default policy (nil allowed).
 func NewStore(def *Policy) *Store {
 	s := &Store{
 		policies: make(map[string]*compiledPolicy),
+		byClient: make(map[string]*compiledPolicy),
 	}
 	if def != nil {
 		s.defaults = compile(def)
@@ -183,7 +187,16 @@ func (s *Store) RemovePolicy(id string) {
 
 func (s *Store) rebuildLocked() {
 	nets := make([]netEntry, 0)
-	for _, cp := range s.policies {
+	byClient := make(map[string]*compiledPolicy)
+	// Iterate in a stable order so a client ID claimed by several policies
+	// resolves deterministically (the last policy in sorted ID order wins).
+	ids := make([]string, 0, len(s.policies))
+	for id := range s.policies {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		cp := s.policies[id]
 		for _, n := range cp.Networks {
 			_, ipnet, err := net.ParseCIDR(n)
 			if err != nil {
@@ -191,8 +204,14 @@ func (s *Store) rebuildLocked() {
 			}
 			nets = append(nets, netEntry{net: ipnet, policy: cp})
 		}
+		for _, c := range cp.Clients {
+			if c != "" {
+				byClient[c] = cp
+			}
+		}
 	}
 	s.nets = nets
+	s.byClient = byClient
 }
 
 // All returns a snapshot of every policy plus the default.
@@ -210,10 +229,16 @@ func (s *Store) All() (def *Policy, list []*Policy) {
 	return
 }
 
-// lookup returns the most specific policy for ip, else the default.
-func (s *Store) lookup(ip net.IP) *compiledPolicy {
+// lookup returns the policy for a DoH client ID if one matches, otherwise the
+// most specific policy for ip, else the default.
+func (s *Store) lookup(ip net.IP, clientID string) *compiledPolicy {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	if clientID != "" {
+		if p, ok := s.byClient[clientID]; ok {
+			return p
+		}
+	}
 	best := -1
 	var bp *compiledPolicy
 	if ip4 := ip.To4(); ip4 != nil {
@@ -234,11 +259,12 @@ func (s *Store) lookup(ip net.IP) *compiledPolicy {
 	return s.defaults
 }
 
-// Classify reports whether name from clientIP should be blocked.
+// Classify reports whether name from clientIP (or DoH clientID) should be
+// blocked. A matching client ID takes precedence over the IP network.
 // Allowlist takes precedence over blocklist. Returns the matched policy's
 // block action, upstream override (if any), and whether logging is enabled.
-func (s *Store) Classify(clientIP net.IP, name string) (blocked bool, action BlockAction, upstream string, log bool) {
-	p := s.lookup(clientIP)
+func (s *Store) Classify(clientIP net.IP, clientID, name string) (blocked bool, action BlockAction, upstream string, log bool) {
+	p := s.lookup(clientIP, clientID)
 	if p == nil {
 		return false, DefaultAction, "", false
 	}

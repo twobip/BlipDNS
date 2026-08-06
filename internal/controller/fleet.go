@@ -292,6 +292,7 @@ func clonePolicy(p *control.Policy) *control.Policy {
 	}
 	out := *p
 	out.Networks = append([]string(nil), p.Networks...)
+	out.Clients = append([]string(nil), p.Clients...)
 	out.Block = append([]string(nil), p.Block...)
 	out.Allow = append([]string(nil), p.Allow...)
 	return &out

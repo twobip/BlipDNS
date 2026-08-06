@@ -427,6 +427,7 @@ func fromFilter(p *filter.Policy) *Policy {
 	return &Policy{
 		ID:          p.ID,
 		Networks:    p.Networks,
+		Clients:     p.Clients,
 		Allow:       p.Allow,
 		Block:       p.Block,
 		BlockAction: string(p.BlockAction),
@@ -439,6 +440,7 @@ func toFilter(p *Policy) *filter.Policy {
 	return &filter.Policy{
 		ID:          p.ID,
 		Networks:    p.Networks,
+		Clients:     p.Clients,
 		Allow:       p.Allow,
 		Block:       p.Block,
 		BlockAction: filter.BlockAction(p.BlockAction),
