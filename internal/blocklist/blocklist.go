@@ -53,21 +53,27 @@ type SourceResult struct {
 	Err     string // "" on success, else the download/parse error
 }
 
-// Blocklist holds a set of domains to block.
+// Blocklist holds a set of domains to block, plus an optional set of allowed
+// (whitelisted) domains that take precedence over the block set.
 // It is safe for concurrent use.
 type Blocklist struct {
 	mu    sync.RWMutex
 	exact map[string]struct{} // exact domains / ancestor blocks
 	wild  map[string]struct{} // roots of "*.root" entries (match strict subdomains only)
-	sum   uint64              // order-independent checksum of exact + wild entries
+	sum   uint64              // order-independent checksum of exact + wild + allow entries
 	count int
+
+	allowExact map[string]struct{} // allowed exact domains
+	allowWild  map[string]struct{} // allowed "*.root" roots
 }
 
 // New creates an empty blocklist.
 func New() *Blocklist {
 	return &Blocklist{
-		exact: make(map[string]struct{}),
-		wild:  make(map[string]struct{}),
+		exact:      make(map[string]struct{}),
+		wild:       make(map[string]struct{}),
+		allowExact: make(map[string]struct{}),
+		allowWild:  make(map[string]struct{}),
 	}
 }
 
@@ -93,19 +99,31 @@ func (b *Blocklist) FromDomainsMap(set map[string]struct{}) {
 
 // swap installs a freshly built set atomically.
 func (b *Blocklist) swap(exact, wild map[string]struct{}) {
-	sum := uint64(0)
-	for d := range exact {
-		sum += hashString(d)
-	}
-	for r := range wild {
-		sum += hashString("*." + r)
-	}
 	b.mu.Lock()
 	b.exact = exact
 	b.wild = wild
-	b.sum = sum
 	b.count = len(exact) + len(wild)
+	b.recomputeSumLocked()
 	b.mu.Unlock()
+}
+
+// recomputeSumLocked recalculates the order-independent checksum across the
+// block and allow sets. Callers must hold b.mu.
+func (b *Blocklist) recomputeSumLocked() {
+	sum := uint64(0)
+	for d := range b.exact {
+		sum += hashString(d)
+	}
+	for r := range b.wild {
+		sum += hashString("*." + r)
+	}
+	for d := range b.allowExact {
+		sum += hashString("allow:" + d)
+	}
+	for r := range b.allowWild {
+		sum += hashString("allow:*." + r)
+	}
+	b.sum = sum
 }
 
 // addEntry normalizes and inserts a single entry (either "domain" or "*.root").
@@ -151,6 +169,58 @@ func (b *Blocklist) Remove(domain string) {
 	}
 }
 
+// SetAllowed replaces the allowed (whitelisted) set. Allowed domains are
+// never blocked, even when they appear in the block set or a source list.
+func (b *Blocklist) SetAllowed(list []string) {
+	exact, wild := make(map[string]struct{}), make(map[string]struct{})
+	for _, d := range list {
+		addEntry(d, exact, wild)
+	}
+	b.mu.Lock()
+	b.allowExact = exact
+	b.allowWild = wild
+	b.recomputeSumLocked()
+	b.mu.Unlock()
+}
+
+// AddAllowed adds a domain to the allowed set.
+func (b *Blocklist) AddAllowed(domain string) {
+	if d := normalizeDomain(domain); d != "" {
+		b.mu.Lock()
+		if _, ok := b.allowExact[d]; !ok {
+			b.allowExact[d] = struct{}{}
+			b.sum += hashString("allow:" + d)
+		}
+		b.mu.Unlock()
+	}
+}
+
+// RemoveAllowed removes a domain from the allowed set.
+func (b *Blocklist) RemoveAllowed(domain string) {
+	if d := normalizeDomain(domain); d != "" {
+		b.mu.Lock()
+		if _, ok := b.allowExact[d]; ok {
+			delete(b.allowExact, d)
+			b.sum -= hashString("allow:" + d)
+		}
+		b.mu.Unlock()
+	}
+}
+
+// Allowed returns the sorted list of allowed domains.
+func (b *Blocklist) Allowed() []string {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	out := make([]string, 0, len(b.allowExact)+len(b.allowWild))
+	for d := range b.allowExact {
+		out = append(out, d)
+	}
+	for r := range b.allowWild {
+		out = append(out, "*."+r)
+	}
+	return out
+}
+
 // Count returns the number of entries in the blocklist.
 func (b *Blocklist) Count() int {
 	b.mu.RLock()
@@ -181,8 +251,10 @@ func (b *Blocklist) Checksum() uint64 {
 }
 
 // IsBlocked reports whether the given host (e.g., from a DNS query) is blocked.
-// It checks the host itself and each of its ancestor labels against the set,
-// so lookups stay fast even for very large lists.
+// The allowed set is checked first: a whitelisted host (or one of its ancestor
+// labels) is never blocked. Otherwise it checks the host itself and each of
+// its ancestor labels against the block set, so lookups stay fast even for
+// very large lists.
 func (b *Blocklist) IsBlocked(host string) bool {
 	if host == "" {
 		return false
@@ -193,6 +265,9 @@ func (b *Blocklist) IsBlocked(host string) bool {
 	}
 	b.mu.RLock()
 	defer b.mu.RUnlock()
+	if allowMatchLocked(b.allowExact, b.allowWild, h) {
+		return false
+	}
 	a := h
 	for {
 		if _, ok := b.exact[a]; ok {
@@ -210,6 +285,31 @@ func (b *Blocklist) IsBlocked(host string) bool {
 			break
 		}
 		a = a[i+1:]
+	}
+	return false
+}
+
+// allowMatchLocked reports whether name (or an ancestor label) is covered by
+// the given allow sets. Callers must hold b.mu.
+func allowMatchLocked(exact, wild map[string]struct{}, h string) bool {
+	if _, ok := exact[h]; ok {
+		return true
+	}
+	a := h
+	for {
+		i := strings.IndexByte(a, '.')
+		if i < 0 {
+			break
+		}
+		a = a[i+1:]
+		// *.root matches strict subdomains only, so the host itself was already
+		// covered by the exact check above.
+		if _, ok := wild[a]; ok {
+			return true
+		}
+		if _, ok := exact[a]; ok {
+			return true
+		}
 	}
 	return false
 }
@@ -441,10 +541,17 @@ func normalizeDomain(s string) string {
 	return s
 }
 
+// cacheFile is the on-disk snapshot: the blocked set plus the allowed set that
+// overrides it.
+type cacheFile struct {
+	Domains []string `json:"domains"`
+	Allowed []string `json:"allowed,omitempty"`
+}
+
 // SaveCache atomically writes the current list to path as JSON so a restart
 // can reload it into RAM without re-fetching the sources.
 func (b *Blocklist) SaveCache(path string) error {
-	data, err := json.Marshal(b.List())
+	data, err := json.Marshal(cacheFile{Domains: b.List(), Allowed: b.Allowed()})
 	if err != nil {
 		return err
 	}
@@ -457,6 +564,7 @@ func (b *Blocklist) SaveCache(path string) error {
 
 // LoadCache returns a blocklist restored from a previously saved cache file.
 // It returns (nil, nil) when no cache exists; a corrupt file is an error.
+// Legacy caches (a bare JSON array of domains) are still readable.
 func LoadCache(path string) (*Blocklist, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -465,12 +573,17 @@ func LoadCache(path string) (*Blocklist, error) {
 		}
 		return nil, err
 	}
-	var list []string
-	if err := json.Unmarshal(data, &list); err != nil {
-		return nil, err
+	var cf cacheFile
+	if err := json.Unmarshal(data, &cf); err != nil {
+		var list []string
+		if lerr := json.Unmarshal(data, &list); lerr != nil {
+			return nil, err
+		}
+		cf.Domains = list
 	}
 	bl := New()
-	bl.FromDomains(list)
+	bl.FromDomains(cf.Domains)
+	bl.SetAllowed(cf.Allowed)
 	return bl, nil
 }
 

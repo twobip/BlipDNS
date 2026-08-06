@@ -81,6 +81,7 @@ type Fleet struct {
 	sourceStats      []SourceStat                 // per-source download stats, refreshed on import
 	importLog        []string                     // recent import output lines (capped ring buffer)
 	manualDomains    map[string]struct{}          // hand-added domains, kept apart from sources
+	manualAllowed    map[string]struct{}          // hand-added whitelist domains
 	autoUpdateHours  int                          // hours between automatic refreshes; 0 = manual only
 	configPath       string                       // path to controller config YAML (for persisting tokens)
 	defaultPolicy    *control.Policy              // fleet-wide default policy (source of truth)
@@ -129,6 +130,7 @@ func NewFleet(configPath string) *Fleet {
 		configPath:    configPath,
 		overrides:     make(map[string]*InstanceOverride),
 		manualDomains: make(map[string]struct{}),
+		manualAllowed: make(map[string]struct{}),
 	}
 }
 
@@ -788,6 +790,96 @@ func (f *Fleet) persistManual() {
 	}()
 }
 
+// LoadAllowedDomains restores the hand-added whitelist at startup so allowed
+// domains survive both restarts and the fresh source import that follows one.
+func (f *Fleet) LoadAllowedDomains(ctx context.Context) {
+	if f.blocklistDB == nil {
+		return
+	}
+	m, err := f.blocklistDB.LoadManualAllowed(ctx)
+	if err != nil {
+		log.Printf("blipc: warning: load allowed blocklist: %v", err)
+		return
+	}
+	f.blMu.Lock()
+	f.manualAllowed = m
+	f.blMu.Unlock()
+	f.syncAllowed()
+}
+
+// AddAllowedDomain whitelists a domain entered by hand in the UI. Allowed
+// domains are never blocked, even if a source list contains them. The change
+// lands on the instances via the next push / reconcile.
+func (f *Fleet) AddAllowedDomain(domain string) {
+	d := blocklist.NormalizeDomain(domain)
+	if d == "" {
+		return
+	}
+	f.blMu.Lock()
+	f.manualAllowed[d] = struct{}{}
+	f.blMu.Unlock()
+	f.blocklist.AddAllowed(d)
+	f.persistAllowed()
+}
+
+// RemoveAllowedDomain removes a hand-entered whitelist entry.
+func (f *Fleet) RemoveAllowedDomain(domain string) {
+	d := blocklist.NormalizeDomain(domain)
+	if d == "" {
+		return
+	}
+	f.blMu.Lock()
+	if _, ok := f.manualAllowed[d]; !ok {
+		f.blMu.Unlock()
+		return
+	}
+	delete(f.manualAllowed, d)
+	f.blMu.Unlock()
+	f.blocklist.RemoveAllowed(d)
+	f.persistAllowed()
+}
+
+// AllowedDomains returns the sorted list of hand-added whitelist domains.
+func (f *Fleet) AllowedDomains() []string {
+	f.blMu.Lock()
+	defer f.blMu.Unlock()
+	out := make([]string, 0, len(f.manualAllowed))
+	for d := range f.manualAllowed {
+		out = append(out, d)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// syncAllowed mirrors the manual whitelist into the merged in-memory list so
+// the checksum (and therefore the hash distributed to instances) covers both
+// blocked and allowed domains.
+func (f *Fleet) syncAllowed() {
+	f.blocklist.SetAllowed(f.AllowedDomains())
+}
+
+// ClearAllowedDomains removes every hand-added whitelist entry.
+func (f *Fleet) ClearAllowedDomains() {
+	f.blMu.Lock()
+	f.manualAllowed = make(map[string]struct{})
+	f.blMu.Unlock()
+	f.blocklist.SetAllowed(nil)
+	f.persistAllowed()
+}
+
+// persistAllowed snapshots the hand-added whitelist to the local DB in the
+// background.
+func (f *Fleet) persistAllowed() {
+	if f.blocklistDB == nil {
+		return
+	}
+	go func() {
+		if err := f.blocklistDB.ReplaceManualAllowed(context.Background(), f.AllowedDomains()); err != nil {
+			log.Printf("blipc: warning: persist allowed blocklist: %v", err)
+		}
+	}()
+}
+
 // LoadBlocklistCache restores the last persisted merged list into RAM at
 // startup, so a restart blocks immediately without re-fetching sources, and
 // pushes it to instances so they are covered even before a fresh import.
@@ -1060,10 +1152,13 @@ func (f *Fleet) runBlocklistImport(ctx context.Context, gen int) {
 	}
 }
 
-// pushBlocklist sends the controller's merged blocklist to every instance and
-// records the applied checksum on success. An empty list clears the instances.
+// pushBlocklist sends the controller's merged blocklist (plus whitelist) to
+// every instance and records the applied checksum on success. An empty list
+// clears the instances.
 func (f *Fleet) pushBlocklist(ctx context.Context) map[string]string {
+	f.syncAllowed()
 	domains := f.blocklist.List()
+	allowed := f.blocklist.Allowed()
 	hash := f.blocklist.Checksum()
 
 	f.mu.RLock()
@@ -1079,7 +1174,7 @@ func (f *Fleet) pushBlocklist(ctx context.Context) map[string]string {
 			results[i.Config.ID] = "not adopted"
 			continue
 		}
-		if err := i.ctl().SetBlocklist(ctx, domains); err != nil {
+		if err := i.ctl().SetBlocklist(ctx, domains, allowed); err != nil {
 			results[i.Config.ID] = err.Error()
 			continue
 		}
@@ -1098,6 +1193,7 @@ func (f *Fleet) maybePushBlocklist(ctx context.Context, i *Instance, reported *c
 	if !i.hasToken() {
 		return
 	}
+	f.syncAllowed()
 	hash := f.blocklist.Checksum()
 	rep := uint64(0)
 	if reported != nil {
@@ -1107,7 +1203,7 @@ func (f *Fleet) maybePushBlocklist(ctx context.Context, i *Instance, reported *c
 		i.markBlocklistApplied(hash)
 		return
 	}
-	if err := i.ctl().SetBlocklist(ctx, f.blocklist.List()); err == nil {
+	if err := i.ctl().SetBlocklist(ctx, f.blocklist.List(), f.blocklist.Allowed()); err == nil {
 		i.markBlocklistApplied(hash)
 	}
 }

@@ -425,7 +425,7 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
 .empty-ic { width: 52px; height: 52px; margin: 0 auto 16px; border-radius: 14px; background: var(--surface-2); border: 1px solid var(--border); display: grid; place-items: center; }
 .empty-ic svg { width: 24px; height: 24px; color: var(--muted); }
 .empty h4 { margin: 0 0 6px; font-size: 15px; font-weight: 600; }
-.empty p { margin: 0 0 18px; color: var(--muted); font-size: 13px; max-width: 340px; }
+.empty p { margin: 0 auto 18px; color: var(--muted); font-size: 13px; max-width: 340px; }
 
 .skeleton { border-radius: var(--radius); border: 1px solid var(--border); background: var(--surface); padding: 18px; }
 .skeleton .bar { height: 12px; border-radius: 6px; background: linear-gradient(90deg, var(--surface-2) 25%, var(--surface-3) 50%, var(--surface-2) 75%); background-size: 200% 100%; animation: shimmer 1.2s infinite; margin-bottom: 10px; }

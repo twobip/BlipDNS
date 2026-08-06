@@ -90,11 +90,11 @@ func (c *Client) SetPolicy(ctx context.Context, p *Policy) error {
 	return c.do(ctx, http.MethodPut, "/api/v1/policy", &req, nil)
 }
 
-// SetBlocklist replaces the instance's global blocklist. Large lists (e.g.
-// oisd.big, ~2M domains) produce payloads of tens of MB, so this uses a much
-// longer timeout than the default client.
-func (c *Client) SetBlocklist(ctx context.Context, domains []string) error {
-	req := SetBlocklistRequest{Domains: domains}
+// SetBlocklist replaces the instance's global blocklist and its whitelist.
+// Large lists (e.g. oisd.big, ~2M domains) produce payloads of tens of MB, so
+// this uses a much longer timeout than the default client.
+func (c *Client) SetBlocklist(ctx context.Context, domains, allowed []string) error {
+	req := SetBlocklistRequest{Domains: domains, Allowed: allowed}
 	body, err := json.Marshal(req)
 	if err != nil {
 		return err

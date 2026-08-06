@@ -119,6 +119,7 @@ function toast(msg, kind = "ok") {
 /* ---------- state ---------- */
 let instances = [];
 let blDomains = [];
+let blAllowed = [];
 let blSourceStats = [];
 let blAutoHours = 0;
 let blNextUpdate = null;
@@ -450,12 +451,14 @@ async function loadBlocklist() {
     const r = await API("/api/blocklist?limit=2000");
     const d = await r.json();
     blDomains = d.domains || [];
+    blAllowed = d.allowed || [];
     if (Array.isArray(d.sources)) blSources = d.sources.slice();
     if (d.status) blStatus = d.status;
     blSourceStats = (d.status && d.status.source_stats) || [];
     blAutoHours = (d.status && d.status.auto_update_hours) || 0;
     blNextUpdate = (d.status && d.status.next_update) || null;
     renderBlocklist();
+    renderAllowList();
     renderSources();
     renderBlStatus();
     if (blStatus.running) startBlStatusPoll();
@@ -467,12 +470,29 @@ function renderBlocklist() {
   $("bl-count").textContent = fmt(blDomains.length);
   const ul = $("bl-list");
   if (!list.length) {
-    ul.innerHTML = `<div class="empty"><div class="empty-ic">${IC.block}</div><h4>No custom blocked domains</h4><p>Domains added here are blocked in addition to the list sources on the Blocklists page.</p></div>`;
+    ul.innerHTML = `<div class="empty"><div class="empty-ic">${IC.block}</div><h4>No custom blocked domains</h4><p>Domains added as Block are stored separately from the list sources and are never overwritten.</p></div>`;
     return;
   }
   ul.innerHTML = list.map((d) => `<li><span class="mono grow">${esc(d)}</span><button class="icon-btn" data-rm="${esc(d)}" title="Remove">${IC.trash}</button></li>`).join("");
   ul.querySelectorAll("[data-rm]").forEach((b) => b.onclick = async () => {
     try { await API("/api/blocklist", { method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ domain: b.dataset.rm }) }); toast("removed " + b.dataset.rm); loadBlocklist(); }
+    catch (e) { toast("remove failed", "err"); }
+  });
+}
+function renderAllowList() {
+  const ul = $("bl-list-allow");
+  const cnt = $("bl-count-allow");
+  if (!ul) return;
+  const f = ($("bl-filter-allow")?.value || "").toLowerCase();
+  const list = blAllowed.filter((d) => !f || d.includes(f));
+  if (cnt) cnt.textContent = fmt(blAllowed.length);
+  if (!list.length) {
+    ul.innerHTML = `<div class="empty"><div class="empty-ic">${IC.shield}</div><h4>No custom allowed domains</h4><p>Domains added as Allow are never blocked, even if a list source contains them.</p></div>`;
+    return;
+  }
+  ul.innerHTML = list.map((d) => `<li><span class="mono grow">${esc(d)}</span><button class="icon-btn" data-rm-allow="${esc(d)}" title="Remove">${IC.trash}</button></li>`).join("");
+  ul.querySelectorAll("[data-rm-allow]").forEach((b) => b.onclick = async () => {
+    try { await API("/api/blocklist", { method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ domain: b.dataset.rmAllow, allow: true }) }); toast("removed " + b.dataset.rmAllow); loadBlocklist(); }
     catch (e) { toast("remove failed", "err"); }
   });
 }
@@ -852,10 +872,17 @@ $("d-range").addEventListener("change", (e) => {
 });
 
 /* blocklist */
+let blMode = "block";
+document.querySelectorAll("#bl-mode-seg button").forEach((b) => b.onclick = () => {
+  document.querySelectorAll("#bl-mode-seg button").forEach((x) => x.classList.remove("active"));
+  b.classList.add("active");
+  blMode = b.dataset.mode;
+  $("bl-add-input").placeholder = blMode === "allow" ? "whitelist a domain…" : "domain.example.com";
+});
 $("bl-add").onclick = async () => {
   const d = ($("bl-add-input").value || "").trim();
   if (!d) return toast("enter a domain", "err");
-  try { await API("/api/blocklist", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ domain: d }) }); toast("added " + d); $("bl-add-input").value = ""; loadBlocklist(); }
+  try { await API("/api/blocklist", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ domain: d, allow: blMode === "allow" }) }); toast(blMode === "allow" ? "allowed " + d : "added " + d); $("bl-add-input").value = ""; loadBlocklist(); }
   catch (e) { toast("add failed: " + e.message, "err"); }
 };
 $("bl-add-input").addEventListener("keydown", (e) => { if (e.key === "Enter") $("bl-add").click(); });
@@ -885,6 +912,7 @@ $("bl-auto-save").onclick = async () => {
   } catch (e) { toast("save failed: " + e.message, "err"); }
 };
 $("bl-filter").addEventListener("input", renderBlocklist);
+$("bl-filter-allow").addEventListener("input", renderAllowList);
 $("bl-export").onclick = () => window.open("/api/blocklist/export", "_blank");
 $("bl-clear").onclick = () => {
   confirmDialog("Clear entire blocklist?", "This removes every blocked domain, drops all sources, and deletes custom domains. This cannot be undone.", async () => {

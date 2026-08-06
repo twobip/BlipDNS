@@ -49,8 +49,10 @@ type SetPolicyRequest struct {
 
 // SetBlocklistRequest replaces the instance's global blocklist with the given
 // domains (already normalized, plain "domain" or "*.root" wildcard entries).
+// Allowed lists a whitelist that takes precedence over the blocked domains.
 type SetBlocklistRequest struct {
 	Domains []string `json:"domains"`
+	Allowed []string `json:"allowed,omitempty"`
 }
 
 type DeletePolicyRequest struct {

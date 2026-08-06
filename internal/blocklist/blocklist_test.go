@@ -19,6 +19,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -321,6 +322,96 @@ func TestCacheRoundtrip(t *testing.T) {
 	}
 	if missing != nil {
 		t.Error("expected nil blocklist for missing cache file")
+	}
+}
+
+func TestAllowlistOverridesBlocklist(t *testing.T) {
+	bl := New()
+	bl.FromDomains([]string{"ads.example.com", "tracker.net", "*.tracker.net", "blocked.org"})
+
+	// Exact allow beats exact/suffix block for the host and its subdomains.
+	bl.SetAllowed([]string{"ads.example.com"})
+	if bl.IsBlocked("ads.example.com") {
+		t.Error("allowed root must not be blocked")
+	}
+	if bl.IsBlocked("sub.ads.example.com") {
+		t.Error("subdomain of allowed root must not be blocked")
+	}
+
+	// A narrow exact allow only covers that host.
+	bl.SetAllowed([]string{"ok.ads.example.com"})
+	if bl.IsBlocked("ok.ads.example.com") {
+		t.Error("exactly allowed host must not be blocked")
+	}
+	if !bl.IsBlocked("ads.example.com") {
+		t.Error("other host under the blocked root must stay blocked")
+	}
+
+	// Wildcard allow covers strict subdomains but not the root itself.
+	bl.SetAllowed([]string{"*.tracker.net"})
+	if bl.IsBlocked("sub.tracker.net") {
+		t.Error("subdomain allowed by *.root must not be blocked")
+	}
+	if !bl.IsBlocked("tracker.net") {
+		t.Error("root must stay blocked: *.root allow does not cover the root")
+	}
+
+	// Unrelated domains are unaffected.
+	if !bl.IsBlocked("blocked.org") {
+		t.Error("blocked.org must stay blocked")
+	}
+	if bl.IsBlocked("nothing.example.com") {
+		t.Error("unlisted domain must not be blocked")
+	}
+
+	// Clearing the allow set restores the block.
+	bl.SetAllowed(nil)
+	if !bl.IsBlocked("sub.tracker.net") {
+		t.Error("sub.tracker.net must be blocked again after allow cleared")
+	}
+
+	// Checksum changes when the allow set changes (drives re-push convergence).
+	sum1 := bl.Checksum()
+	bl.AddAllowed("new-allow.example.com")
+	sum2 := bl.Checksum()
+	bl.RemoveAllowed("new-allow.example.com")
+	if sum1 == sum2 || sum2 == bl.Checksum() {
+		t.Error("checksum must reflect allow-set changes")
+	}
+}
+
+func TestCacheRoundtripWithAllowed(t *testing.T) {
+	bl := New()
+	bl.FromDomains([]string{"a.example.com", "*.wild.net"})
+	bl.SetAllowed([]string{"keep.example.com", "*.tracker.net"})
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cache.json")
+	if err := bl.SaveCache(path); err != nil {
+		t.Fatalf("SaveCache: %v", err)
+	}
+	got, err := LoadCache(path)
+	if err != nil {
+		t.Fatalf("LoadCache: %v", err)
+	}
+	if !got.IsBlocked("a.example.com") || !got.IsBlocked("x.wild.net") {
+		t.Error("blocked set not restored from cache")
+	}
+	if got.IsBlocked("keep.example.com") || got.IsBlocked("x.tracker.net") {
+		t.Error("allowed set not restored from cache (domains still blocked)")
+	}
+
+	// Legacy cache (bare array) must still load, with no allow set.
+	legacy := filepath.Join(dir, "legacy.json")
+	if err := os.WriteFile(legacy, []byte(`["old.example.com","*.legacy.net"]`), 0640); err != nil {
+		t.Fatal(err)
+	}
+	l, err := LoadCache(legacy)
+	if err != nil {
+		t.Fatalf("LoadCache legacy: %v", err)
+	}
+	if !l.IsBlocked("old.example.com") || !l.IsBlocked("sub.legacy.net") {
+		t.Error("legacy cache blocked set not restored")
 	}
 }
 

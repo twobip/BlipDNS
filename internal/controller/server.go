@@ -481,13 +481,15 @@ func (s *Server) handleBlocklist(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, map[string]interface{}{
 			"domains": domains,
+			"allowed": s.fleet.AllowedDomains(),
 			"total":   s.fleet.Blocklist().Count(),
 			"sources": s.fleet.BlocklistSources(),
 			"status":  s.fleet.BlocklistStatus(),
 		})
-	case http.MethodPost:
+	case http.MethodPost, http.MethodDelete:
 		var req struct {
 			Domain string `json:"domain"`
+			Allow  bool   `json:"allow"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -497,22 +499,21 @@ func (s *Server) handleBlocklist(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "domain required", http.StatusBadRequest)
 			return
 		}
-		s.fleet.AddManualDomain(req.Domain)
-		writeJSON(w, map[string]string{"ok": "added"})
-	case http.MethodDelete:
-		var req struct {
-			Domain string `json:"domain"`
+		if r.Method == http.MethodPost {
+			if req.Allow {
+				s.fleet.AddAllowedDomain(req.Domain)
+			} else {
+				s.fleet.AddManualDomain(req.Domain)
+			}
+			writeJSON(w, map[string]string{"ok": "added"})
+		} else {
+			if req.Allow {
+				s.fleet.RemoveAllowedDomain(req.Domain)
+			} else {
+				s.fleet.RemoveManualDomain(req.Domain)
+			}
+			writeJSON(w, map[string]string{"ok": "removed"})
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		if req.Domain == "" {
-			http.Error(w, "domain required", http.StatusBadRequest)
-			return
-		}
-		s.fleet.RemoveManualDomain(req.Domain)
-		writeJSON(w, map[string]string{"ok": "removed"})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
@@ -579,6 +580,7 @@ func (s *Server) handleBlocklistSources(w http.ResponseWriter, r *http.Request) 
 			s.fleet.Blocklist().FromDomains(nil)
 			if req.ClearManual {
 				s.fleet.ClearManualDomains()
+				s.fleet.ClearAllowedDomains()
 			}
 			s.fleet.persistBlocklist()
 			writeJSON(w, map[string]interface{}{"ok": true, "count": 0})

@@ -212,6 +212,10 @@
           <div class="panel">
             <div class="panel-head"><h3>Add Domain</h3><span class="spacer"></span><span class="badge accent" id="bl-count">0</span></div>
             <div class="panel-body">
+              <div class="seg" id="bl-mode-seg" style="margin-bottom:12px">
+                <button data-mode="block" class="active">Block</button>
+                <button data-mode="allow">Allow</button>
+              </div>
               <div class="row">
                 <div class="search grow">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
@@ -219,7 +223,7 @@
                 </div>
                 <button class="btn btn-primary" id="bl-add">Add</button>
               </div>
-              <p class="muted" style="font-size:13px; margin-top:10px">Custom domains are stored separately from the list sources and are never overwritten when the Blocklists update.</p>
+              <p class="muted" style="font-size:13px; margin-top:10px">Blocked and allowed domains are stored separately from the list sources and are never overwritten when the Blocklists update. Allowed domains take precedence over blocked ones.</p>
             </div>
           </div>
 
@@ -232,6 +236,16 @@
             </div>
             <ul class="list" id="bl-list" style="max-height:440px; overflow-y:auto"></ul>
           </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head"><h3>Custom Allowed Domains</h3><span class="spacer"></span><span class="badge accent" id="bl-count-allow">0</span>
+            <div class="search" style="width:200px">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+              <input class="input" id="bl-filter-allow" placeholder="Filter…"/>
+            </div>
+          </div>
+          <ul class="list" id="bl-list-allow" style="max-height:440px; overflow-y:auto"></ul>
         </div>
 
         <div class="panel">

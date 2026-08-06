@@ -295,6 +295,7 @@ func (s *Server) handleBlocklist(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.blocklist.FromDomains(req.Domains)
+	s.blocklist.SetAllowed(req.Allowed)
 	if s.blocklistCachePath != "" {
 		path := s.blocklistCachePath
 		go func() {

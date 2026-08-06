@@ -105,6 +105,53 @@ func TestBlocklistStoreManualDomains(t *testing.T) {
 	}
 }
 
+func TestBlocklistStoreManualAllowed(t *testing.T) {
+	store, err := NewBlocklistStore(filepath.Join(t.TempDir(), "blocklist.db"))
+	if err != nil {
+		t.Fatalf("NewBlocklistStore: %v", err)
+	}
+	defer store.db.Close()
+
+	ctx := context.Background()
+	if err := store.ReplaceManualAllowed(ctx, []string{"keep.example.com", "wildcard.example.org"}); err != nil {
+		t.Fatalf("ReplaceManualAllowed: %v", err)
+	}
+	set, err := store.LoadManualAllowed(ctx)
+	if err != nil {
+		t.Fatalf("LoadManualAllowed: %v", err)
+	}
+	if len(set) != 2 {
+		t.Fatalf("LoadManualAllowed returned %d, want 2", len(set))
+	}
+	if _, ok := set["keep.example.com"]; !ok {
+		t.Error("keep.example.com missing from allowed set")
+	}
+
+	// Replacing must drop the previous set.
+	if err := store.ReplaceManualAllowed(ctx, []string{"other.example.io"}); err != nil {
+		t.Fatalf("ReplaceManualAllowed 2: %v", err)
+	}
+	set, err = store.LoadManualAllowed(ctx)
+	if err != nil {
+		t.Fatalf("LoadManualAllowed 2: %v", err)
+	}
+	if !reflect.DeepEqual(set, map[string]struct{}{"other.example.io": {}}) {
+		t.Errorf("unexpected allowed set: %v", set)
+	}
+
+	// Empty clears.
+	if err := store.ReplaceManualAllowed(ctx, nil); err != nil {
+		t.Fatalf("ReplaceManualAllowed empty: %v", err)
+	}
+	set, err = store.LoadManualAllowed(ctx)
+	if err != nil {
+		t.Fatalf("LoadManualAllowed empty: %v", err)
+	}
+	if len(set) != 0 {
+		t.Errorf("allowed set not cleared: %v", set)
+	}
+}
+
 func TestFleetManualDomainsSurviveImport(t *testing.T) {
 	fleet := NewFleet(filepath.Join(t.TempDir(), "blipc.yaml"))
 
@@ -161,6 +208,62 @@ func TestFleetManualDomainsSurviveImport(t *testing.T) {
 	}
 	if !fleet.Blocklist().IsBlocked("src2.example.net") {
 		t.Error("source domain lost on manual clear")
+	}
+}
+
+func TestFleetManualAllowedSurviveImport(t *testing.T) {
+	fleet := NewFleet(filepath.Join(t.TempDir(), "blipc.yaml"))
+
+	fleet.AddAllowedDomain("ads.example.com")
+	fleet.AddAllowedDomain("TRACKER.net") // normalized on insert
+	if got := fleet.AllowedDomains(); !reflect.DeepEqual(got, []string{"ads.example.com", "tracker.net"}) {
+		t.Fatalf("AllowedDomains() = %v, want sorted normalized list", got)
+	}
+
+	// Simulate a source import whose list blocks the whitelisted domains.
+	merged := map[string]struct{}{
+		"ads.example.com": {},
+		"tracker.net":     {},
+		"*.tracker.net":   {},
+		"src.example.net": {},
+	}
+	fleet.Blocklist().FromDomainsMap(merged)
+	fleet.syncAllowed()
+	if fleet.Blocklist().IsBlocked("ads.example.com") {
+		t.Error("whitelisted domain blocked after import merge")
+	}
+	if fleet.Blocklist().IsBlocked("sub.tracker.net") {
+		t.Error("subdomain of whitelisted root blocked after import merge")
+	}
+	if !fleet.Blocklist().IsBlocked("src.example.net") {
+		t.Error("source domain missing after import merge")
+	}
+
+	// Removing a whitelist entry restores the block for that domain only.
+	fleet.RemoveAllowedDomain("ads.example.com")
+	if got := fleet.AllowedDomains(); !reflect.DeepEqual(got, []string{"tracker.net"}) {
+		t.Fatalf("AllowedDomains after remove = %v", got)
+	}
+	if !fleet.Blocklist().IsBlocked("ads.example.com") {
+		t.Error("removed whitelist domain still allowed")
+	}
+	if fleet.Blocklist().IsBlocked("tracker.net") {
+		t.Error("remaining whitelist domain lost")
+	}
+	if !fleet.Blocklist().IsBlocked("src.example.net") {
+		t.Error("source domain lost on whitelist remove")
+	}
+
+	// Clearing wipes the whole whitelist.
+	fleet.ClearAllowedDomains()
+	if got := fleet.AllowedDomains(); len(got) != 0 {
+		t.Fatalf("allowed set not cleared: %v", got)
+	}
+	if !fleet.Blocklist().IsBlocked("tracker.net") {
+		t.Error("whitelist domain survived clear")
+	}
+	if !fleet.Blocklist().IsBlocked("src.example.net") {
+		t.Error("source domain lost on whitelist clear")
 	}
 }
 
