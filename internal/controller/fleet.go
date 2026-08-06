@@ -1415,7 +1415,8 @@ func (f *Fleet) saveConfig() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(f.configPath, out, 0640)
+	// 0600: config holds admin tokens for every instance, so no group/world access.
+	return os.WriteFile(f.configPath, out, 0600)
 }
 
 // ResolveTokenFile expands token paths like "@/path" or absolute/relative files

@@ -165,7 +165,8 @@ func (s *Server) persistAdopted(adopted bool) {
 		Token      string    `json:"token,omitempty"`
 		AdoptedAt  time.Time `json:"adopted_at"`
 	}{true, s.instanceID, s.token, time.Now()})
-	if err := os.WriteFile(s.stateFile, b, 0640); err != nil {
+	// 0600: state holds the management token, so no group/world access.
+	if err := os.WriteFile(s.stateFile, b, 0600); err != nil {
 		log.Printf("blipd: warning: cannot persist adoption state to %s: %v", s.stateFile, err)
 	}
 }
@@ -202,7 +203,20 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/adopt/status", s.handleAdoptStatus)
 	mux.HandleFunc("/api/v1/adopt", s.handleAdopt)
 	mux.HandleFunc("/api/v1/adopt/reset", s.auth(s.handleAdoptReset))
-	return mux
+	return s.withSecurityHeaders(mux)
+}
+
+// withSecurityHeaders attaches defense-in-depth headers to every blipd
+// management API response (including the DoH toggle endpoint). These are JSON
+// API responses (never HTML), so the headers are safe defaults.
+func (s *Server) withSecurityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("X-Frame-Options", "DENY")
+		h.Set("Referrer-Policy", "no-referrer")
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) auth(h http.HandlerFunc) http.HandlerFunc {

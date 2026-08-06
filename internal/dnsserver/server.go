@@ -24,6 +24,11 @@ import (
 	"github.com/miekg/dns"
 )
 
+// maxDNSQueryParam is the maximum base64url length of the DoH GET `dns`
+// parameter. A 4096-byte DNS message encodes to ~5462 base64url chars; 8192
+// leaves comfortable headroom while bounding the per-request allocation.
+const maxDNSQueryParam = 8192
+
 // Config configures a Server.
 type Config struct {
 	DNSAddr           string // "127.0.0.1:53"
@@ -107,7 +112,20 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/dns-query", s.handleDoH)
 	mux.HandleFunc("/dns-query/", s.handleDoH)
-	return mux
+	return s.withSecurityHeaders(mux)
+}
+
+// withSecurityHeaders attaches defense-in-depth headers to every DoH response,
+// including error paths. DoH is an API (binary, never HTML), so these are
+// safe defaults.
+func (s *Server) withSecurityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("X-Frame-Options", "DENY")
+		h.Set("Referrer-Policy", "no-referrer")
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) handleDoH(w http.ResponseWriter, r *http.Request) {
@@ -118,6 +136,10 @@ func (s *Server) handleDoH(w http.ResponseWriter, r *http.Request) {
 		v := r.URL.Query().Get("dns")
 		if v == "" {
 			http.Error(w, "missing dns parameter", http.StatusBadRequest)
+			return
+		}
+		if len(v) > maxDNSQueryParam {
+			http.Error(w, "dns parameter too large", http.StatusRequestEntityTooLarge)
 			return
 		}
 		b, err := base64urlDecode(v)
