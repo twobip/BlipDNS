@@ -16,6 +16,33 @@ func (f *fakeResolver) Resolve(ctx context.Context, q *dns.Msg) (*dns.Msg, error
 	return m, nil
 }
 
+func TestErrUpstreamStripsEphemeralSocket(t *testing.T) {
+	// Address labeling + stripping combined: the ephemeral local socket is
+	// removed so identical failures share one message.
+	got := errUpstream("127.0.0.1:1", &simpleErr{"read udp 127.0.0.1:50791->127.0.0.1:1: read: connection refused"}).Error()
+	if got != "127.0.0.1:1: read: connection refused" {
+		t.Errorf("errUpstream = %q, want %q", got, "127.0.0.1:1: read: connection refused")
+	}
+	// IPv6 local sockets are stripped too.
+	got = errUpstream("[::1]:53", &simpleErr{"read udp [::1]:45000->[::1]:53: i/o timeout"}).Error()
+	if got != "[::1]:53: i/o timeout" {
+		t.Errorf("errUpstream ipv6 = %q, want %q", got, "[::1]:53: i/o timeout")
+	}
+	// Dial errors have no local socket; only the address label is added.
+	got = errUpstream("1.1.1.1:53", &simpleErr{"dial tcp 1.1.1.1:53: connect: network is unreachable"}).Error()
+	if got != "1.1.1.1:53: dial tcp 1.1.1.1:53: connect: network is unreachable" {
+		t.Errorf("errUpstream dial = %q", got)
+	}
+	// Non-network errors pass through with just the address label.
+	if got := errUpstream("https://1.1.1.1/dns-query", &simpleErr{"doh: upstream returned 500"}).Error(); got != "https://1.1.1.1/dns-query: doh: upstream returned 500" {
+		t.Errorf("errUpstream doh = %q", got)
+	}
+}
+
+type simpleErr struct{ msg string }
+
+func (e *simpleErr) Error() string { return e.msg }
+
 func TestFromSpec(t *testing.T) {
 	r, err := FromSpec("udp://1.1.1.1:53 https://8.8.8.8/dns-query")
 	if err != nil {

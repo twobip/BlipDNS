@@ -63,6 +63,7 @@ const NAV = [
 const TITLES = {
   dashboard: ["Dashboard", "Fleet throughput &amp; health"],
   queries: ["Query Log", "Live DNS resolution history"],
+  "upstream-errors": ["Upstream Errors", "Failed upstream requests and when they happened"],
   clients: ["Clients", "Who is querying this resolver"],
   instances: ["Instances", "Managed blipd resolvers"],
   blocklist: ["Blocklists", "Global blocked domains and list sources"],
@@ -139,6 +140,7 @@ async function refresh() {
     if (current === "dashboard") renderDashboard();
     else if (current === "instances") renderInstances();
     else if (current === "queries") renderQueries();
+    else if (current === "upstream-errors") renderUpstreamErrors();
     else if (current === "clients") renderClients();
     else if (current === "filters") renderPolicies();
   } catch (e) {
@@ -451,6 +453,43 @@ async function copyText(s) {
     }
     toast("copied " + s);
   } catch { toast("copy failed", "err"); }
+}
+
+/* ---------- upstream errors ---------- */
+let ueState = { inst: "", since: "24h" };
+function propsUeInstanceOptions() {
+  const sel = $("ue-instance");
+  const cur = sel.value;
+  const labels = [...new Set(instances.map((i) => i.label || i.id || ""))].filter(Boolean);
+  sel.innerHTML = `<option value="">All instances</option>` + labels.map((l) => `<option value="${esc(l)}" ${l === cur ? "selected" : ""}>${esc(l)}</option>`).join("");
+}
+async function renderUpstreamErrors() {
+  const tb = $("ue-tbody");
+  propsUeInstanceOptions();
+  try {
+    const res = await API(`/api/upstream-errors?instance=${encodeURIComponent(ueState.inst)}&since=${ueState.since}&limit=200`);
+    const d = await res.json();
+    const rows = d.errors || [];
+    $("ue-count").textContent = fmt(d.total ?? 0) + " errors";
+    if (!rows.length) {
+      tb.innerHTML = `<tr class="empty-row"><td colspan="6"><div class="empty"><div class="empty-ic">${IC.warn}</div><h4>No upstream errors</h4><p>Nothing failed in the selected range.</p></div></td></tr>`;
+      return;
+    }
+    tb.innerHTML = rows.map((r) => {
+      const inst = instances.find((i) => (i.label || i.id) === r.instance);
+      return `<tr>
+        <td class="q-domain"><span class="mono q-dom" title="${esc(r.message)}">${esc(r.message)}</span></td>
+        <td><span class="mono">${esc(r.domain)}</span></td>
+        <td class="num">${fmt(r.count)}</td>
+        <td class="q-time"><span class="t" data-t="${esc(r.first_seen)}" title="${esc(r.first_seen)}">…</span></td>
+        <td class="q-time"><span class="t" data-t="${esc(r.last_seen)}" title="${esc(r.last_seen)}">…</span></td>
+        <td class="q-inst"><span class="dot ${inst && inst.online ? "on" : "off"}"></span>${esc(inst ? (inst.label || inst.id) : r.instance)}</td>
+      </tr>`;
+    }).join("");
+    tb.querySelectorAll(".t").forEach((t) => { t.textContent = timeAgo(t.dataset.t); });
+  } catch (e) {
+    tb.innerHTML = `<tr class="empty-row"><td colspan="6"><div class="empty"><div class="empty-ic">${IC.warn}</div><h4>Upstream errors unavailable</h4><p>${esc(e.message)}</p></div></td></tr>`;
+  }
 }
 
 /* ---------- clients ---------- */
@@ -916,13 +955,14 @@ $("logout-btn").onclick = async () => {
 };
 
 /* initial route */
+const validPage = (id) => NAV.some((n) => n.id === id) || id === "upstream-errors";
 const initial = (location.pathname.replace(/\/+$/, "") || "/").replace(/^\//, "");
-go(NAV.some((n) => n.id === initial) ? initial : "dashboard", false);
+go(validPage(initial) ? initial : "dashboard", false);
 
 /* popstate */
 window.addEventListener("popstate", () => {
   const p = (location.pathname.replace(/\/+$/, "") || "/").replace(/^\//, "");
-  go(NAV.some((n) => n.id === p) ? p : "dashboard", false);
+  go(validPage(p) ? p : "dashboard", false);
 });
 
 /* add instance */
@@ -944,6 +984,11 @@ $("inst-tbody").addEventListener("click", (e) => {
 $("q-filter").addEventListener("input", (e) => { qState.filter = e.target.value; renderQueries(); });
 $("q-instance").addEventListener("change", (e) => { qState.inst = e.target.value; renderQueries(); });
 $("q-refresh").onclick = renderQueries;
+
+/* upstream errors */
+$("ue-instance").addEventListener("change", (e) => { ueState.inst = e.target.value; renderUpstreamErrors(); });
+$("ue-range").addEventListener("change", (e) => { ueState.since = e.target.value; renderUpstreamErrors(); });
+$("ue-refresh").onclick = renderUpstreamErrors;
 $("q-tbody").addEventListener("click", (e) => {
   const c = e.target.closest("[data-copy]"); if (!c) return;
   copyText(c.dataset.copy);
@@ -1098,5 +1143,5 @@ loadBlocklist();
 connectSSE();
 refresh();
 refreshSettings();
-pollTimer = setInterval(() => { if (current === "dashboard" || current === "instances" || current === "queries") refresh(); }, 5000);
+pollTimer = setInterval(() => { if (current === "dashboard" || current === "instances" || current === "queries" || current === "upstream-errors") refresh(); }, 5000);
 setInterval(() => { if (current === "dashboard") fetchStats(); }, 60000); // refresh chart/stats periodically

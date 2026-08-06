@@ -224,6 +224,7 @@ func (i *Instance) watch(ctx context.Context) {
 				Stats:      e.Stats,
 				Client:     e.Client,
 				Domain:     e.Domain,
+				Msg:        e.Msg,
 			})
 			// Also log block/pass events to query log (async, batched so the
 			// watch stream can't be bottlenecked by per-row SQLite writes).
@@ -238,6 +239,15 @@ func (i *Instance) watch(ctx context.Context) {
 					IPs:        e.IPs,
 					DurationUs: e.DurationUs,
 					Cached:     e.Cached,
+				})
+			}
+			// Upstream failures are persisted individually for the errors page.
+			if e.Type == "error" && i.fleet.queryLog != nil {
+				_ = i.fleet.queryLog.RecordUpstreamError(ctx, UpstreamError{
+					Timestamp: e.At,
+					Instance:  i.Config.Label,
+					Domain:    e.Domain,
+					Message:   e.Msg,
 				})
 			}
 		})

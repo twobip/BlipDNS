@@ -39,16 +39,31 @@ func (r *UDPResolver) Resolve(ctx context.Context, q *dns.Msg) (*dns.Msg, error)
 	c := &dns.Client{Net: "udp", Timeout: r.timeout}
 	resp, _, err := c.Exchange(q, r.addr)
 	if err != nil {
-		return nil, err
+		return nil, errUpstream(r.addr, err)
 	}
 	if resp.Truncated {
 		c.Net = "tcp"
 		resp, _, err = c.Exchange(q, r.addr)
 		if err != nil {
-			return nil, err
+			return nil, errUpstream(r.addr, err)
 		}
 	}
 	return resp, nil
+}
+
+// errUpstream labels a network failure with the upstream address and strips
+// the ephemeral local socket that Go embeds in the message ("read udp
+// 127.0.0.1:50791->127.0.0.1:1: ..."), so the same failure always produces
+// the same string and can be grouped on the errors page.
+func errUpstream(addr string, err error) error {
+	msg := err.Error()
+	for _, p := range []string{"read udp ", "write udp ", "read tcp ", "write tcp ", "dial udp ", "dial tcp "} {
+		if i := strings.Index(msg, "->"); strings.HasPrefix(msg, p) && i >= 0 {
+			// The remainder already carries the remote (upstream) address.
+			return fmt.Errorf("%s", msg[i+2:])
+		}
+	}
+	return fmt.Errorf("%s: %s", addr, msg)
 }
 
 // DoHResolver forwards over DNS-over-HTTPS (RFC 8484).

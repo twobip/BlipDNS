@@ -70,12 +70,14 @@ type AckResponse struct {
 
 // WatchEvent is streamed by GET /api/v1/watch as SSE.
 type WatchEvent struct {
-	Type   string         `json:"type"` // "stats" | "block" | "health"
+	Type   string         `json:"type"` // "stats" | "block" | "pass" | "error"
 	At     time.Time      `json:"at"`
 	Stats  *StatsResponse `json:"stats,omitempty"`
 	Client string         `json:"client,omitempty"`
 	Domain string         `json:"domain,omitempty"`
 	IPs    []string       `json:"ips,omitempty"`
+	// Msg carries the error detail for type "error".
+	Msg string `json:"msg,omitempty"`
 	// DurationUs is how long the query took to answer, in microseconds.
 	// Cached reports whether the answer was served from the response cache.
 	DurationUs int64 `json:"duration_us,omitempty"`

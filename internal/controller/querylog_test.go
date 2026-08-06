@@ -260,6 +260,67 @@ func TestClientNames(t *testing.T) {
 	}
 }
 
+func TestQueryLogStoreUpstreamErrors(t *testing.T) {
+	store, err := NewQueryLogStore(filepath.Join(t.TempDir(), "querylog.db"))
+	if err != nil {
+		t.Fatalf("NewQueryLogStore: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	now := time.Now()
+	errs := []UpstreamError{
+		{Timestamp: now.Add(-time.Minute), Instance: "a", Domain: "example.com", Message: "i/o timeout"},
+		{Timestamp: now.Add(-2 * time.Minute), Instance: "a", Domain: "example.com", Message: "i/o timeout"},
+		{Timestamp: now.Add(-3 * time.Minute), Instance: "a", Domain: "other.test", Message: "i/o timeout"},
+		{Timestamp: now.Add(-4 * time.Minute), Instance: "b", Domain: "example.com", Message: "connection refused"},
+		{Timestamp: now.Add(-5 * time.Minute), Instance: "b", Domain: "example.com", Message: "connection refused"},
+	}
+	for _, e := range errs {
+		if err := store.RecordUpstreamError(ctx, e); err != nil {
+			t.Fatalf("RecordUpstreamError: %v", err)
+		}
+	}
+
+	stats, err := store.UpstreamErrorStats(ctx, "", now.Add(-24*time.Hour), 100)
+	if err != nil {
+		t.Fatalf("UpstreamErrorStats: %v", err)
+	}
+	if len(stats) != 3 {
+		t.Fatalf("UpstreamErrorStats returned %d groups, want 3", len(stats))
+	}
+	// Most frequent first: "i/o timeout"@example.com (2) beats the singleton groups.
+	if stats[0].Count != 2 || stats[0].Message != "i/o timeout" || stats[0].Domain != "example.com" {
+		t.Errorf("top group = %+v, want i/o timeout/example.com with count 2", stats[0])
+	}
+	if stats[0].FirstSeen.After(stats[0].LastSeen) {
+		t.Errorf("first_seen %v after last_seen %v", stats[0].FirstSeen, stats[0].LastSeen)
+	}
+	for _, st := range stats {
+		if st.Count <= 0 {
+			t.Errorf("group %+v has non-positive count", st)
+		}
+	}
+
+	// Instance filter narrows to one instance.
+	stats, err = store.UpstreamErrorStats(ctx, "b", now.Add(-24*time.Hour), 100)
+	if err != nil {
+		t.Fatalf("UpstreamErrorStats(b): %v", err)
+	}
+	if len(stats) != 1 || stats[0].Instance != "b" || stats[0].Count != 2 {
+		t.Fatalf("UpstreamErrorStats(b) = %+v, want one b group with count 2", stats)
+	}
+
+	// Since window excludes everything.
+	stats, err = store.UpstreamErrorStats(ctx, "", now.Add(time.Hour), 100)
+	if err != nil {
+		t.Fatalf("UpstreamErrorStats(since): %v", err)
+	}
+	if len(stats) != 0 {
+		t.Fatalf("UpstreamErrorStats(since) returned %d groups, want 0", len(stats))
+	}
+}
+
 func TestQueryLogStoreBatchWriter(t *testing.T) {
 	store, err := NewQueryLogStore(filepath.Join(t.TempDir(), "querylog.db"))
 	if err != nil {

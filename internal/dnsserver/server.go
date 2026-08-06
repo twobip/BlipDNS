@@ -6,6 +6,7 @@ package dnsserver
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -221,6 +222,7 @@ func (s *Server) serve(ctx context.Context, clientIP net.IP, clientID string, re
 		resolver, err = upstream.FromSpec(upstreamOverride)
 		if err != nil {
 			s.cnt.AddUpErr()
+			s.notifyUpstreamError(client, domain, fmt.Sprintf("invalid upstream override %q: %v", upstreamOverride, err))
 			resp.Rcode = dns.RcodeServerFailure
 			return resp
 		}
@@ -232,6 +234,7 @@ func (s *Server) serve(ctx context.Context, clientIP net.IP, clientID string, re
 	})
 	if err != nil {
 		s.cnt.AddUpErr()
+		s.notifyUpstreamError(client, domain, err.Error())
 		resp.Rcode = dns.RcodeServerFailure
 		return resp
 	}
@@ -259,6 +262,18 @@ func (s *Server) serve(ctx context.Context, clientIP net.IP, clientID string, re
 		DurationUs: time.Since(start).Microseconds(),
 	})
 	return out
+}
+
+// notifyUpstreamError streams an upstream failure to the controller so it can
+// be shown on the Upstream Errors page.
+func (s *Server) notifyUpstreamError(client, domain, msg string) {
+	s.ctrl.Notify(control.WatchEvent{
+		Type:   "error",
+		At:     time.Now(),
+		Client: client,
+		Domain: domain,
+		Msg:    msg,
+	})
 }
 
 // applyBlockAction sets the response status (and, for the zero action, a

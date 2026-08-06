@@ -38,12 +38,13 @@ func (s *Server) Handler() http.Handler {
 		return s.requireAuth(h)
 	}
 	mux.HandleFunc("/api/instances", api(s.handleInstances))
-	mux.HandleFunc("/api/instances/", api(s.handleInstance))      // /add /delete /policies /policy /adopt /adopt/status /adopt/reset /label /query-log
-	mux.HandleFunc("/api/queries", api(s.handleQueries))          // query log
-	mux.HandleFunc("/api/clients", api(s.handleClients))          // per-client activity
-	mux.HandleFunc("/api/client-names", api(s.handleClientNames)) // friendly client renames
-	mux.HandleFunc("/api/stats", api(s.handleStats))              // aggregated query stats for graphs
-	mux.HandleFunc("/api/maintenance", api(s.handleMaintenance))  // POST reset_stats / clear_query_log
+	mux.HandleFunc("/api/instances/", api(s.handleInstance))            // /add /delete /policies /policy /adopt /adopt/status /adopt/reset /label /query-log
+	mux.HandleFunc("/api/queries", api(s.handleQueries))                // query log
+	mux.HandleFunc("/api/upstream-errors", api(s.handleUpstreamErrors)) // upstream failure details
+	mux.HandleFunc("/api/clients", api(s.handleClients))                // per-client activity
+	mux.HandleFunc("/api/client-names", api(s.handleClientNames))       // friendly client renames
+	mux.HandleFunc("/api/stats", api(s.handleStats))                    // aggregated query stats for graphs
+	mux.HandleFunc("/api/maintenance", api(s.handleMaintenance))        // POST reset_stats / clear_query_log
 	mux.HandleFunc("/api/events", api(s.handleEvents))
 	mux.HandleFunc("/api/health", api(s.handleHealth))
 	mux.HandleFunc("/api/settings", api(s.handleSettings)) // fleet-wide default config
@@ -475,6 +476,40 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, agg)
+}
+
+// handleUpstreamErrors returns upstream failures grouped by message/domain/
+// instance, most frequent first, within the requested range.
+func (s *Server) handleUpstreamErrors(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.fleet.queryLog == nil {
+		http.Error(w, "query log not available", http.StatusServiceUnavailable)
+		return
+	}
+	instance := r.URL.Query().Get("instance")
+	limit := 100
+	if l := r.URL.Query().Get("limit"); l != "" {
+		fmt.Sscanf(l, "%d", &limit)
+	}
+	since := time.Now().Add(-24 * time.Hour)
+	if s := r.URL.Query().Get("since"); s != "" {
+		if d, err := time.ParseDuration(s); err == nil {
+			since = time.Now().Add(-d)
+		}
+	}
+	stats, err := s.fleet.queryLog.UpstreamErrorStats(r.Context(), instance, since, limit)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	total := 0
+	for _, st := range stats {
+		total += st.Count
+	}
+	writeJSON(w, map[string]interface{}{"total": total, "errors": stats})
 }
 
 // handleMaintenance handles destructive maintenance actions: reset_stats

@@ -56,6 +56,26 @@ type ClientStat struct {
 	LastSeen time.Time `json:"last_seen"`
 }
 
+// UpstreamError is a single upstream failure event streamed from an instance.
+type UpstreamError struct {
+	ID        int64     `json:"id"`
+	Timestamp time.Time `json:"timestamp"`
+	Instance  string    `json:"instance"` // instance label
+	Domain    string    `json:"domain"`
+	Message   string    `json:"message"`
+}
+
+// UpstreamErrorStat groups identical upstream failures for the errors
+// drill-down page: how many times a given error happened, and when.
+type UpstreamErrorStat struct {
+	Message   string    `json:"message"`
+	Domain    string    `json:"domain"`
+	Instance  string    `json:"instance"`
+	Count     int       `json:"count"`
+	FirstSeen time.Time `json:"first_seen"`
+	LastSeen  time.Time `json:"last_seen"`
+}
+
 // ClientStats aggregates query-log activity by client (DoH client ID or source
 // IP), most active first, capped at limit.
 func (s *QueryLogStore) ClientStats(ctx context.Context, instance string, since time.Time, limit int) ([]ClientStat, error) {
@@ -170,6 +190,14 @@ func NewQueryLogStore(dbPath string) (*QueryLogStore, error) {
 		name TEXT NOT NULL,
 		updated_at DATETIME NOT NULL
 	);
+	CREATE TABLE IF NOT EXISTS upstream_errors (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		timestamp DATETIME NOT NULL,
+		instance TEXT NOT NULL,
+		domain TEXT NOT NULL,
+		message TEXT NOT NULL
+	);
+	CREATE INDEX IF NOT EXISTS idx_upstream_errors_timestamp ON upstream_errors(timestamp);
 	`
 	if _, err := db.Exec(schema); err != nil {
 		return nil, fmt.Errorf("create schema: %w", err)
@@ -289,6 +317,51 @@ func (s *QueryLogStore) ClientNames(ctx context.Context) (map[string]string, err
 	return out, rows.Err()
 }
 
+// RecordUpstreamError inserts a single upstream failure. Errors are low
+// frequency so a direct insert is fine; they are grouped at query time.
+func (s *QueryLogStore) RecordUpstreamError(ctx context.Context, e UpstreamError) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO upstream_errors (timestamp, instance, domain, message) VALUES (?, ?, ?, ?)`,
+		e.Timestamp, e.Instance, e.Domain, e.Message)
+	return err
+}
+
+// UpstreamErrorStats returns upstream failures within the range, grouped by
+// message/domain/instance so the dashboard can show how many times each error
+// happened and when. Most frequent (then most recent) first.
+func (s *QueryLogStore) UpstreamErrorStats(ctx context.Context, instance string, since time.Time, limit int) ([]UpstreamErrorStat, error) {
+	query := `SELECT message, domain, instance, COUNT(*), MIN(timestamp), MAX(timestamp) FROM upstream_errors WHERE timestamp >= ?`
+	args := []interface{}{since}
+	if instance != "" {
+		query += " AND instance = ?"
+		args = append(args, instance)
+	}
+	query += " GROUP BY message, domain, instance ORDER BY COUNT(*) DESC, MAX(timestamp) DESC LIMIT ?"
+	args = append(args, limit)
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []UpstreamErrorStat
+	for rows.Next() {
+		var st UpstreamErrorStat
+		var first, last string
+		if err := rows.Scan(&st.Message, &st.Domain, &st.Instance, &st.Count, &first, &last); err != nil {
+			return nil, err
+		}
+		st.FirstSeen = parseQueryTS(first)
+		st.LastSeen = parseQueryTS(last)
+		out = append(out, st)
+	}
+	if out == nil {
+		out = []UpstreamErrorStat{}
+	}
+	return out, rows.Err()
+}
+
 // AddStatsSample records a snapshot of an instance's cumulative counters.
 func (s *QueryLogStore) AddStatsSample(ctx context.Context, e StatsSample) error {
 	_, err := s.db.ExecContext(ctx,
@@ -403,6 +476,7 @@ func (s *QueryLogStore) cleanupLoop() {
 	for range ticker.C {
 		ctx := context.Background()
 		s.db.ExecContext(ctx, `DELETE FROM query_log WHERE timestamp < ?`, time.Now().Add(-24*time.Hour))
+		s.db.ExecContext(ctx, `DELETE FROM upstream_errors WHERE timestamp < ?`, time.Now().Add(-24*time.Hour))
 		s.db.ExecContext(ctx, `DELETE FROM stats_samples WHERE timestamp < ?`, time.Now().Add(-31*24*time.Hour))
 	}
 }

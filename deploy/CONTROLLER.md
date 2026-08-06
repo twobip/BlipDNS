@@ -94,6 +94,7 @@ POST   /api/instances/<id>/adopt         adopt with {code} (one-time bootstrap)
 POST   /api/instances/<id>/adopt/reset   reset adoption (requires instance token)
 GET    /api/events                    SSE fleet event stream
 GET    /api/health                    {instances: {per-instance health}, query_log_dropped}
+GET    /api/upstream-errors           grouped upstream failures {total, errors:[{message,domain,instance,count,first_seen,last_seen}]}
 ```
 
 Token may be passed as `Authorization: Bearer <token>` or `?token=<token>`.
