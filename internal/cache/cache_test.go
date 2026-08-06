@@ -32,6 +32,28 @@ func TestSetGetDecrementsTTL(t *testing.T) {
 	}
 }
 
+func TestPurge(t *testing.T) {
+	c := New(time.Hour, 0)
+	c.Set(Key(mkMsg("a.test", 60)), mkMsg("a.test", 60))
+	c.Set(Key(mkMsg("b.test", 60)), mkMsg("b.test", 60))
+	if c.Len() != 2 {
+		t.Fatalf("precondition: Len = %d, want 2", c.Len())
+	}
+	c.Purge()
+	if c.Len() != 0 {
+		t.Fatalf("Len after purge = %d, want 0", c.Len())
+	}
+	if _, ok := c.Get(Key(mkMsg("a.test", 60))); ok {
+		t.Error("expected miss after purge")
+	}
+	// cache must remain usable after purge
+	k := Key(mkMsg("a.test", 60))
+	c.Set(k, mkMsg("a.test", 60))
+	if _, ok := c.Get(k); !ok {
+		t.Error("expected hit after re-insertion post-purge")
+	}
+}
+
 func TestExpiry(t *testing.T) {
 	c := New(time.Hour, 0)
 	c.now = func() time.Time { return time.Unix(1000, 0) }

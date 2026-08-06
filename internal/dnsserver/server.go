@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -163,30 +164,33 @@ func (s *Server) serve(ctx context.Context, clientIP net.IP, req *dns.Msg) *dns.
 		return resp
 	}
 	q := req.Question[0]
+	// The DNS wire format always carries the root dot ("google.com."); strip it
+	// so logs and the query log show the bare domain name.
+	domain := strings.TrimSuffix(q.Name, ".")
 
 	// Check global blocklist first (applied to all clients)
-	if s.cfg.Blocklist != nil && s.cfg.Blocklist.IsBlocked(q.Name) {
+	if s.cfg.Blocklist != nil && s.cfg.Blocklist.IsBlocked(domain) {
 		s.cnt.AddBlocked()
 		s.ctrl.Notify(control.WatchEvent{
 			Type: "block", At: time.Now(),
-			Client: clientIP.String(), Domain: q.Name,
+			Client: clientIP.String(), Domain: domain,
 		})
 		if s.logfn != nil {
-			s.logfn(clientIP.String(), q.Name)
+			s.logfn(clientIP.String(), domain)
 		}
 		resp.Rcode = dns.RcodeNameError // NXDOMAIN for blocklist hits
 		return resp
 	}
 
-	blocked, action, upstreamOverride, log := s.cfg.Store.Classify(clientIP, q.Name)
+	blocked, action, upstreamOverride, log := s.cfg.Store.Classify(clientIP, domain)
 	if blocked {
 		s.cnt.AddBlocked()
 		s.ctrl.Notify(control.WatchEvent{
 			Type: "block", At: time.Now(),
-			Client: clientIP.String(), Domain: q.Name,
+			Client: clientIP.String(), Domain: domain,
 		})
 		if log && s.logfn != nil {
-			s.logfn(clientIP.String(), q.Name)
+			s.logfn(clientIP.String(), domain)
 		}
 		switch action {
 		case filter.ActionRefused:
@@ -200,7 +204,7 @@ func (s *Server) serve(ctx context.Context, clientIP net.IP, req *dns.Msg) *dns.
 	}
 
 	if log && s.logfn != nil {
-		s.logfn(clientIP.String(), q.Name)
+		s.logfn(clientIP.String(), domain)
 	}
 
 	// Use policy-specific upstream if provided, else fall back to global
@@ -241,7 +245,7 @@ func (s *Server) serve(ctx context.Context, clientIP net.IP, req *dns.Msg) *dns.
 		Type:   "pass",
 		At:     time.Now(),
 		Client: clientIP.String(),
-		Domain: q.Name,
+		Domain: domain,
 		IPs:    ips,
 	})
 	return out

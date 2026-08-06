@@ -195,6 +195,16 @@ func (c *Cache) Do(ctx context.Context, k string, fn func() (*dns.Msg, error)) (
 	return v.(*dns.Msg), nil
 }
 
+// Purge drops every cached response. It is used when the blocklist changes so
+// answers cached while a domain was allowed are not served after it is (re)
+// blocked, and vice versa.
+func (c *Cache) Purge() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.items = make(map[string]*entry)
+	c.lru.Init()
+}
+
 // Len returns the number of cached entries.
 func (c *Cache) Len() int {
 	c.mu.RLock()

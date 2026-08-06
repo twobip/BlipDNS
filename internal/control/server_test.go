@@ -11,6 +11,7 @@ import (
 	"github.com/twobip/BlipDNS/internal/blocklist"
 	"github.com/twobip/BlipDNS/internal/cache"
 	"github.com/twobip/BlipDNS/internal/filter"
+	"github.com/miekg/dns"
 )
 
 func TestSetBlocklistEndpoint(t *testing.T) {
@@ -26,6 +27,17 @@ func TestSetBlocklistEndpoint(t *testing.T) {
 	req, _ := http.NewRequest(http.MethodPut, ts.URL+"/api/v1/blocklist", bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer tok")
 	req.Header.Set("Content-Type", "application/json")
+
+	// A populated cache must be dropped by the blocklist update.
+	m := new(dns.Msg)
+	m.SetQuestion("a.com.", dns.TypeA)
+	m.Answer = []dns.RR{&dns.A{Hdr: dns.RR_Header{Name: "a.com.", Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60}, A: []byte{1, 2, 3, 4}}}
+	k := cache.Key(m)
+	c.Set(k, m)
+	if c.Len() != 1 {
+		t.Fatalf("precondition: cache Len = %d, want 1", c.Len())
+	}
+
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -39,6 +51,9 @@ func TestSetBlocklistEndpoint(t *testing.T) {
 	}
 	if bl.IsBlocked("seed.example.com") {
 		t.Error("old entries should have been replaced")
+	}
+	if c.Len() != 0 {
+		t.Errorf("cache Len after blocklist update = %d, want 0 (stale responses must be purged)", c.Len())
 	}
 
 	// stats should now report the active blocklist.

@@ -296,6 +296,11 @@ func (s *Server) handleBlocklist(w http.ResponseWriter, r *http.Request) {
 	}
 	s.blocklist.FromDomains(req.Domains)
 	s.blocklist.SetAllowed(req.Allowed)
+	// A new blocklist can flip domains between blocked and allowed, so drop
+	// any cached responses that were resolved under the old list.
+	if s.cache != nil {
+		s.cache.Purge()
+	}
 	if s.blocklistCachePath != "" {
 		path := s.blocklistCachePath
 		go func() {

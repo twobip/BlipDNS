@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/twobip/BlipDNS/internal/blocklist"
 	"github.com/twobip/BlipDNS/internal/cache"
 	"github.com/twobip/BlipDNS/internal/filter"
 	"github.com/twobip/BlipDNS/internal/upstream"
@@ -64,6 +65,26 @@ func TestServeBlocks(t *testing.T) {
 	resp := srv.serve(context.Background(), net.ParseIP("10.0.0.1"), q)
 	if resp.Rcode != dns.RcodeNameError {
 		t.Errorf("blocked query rc=%d want NXDOMAIN", resp.Rcode)
+	}
+}
+
+// The wire format carries the root dot ("google.com."); logs and watch events
+// must show the bare domain.
+func TestServeStripsRootDotFromLoggedDomain(t *testing.T) {
+	srv, _ := newTestServer(t)
+	srv.cfg.Blocklist = blocklist.New()
+	srv.cfg.Blocklist.FromDomains([]string{"blocked.test"})
+	var got string
+	srv.logfn = func(_client, domain string) { got = domain }
+
+	q := new(dns.Msg)
+	q.SetQuestion("blocked.test.", dns.TypeA)
+	resp := srv.serve(context.Background(), net.ParseIP("10.0.0.1"), q)
+	if resp.Rcode != dns.RcodeNameError {
+		t.Fatalf("blocked query rc=%d want NXDOMAIN", resp.Rcode)
+	}
+	if got != "blocked.test" {
+		t.Errorf("logged domain = %q, want %q (root dot must be stripped)", got, "blocked.test")
 	}
 }
 
