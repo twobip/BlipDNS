@@ -278,8 +278,12 @@
           <div class="panel" style="border-style:dashed; border-color:var(--border-2); background:transparent">
             <div class="panel-body">
               <h3 style="margin:0 0 6px">Reset &amp; destroy</h3>
-              <p class="muted" style="font-size:13px">Remove an instance from the fleet. Destructive — no undo.</p>
-              <button class="btn btn-danger" id="s-reset-demo" disabled>Manage via Instances page</button>
+              <p class="muted" style="font-size:13px">Maintenance actions. Destructive — no undo.</p>
+              <div style="display:flex; flex-direction:column; gap:8px; align-items:flex-start">
+                <button class="btn" id="s-reset-stats">Reset statistics</button>
+                <button class="btn" id="s-clear-querylog">Clear query logs</button>
+                <button class="btn btn-danger" id="s-reset-demo" disabled>Manage via Instances page</button>
+              </div>
             </div>
           </div>
         </div>

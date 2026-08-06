@@ -255,6 +255,20 @@ func counterDelta(cur, prev uint64) uint64 {
 	return cur
 }
 
+// ClearQueryLog deletes all query log entries.
+func (s *QueryLogStore) ClearQueryLog(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM query_log`)
+	return err
+}
+
+// ClearStatsSamples deletes all aggregated statistics samples, resetting the
+// dashboard totals and charts. The next sample written by an instance becomes
+// a fresh baseline (deltas are computed between consecutive samples).
+func (s *QueryLogStore) ClearStatsSamples(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM stats_samples`)
+	return err
+}
+
 // cleanupLoop removes old query log entries (24h) and stats samples (1 month).
 func (s *QueryLogStore) cleanupLoop() {
 	ticker := time.NewTicker(1 * time.Hour)

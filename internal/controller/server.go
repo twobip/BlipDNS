@@ -41,6 +41,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/instances/", api(s.handleInstance)) // /add /delete /policies /policy /adopt /adopt/status /adopt/reset /label /query-log
 	mux.HandleFunc("/api/queries", api(s.handleQueries))     // query log
 	mux.HandleFunc("/api/stats", api(s.handleStats))         // aggregated query stats for graphs
+	mux.HandleFunc("/api/maintenance", api(s.handleMaintenance)) // POST reset_stats / clear_query_log
 	mux.HandleFunc("/api/events", api(s.handleEvents))
 	mux.HandleFunc("/api/health", api(s.handleHealth))
 	mux.HandleFunc("/api/settings", api(s.handleSettings)) // fleet-wide default config
@@ -398,6 +399,46 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, agg)
+}
+
+// handleMaintenance handles destructive maintenance actions: reset_stats
+// (clear + re-baseline aggregated statistics) and clear_query_log.
+func (s *Server) handleMaintenance(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		Action string `json:"action"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	switch req.Action {
+	case "reset_stats":
+		if s.fleet.queryLog == nil {
+			http.Error(w, "query log not available", http.StatusServiceUnavailable)
+			return
+		}
+		if err := s.fleet.queryLog.ClearStatsSamples(r.Context()); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	case "clear_query_log":
+		if s.fleet.queryLog == nil {
+			http.Error(w, "query log not available", http.StatusServiceUnavailable)
+			return
+		}
+		if err := s.fleet.queryLog.ClearQueryLog(r.Context()); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	default:
+		http.Error(w, "unknown action", http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, map[string]bool{"ok": true})
 }
 
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {

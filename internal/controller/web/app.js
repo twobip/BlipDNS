@@ -884,6 +884,24 @@ $("s-fetch").onclick = async () => {
   try { await API("/api/blocklist/sources", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ urls }) }); toast("fetching blocklist sources"); startBlStatusPoll(); }
   catch (e) { toast("failed: " + e.message, "err"); }
 };
+$("s-reset-stats").onclick = () => {
+  confirmDialog("Reset statistics?", "Clears all aggregated statistics and charts on the dashboard. Live per-instance counters are unaffected. This cannot be undone.", async () => {
+    try {
+      await API("/api/maintenance", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "reset_stats" }) });
+      toast("statistics reset");
+      if (current === "dashboard") fetchStats();
+    } catch (e) { toast("reset failed: " + e.message, "err"); }
+  });
+};
+$("s-clear-querylog").onclick = () => {
+  confirmDialog("Clear query logs?", "Removes every entry from the query log. This cannot be undone.", async () => {
+    try {
+      await API("/api/maintenance", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "clear_query_log" }) });
+      toast("query log cleared");
+      if (current === "queries") refresh();
+    } catch (e) { toast("clear failed: " + e.message, "err"); }
+  });
+};
 
 /* settings link from dashboard/overview */
 document.querySelectorAll("[data-goto]").forEach((a) => a.addEventListener("click", (e) => { e.preventDefault(); go(a.dataset.goto); }));
