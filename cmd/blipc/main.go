@@ -21,13 +21,14 @@ import (
 const version = "blipc/0.1.0"
 
 type config struct {
-	Listen            string                                  `yaml:"listen"`
-	Username          string                                  `yaml:"username"`
-	Password          string                                  `yaml:"password"`
-	DefaultPolicy     *control.Policy                         `yaml:"default_policy"`
-	InstanceOverrides map[string]*controller.InstanceOverride `yaml:"instance_overrides"`
-	BlocklistSources  []string                                `yaml:"blocklist_sources"`
-	Instances         []controller.InstanceConfig             `yaml:"instances"`
+	Listen               string                                  `yaml:"listen"`
+	Username             string                                  `yaml:"username"`
+	Password             string                                  `yaml:"password"`
+	DefaultPolicy        *control.Policy                         `yaml:"default_policy"`
+	InstanceOverrides    map[string]*controller.InstanceOverride `yaml:"instance_overrides"`
+	BlocklistSources     []string                                `yaml:"blocklist_sources"`
+	BlocklistUpdateHours int                                     `yaml:"blocklist_update_hours"`
+	Instances            []controller.InstanceConfig             `yaml:"instances"`
 }
 
 func main() {
@@ -68,9 +69,14 @@ func main() {
 	if err := fleet.LoadBlocklistCache(ctx); err != nil {
 		log.Printf("blipc: blocklist cache: %v", err)
 	}
+	fleet.LoadSourceStats(ctx)
+	if cfg.BlocklistUpdateHours > 0 {
+		fleet.SetAutoUpdateHours(cfg.BlocklistUpdateHours)
+	}
 	if len(cfg.BlocklistSources) > 0 {
 		fleet.SetBlocklistSources(ctx, cfg.BlocklistSources)
 	}
+	fleet.StartAutoUpdater()
 
 	srv := controller.NewServer(cfg.Username, cfg.Password, fleet, controller.UI())
 	httpSrv := &http.Server{

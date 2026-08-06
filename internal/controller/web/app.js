@@ -101,7 +101,7 @@ function go(page, push = true) {
   refresh();
   if (page === "instances") renderEvents();
   if (page === "settings") refreshSettings();
-  if (page === "blocklist") loadBlocklist();
+  if (page === "blocklist" || page === "filters") loadBlocklist();
   if (page === "filters") renderPolicies();
 }
 
@@ -119,6 +119,9 @@ function toast(msg, kind = "ok") {
 /* ---------- state ---------- */
 let instances = [];
 let blDomains = [];
+let blSourceStats = [];
+let blAutoHours = 0;
+let blNextUpdate = null;
 let chart = null;
 let chartRange = "1d";
 let sse = null, evLive = false;
@@ -449,8 +452,11 @@ async function loadBlocklist() {
     blDomains = d.domains || [];
     if (Array.isArray(d.sources)) blSources = d.sources.slice();
     if (d.status) blStatus = d.status;
+    blSourceStats = (d.status && d.status.source_stats) || [];
+    blAutoHours = (d.status && d.status.auto_update_hours) || 0;
+    blNextUpdate = (d.status && d.status.next_update) || null;
     renderBlocklist();
-    renderBlSources();
+    renderSources();
     renderBlStatus();
     if (blStatus.running) startBlStatusPoll();
   } catch (e) {}
@@ -462,7 +468,7 @@ function renderBlocklist() {
   const ul = $("bl-list");
   if (!list.length) {
     const hint = blStatus.domains > 2000 ? `${fmt(blStatus.domains)} blocked · showing first 2000` : "";
-    ul.innerHTML = `<div class="empty"><div class="empty-ic">${IC.block}</div><h4>Nothing blocked</h4><p>Add a domain or add sources like oisd.nl below.</p>${hint ? `<p class="hint">${hint}</p>` : ""}</div>`;
+    ul.innerHTML = `<div class="empty"><div class="empty-ic">${IC.block}</div><h4>Nothing blocked</h4><p>Add a domain above, or add list sources on the Blocklists page.</p>${hint ? `<p class="hint">${hint}</p>` : ""}</div>`;
     return;
   }
   const shown = list.slice(0, 500);
@@ -475,19 +481,40 @@ function renderBlocklist() {
     catch (e) { toast("remove failed", "err"); }
   });
 }
-function renderBlSources() {
-  const targets = [
-    [$("bl-sources"), "bl", (u) => removeSource(u)],
-    [$("s-bl-sources"), "s", null],
-  ];
-  for (const [el, _pfx, rm] of targets) {
-    if (!el) continue;
-    el.innerHTML = blSources.length
-      ? blSources.map((u) => `<div class="row" style="gap:8px"><span class="mono grow" title="${esc(u)}">${esc(u)}</span>${rm ? `<button class="icon-btn" data-rm-src="${esc(u)}" title="Remove source">${IC.x}</button>` : ""}</div>`).join("")
-      : `<span class="hint">No sources. Add a list URL above and hit Update now.</span>`;
+function renderSources() {
+  const tb = $("bl-src-tbody");
+  if (tb) {
+    if (!blSources.length) {
+      tb.innerHTML = `<tr class="empty-row"><td colspan="5"><div class="empty"><div class="empty-ic">${IC.block}</div><h4>No sources</h4><p>Add a list URL (AdBlock Plus or hosts format) above and hit Update now.</p></div></td></tr>`;
+    } else {
+      const byUrl = {};
+      blSourceStats.forEach((s) => byUrl[s.url] = s);
+      tb.innerHTML = blSources.map((u) => {
+        const s = byUrl[u] || {};
+        const n = s.domains || 0;
+        const err = s.error || "";
+        const upd = s.last_update ? relTime(s.last_update) : "—";
+        return `<tr>
+          <td class="mono" style="font-size:12px">${esc(u)}</td>
+          <td>${n ? fmt(n) : "—"}</td>
+          <td class="cell-sub">${upd}</td>
+          <td>${err ? `<span class="badge err" title="${esc(err)}">error</span>` : n ? `<span class="badge on">ok</span>` : `<span class="badge">new</span>`}</td>
+          <td style="text-align:right"><button class="icon-btn" data-rm-src="${esc(u)}" title="Remove source">${IC.x}</button></td>
+        </tr>`;
+      }).join("");
+    }
+    tb.querySelectorAll("[data-rm-src]").forEach((b) => b.onclick = () => removeSource(b.dataset.rmSrc));
   }
-  const blEl = $("bl-sources");
-  if (blEl) blEl.querySelectorAll("[data-rm-src]").forEach((b) => b.onclick = () => removeSource(b.dataset.rmSrc));
+  const sel = $("s-bl-sources");
+  if (sel) {
+    sel.innerHTML = blSources.length
+      ? blSources.map((u) => `<div class="row" style="gap:8px"><span class="mono grow" title="${esc(u)}">${esc(u)}</span></div>`).join("")
+      : `<span class="hint">No sources. Add them on the Blocklists page.</span>`;
+  }
+  const cnt = $("bl-src-count");
+  if (cnt) cnt.textContent = blSources.length ? `${blSources.length} source${blSources.length > 1 ? "s" : ""}` : "0";
+  const ah = $("bl-auto-hours");
+  if (ah) ah.value = blAutoHours || 0;
 }
 function renderBlStatus() {
   const st = $("bl-import-status");
@@ -498,20 +525,22 @@ function renderBlStatus() {
       st.innerHTML = `<b>Syncing…</b> ${blStatus.source_done || 0}/${n} ${esc(blStatus.current_url || "")} · <b>${fmt(blStatus.domains)}</b> domains`;
     } else if (blStatus.last_update) {
       const errs = (blStatus.errors || []).filter(Boolean).length;
-      st.innerHTML = `${blSources.length} source${blSources.length === 1 ? "" : "s"} · <b>${fmt(blStatus.domains)}</b> domains · updated ${esc(new Date(blStatus.last_update).toLocaleTimeString())}${errs ? ` · <span style="color:var(--danger)">${errs} error${errs > 1 ? "s" : ""}</span>` : ""}`;
+      let txt = `${blSources.length} source${blSources.length === 1 ? "" : "s"} · <b>${fmt(blStatus.domains)}</b> domains · updated ${esc(new Date(blStatus.last_update).toLocaleTimeString())}`;
+      if (blNextUpdate) txt += ` · auto next ${esc(new Date(blNextUpdate).toLocaleString())}`;
+      st.innerHTML = txt + (errs ? ` · <span style="color:var(--danger)">${errs} error${errs > 1 ? "s" : ""}</span>` : "");
     } else {
       st.innerHTML = "No sources yet. Add list URLs (AdBlock Plus or hosts format) and hit Update now.";
     }
   }
   if (badge) {
     if (blStatus.running) { badge.textContent = "syncing…"; badge.classList.add("accent"); }
-    else if (blSources.length) { badge.textContent = `${blSources.length} src · ${fmt(blStatus.domains)}`; badge.classList.remove("accent"); }
+    else if (blSources.length) { badge.textContent = `${blSources.length} src · ${fmt(blStatus.domains)}${blAutoHours ? " · " + blAutoHours + "h" : ""}`; badge.classList.remove("accent"); }
     else { badge.textContent = "off"; badge.classList.remove("accent"); }
   }
 }
 function removeSource(u) {
   blSources = blSources.filter((s) => s !== u);
-  renderBlSources();
+  renderSources();
 }
 function startBlStatusPoll() {
   if (blStatusTimer) return;
@@ -825,9 +854,19 @@ $("bl-url-add").onclick = () => {
   if (blSources.includes(u)) return toast("source already added", "err");
   blSources.push(u);
   $("bl-url-input").value = "";
-  renderBlSources();
+  renderSources();
 };
 $("bl-update").onclick = updateBlocklist;
+$("bl-auto-save").onclick = async () => {
+  const h = parseInt(($("bl-auto-hours") || {}).value ?? "0", 10);
+  if (isNaN(h) || h < 0) return toast("enter hours (0 = off)", "err");
+  try {
+    await API("/api/blocklist/sources", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ urls: blSources.filter((u) => u.trim()), auto_update_hours: h }) });
+    blAutoHours = h;
+    toast(h ? `auto-update every ${h}h` : "auto-update off");
+    loadBlocklist();
+  } catch (e) { toast("save failed: " + e.message, "err"); }
+};
 $("bl-filter").addEventListener("input", renderBlocklist);
 $("bl-export").onclick = () => window.open("/api/blocklist/export", "_blank");
 $("bl-clear").onclick = () => {

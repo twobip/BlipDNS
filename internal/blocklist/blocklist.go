@@ -39,10 +39,18 @@ type Progress struct {
 
 // LoadResult describes the outcome of loading one or more sources.
 type LoadResult struct {
-	Domains int      // total domains in the merged list
-	Sources int      // sources processed (total)
-	Failed  int      // sources that errored
-	Errors  []string // per-source errors ("" for ok, else "<url>: <err>")
+	Domains   int            // total domains in the merged list
+	Sources   int            // sources processed (total)
+	Failed    int            // sources that errored
+	Errors    []string       // per-source errors ("" for ok, else "<url>: <err>")
+	PerSource []SourceResult // per-source breakdown, in source order
+}
+
+// SourceResult describes the outcome of a single source fetch.
+type SourceResult struct {
+	URL     string // source URL
+	Domains int    // domains parsed from this source (before cross-list dedupe)
+	Err     string // "" on success, else the download/parse error
 }
 
 // Blocklist holds a set of domains to block.
@@ -232,13 +240,20 @@ func (b *Blocklist) LoadFromURLs(ctx context.Context, urls []string, opts *LoadO
 	merged := make(map[string]struct{})
 	res := &LoadResult{Sources: len(urls)}
 	for i, u := range urls {
-		err := fetchInto(ctx, u, merged)
+		per := SourceResult{URL: u}
+		set, err := FetchSource(ctx, u)
 		if err != nil {
 			res.Failed++
+			per.Err = err.Error()
 			res.Errors = append(res.Errors, fmt.Sprintf("%s: %v", u, err))
 		} else {
+			for d := range set {
+				merged[d] = struct{}{}
+			}
+			per.Domains = len(set)
 			res.Errors = append(res.Errors, "")
 		}
+		res.PerSource = append(res.PerSource, per)
 		if opts != nil && opts.Progress != nil {
 			opts.Progress(Progress{URL: u, Domains: len(merged), SourceDone: i + 1, SourceTotal: len(urls)})
 		}
@@ -260,40 +275,43 @@ type LoadOptions struct {
 	Progress func(Progress)
 }
 
-// fetchInto streams one source and adds every parsed domain to merged.
-func fetchInto(ctx context.Context, rawURL string, merged map[string]struct{}) error {
+// FetchSource fetches a single source (AdBlock Plus or hosts format) and
+// returns the parsed domains (and wildcard roots) as a set. An error is
+// returned only when the source could not be fetched or parsed at all.
+func FetchSource(ctx context.Context, rawURL string) (map[string]struct{}, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	req.Header.Set("User-Agent", "blipdns-blocklist/1.0 (+https://blipdns.local)")
 
 	client := &http.Client{Timeout: 2 * time.Minute}
 	resp, err := client.Do(req)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("unexpected status code %d", resp.StatusCode)
+		return nil, fmt.Errorf("unexpected status code %d", resp.StatusCode)
 	}
 
+	set := make(map[string]struct{})
 	sc := bufio.NewScanner(io.LimitReader(resp.Body, maxSourceBytes))
 	sc.Buffer(make([]byte, 64*1024), maxLineLen)
 	for sc.Scan() {
-		parseLine(sc.Text(), merged)
+		parseLine(sc.Text(), set)
 		if ctx.Err() != nil {
-			return ctx.Err()
+			return nil, ctx.Err()
 		}
 	}
 	if err := sc.Err(); err != nil {
-		return err
+		return nil, err
 	}
 	if ctx.Err() != nil {
-		return ctx.Err()
+		return nil, ctx.Err()
 	}
-	return nil
+	return set, nil
 }
 
 // parseLine extracts a domain (or wildcard root) from a single list line and

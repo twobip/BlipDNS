@@ -38,9 +38,9 @@ func (s *Server) Handler() http.Handler {
 		return s.requireAuth(h)
 	}
 	mux.HandleFunc("/api/instances", api(s.handleInstances))
-	mux.HandleFunc("/api/instances/", api(s.handleInstance)) // /add /delete /policies /policy /adopt /adopt/status /adopt/reset /label /query-log
-	mux.HandleFunc("/api/queries", api(s.handleQueries))     // query log
-	mux.HandleFunc("/api/stats", api(s.handleStats))         // aggregated query stats for graphs
+	mux.HandleFunc("/api/instances/", api(s.handleInstance))     // /add /delete /policies /policy /adopt /adopt/status /adopt/reset /label /query-log
+	mux.HandleFunc("/api/queries", api(s.handleQueries))         // query log
+	mux.HandleFunc("/api/stats", api(s.handleStats))             // aggregated query stats for graphs
 	mux.HandleFunc("/api/maintenance", api(s.handleMaintenance)) // POST reset_stats / clear_query_log
 	mux.HandleFunc("/api/events", api(s.handleEvents))
 	mux.HandleFunc("/api/health", api(s.handleHealth))
@@ -561,11 +561,15 @@ func (s *Server) handleBlocklistSources(w http.ResponseWriter, r *http.Request) 
 		})
 	case http.MethodPut, http.MethodPost:
 		var req struct {
-			URLs []string `json:"urls"`
+			URLs            []string `json:"urls"`
+			AutoUpdateHours *int     `json:"auto_update_hours"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
+		}
+		if req.AutoUpdateHours != nil {
+			s.fleet.SetAutoUpdateHours(*req.AutoUpdateHours)
 		}
 		urls := cleanURLs(req.URLs)
 		if len(urls) == 0 {

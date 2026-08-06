@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+	"time"
 )
 
 func TestBlocklistStoreRoundtrip(t *testing.T) {
@@ -54,5 +55,83 @@ func TestBlocklistStoreRoundtrip(t *testing.T) {
 	}
 	if n != 0 {
 		t.Errorf("Count after clear = %d, want 0", n)
+	}
+}
+
+func TestBlocklistStoreSourceSnapshots(t *testing.T) {
+	store, err := NewBlocklistStore(filepath.Join(t.TempDir(), "blocklist.db"))
+	if err != nil {
+		t.Fatalf("NewBlocklistStore: %v", err)
+	}
+	defer store.db.Close()
+
+	ctx := context.Background()
+	u1 := "https://example.invalid/a.txt"
+	u2 := "https://example.invalid/b.txt"
+
+	if err := store.ReplaceSourceDomains(ctx, u1, []string{"a.example.com", "b.example.net"}); err != nil {
+		t.Fatalf("ReplaceSourceDomains: %v", err)
+	}
+	// Replacing the same source must drop the previous snapshot.
+	if err := store.ReplaceSourceDomains(ctx, u1, []string{"a.example.com", "c.example.org"}); err != nil {
+		t.Fatalf("ReplaceSourceDomains 2: %v", err)
+	}
+	if err := store.ReplaceSourceDomains(ctx, u2, []string{"d.example.io"}); err != nil {
+		t.Fatalf("ReplaceSourceDomains u2: %v", err)
+	}
+
+	set, err := store.LoadSourceDomains(ctx, u1)
+	if err != nil {
+		t.Fatalf("LoadSourceDomains: %v", err)
+	}
+	if len(set) != 2 {
+		t.Fatalf("LoadSourceDomains returned %d, want 2", len(set))
+	}
+	if _, ok := set["c.example.org"]; !ok {
+		t.Error("c.example.org missing; snapshot was not replaced")
+	}
+	if _, ok := set["b.example.net"]; ok {
+		t.Error("b.example.net should have been dropped by replace")
+	}
+
+	lu := time.Now().UTC().Truncate(time.Second)
+	if err := store.ReplaceSourceMeta(ctx, SourceMeta{URL: u1, Domains: 2, LastUpdate: lu, Error: ""}); err != nil {
+		t.Fatalf("ReplaceSourceMeta: %v", err)
+	}
+	if err := store.ReplaceSourceMeta(ctx, SourceMeta{URL: u2, Domains: 1, LastUpdate: time.Time{}, Error: "boom"}); err != nil {
+		t.Fatalf("ReplaceSourceMeta u2: %v", err)
+	}
+
+	meta, err := store.LoadSourceMeta(ctx)
+	if err != nil {
+		t.Fatalf("LoadSourceMeta: %v", err)
+	}
+	if meta[u1].Domains != 2 || !meta[u1].LastUpdate.Equal(lu) || meta[u1].Error != "" {
+		t.Errorf("meta[u1] = %+v, want domains=2 / last_update=%v / no error", meta[u1], lu)
+	}
+	if meta[u2].Error != "boom" || !meta[u2].LastUpdate.IsZero() {
+		t.Errorf("meta[u2] = %+v, want error=boom / zero last_update", meta[u2])
+	}
+
+	// Pruning keeps only configured sources.
+	if err := store.PruneSources(ctx, []string{u2}); err != nil {
+		t.Fatalf("PruneSources: %v", err)
+	}
+	set, err = store.LoadSourceDomains(ctx, u1)
+	if err != nil {
+		t.Fatalf("LoadSourceDomains after prune: %v", err)
+	}
+	if len(set) != 0 {
+		t.Errorf("pruned source snapshot still present (%d domains)", len(set))
+	}
+	meta, err = store.LoadSourceMeta(ctx)
+	if err != nil {
+		t.Fatalf("LoadSourceMeta after prune: %v", err)
+	}
+	if _, ok := meta[u1]; ok {
+		t.Error("pruned source meta still present")
+	}
+	if meta[u2].Domains != 1 {
+		t.Errorf("kept source meta lost: %+v", meta[u2])
 	}
 }

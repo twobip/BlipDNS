@@ -169,6 +169,41 @@
 
       <!-- ================= BLOCKLIST ================= -->
       <section id="view-blocklist" class="view hidden">
+        <div class="panel">
+          <div class="panel-head"><h3>Blocklist Sources</h3><span class="spacer"></span><span class="badge accent" id="bl-src-count">0</span></div>
+          <div class="panel-body">
+            <div class="row">
+              <div class="search grow">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.6 3.8 5.7 3.8 9S14.5 18.4 12 21c-2.5-2.6-3.8-5.7-3.8-9S9.5 5.6 12 3z"/></svg>
+                <input class="input" id="bl-url-input" placeholder="https://big.oisd.nl/domainswild2"/>
+              </div>
+              <button class="btn" id="bl-url-add">+ Add source</button>
+            </div>
+            <div class="table-wrap" style="border:none; box-shadow:none">
+              <table class="tbl">
+                <thead><tr><th>Source URL</th><th style="width:90px">Domains</th><th style="width:150px">Last updated</th><th style="width:90px">Status</th><th style="width:40px"></th></tr></thead>
+                <tbody id="bl-src-tbody"></tbody>
+              </table>
+            </div>
+            <div class="divider mt"></div>
+            <div class="row mt" style="flex-wrap:wrap; gap:10px; align-items:center">
+              <div class="row" style="gap:6px">
+                <label class="hint" style="margin:0">Auto-update every</label>
+                <input class="input" id="bl-auto-hours" type="number" min="0" step="1" style="width:80px" value="0"/>
+                <span class="hint">h · 0 = off</span>
+                <button class="btn" id="bl-auto-save">Save</button>
+              </div>
+              <button class="btn btn-primary" id="bl-update">Update now</button>
+              <button class="btn" id="bl-export">Export .txt</button>
+              <button class="btn btn-danger" id="bl-clear">Clear all</button>
+              <span class="hint" id="bl-import-status">Fetch, merge and distribute the sources to every instance.</span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ================= DNS FILTERS ================= -->
+      <section id="view-filters" class="view hidden">
         <div class="grid grid-2">
           <div class="panel">
             <div class="panel-head"><h3>Add Domain</h3><span class="spacer"></span><span class="badge accent" id="bl-count">0</span></div>
@@ -180,29 +215,7 @@
                 </div>
                 <button class="btn btn-primary" id="bl-add">Add</button>
               </div>
-              <div class="divider mt"></div>
-              <div class="field mt">
-                <label>Blocklist sources <span class="faint">AdBlock Plus / hosts lists, Pi-hole style</span></label>
-                <div id="bl-sources"></div>
-                <div class="row">
-                  <div class="search grow">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7"/><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"/></svg>
-                    <input class="input" id="bl-url-input" placeholder="https://big.oisd.nl/domainswild2"/>
-                  </div>
-                  <button class="btn" id="bl-url-add">+ Add</button>
-                </div>
-                <div class="row mt">
-                  <button class="btn btn-primary" id="bl-update">
-                    <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 3v12m0 0 4-4m-4 4-4-4M4 21h16"/></svg>
-                    Update now
-                  </button>
-                  <span class="hint" id="bl-import-status">Fetch, merge and distribute the sources to every instance.</span>
-                </div>
-              </div>
-              <div class="row mt">
-                <button class="btn" id="bl-export">Export .txt</button>
-                <button class="btn btn-danger" id="bl-clear">Clear all</button>
-              </div>
+              <p class="muted" style="font-size:13px; margin-top:10px">Manually blocked domains are merged with the sources from the Blocklists page.</p>
             </div>
           </div>
 
@@ -216,10 +229,7 @@
             <ul class="list" id="bl-list" style="max-height:440px; overflow-y:auto"></ul>
           </div>
         </div>
-      </section>
 
-      <!-- ================= DNS FILTERS ================= -->
-      <section id="view-filters" class="view hidden">
         <div class="panel">
           <div class="panel-head"><h3>Per-Instance Policies</h3><span class="spacer"></span><span class="muted">Scope allow / block rules &amp; upstreams to specific networks</span></div>
           <div class="table-wrap" style="border:none; box-shadow:none">

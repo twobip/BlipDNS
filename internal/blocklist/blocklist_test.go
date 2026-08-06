@@ -323,3 +323,48 @@ func TestCacheRoundtrip(t *testing.T) {
 		t.Error("expected nil blocklist for missing cache file")
 	}
 }
+
+func TestLoadFromURLsPerSourceCounts(t *testing.T) {
+	listA := "||a.example.com^\n||b.example.com^\n"
+	listB := "||b.example.com^\n||c.example.com^\n||d.example.org^\n"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/a.txt":
+			io.WriteString(w, listA)
+		case "/b.txt":
+			io.WriteString(w, listB)
+		case "/bad":
+			http.Error(w, "boom", http.StatusInternalServerError)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	urls := []string{srv.URL + "/a.txt", srv.URL + "/b.txt", srv.URL + "/bad"}
+	b := New()
+	res, err := b.LoadFromURLs(context.Background(), urls, nil)
+	if err != nil {
+		t.Fatalf("LoadFromURLs: %v", err)
+	}
+	if res.Failed != 1 {
+		t.Fatalf("failed = %d, want 1", res.Failed)
+	}
+	// a.txt has 2 domains, b.txt has 3 (b.example.com overlaps), bad fails.
+	if len(res.PerSource) != 3 {
+		t.Fatalf("PerSource length = %d, want 3", len(res.PerSource))
+	}
+	if res.PerSource[0].Domains != 2 || res.PerSource[0].Err != "" {
+		t.Errorf("PerSource[0] = %+v, want 2 domains / no error", res.PerSource[0])
+	}
+	if res.PerSource[1].Domains != 3 || res.PerSource[1].Err != "" {
+		t.Errorf("PerSource[1] = %+v, want 3 domains / no error", res.PerSource[1])
+	}
+	if res.PerSource[2].Err == "" {
+		t.Errorf("PerSource[2] = %+v, want an error recorded", res.PerSource[2])
+	}
+	// Merged total dedupes the shared b.example.com: a(2)+b(3)-overlap(1) = 4.
+	if res.Domains != 4 {
+		t.Errorf("merged domains = %d, want 4", res.Domains)
+	}
+}

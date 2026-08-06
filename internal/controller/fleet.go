@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -77,6 +78,8 @@ type Fleet struct {
 	blGen            int
 	blCancel         context.CancelFunc
 	blStatus         BlocklistStatus
+	sourceStats      []SourceStat                 // per-source download stats, refreshed on import
+	autoUpdateHours  int                          // hours between automatic refreshes; 0 = manual only
 	configPath       string                       // path to controller config YAML (for persisting tokens)
 	defaultPolicy    *control.Policy              // fleet-wide default policy (source of truth)
 	overrides        map[string]*InstanceOverride // per-instance partial configs (diff vs default)
@@ -85,14 +88,27 @@ type Fleet struct {
 // BlocklistStatus is a point-in-time view of the controller's blocklist
 // sources, the current import job (if any), and the merged list state.
 type BlocklistStatus struct {
-	Running     bool      `json:"running"`
-	SourceTotal int       `json:"source_total"`
-	SourceDone  int       `json:"source_done"`
-	CurrentURL  string    `json:"current_url"`
-	Domains     int       `json:"domains"`
-	LastUpdate  time.Time `json:"last_update"`
-	Errors      []string  `json:"errors,omitempty"`
-	Sources     []string  `json:"sources"`
+	Running         bool         `json:"running"`
+	SourceTotal     int          `json:"source_total"`
+	SourceDone      int          `json:"source_done"`
+	CurrentURL      string       `json:"current_url"`
+	Domains         int          `json:"domains"`
+	LastUpdate      time.Time    `json:"last_update"`
+	Errors          []string     `json:"errors,omitempty"`
+	Sources         []string     `json:"sources"`
+	SourceStats     []SourceStat `json:"source_stats,omitempty"`
+	AutoUpdateHours int          `json:"auto_update_hours"`
+	NextUpdate      time.Time    `json:"next_update,omitempty"`
+}
+
+// SourceStat is the per-source download result: how many domains the source
+// contributes (last good count when the latest refresh failed), when it last
+// succeeded, and any error from the most recent attempt.
+type SourceStat struct {
+	URL        string    `json:"url"`
+	Domains    int       `json:"domains"`
+	LastUpdate time.Time `json:"last_update,omitempty"`
+	Error      string    `json:"error,omitempty"`
 }
 
 // NewFleet creates an empty fleet with a default event buffer.
@@ -556,8 +572,13 @@ func (f *Fleet) BlocklistStatus() BlocklistStatus {
 	defer f.blMu.Unlock()
 	st := f.blStatus
 	st.Sources = append([]string(nil), f.blocklistSources...)
+	st.SourceStats = append([]SourceStat(nil), f.sourceStats...)
+	st.AutoUpdateHours = f.autoUpdateHours
 	if !st.Running && f.blocklist != nil {
 		st.Domains = f.blocklist.Count()
+	}
+	if st.AutoUpdateHours > 0 && !st.LastUpdate.IsZero() {
+		st.NextUpdate = st.LastUpdate.Add(time.Duration(st.AutoUpdateHours) * time.Hour)
 	}
 	return st
 }
@@ -581,6 +602,81 @@ func (f *Fleet) SetBlocklistSources(ctx context.Context, urls []string) {
 // one is already running.
 func (f *Fleet) ImportBlocklist() {
 	f.startBlocklistImport()
+}
+
+// AutoUpdateHours returns the configured refresh interval in hours (0 = off).
+func (f *Fleet) AutoUpdateHours() int {
+	f.blMu.Lock()
+	defer f.blMu.Unlock()
+	return f.autoUpdateHours
+}
+
+// SetAutoUpdateHours configures the interval (hours) between automatic source
+// refreshes and persists it to the controller config. 0 disables auto-updates.
+func (f *Fleet) SetAutoUpdateHours(h int) {
+	if h < 0 {
+		h = 0
+	}
+	f.blMu.Lock()
+	f.autoUpdateHours = h
+	f.blMu.Unlock()
+	if f.configPath != "" {
+		if err := f.saveConfig(); err != nil {
+			log.Printf("blipc: warning: failed to persist blocklist auto-update hours: %v", err)
+		}
+	}
+}
+
+// StartAutoUpdater runs a background loop that refreshes the blocklist sources
+// on the configured interval. It never cancels an in-flight import and skips
+// while one is running, so manual and automatic refreshes can't collide.
+func (f *Fleet) StartAutoUpdater() {
+	go func() {
+		t := time.NewTicker(1 * time.Minute)
+		defer t.Stop()
+		for range t.C {
+			due := false
+			f.blMu.Lock()
+			if f.autoUpdateHours > 0 && len(f.blocklistSources) > 0 && !f.blRunning {
+				last := f.blStatus.LastUpdate
+				if last.IsZero() || time.Since(last) >= time.Duration(f.autoUpdateHours)*time.Hour {
+					due = true
+				}
+			}
+			f.blMu.Unlock()
+			if due {
+				f.startBlocklistImport()
+			}
+		}
+	}()
+}
+
+// LoadSourceStats restores the persisted per-source download metadata into
+// memory so the UI can show counts, errors and last-updates immediately after
+// a restart, before the background import finishes.
+func (f *Fleet) LoadSourceStats(ctx context.Context) {
+	if f.blocklistDB == nil {
+		return
+	}
+	m, err := f.blocklistDB.LoadSourceMeta(ctx)
+	if err != nil {
+		log.Printf("blipc: warning: load blocklist source stats: %v", err)
+		return
+	}
+	f.blMu.Lock()
+	ordered := make([]SourceStat, 0, len(m))
+	for _, u := range f.blocklistSources {
+		if meta, ok := m[u]; ok {
+			ordered = append(ordered, SourceStat{URL: meta.URL, Domains: meta.Domains, LastUpdate: meta.LastUpdate, Error: meta.Error})
+			delete(m, u)
+		}
+	}
+	for url, meta := range m {
+		ordered = append(ordered, SourceStat{URL: url, Domains: meta.Domains, LastUpdate: meta.LastUpdate, Error: meta.Error})
+	}
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i].URL < ordered[j].URL })
+	f.sourceStats = ordered
+	f.blMu.Unlock()
 }
 
 // LoadBlocklistCache restores the last persisted merged list into RAM at
@@ -647,8 +743,11 @@ func (f *Fleet) startBlocklistImport() {
 // runBlocklistImport fetches and merges all sources, then distributes the
 // merged list to every instance. Runs in the background so a huge list (e.g.
 // oisd.big) never blocks the web UI. gen lets a superseding import claim the
-// status while an older one winds down.
+// status while an older one winds down. A source that fails to download falls
+// back to its last good snapshot in the local DB, so a flaky source never
+// wipes its domains out of the merged list.
 func (f *Fleet) runBlocklistImport(ctx context.Context, gen int) {
+	applied := false
 	current := func() bool {
 		f.blMu.Lock()
 		defer f.blMu.Unlock()
@@ -663,7 +762,9 @@ func (f *Fleet) runBlocklistImport(ctx context.Context, gen int) {
 		f.blCancel = nil
 		f.blStatus.Running = false
 		f.blStatus.Domains = f.blocklist.Count()
-		f.blStatus.LastUpdate = f.now()
+		if applied {
+			f.blStatus.LastUpdate = f.now()
+		}
 		f.blMu.Unlock()
 		f.bus.Publish(Event{Type: "status", At: f.now(), Msg: "blocklist update finished"})
 	}()
@@ -672,39 +773,109 @@ func (f *Fleet) runBlocklistImport(ctx context.Context, gen int) {
 	if len(urls) == 0 {
 		f.blMu.Lock()
 		f.blStatus.Errors = []string{"no blocklist sources configured"}
+		f.sourceStats = nil
 		f.blMu.Unlock()
-		// Clear the list on every instance too (sources were dropped).
+		// Clear the list and the stored source snapshots on every instance too.
+		if f.blocklistDB != nil {
+			_ = f.blocklistDB.PruneSources(context.Background(), nil)
+		}
 		f.pushBlocklist(context.Background())
 		f.persistBlocklist()
 		return
 	}
-	res, err := f.blocklist.LoadFromURLs(ctx, urls, &blocklist.LoadOptions{
-		Progress: func(p blocklist.Progress) {
-			if !current() {
-				return
+
+	prevMeta := map[string]SourceMeta{}
+	if f.blocklistDB != nil {
+		if m, err := f.blocklistDB.LoadSourceMeta(ctx); err == nil {
+			prevMeta = m
+		}
+	}
+
+	merged := make(map[string]struct{})
+	stats := make([]SourceStat, 0, len(urls))
+	failed := 0
+	for i, u := range urls {
+		if !current() {
+			return
+		}
+		st := SourceStat{URL: u}
+		set, ferr := blocklist.FetchSource(ctx, u)
+		if ferr != nil {
+			failed++
+			st.Error = ferr.Error()
+			// Fall back to the last good snapshot from the local DB.
+			if f.blocklistDB != nil {
+				if dbSet, derr := f.blocklistDB.LoadSourceDomains(ctx, u); derr == nil && len(dbSet) > 0 {
+					for d := range dbSet {
+						merged[d] = struct{}{}
+					}
+					st.Domains = len(dbSet)
+				}
 			}
-			f.blMu.Lock()
-			f.blStatus.CurrentURL = p.URL
-			f.blStatus.SourceDone = p.SourceDone
-			f.blStatus.SourceTotal = p.SourceTotal
-			f.blStatus.Domains = p.Domains
-			f.blMu.Unlock()
-		},
-	})
+			if prev, ok := prevMeta[u]; ok {
+				st.LastUpdate = prev.LastUpdate
+				if st.Domains == 0 {
+					st.Domains = prev.Domains
+				}
+			}
+		} else {
+			for d := range set {
+				merged[d] = struct{}{}
+			}
+			st.Domains = len(set)
+			st.LastUpdate = f.now()
+			if f.blocklistDB != nil {
+				domains := make([]string, 0, len(set))
+				for d := range set {
+					domains = append(domains, d)
+				}
+				if err := f.blocklistDB.ReplaceSourceDomains(ctx, u, domains); err != nil {
+					log.Printf("blipc: warning: persist blocklist source snapshot: %v", err)
+				}
+			}
+		}
+		if f.blocklistDB != nil {
+			if err := f.blocklistDB.ReplaceSourceMeta(ctx, SourceMeta{
+				URL:        u,
+				Domains:    st.Domains,
+				LastUpdate: st.LastUpdate,
+				Error:      st.Error,
+			}); err != nil {
+				log.Printf("blipc: warning: persist blocklist source meta: %v", err)
+			}
+		}
+		stats = append(stats, st)
+		if !current() {
+			return
+		}
+		f.blMu.Lock()
+		f.blStatus.CurrentURL = u
+		f.blStatus.SourceDone = i + 1
+		f.blStatus.SourceTotal = len(urls)
+		f.blStatus.Domains = len(merged)
+		f.sourceStats = append([]SourceStat(nil), stats...)
+		f.blMu.Unlock()
+	}
+
 	if !current() {
 		return
 	}
 	f.blMu.Lock()
-	if err != nil {
-		f.blStatus.Errors = append(f.blStatus.Errors, err.Error())
-	}
-	if res != nil {
-		f.blStatus.Errors = append(f.blStatus.Errors, res.Errors...)
+	if len(merged) == 0 {
+		f.blStatus.Errors = append(f.blStatus.Errors, fmt.Sprintf("no domains fetched from any source (%d failed)", failed))
+		f.sourceStats = append([]SourceStat(nil), stats...)
+		f.blMu.Unlock()
+		return // keep the last good merged list untouched
 	}
 	f.blMu.Unlock()
 
-	if res == nil || res.Domains == 0 {
-		return
+	f.blocklist.FromDomainsMap(merged)
+	applied = true
+	// Drop snapshots/metadata for sources that are no longer configured.
+	if f.blocklistDB != nil {
+		if err := f.blocklistDB.PruneSources(ctx, urls); err != nil {
+			log.Printf("blipc: warning: prune blocklist source data: %v", err)
+		}
 	}
 	// Persist the merged list so a controller restart loads it into RAM
 	// instantly instead of re-fetching every source.
@@ -828,13 +999,14 @@ func (f *Fleet) saveConfig() error {
 	}
 
 	type fullConfig struct {
-		Listen           string                       `yaml:"listen"`
-		Username         string                       `yaml:"username"`
-		Password         string                       `yaml:"password"`
-		DefaultPolicy    *control.Policy              `yaml:"default_policy"`
-		InstancePolicies map[string]*InstanceOverride `yaml:"instance_overrides"`
-		BlocklistSources []string                     `yaml:"blocklist_sources"`
-		Instances        []InstanceConfig             `yaml:"instances"`
+		Listen               string                       `yaml:"listen"`
+		Username             string                       `yaml:"username"`
+		Password             string                       `yaml:"password"`
+		DefaultPolicy        *control.Policy              `yaml:"default_policy"`
+		InstancePolicies     map[string]*InstanceOverride `yaml:"instance_overrides"`
+		BlocklistSources     []string                     `yaml:"blocklist_sources"`
+		BlocklistUpdateHours int                          `yaml:"blocklist_update_hours"`
+		Instances            []InstanceConfig             `yaml:"instances"`
 	}
 
 	var cfg fullConfig
@@ -855,10 +1027,12 @@ func (f *Fleet) saveConfig() error {
 	overs := f.overrides
 	f.mu.RUnlock()
 	blSources := f.BlocklistSources()
+	autoHours := f.AutoUpdateHours()
 	cfg.Instances = instances
 	cfg.DefaultPolicy = def
 	cfg.InstancePolicies = overs
 	cfg.BlocklistSources = blSources
+	cfg.BlocklistUpdateHours = autoHours
 
 	out, err := yaml.Marshal(cfg)
 	if err != nil {
