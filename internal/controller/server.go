@@ -473,7 +473,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleBlocklist(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		domains := s.fleet.Blocklist().List()
+		domains := s.fleet.ManualDomains()
 		if lim := r.URL.Query().Get("limit"); lim != "" {
 			if n, err := strconv.Atoi(lim); err == nil && n > 0 && len(domains) > n {
 				domains = domains[:n]
@@ -481,6 +481,7 @@ func (s *Server) handleBlocklist(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, map[string]interface{}{
 			"domains": domains,
+			"total":   s.fleet.Blocklist().Count(),
 			"sources": s.fleet.BlocklistSources(),
 			"status":  s.fleet.BlocklistStatus(),
 		})
@@ -496,8 +497,7 @@ func (s *Server) handleBlocklist(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "domain required", http.StatusBadRequest)
 			return
 		}
-		s.fleet.Blocklist().Add(req.Domain)
-		s.fleet.persistBlocklist()
+		s.fleet.AddManualDomain(req.Domain)
 		writeJSON(w, map[string]string{"ok": "added"})
 	case http.MethodDelete:
 		var req struct {
@@ -511,8 +511,7 @@ func (s *Server) handleBlocklist(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "domain required", http.StatusBadRequest)
 			return
 		}
-		s.fleet.Blocklist().Remove(req.Domain)
-		s.fleet.persistBlocklist()
+		s.fleet.RemoveManualDomain(req.Domain)
 		writeJSON(w, map[string]string{"ok": "removed"})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -564,6 +563,7 @@ func (s *Server) handleBlocklistSources(w http.ResponseWriter, r *http.Request) 
 		var req struct {
 			URLs            []string `json:"urls"`
 			AutoUpdateHours *int     `json:"auto_update_hours"`
+			ClearManual     bool     `json:"clear_manual"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -577,6 +577,9 @@ func (s *Server) handleBlocklistSources(w http.ResponseWriter, r *http.Request) 
 			// Saving an empty source list clears the blocklist.
 			s.fleet.SetBlocklistSources(r.Context(), nil)
 			s.fleet.Blocklist().FromDomains(nil)
+			if req.ClearManual {
+				s.fleet.ClearManualDomains()
+			}
 			s.fleet.persistBlocklist()
 			writeJSON(w, map[string]interface{}{"ok": true, "count": 0})
 			return

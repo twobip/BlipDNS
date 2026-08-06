@@ -464,18 +464,13 @@ async function loadBlocklist() {
 function renderBlocklist() {
   const f = ($("bl-filter")?.value || "").toLowerCase();
   const list = blDomains.filter((d) => !f || d.includes(f));
-  $("bl-count").textContent = blStatus.domains || blDomains.length;
+  $("bl-count").textContent = fmt(blDomains.length);
   const ul = $("bl-list");
   if (!list.length) {
-    const hint = blStatus.domains > 2000 ? `${fmt(blStatus.domains)} blocked · showing first 2000` : "";
-    ul.innerHTML = `<div class="empty"><div class="empty-ic">${IC.block}</div><h4>Nothing blocked</h4><p>Add a domain above, or add list sources on the Blocklists page.</p>${hint ? `<p class="hint">${hint}</p>` : ""}</div>`;
+    ul.innerHTML = `<div class="empty"><div class="empty-ic">${IC.block}</div><h4>No custom blocked domains</h4><p>Domains added here are blocked in addition to the list sources on the Blocklists page.</p></div>`;
     return;
   }
-  const shown = list.slice(0, 500);
-  ul.innerHTML = shown.map((d) => `<li><span class="mono grow">${esc(d)}</span><button class="icon-btn" data-rm="${esc(d)}" title="Remove">${IC.trash}</button></li>`).join("");
-  if (list.length > shown.length) {
-    ul.insertAdjacentHTML("beforeend", `<li class="muted" style="padding:8px 12px">showing ${shown.length} of ${fmt(list.length)} (filter to narrow)</li>`);
-  }
+  ul.innerHTML = list.map((d) => `<li><span class="mono grow">${esc(d)}</span><button class="icon-btn" data-rm="${esc(d)}" title="Remove">${IC.trash}</button></li>`).join("");
   ul.querySelectorAll("[data-rm]").forEach((b) => b.onclick = async () => {
     try { await API("/api/blocklist", { method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ domain: b.dataset.rm }) }); toast("removed " + b.dataset.rm); loadBlocklist(); }
     catch (e) { toast("remove failed", "err"); }
@@ -892,9 +887,9 @@ $("bl-auto-save").onclick = async () => {
 $("bl-filter").addEventListener("input", renderBlocklist);
 $("bl-export").onclick = () => window.open("/api/blocklist/export", "_blank");
 $("bl-clear").onclick = () => {
-  confirmDialog("Clear entire blocklist?", "This removes every blocked domain and drops all sources. This cannot be undone.", async () => {
+  confirmDialog("Clear entire blocklist?", "This removes every blocked domain, drops all sources, and deletes custom domains. This cannot be undone.", async () => {
     try {
-      await API("/api/blocklist/sources", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ urls: [] }) });
+      await API("/api/blocklist/sources", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ urls: [], clear_manual: true }) });
       blSources = [];
       toast("cleared blocklist"); loadBlocklist();
     } catch (e) { toast("clear failed", "err"); }

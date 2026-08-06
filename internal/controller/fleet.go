@@ -80,6 +80,7 @@ type Fleet struct {
 	blStatus         BlocklistStatus
 	sourceStats      []SourceStat                 // per-source download stats, refreshed on import
 	importLog        []string                     // recent import output lines (capped ring buffer)
+	manualDomains    map[string]struct{}          // hand-added domains, kept apart from sources
 	autoUpdateHours  int                          // hours between automatic refreshes; 0 = manual only
 	configPath       string                       // path to controller config YAML (for persisting tokens)
 	defaultPolicy    *control.Policy              // fleet-wide default policy (source of truth)
@@ -118,15 +119,16 @@ func NewFleet(configPath string) *Fleet {
 	queryLog, _ := NewQueryLogStore("/var/lib/blipc/querylog.db")
 	blocklistDB, _ := NewBlocklistStore("/var/lib/blipc/blocklist.db")
 	return &Fleet{
-		instances:   make(map[string]*Instance),
-		bus:         NewBus(500),
-		http:        &http.Client{Timeout: 10 * time.Second},
-		now:         time.Now,
-		queryLog:    queryLog,
-		blocklistDB: blocklistDB,
-		blocklist:   blocklist.New(),
-		configPath:  configPath,
-		overrides:   make(map[string]*InstanceOverride),
+		instances:     make(map[string]*Instance),
+		bus:           NewBus(500),
+		http:          &http.Client{Timeout: 10 * time.Second},
+		now:           time.Now,
+		queryLog:      queryLog,
+		blocklistDB:   blocklistDB,
+		blocklist:     blocklist.New(),
+		configPath:    configPath,
+		overrides:     make(map[string]*InstanceOverride),
+		manualDomains: make(map[string]struct{}),
 	}
 }
 
@@ -682,6 +684,110 @@ func (f *Fleet) LoadSourceStats(ctx context.Context) {
 	f.blMu.Unlock()
 }
 
+// LoadManualDomains restores the hand-added domains at startup so they survive
+// both restarts and the fresh source import that follows one.
+func (f *Fleet) LoadManualDomains(ctx context.Context) {
+	if f.blocklistDB == nil {
+		return
+	}
+	m, err := f.blocklistDB.LoadManualDomains(ctx)
+	if err != nil {
+		log.Printf("blipc: warning: load manual blocklist: %v", err)
+		return
+	}
+	f.blMu.Lock()
+	f.manualDomains = m
+	f.blMu.Unlock()
+}
+
+// AddManualDomain blocks a domain entered by hand in the UI. It takes effect
+// immediately on the in-memory list (so the next reconcile pushes it to the
+// instances) and is persisted separately, so future source imports keep it.
+func (f *Fleet) AddManualDomain(domain string) {
+	d := blocklist.NormalizeDomain(domain)
+	if d == "" {
+		return
+	}
+	f.blMu.Lock()
+	f.manualDomains[d] = struct{}{}
+	f.blMu.Unlock()
+	f.blocklist.Add(d)
+	f.persistManual()
+	f.persistBlocklist()
+}
+
+// RemoveManualDomain unblocks a hand-entered domain. A domain that was never
+// added by hand is left untouched in the merged list.
+func (f *Fleet) RemoveManualDomain(domain string) {
+	d := blocklist.NormalizeDomain(domain)
+	if d == "" {
+		return
+	}
+	f.blMu.Lock()
+	if _, ok := f.manualDomains[d]; !ok {
+		f.blMu.Unlock()
+		return
+	}
+	delete(f.manualDomains, d)
+	f.blMu.Unlock()
+	f.blocklist.Remove(d)
+	f.persistManual()
+	f.persistBlocklist()
+}
+
+// ManualDomains returns the sorted list of hand-added domains.
+func (f *Fleet) ManualDomains() []string {
+	f.blMu.Lock()
+	defer f.blMu.Unlock()
+	out := make([]string, 0, len(f.manualDomains))
+	for d := range f.manualDomains {
+		out = append(out, d)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// manualDomainSet returns a copy of the manual set, so an import can merge the
+// hand-added domains with fresh source data without racing the map.
+func (f *Fleet) manualDomainSet() map[string]struct{} {
+	f.blMu.Lock()
+	defer f.blMu.Unlock()
+	out := make(map[string]struct{}, len(f.manualDomains))
+	for d := range f.manualDomains {
+		out[d] = struct{}{}
+	}
+	return out
+}
+
+// ClearManualDomains removes every hand-added domain.
+func (f *Fleet) ClearManualDomains() {
+	f.blMu.Lock()
+	manual := make([]string, 0, len(f.manualDomains))
+	for d := range f.manualDomains {
+		manual = append(manual, d)
+	}
+	f.manualDomains = make(map[string]struct{})
+	f.blMu.Unlock()
+	for _, d := range manual {
+		f.blocklist.Remove(d)
+	}
+	f.persistManual()
+	f.persistBlocklist()
+}
+
+// persistManual snapshots the hand-added domains to the local DB in the
+// background.
+func (f *Fleet) persistManual() {
+	if f.blocklistDB == nil {
+		return
+	}
+	go func() {
+		if err := f.blocklistDB.ReplaceManualDomains(context.Background(), f.ManualDomains()); err != nil {
+			log.Printf("blipc: warning: persist manual blocklist: %v", err)
+		}
+	}()
+}
+
 // LoadBlocklistCache restores the last persisted merged list into RAM at
 // startup, so a restart blocks immediately without re-fetching sources, and
 // pushes it to instances so they are covered even before a fresh import.
@@ -822,7 +928,10 @@ func (f *Fleet) runBlocklistImport(ctx context.Context, gen int) {
 		}
 	}
 
-	merged := make(map[string]struct{})
+	merged := f.manualDomainSet()
+	if len(merged) > 0 {
+		f.logImport("seeding %d manually added domain(s)", len(merged))
+	}
 	stats := make([]SourceStat, 0, len(urls))
 	failed := 0
 	for i, u := range urls {

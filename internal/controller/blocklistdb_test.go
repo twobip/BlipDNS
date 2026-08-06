@@ -58,6 +58,112 @@ func TestBlocklistStoreRoundtrip(t *testing.T) {
 	}
 }
 
+func TestBlocklistStoreManualDomains(t *testing.T) {
+	store, err := NewBlocklistStore(filepath.Join(t.TempDir(), "blocklist.db"))
+	if err != nil {
+		t.Fatalf("NewBlocklistStore: %v", err)
+	}
+	defer store.db.Close()
+
+	ctx := context.Background()
+	if err := store.ReplaceManualDomains(ctx, []string{"ads.example.com", "manual.net"}); err != nil {
+		t.Fatalf("ReplaceManualDomains: %v", err)
+	}
+	set, err := store.LoadManualDomains(ctx)
+	if err != nil {
+		t.Fatalf("LoadManualDomains: %v", err)
+	}
+	if len(set) != 2 {
+		t.Fatalf("LoadManualDomains returned %d, want 2", len(set))
+	}
+	if _, ok := set["ads.example.com"]; !ok {
+		t.Error("ads.example.com missing from manual set")
+	}
+
+	// Replacing must drop the previous set.
+	if err := store.ReplaceManualDomains(ctx, []string{"new.example.org"}); err != nil {
+		t.Fatalf("ReplaceManualDomains 2: %v", err)
+	}
+	set, err = store.LoadManualDomains(ctx)
+	if err != nil {
+		t.Fatalf("LoadManualDomains 2: %v", err)
+	}
+	if !reflect.DeepEqual(set, map[string]struct{}{"new.example.org": {}}) {
+		t.Errorf("unexpected manual set: %v", set)
+	}
+
+	// Empty clears.
+	if err := store.ReplaceManualDomains(ctx, nil); err != nil {
+		t.Fatalf("ReplaceManualDomains empty: %v", err)
+	}
+	set, err = store.LoadManualDomains(ctx)
+	if err != nil {
+		t.Fatalf("LoadManualDomains empty: %v", err)
+	}
+	if len(set) != 0 {
+		t.Errorf("manual set not cleared: %v", set)
+	}
+}
+
+func TestFleetManualDomainsSurviveImport(t *testing.T) {
+	fleet := NewFleet(filepath.Join(t.TempDir(), "blipc.yaml"))
+
+	fleet.AddManualDomain("custom.example.com")
+	fleet.AddManualDomain("ALSO.example.com") // normalized on insert
+	if got := fleet.ManualDomains(); !reflect.DeepEqual(got, []string{"also.example.com", "custom.example.com"}) {
+		t.Fatalf("ManualDomains() = %v, want sorted normalized list", got)
+	}
+
+	// An import seeds the manual set into the merged list.
+	merged := fleet.manualDomainSet()
+	for _, d := range []string{"src.example.net", "src2.example.net"} {
+		merged[d] = struct{}{}
+	}
+	fleet.Blocklist().FromDomainsMap(merged)
+	if !fleet.Blocklist().IsBlocked("custom.example.com") {
+		t.Error("manual domain missing after simulated import merge")
+	}
+	if !fleet.Blocklist().IsBlocked("also.example.com") {
+		t.Error("normalized manual domain missing after import merge")
+	}
+	if !fleet.Blocklist().IsBlocked("src.example.net") {
+		t.Error("source domain missing after import merge")
+	}
+
+	// Removing a manual domain keeps source domains intact.
+	fleet.RemoveManualDomain("custom.example.com")
+	if got := fleet.ManualDomains(); !reflect.DeepEqual(got, []string{"also.example.com"}) {
+		t.Fatalf("ManualDomains after remove = %v", got)
+	}
+	if fleet.Blocklist().IsBlocked("custom.example.com") {
+		t.Error("removed manual domain still blocked")
+	}
+	if !fleet.Blocklist().IsBlocked("also.example.com") {
+		t.Error("remaining manual domain lost")
+	}
+	if !fleet.Blocklist().IsBlocked("src.example.net") {
+		t.Error("source domain lost on manual remove")
+	}
+
+	// Removing a domain that was never manual is a no-op.
+	fleet.RemoveManualDomain("src.example.net")
+	if !fleet.Blocklist().IsBlocked("src.example.net") {
+		t.Error("non-manual domain was removed")
+	}
+
+	// Clear wipes only the manual subset from the merged list.
+	fleet.ClearManualDomains()
+	if got := fleet.ManualDomains(); len(got) != 0 {
+		t.Fatalf("manual set not cleared: %v", got)
+	}
+	if fleet.Blocklist().IsBlocked("also.example.com") {
+		t.Error("manual domain survived clear")
+	}
+	if !fleet.Blocklist().IsBlocked("src2.example.net") {
+		t.Error("source domain lost on manual clear")
+	}
+}
+
 func TestBlocklistStoreSourceSnapshots(t *testing.T) {
 	store, err := NewBlocklistStore(filepath.Join(t.TempDir(), "blocklist.db"))
 	if err != nil {

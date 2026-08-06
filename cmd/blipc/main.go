@@ -69,6 +69,7 @@ func main() {
 	if err := fleet.LoadBlocklistCache(ctx); err != nil {
 		log.Printf("blipc: blocklist cache: %v", err)
 	}
+	fleet.LoadManualDomains(ctx)
 	fleet.LoadSourceStats(ctx)
 	if cfg.BlocklistUpdateHours > 0 {
 		fleet.SetAutoUpdateHours(cfg.BlocklistUpdateHours)

@@ -413,6 +413,11 @@ func isHostsIP(line string) bool {
 	return false
 }
 
+// NormalizeDomain returns a lowercase domain with trailing dot removed, or ""
+// if the input is not a valid domain. Exposed so the controller can key its
+// manual-domain store on the same normalized form the blocklist uses.
+func NormalizeDomain(s string) string { return normalizeDomain(s) }
+
 // normalizeDomain returns a lowercase domain with trailing dot removed.
 // It returns empty string if the input is empty or not a valid domain.
 func normalizeDomain(s string) string {

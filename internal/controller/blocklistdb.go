@@ -46,6 +46,9 @@ CREATE TABLE IF NOT EXISTS blocklist_source_meta (
 	domains    INTEGER NOT NULL DEFAULT 0,
 	last_update TEXT,
 	error      TEXT
+);
+CREATE TABLE IF NOT EXISTS blocklist_manual (
+	domain TEXT PRIMARY KEY
 );`); err != nil {
 		return nil, fmt.Errorf("create blocklist source schema: %w", err)
 	}
@@ -99,6 +102,48 @@ func (s *BlocklistStore) Count(ctx context.Context) (int, error) {
 	var n int
 	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM blocklist`).Scan(&n)
 	return n, err
+}
+
+// ReplaceManualDomains replaces the stored set of hand-added domains. An empty
+// list clears them.
+func (s *BlocklistStore) ReplaceManualDomains(ctx context.Context, domains []string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM blocklist_manual`); err != nil {
+		return err
+	}
+	stmt, err := tx.PrepareContext(ctx, `INSERT INTO blocklist_manual (domain) VALUES (?)`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	for _, d := range domains {
+		if _, err := stmt.ExecContext(ctx, d); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+// LoadManualDomains returns the stored set of hand-added domains.
+func (s *BlocklistStore) LoadManualDomains(ctx context.Context) (map[string]struct{}, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT domain FROM blocklist_manual`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string]struct{})
+	for rows.Next() {
+		var d string
+		if err := rows.Scan(&d); err != nil {
+			return nil, err
+		}
+		out[d] = struct{}{}
+	}
+	return out, rows.Err()
 }
 
 // SourceMeta is the persisted per-source download metadata (count, last
