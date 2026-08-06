@@ -124,6 +124,9 @@ func (s *Server) withSecurityHeaders(next http.Handler) http.Handler {
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("X-Frame-Options", "DENY")
 		h.Set("Referrer-Policy", "no-referrer")
+		// Defense-in-depth: DoH is binary (application/dns-message), never
+		// HTML, so a restrictive CSP makes any future error-page mistake inert.
+		h.Set("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'")
 		next.ServeHTTP(w, r)
 	})
 }

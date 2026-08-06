@@ -41,6 +41,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("blipc: %v", err)
 	}
+	warnConfigPerms(*cfgPath)
 	if cfg.Username == "" {
 		cfg.Username = os.Getenv("BLIPC_USER")
 	}
@@ -126,4 +127,23 @@ func load(path string) (*config, error) {
 		return nil, err
 	}
 	return c, nil
+}
+
+// warnConfigPerms logs a warning if the config file is group- or world-readable,
+// since it holds the admin password and per-instance tokens.
+func warnConfigPerms(path string) {
+	if path == "" {
+		return
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			log.Printf("blipc: cannot stat config %s: %v", path, err)
+		}
+		return
+	}
+	m := fi.Mode().Perm()
+	if m&0o077 != 0 {
+		log.Printf("blipc: WARNING: config file %s is group/world-accessible (mode %04o); it may contain credentials. Use `chmod 600 %s`.", path, m, path)
+	}
 }

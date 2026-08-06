@@ -41,6 +41,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("blipd: %v", err)
 	}
+	warnConfigPerms(*cfgPath)
 
 	store := filter.NewStore(cfg.Default)
 	for _, p := range cfg.Policies {
@@ -198,4 +199,23 @@ func dohScheme(cfg *config.Config) string {
 		return "https"
 	}
 	return "http"
+}
+
+// warnConfigPerms logs a warning if the config file is group- or world-readable,
+// since it may contain credentials. blipd's config holds the admin_token.
+func warnConfigPerms(path string) {
+	if path == "" {
+		return
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			log.Printf("blipd: cannot stat config %s: %v", path, err)
+		}
+		return
+	}
+	m := fi.Mode().Perm()
+	if m&0o077 != 0 {
+		log.Printf("blipd: WARNING: config file %s is group/world-accessible (mode %04o); it may contain the admin token. Use `chmod 600 %s`.", path, m, path)
+	}
 }

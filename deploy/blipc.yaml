@@ -1,8 +1,24 @@
 listen: "0.0.0.0:8500"
-# Auth for the web UI / API. Empty = OPEN (no auth) — convenient for testing
-# or a trusted management VLAN. Set a secret here (or via BLIPC_TOKEN) for
-# production; the UI is then accessed with ?token=<secret>.
-token: ""
+# Auth for the web UI / API. blipc uses username/password session auth: you log
+# in once via the web UI (or /api/login) and receive an HttpOnly + SameSite=Strict
+# cookie. Empty username/password = OPEN (no auth) — convenient for testing or
+# a trusted management VLAN. Set a username + one of the password options below
+# for production.
+username: "admin"
+# Password may be either a BCRYPT HASH (recommended — keeps the plaintext out of
+# the config file) or a plaintext password (hashed in-memory at startup).
+# Generate a hash, e.g.:
+#   htpasswd -bnBC 10 "" "your-password" | tr -d ':\n'
+# then use `password_hash` (preferred). If `password_hash` is set it wins.
+password: ""            # plaintext — only for local testing / first boot
+# password_hash: "$2b$10$..."   # bcrypt hash — use this in production
+# Optional env overrides: BLIPC_USER, BLIPC_PASS, BLIPC_PASS_HASH
+
+# Fleet-wide plain-HTTP DoH listener. blipd already serves DoH over HTTPS on its
+# doh_addr (self-signed cert). Set this to also listen for plain-text HTTP DoH
+# (e.g. "0.0.0.0:8445") so non-TLS clients can reach it. "" = off. Per-instance
+# overrides can be set from the Settings -> DoH panel.
+doh_http_addr: ""
 # Fleet-wide default policy (upstreams etc.). blipc is the source of truth:
 # it persists this and distributes it to every blipd instance on save, and to
 # instances as they come online / are adopted. Edited from the web UI too.
