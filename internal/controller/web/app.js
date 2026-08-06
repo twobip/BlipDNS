@@ -993,12 +993,15 @@ $("q-tbody").addEventListener("click", (e) => {
   const c = e.target.closest("[data-copy]"); if (!c) return;
   copyText(c.dataset.copy);
 });
-document.querySelectorAll("#q-action-seg button").forEach((b) => b.onclick = () => {
-  document.querySelectorAll("#q-action-seg button").forEach((x) => x.classList.remove("active"));
-  b.classList.add("active");
-  qState.action = b.dataset.a;
+// setQueryAction updates the query-log action filter ("" = all, "PASS",
+// "BLOCK") and the highlighted segment button, then re-renders. Used by the
+// segment buttons and by dashboard links that deep-link into a filtered view.
+function setQueryAction(action) {
+  qState.action = action;
+  document.querySelectorAll("#q-action-seg button").forEach((x) => x.classList.toggle("active", x.dataset.a === action));
   renderQueries();
-});
+}
+document.querySelectorAll("#q-action-seg button").forEach((b) => b.onclick = () => setQueryAction(b.dataset.a));
 
 /* clients */
 $("c-instance").addEventListener("change", (e) => { cState.inst = e.target.value; renderClients(); });
@@ -1136,7 +1139,11 @@ $("s-clear-querylog").onclick = () => {
 };
 
 /* settings link from dashboard/overview */
-document.querySelectorAll("[data-goto]").forEach((a) => a.addEventListener("click", (e) => { e.preventDefault(); go(a.dataset.goto); }));
+document.querySelectorAll("[data-goto]").forEach((a) => a.addEventListener("click", (e) => {
+  e.preventDefault();
+  if (a.dataset.gotoAction) setQueryAction(a.dataset.gotoAction);
+  go(a.dataset.goto);
+}));
 
 /* ---------- live polling ---------- */
 loadBlocklist();

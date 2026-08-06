@@ -55,7 +55,7 @@
       <!-- ================= DASHBOARD ================= -->
       <section id="view-dashboard" class="view">
         <div class="grid grid-4">
-          <div class="stat">
+          <div class="stat" data-goto="queries" role="link" title="View query log" style="cursor:pointer">
             <div class="stat-icon i-blue">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 20h20M6 16V8m6 8V4m6 12v-6"/></svg>
             </div>
@@ -63,7 +63,7 @@
             <div class="stat-value" id="d-queries">—</div>
             <div class="stat-sub">across all instances · <span id="d-range-hint">1 day</span></div>
           </div>
-          <div class="stat">
+          <div class="stat" data-goto="queries" data-goto-action="BLOCK" role="link" title="View blocked queries" style="cursor:pointer">
             <div class="stat-icon i-red">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="m9 9 6 6m0-6-6 6"/></svg>
             </div>
@@ -79,7 +79,7 @@
             <div class="stat-value" id="d-errors">—</div>
             <div class="stat-sub">failed upstream requests</div>
           </div>
-          <div class="stat">
+          <div class="stat" data-goto="instances" role="link" title="View instances" style="cursor:pointer">
             <div class="stat-icon i-green">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 7.5h.01M7 16.5h.01"/></svg>
             </div>
