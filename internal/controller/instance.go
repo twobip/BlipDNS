@@ -228,13 +228,15 @@ func (i *Instance) watch(ctx context.Context) {
 			// Also log block/pass events to query log
 			if (e.Type == "block" || e.Type == "pass") && i.fleet.queryLog != nil {
 				_ = i.fleet.queryLog.Insert(ctx, QueryLogEntry{
-					Timestamp: e.At,
-					Instance:  i.Config.Label,
-					Client:    e.Client,
-					Domain:    e.Domain,
-					Action:    strings.ToUpper(e.Type), // "BLOCK" or "PASS"
-					Upstream:  "",
-					IPs:       e.IPs,
+					Timestamp:  e.At,
+					Instance:   i.Config.Label,
+					Client:     e.Client,
+					Domain:     e.Domain,
+					Action:     strings.ToUpper(e.Type), // "BLOCK" or "PASS"
+					Upstream:   "",
+					IPs:        e.IPs,
+					DurationUs: e.DurationUs,
+					Cached:     e.Cached,
 				})
 			}
 		})

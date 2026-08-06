@@ -72,6 +72,10 @@ type WatchEvent struct {
 	Client string         `json:"client,omitempty"`
 	Domain string         `json:"domain,omitempty"`
 	IPs    []string       `json:"ips,omitempty"`
+	// DurationUs is how long the query took to answer, in microseconds.
+	// Cached reports whether the answer was served from the response cache.
+	DurationUs int64 `json:"duration_us,omitempty"`
+	Cached     bool  `json:"cached,omitempty"`
 }
 
 // ---- adoption (claim-code bootstrap) ----

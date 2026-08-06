@@ -98,6 +98,55 @@ func TestCoalesce(t *testing.T) {
 	}
 }
 
+func TestDoHitReportsCacheSource(t *testing.T) {
+	c := New(time.Hour, 0)
+	calls := 0
+	fn := func() (*dns.Msg, error) {
+		calls++
+		return mkMsg("a.test", 60), nil
+	}
+	// First call must miss and fetch.
+	_, cached, err := c.DoHit(context.Background(), "k", fn)
+	if err != nil || cached {
+		t.Errorf("first DoHit: cached=%v err=%v, want miss", cached, err)
+	}
+	// Second call must be served from cache.
+	_, cached, err = c.DoHit(context.Background(), "k", fn)
+	if err != nil || !cached {
+		t.Errorf("second DoHit: cached=%v err=%v, want hit", cached, err)
+	}
+	if calls != 1 {
+		t.Errorf("expected 1 upstream call, got %d", calls)
+	}
+}
+
+func TestDoHitCoalescedWaiterIsMiss(t *testing.T) {
+	c := New(time.Hour, 0)
+	fn := func() (*dns.Msg, error) {
+		time.Sleep(20 * time.Millisecond)
+		return mkMsg("a.test", 60), nil
+	}
+	var cacheds []bool
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, cached, _ := c.DoHit(context.Background(), "k", fn)
+			mu.Lock()
+			cacheds = append(cacheds, cached)
+			mu.Unlock()
+		}()
+	}
+	wg.Wait()
+	for _, cached := range cacheds {
+		if cached {
+			t.Error("coalesced waiter reported as cache hit, want miss")
+		}
+	}
+}
+
 func TestEvictLeastRecentlyUsed(t *testing.T) {
 	c := New(time.Hour, 2)
 	c.Set("k1", mkMsg("a.test", 60))

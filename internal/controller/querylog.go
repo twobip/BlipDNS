@@ -25,6 +25,10 @@ type QueryLogEntry struct {
 	Action    string    `json:"action"`
 	Upstream  string    `json:"upstream,omitempty"`
 	IPs       []string  `json:"ips,omitempty"`
+	// DurationUs is how long the query took to answer, in microseconds.
+	// Cached reports whether the answer was served from the response cache.
+	DurationUs int64 `json:"duration_us,omitempty"`
+	Cached     bool  `json:"cached"`
 }
 
 // TimeSeriesPoint represents a single point in a time series
@@ -83,7 +87,9 @@ func NewQueryLogStore(dbPath string) (*QueryLogStore, error) {
 		domain TEXT NOT NULL,
 		action TEXT NOT NULL,
 		upstream TEXT,
-		ips TEXT
+		ips TEXT,
+		duration_us INTEGER,
+		cached INTEGER
 	);
 	CREATE INDEX IF NOT EXISTS idx_query_log_timestamp ON query_log(timestamp);
 	CREATE INDEX IF NOT EXISTS idx_query_log_instance ON query_log(instance);
@@ -100,8 +106,14 @@ func NewQueryLogStore(dbPath string) (*QueryLogStore, error) {
 	if _, err := db.Exec(schema); err != nil {
 		return nil, fmt.Errorf("create schema: %w", err)
 	}
-	// Add ips column to existing databases (no-op if already present)
-	_, _ = db.Exec("ALTER TABLE query_log ADD COLUMN ips TEXT")
+	// Add columns to existing databases (no-ops if already present)
+	for _, col := range []string{
+		"ALTER TABLE query_log ADD COLUMN ips TEXT",
+		"ALTER TABLE query_log ADD COLUMN duration_us INTEGER",
+		"ALTER TABLE query_log ADD COLUMN cached INTEGER",
+	} {
+		_, _ = db.Exec(col)
+	}
 
 	// Start cleanup goroutine
 	store := &QueryLogStore{db: db}
@@ -113,15 +125,19 @@ func NewQueryLogStore(dbPath string) (*QueryLogStore, error) {
 // Insert adds a new query log entry
 func (s *QueryLogStore) Insert(ctx context.Context, e QueryLogEntry) error {
 	ips := strings.Join(e.IPs, ",")
+	cached := 0
+	if e.Cached {
+		cached = 1
+	}
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO query_log (timestamp, instance, client, domain, action, upstream, ips) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		e.Timestamp, e.Instance, e.Client, e.Domain, e.Action, e.Upstream, ips)
+		`INSERT INTO query_log (timestamp, instance, client, domain, action, upstream, ips, duration_us, cached) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		e.Timestamp, e.Instance, e.Client, e.Domain, e.Action, e.Upstream, ips, e.DurationUs, cached)
 	return err
 }
 
 // Query returns entries within the time range
 func (s *QueryLogStore) Query(ctx context.Context, instance, filter string, since time.Time, limit int) ([]QueryLogEntry, error) {
-	query := `SELECT id, timestamp, instance, client, domain, action, upstream, ips FROM query_log WHERE timestamp >= ? AND domain != 'health_check'`
+	query := `SELECT id, timestamp, instance, client, domain, action, upstream, ips, duration_us, cached FROM query_log WHERE timestamp >= ? AND domain != 'health_check'`
 	args := []interface{}{since}
 
 	if instance != "" {
@@ -150,13 +166,16 @@ func (s *QueryLogStore) Query(ctx context.Context, instance, filter string, sinc
 		var e QueryLogEntry
 		var ts string
 		var ips sql.NullString
-		if err := rows.Scan(&e.ID, &ts, &e.Instance, &e.Client, &e.Domain, &e.Action, &e.Upstream, &ips); err != nil {
+		var dur, cached sql.NullInt64
+		if err := rows.Scan(&e.ID, &ts, &e.Instance, &e.Client, &e.Domain, &e.Action, &e.Upstream, &ips, &dur, &cached); err != nil {
 			return nil, err
 		}
 		e.Timestamp = parseQueryTS(ts)
 		if ips.Valid && ips.String != "" {
 			e.IPs = strings.Split(ips.String, ",")
 		}
+		e.DurationUs = dur.Int64
+		e.Cached = cached.Valid && cached.Int64 != 0
 		results = append(results, e)
 	}
 	return results, rows.Err()

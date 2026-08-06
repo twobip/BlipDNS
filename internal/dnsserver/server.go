@@ -157,6 +157,7 @@ func (s *Server) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
 
 // serve is the unified query path: filter -> cache -> upstream.
 func (s *Server) serve(ctx context.Context, clientIP net.IP, req *dns.Msg) *dns.Msg {
+	start := time.Now()
 	s.cnt.AddQuery(clientIP.String())
 	resp := new(dns.Msg)
 	resp.SetReply(req)
@@ -175,6 +176,7 @@ func (s *Server) serve(ctx context.Context, clientIP net.IP, req *dns.Msg) *dns.
 		s.ctrl.Notify(control.WatchEvent{
 			Type: "block", At: time.Now(),
 			Client: clientIP.String(), Domain: domain,
+			DurationUs: time.Since(start).Microseconds(),
 		})
 		if s.logfn != nil {
 			s.logfn(clientIP.String(), domain)
@@ -189,6 +191,7 @@ func (s *Server) serve(ctx context.Context, clientIP net.IP, req *dns.Msg) *dns.
 		s.ctrl.Notify(control.WatchEvent{
 			Type: "block", At: time.Now(),
 			Client: clientIP.String(), Domain: domain,
+			DurationUs: time.Since(start).Microseconds(),
 		})
 		if log && s.logfn != nil {
 			s.logfn(clientIP.String(), domain)
@@ -214,7 +217,7 @@ func (s *Server) serve(ctx context.Context, clientIP net.IP, req *dns.Msg) *dns.
 	}
 
 	key := cache.Key(req)
-	out, err := s.cache.Do(ctx, key, func() (*dns.Msg, error) {
+	out, cached, err := s.cache.DoHit(ctx, key, func() (*dns.Msg, error) {
 		return resolver.Resolve(ctx, req)
 	})
 	if err != nil {
@@ -241,6 +244,9 @@ func (s *Server) serve(ctx context.Context, clientIP net.IP, req *dns.Msg) *dns.
 		Client: clientIP.String(),
 		Domain: domain,
 		IPs:    ips,
+		// Cached=true when the answer came from the response cache.
+		Cached:     cached,
+		DurationUs: time.Since(start).Microseconds(),
 	})
 	return out
 }

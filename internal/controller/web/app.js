@@ -385,7 +385,7 @@ async function renderQueries() {
     propsInstanceOptions();
     $("q-count").textContent = list.length + " entries (shown)";
     if (!list.length) {
-      tb.innerHTML = `<tr class="empty-row"><td colspan="6"><div class="empty"><div class="empty-ic">${IC.query}</div><h4>No queries</h4><p>Nothing matched in the last 24 hours.</p></div></td></tr>`;
+      tb.innerHTML = `<tr class="empty-row"><td colspan="7"><div class="empty"><div class="empty-ic">${IC.query}</div><h4>No queries</h4><p>Nothing matched in the last 24 hours.</p></div></td></tr>`;
       return;
     }
     tb.innerHTML = list.map((r) => {
@@ -404,13 +404,22 @@ async function renderQueries() {
         <td><span class="badge badge-action ${actionBadge}">${isBlock ? IC.block : action === "PASS" ? IC.arrow : ""}${actionLabel}</span></td>
         <td class="q-client"><span class="q-cicon">${IC.device}</span><span class="mono" title="${esc(r.client)}">${esc(r.client)}</span></td>
         <td class="q-ips">${ipsHtml(r.ips)}</td>
+        <td class="q-lat">${latencyHtml(r)}</td>
         <td class="q-inst"><span class="dot ${inst && inst.online ? "on" : "off"}"></span>${esc(inst ? (inst.label || inst.id) : r.instance)}</td>
       </tr>`;
     }).join("");
     tb.querySelectorAll(".t").forEach((t) => { t.textContent = timeAgo(t.dataset.t); });
   } catch (e) {
-    tb.innerHTML = `<tr class="empty-row"><td colspan="6"><div class="empty"><div class="empty-ic">${IC.warn}</div><h4>Query log unavailable</h4><p>${esc(e.message)}</p></div></td></tr>`;
+    tb.innerHTML = `<tr class="empty-row"><td colspan="7"><div class="empty"><div class="empty-ic">${IC.warn}</div><h4>Query log unavailable</h4><p>${esc(e.message)}</p></div></td></tr>`;
   }
+}
+
+// latencyHtml renders the answer latency and a cache badge for a query row.
+function latencyHtml(r) {
+  const dur = (r.duration_us == null) ? null : Number(r.duration_us);
+  const lat = dur == null ? "—" : dur < 1000 ? dur + "µs" : (dur / 1000).toFixed(1) + "ms";
+  const badge = r.cached ? `<span class="badge badge-action on" title="Served from cache">cache</span>` : "";
+  return badge + `<span class="muted mono" title="${dur == null ? "no timing data" : dur + " µs"}">${lat}</span>`;
 }
 function propsInstanceOptions() {
   const sel = $("q-instance");

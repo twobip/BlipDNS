@@ -7,6 +7,56 @@ import (
 	"time"
 )
 
+func TestQueryLogStoreRoundtrip(t *testing.T) {
+	store, err := NewQueryLogStore(filepath.Join(t.TempDir(), "querylog.db"))
+	if err != nil {
+		t.Fatalf("NewQueryLogStore: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	now := time.Now()
+	want := QueryLogEntry{
+		Timestamp:  now,
+		Instance:   "a",
+		Client:     "1.2.3.4",
+		Domain:     "example.com",
+		Action:     "PASS",
+		IPs:        []string{"9.9.9.9", "::1"},
+		DurationUs: 420,
+		Cached:     true,
+	}
+	if err := store.Insert(ctx, want); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+	entries, err := store.Query(ctx, "", "", time.Time{}, 100)
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("Query returned %d entries, want 1", len(entries))
+	}
+	got := entries[0]
+	if got.Domain != want.Domain || got.DurationUs != want.DurationUs || !got.Cached {
+		t.Errorf("roundtrip mismatch: duration_us=%d cached=%v, want %d/%v", got.DurationUs, got.Cached, want.DurationUs, want.Cached)
+	}
+	if len(got.IPs) != 2 || got.IPs[0] != "9.9.9.9" || got.IPs[1] != "::1" {
+		t.Errorf("roundtrip IPs = %v, want [9.9.9.9 ::1]", got.IPs)
+	}
+
+	// A block entry with no timing info must round-trip with zero values.
+	if err := store.Insert(ctx, QueryLogEntry{Timestamp: now.Add(time.Second), Instance: "a", Client: "1.2.3.4", Domain: "ads.test", Action: "BLOCK"}); err != nil {
+		t.Fatalf("Insert block: %v", err)
+	}
+	entries, err = store.Query(ctx, "", "", time.Time{}, 100)
+	if err != nil {
+		t.Fatalf("Query 2: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("Query returned %d entries, want 2", len(entries))
+	}
+}
+
 func TestQueryLogStoreMaintenance(t *testing.T) {
 	store, err := NewQueryLogStore(filepath.Join(t.TempDir(), "querylog.db"))
 	if err != nil {

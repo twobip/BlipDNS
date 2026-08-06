@@ -178,8 +178,16 @@ func (c *Cache) evictLocked() {
 // Do returns a cached response if present, otherwise runs fn (coalescing
 // concurrent identical requests) and caches the result.
 func (c *Cache) Do(ctx context.Context, k string, fn func() (*dns.Msg, error)) (*dns.Msg, error) {
+	m, _, err := c.DoHit(ctx, k, fn)
+	return m, err
+}
+
+// DoHit is like Do but also reports whether the response was served from a
+// cache hit rather than fetched just now. Requests coalesced behind a
+// concurrent identical fetch are reported as misses.
+func (c *Cache) DoHit(ctx context.Context, k string, fn func() (*dns.Msg, error)) (*dns.Msg, bool, error) {
 	if m, ok := c.Get(k); ok {
-		return m, nil
+		return m, true, nil
 	}
 	v, err, _ := c.group.Do(k, func() (interface{}, error) {
 		m, ferr := fn()
@@ -190,9 +198,9 @@ func (c *Cache) Do(ctx context.Context, k string, fn func() (*dns.Msg, error)) (
 		return m, nil
 	})
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	return v.(*dns.Msg), nil
+	return v.(*dns.Msg), false, nil
 }
 
 // Purge drops every cached response. It is used when the blocklist changes so
