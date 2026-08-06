@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/twobip/BlipDNS/internal/blocklist"
@@ -92,4 +93,112 @@ func TestSetBlocklistRequiresAuth(t *testing.T) {
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401", resp.StatusCode)
 	}
+}
+
+// fakeDoHController records every plain-HTTP DoH address it is asked to run.
+type fakeDoHController struct {
+	mu    sync.Mutex
+	addr  string
+	calls []string
+}
+
+func (f *fakeDoHController) SetDoHHTTPAddr(addr string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.addr = addr
+	f.calls = append(f.calls, addr)
+	return nil
+}
+
+func (f *fakeDoHController) DoHHTTPAddr() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.addr
+}
+
+func (f *fakeDoHController) snapshot() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]string, len(f.calls))
+	copy(out, f.calls)
+	return out
+}
+
+func TestDoHEndpoint(t *testing.T) {
+	bl := blocklist.New()
+	store := filter.NewStore(nil)
+	dc := &fakeDoHController{}
+	srv := NewServerWithBlocklist("tok", store, cache.New(0, 0), &Counters{}, "blipd/test", bl)
+	srv.SetDoHController(dc)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	// unauthenticated -> 401
+	req, _ := http.NewRequest(http.MethodPut, ts.URL+"/api/v1/doh", strings.NewReader(`{"http_addr":"0.0.0.0:8445"}`))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauth status = %d, want 401", resp.StatusCode)
+	}
+
+	authReq := func(method, body string) *http.Response {
+		req, _ := http.NewRequest(method, ts.URL+"/api/v1/doh", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer tok")
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp
+	}
+
+	// GET reports the (empty) current address.
+	resp = authReq(http.MethodGet, "")
+	var got map[string]string
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if got["http_addr"] != "" {
+		t.Errorf("initial http_addr = %q, want empty", got["http_addr"])
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET status = %d", resp.StatusCode)
+	}
+
+	// PUT enables plain HTTP DoH.
+	resp = authReq(http.MethodPut, `{"http_addr":"0.0.0.0:8445"}`)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("PUT status = %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+	if got := dc.snapshot(); len(got) != 1 || got[0] != "0.0.0.0:8445" {
+		t.Errorf("controller calls = %v, want [0.0.0.0:8445]", got)
+	}
+
+	// stats now report the address.
+	sreq, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/v1/stats", nil)
+	sreq.Header.Set("Authorization", "Bearer tok")
+	sresp, err := http.DefaultClient.Do(sreq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var st StatsResponse
+	if err := json.NewDecoder(sresp.Body).Decode(&st); err != nil {
+		t.Fatal(err)
+	}
+	sresp.Body.Close()
+	if st.DohHTTPAddr != "0.0.0.0:8445" {
+		t.Errorf("stats doh_http_addr = %q, want 0.0.0.0:8445", st.DohHTTPAddr)
+	}
+
+	// PUT with a bad address is rejected; the controller is left unchanged.
+	resp = authReq(http.MethodPut, `{"http_addr":"not-a-host"}`)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("bad addr status = %d, want 400", resp.StatusCode)
+	}
+	resp.Body.Close()
 }

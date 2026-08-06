@@ -3,7 +3,10 @@ package dnsserver
 import (
 	"context"
 	"encoding/base64"
+	"fmt"
+	"io"
 	"net"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
@@ -344,5 +347,104 @@ func TestDoHHandlerClientIDRouting(t *testing.T) {
 	}
 	if resp2.Rcode == dns.RcodeNameError {
 		t.Error("expected plain /dns-query not to be blocked")
+	}
+}
+
+func freePort(t *testing.T) string {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	_, port, err := net.SplitHostPort(l.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return "127.0.0.1:" + port
+}
+
+// dnsMsgB64 packs a query for name into base64url for the ?dns= param.
+func dnsMsgB64(t *testing.T, name string, qtype uint16) string {
+	t.Helper()
+	m := new(dns.Msg)
+	m.SetQuestion(name+".", qtype)
+	wire, err := m.Pack()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return base64.RawURLEncoding.EncodeToString(wire)
+}
+
+func TestSetDoHHTTPAddrStartStop(t *testing.T) {
+	srv, up := newTestServer(t)
+
+	addr := freePort(t)
+	if err := srv.SetDoHHTTPAddr(addr); err != nil {
+		t.Fatalf("start plain listener: %v", err)
+	}
+	if got := srv.DoHHTTPAddr(); got != addr {
+		t.Errorf("DoHHTTPAddr = %q, want %q", got, addr)
+	}
+
+	// A real DoH query over plain HTTP is answered (allowed.test resolves).
+	url := fmt.Sprintf("http://%s/dns-query?dns=%s", addr, dnsMsgB64(t, "allowed.test", dns.TypeA))
+	resp, err := http.Get(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("plain DoH query status = %d", resp.StatusCode)
+	}
+	var out dns.Msg
+	if err := out.Unpack(body); err != nil {
+		t.Fatalf("unpack: %v", err)
+	}
+	if up.calls != 1 {
+		t.Errorf("expected 1 upstream call, got %d", up.calls)
+	}
+
+	// Stopping the listener flips the reported address to "".
+	if err := srv.SetDoHHTTPAddr(""); err != nil {
+		t.Fatalf("stop plain listener: %v", err)
+	}
+	if got := srv.DoHHTTPAddr(); got != "" {
+		t.Errorf("DoHHTTPAddr after stop = %q, want empty", got)
+	}
+
+	// A second start/stop toggles cleanly (no port/stale-handle leak).
+	if err := srv.SetDoHHTTPAddr(addr); err != nil {
+		t.Fatalf("restart plain listener: %v", err)
+	}
+	if got := srv.DoHHTTPAddr(); got != addr {
+		t.Errorf("DoHHTTPAddr after restart = %q, want %q", got, addr)
+	}
+	if err := srv.SetDoHHTTPAddr(""); err != nil {
+		t.Fatalf("second stop: %v", err)
+	}
+}
+
+func TestSetDoHHTTPAddrRejectsBadAddr(t *testing.T) {
+	srv, _ := newTestServer(t)
+	if err := srv.SetDoHHTTPAddr("not-a-host"); err == nil {
+		t.Fatal("expected error for bad address, got nil")
+	}
+	if got := srv.DoHHTTPAddr(); got != "" {
+		t.Errorf("DoHHTTPAddr after failed set = %q, want empty", got)
+	}
+}
+
+func TestSetDoHHTTPAddrIdempotent(t *testing.T) {
+	srv, _ := newTestServer(t)
+	if err := srv.SetDoHHTTPAddr(""); err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.SetDoHHTTPAddr(""); err != nil {
+		t.Fatal(err)
 	}
 }

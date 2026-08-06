@@ -39,6 +39,9 @@ type StatsResponse struct {
 	Upstream       string            `json:"upstream,omitempty"`
 	BlocklistCount int               `json:"blocklist_count,omitempty"`
 	BlocklistHash  uint64            `json:"blocklist_hash,omitempty"`
+	// DohHTTPAddr is the additional plain-HTTP DoH listener address an
+	// instance accepts ("" = off). Lets the controller reconcile it.
+	DohHTTPAddr string `json:"doh_http_addr,omitempty"`
 }
 
 // ListResponse returns the default (nil ID indicates default) plus all policies.
@@ -49,6 +52,12 @@ type ListResponse struct {
 
 type SetPolicyRequest struct {
 	Policy Policy `json:"policy"`
+}
+
+// SetDoHRequest toggles the optional plain-HTTP DoH listener. An empty
+// http_addr disables it.
+type SetDoHRequest struct {
+	HTTPAddr string `json:"http_addr"`
 }
 
 // SetBlocklistRequest replaces the instance's global blocklist with the given

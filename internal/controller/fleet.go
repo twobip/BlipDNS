@@ -54,11 +54,14 @@ type InstanceOverride struct {
 	Upstream    *string `json:"upstream,omitempty" yaml:"upstream,omitempty"`
 	BlockAction *string `json:"block_action,omitempty" yaml:"block_action,omitempty"`
 	Log         *bool   `json:"log,omitempty" yaml:"log,omitempty"`
+	// DoHHTTPAddr, when set, makes this instance accept plain-HTTP DoH on the
+	// given addr ("" = off) instead of inheriting the fleet-wide setting.
+	DoHHTTPAddr *string `json:"doh_http_addr,omitempty" yaml:"doh_http_addr,omitempty"`
 }
 
 // IsEmpty reports whether the override changes nothing.
 func (o *InstanceOverride) IsEmpty() bool {
-	return o == nil || (o.Upstream == nil && o.BlockAction == nil && o.Log == nil)
+	return o == nil || (o.Upstream == nil && o.BlockAction == nil && o.Log == nil && o.DoHHTTPAddr == nil)
 }
 
 // Fleet holds all instances, the event bus, and the global blocklist.
@@ -86,6 +89,7 @@ type Fleet struct {
 	configPath       string                       // path to controller config YAML (for persisting tokens)
 	defaultPolicy    *control.Policy              // fleet-wide default policy (source of truth)
 	overrides        map[string]*InstanceOverride // per-instance partial configs (diff vs default)
+	dohHTTPAddr      string                       // fleet-wide plain-HTTP DoH address ("", off)
 }
 
 // BlocklistStatus is a point-in-time view of the controller's blocklist
@@ -347,6 +351,112 @@ func (f *Fleet) InstanceOverrides() map[string]*InstanceOverride {
 	return out
 }
 
+// DoHHTTPAddr returns the fleet-wide plain-HTTP DoH listener address ("" = off).
+func (f *Fleet) DoHHTTPAddr() string {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return f.dohHTTPAddr
+}
+
+// SetDoHDefault records the fleet-wide plain-HTTP DoH address without
+// distributing it. Used at startup from the controller config.
+func (f *Fleet) SetDoHDefault(addr string) {
+	f.mu.Lock()
+	f.dohHTTPAddr = addr
+	f.mu.Unlock()
+}
+
+// effectiveDoHHTTPAddr returns the plain-HTTP DoH address an instance should
+// run: its own override if set, otherwise the fleet-wide default.
+func (f *Fleet) effectiveDoHHTTPAddr(id string) string {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	if o := f.overrides[id]; o != nil && o.DoHHTTPAddr != nil {
+		return *o.DoHHTTPAddr
+	}
+	return f.dohHTTPAddr
+}
+
+// mergeOverride layers a partial override (the fields the caller wants to set)
+// on top of the existing one, preserving fields the caller did not send. This
+// keeps saving the upstream editor from wiping a previously saved DoH override
+// and vice-versa.
+func mergeOverride(existing, partial *InstanceOverride) *InstanceOverride {
+	if partial == nil {
+		return existing
+	}
+	if existing == nil {
+		return partial
+	}
+	merged := *existing
+	if partial.Upstream != nil {
+		merged.Upstream = partial.Upstream
+	}
+	if partial.BlockAction != nil {
+		merged.BlockAction = partial.BlockAction
+	}
+	if partial.Log != nil {
+		merged.Log = partial.Log
+	}
+	if partial.DoHHTTPAddr != nil {
+		merged.DoHHTTPAddr = partial.DoHHTTPAddr
+	}
+	return &merged
+}
+
+// SetDoHHTTPAddr records the fleet-wide plain-HTTP DoH address, persists it and
+// pushes it to every instance. Returns the per-instance outcome.
+func (f *Fleet) SetDoHHTTPAddr(ctx context.Context, addr string) map[string]string {
+	f.SetDoHDefault(addr)
+	if f.configPath != "" {
+		if err := f.saveConfig(); err != nil {
+			log.Printf("blipc: warning: failed to persist doh setting: %v", err)
+		}
+	}
+	return f.pushDoH(ctx)
+}
+
+// pushDoH distributes the effective plain-HTTP DoH address to every instance.
+func (f *Fleet) pushDoH(ctx context.Context) map[string]string {
+	f.mu.RLock()
+	insts := make([]*Instance, 0, len(f.instances))
+	for _, i := range f.instances {
+		insts = append(insts, i)
+	}
+	f.mu.RUnlock()
+	results := make(map[string]string, len(insts))
+	for _, i := range insts {
+		if !i.hasToken() {
+			results[i.Config.ID] = "not adopted"
+			continue
+		}
+		want := f.effectiveDoHHTTPAddr(i.Config.ID)
+		if err := i.ctl().SetDoHHTTPAddr(ctx, want); err != nil {
+			results[i.Config.ID] = err.Error()
+			continue
+		}
+		results[i.Config.ID] = "ok"
+	}
+	return results
+}
+
+// maybePushDoH converges an instance's plain-HTTP DoH listener to its fleet
+// default (or per-instance override) when the instance reports a divergent
+// value — e.g. after a restart it reverted to its own YAML.
+func (f *Fleet) maybePushDoH(ctx context.Context, i *Instance, reported *control.StatsResponse) {
+	want := f.effectiveDoHHTTPAddr(i.Config.ID)
+	rep := ""
+	if reported != nil {
+		rep = reported.DohHTTPAddr
+	}
+	if rep == want || !i.hasToken() {
+		return
+	}
+	if err := i.ctl().SetDoHHTTPAddr(ctx, want); err != nil {
+		log.Printf("blipc: reconcile doh for %s: %v", i.Config.ID, err)
+	}
+}
+
 // pushConfigs sends each instance's effective config to it and marks its
 // applied config hash on success.
 func (f *Fleet) pushConfigs(ctx context.Context) map[string]string {
@@ -376,7 +486,9 @@ func (f *Fleet) pushConfigs(ctx context.Context) map[string]string {
 }
 
 // pushInstance sends one instance's effective config to it. Used when a
-// per-instance override is saved. Returns a single-entry result map.
+// per-instance override is saved. Returns a single-entry result map. The DoH
+// address is always pushed (it can override even with no policy set); the
+// policy is pushed only when an effective one exists.
 func (f *Fleet) pushInstance(ctx context.Context, id string) map[string]string {
 	i := f.get(id)
 	if i == nil {
@@ -384,18 +496,24 @@ func (f *Fleet) pushInstance(ctx context.Context, id string) map[string]string {
 	}
 	f.mu.RLock()
 	eff, _ := f.effectivePolicy(id)
+	wantDoH := f.effectiveDoHHTTPAddr(id)
 	f.mu.RUnlock()
-	if eff == nil {
-		return map[string]string{id: "no config"}
-	}
+	res := map[string]string{id: "ok"}
 	if !i.hasToken() {
-		return map[string]string{id: "not adopted"}
+		res[id] = "not adopted"
+		return res
 	}
-	if err := i.ctl().SetPolicy(ctx, eff); err != nil {
-		return map[string]string{id: err.Error()}
+	if err := i.ctl().SetDoHHTTPAddr(ctx, wantDoH); err != nil {
+		res[id] = "doh: " + err.Error()
 	}
-	i.markConfigAppliedWith(f.appliedHashFor(id), eff.Upstream)
-	return map[string]string{id: "ok"}
+	if eff != nil {
+		if err := i.ctl().SetPolicy(ctx, eff); err != nil {
+			res[id] = err.Error()
+			return res
+		}
+		i.markConfigAppliedWith(f.appliedHashFor(id), eff.Upstream)
+	}
+	return res
 }
 
 // appliedHashFor returns the hash an instance should have applied right now.
@@ -1261,6 +1379,7 @@ func (f *Fleet) saveConfig() error {
 		Password             string                       `yaml:"password"`
 		DefaultPolicy        *control.Policy              `yaml:"default_policy"`
 		InstancePolicies     map[string]*InstanceOverride `yaml:"instance_overrides"`
+		DoHHTTPAddr          string                       `yaml:"doh_http_addr"`
 		BlocklistSources     []string                     `yaml:"blocklist_sources"`
 		BlocklistUpdateHours int                          `yaml:"blocklist_update_hours"`
 		Instances            []InstanceConfig             `yaml:"instances"`
@@ -1288,6 +1407,7 @@ func (f *Fleet) saveConfig() error {
 	cfg.Instances = instances
 	cfg.DefaultPolicy = def
 	cfg.InstancePolicies = overs
+	cfg.DoHHTTPAddr = f.DoHHTTPAddr()
 	cfg.BlocklistSources = blSources
 	cfg.BlocklistUpdateHours = autoHours
 

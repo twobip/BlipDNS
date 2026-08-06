@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -314,20 +315,53 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]interface{}{
 			"default_policy":     s.fleet.DefaultPolicy(),
 			"instance_overrides": s.fleet.InstanceOverrides(),
+			"doh_http_addr":      s.fleet.DoHHTTPAddr(),
 		})
 	case http.MethodPut:
 		var req struct {
-			Scope    string            `json:"scope"`
-			Policy   *control.Policy   `json:"default_policy"`
-			Instance string            `json:"instance"`
-			Override *InstanceOverride `json:"override"`
+			Scope       string            `json:"scope"`
+			Policy      *control.Policy   `json:"default_policy"`
+			Instance    string            `json:"instance"`
+			Override    *InstanceOverride `json:"override"`
+			DoHHTTPAddr *string           `json:"doh_http_addr"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		// Plain-HTTP DoH toggle (fleet-wide or per-instance), applied on its
+		// own so it can be saved independently of the upstream editor.
+		if req.DoHHTTPAddr != nil {
+			addr := *req.DoHHTTPAddr
+			if addr != "" {
+				if _, _, err := net.SplitHostPort(addr); err != nil {
+					http.Error(w, "invalid doh_http_addr: must be host:port", http.StatusBadRequest)
+					return
+				}
+			}
+			if req.Scope == "instance" && req.Instance != "" {
+				existing := s.fleet.InstanceOverrideOf(req.Instance)
+				merged := mergeOverride(existing, &InstanceOverride{DoHHTTPAddr: req.DoHHTTPAddr})
+				// empty address on an instance means "inherit the fleet-wide
+				// default": clear any previously set per-instance value.
+				if *req.DoHHTTPAddr == "" {
+					merged.DoHHTTPAddr = nil
+				}
+				applied := s.fleet.SetInstanceOverride(r.Context(), req.Instance, merged)
+				writeJSON(w, map[string]interface{}{"ok": true, "applied": applied})
+				return
+			}
+			applied := s.fleet.SetDoHHTTPAddr(r.Context(), addr)
+			writeJSON(w, map[string]interface{}{"ok": true, "applied": applied})
+			return
+		}
+		// Default policy / per-instance policy fields. Per-instance edits are
+		// merged onto any existing override so saving upstream doesn't wipe a
+		// previously saved DoH override (and vice-versa).
 		if req.Scope == "instance" && req.Instance != "" {
-			applied := s.fleet.SetInstanceOverride(r.Context(), req.Instance, req.Override)
+			existing := s.fleet.InstanceOverrideOf(req.Instance)
+			merged := mergeOverride(existing, req.Override)
+			applied := s.fleet.SetInstanceOverride(r.Context(), req.Instance, merged)
 			writeJSON(w, map[string]interface{}{"ok": true, "applied": applied})
 			return
 		}

@@ -5,9 +5,11 @@
 package dnsserver
 
 import (
+	"crypto/tls"
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"strings"
@@ -26,8 +28,11 @@ import (
 type Config struct {
 	DNSAddr           string // "127.0.0.1:53"
 	DoHAddr           string // "127.0.0.1:8443"
-	CertFile          string // optional TLS for DoH
-	KeyFile           string // optional TLS for DoH
+	CertFile          string // optional explicit TLS cert/key for DoH
+	KeyFile           string // optional explicit TLS cert/key for DoH
+	DoHTLS            bool   // serve DoH over HTTPS on DoHAddr (self-signed cert generated when no CertFile/KeyFile)
+	DoHHTTPAddr       string // also accept plain-HTTP DoH on this addr ("" = off; toggleable at runtime by the controller)
+	TLSCert           *tls.Certificate // in-memory cert+key (e.g. generated self-signed) used when DoHTLS
 	Upstream          string // upstream spec(s)
 	CacheCap          time.Duration
 	CacheSize         int           // max cached responses in RAM (0 = unlimited)
@@ -51,6 +56,10 @@ type Server struct {
 	udp   *dns.Server
 	tcp   *dns.Server
 	doch  *http.Server
+	// Optional plain-HTTP DoH listener, toggled at runtime by the controller.
+	dohPlainMu  sync.Mutex
+	dohPlain    *http.Server
+	dohPlainAddr string
 	close chan struct{}
 	once  sync.Once
 }
@@ -75,6 +84,8 @@ func New(cfg Config) (*Server, error) {
 		cnt:   cnt,
 		close: make(chan struct{}),
 	}
+	// Let the management API toggle the optional plain-HTTP DoH listener.
+	ctrl.SetDoHController(s)
 	return s, nil
 }
 
@@ -382,16 +393,108 @@ func (s *Server) Start() error {
 	case <-time.After(50 * time.Millisecond):
 	}
 
-	if s.cfg.CertFile != "" && s.cfg.KeyFile != "" {
-		return s.doch.ListenAndServeTLS(s.cfg.CertFile, s.cfg.KeyFile)
+	// Optional plain-HTTP DoH listener (also toggled at runtime by the
+	// controller via the management API). Start with whatever config says.
+	if err := s.SetDoHHTTPAddr(s.cfg.DoHHTTPAddr); err != nil {
+		return err
+	}
+
+	if s.cfg.DoHTLS {
+		if s.cfg.TLSCert != nil {
+			tlsCfg := &tls.Config{
+				Certificates: []tls.Certificate{*s.cfg.TLSCert},
+				MinVersion:   tls.VersionTLS12,
+			}
+			ln, err := tls.Listen("tcp", s.cfg.DoHAddr, tlsCfg)
+			if err != nil {
+				return fmt.Errorf("blipd: doh tls listen: %w", err)
+			}
+			return s.doch.Serve(ln)
+		}
+		if s.cfg.CertFile != "" && s.cfg.KeyFile != "" {
+			return s.doch.ListenAndServeTLS(s.cfg.CertFile, s.cfg.KeyFile)
+		}
+		return fmt.Errorf("blipd: doh_tls enabled but no certificate configured (set cert_file/key_file or tls_dir)")
 	}
 	return s.doch.ListenAndServe()
+}
+
+// SetDoHHTTPAddr toggles the optional plain-HTTP DoH listener. An empty addr
+// stops a running listener; a non-empty addr starts one on that address. It is
+// safe to call concurrently with Start/Shutdown and from the management API.
+func (s *Server) SetDoHHTTPAddr(addr string) error {
+	s.dohPlainMu.Lock()
+	defer s.dohPlainMu.Unlock()
+	if addr == s.dohPlainAddr {
+		return nil
+	}
+	s.stopDoHPlainLocked()
+	if addr == "" {
+		return nil
+	}
+	if err := validateAddr("tcp", addr); err != nil {
+		return fmt.Errorf("doh http addr %q: %w", addr, err)
+	}
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("doh http listen %s: %w", addr, err)
+	}
+	srv := &http.Server{Addr: addr, Handler: s.Handler(), ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second}
+	s.dohPlain = srv
+	s.dohPlainAddr = addr
+	go func() {
+		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
+			log.Printf("blipd: doh http listener %s: %v", addr, err)
+		}
+	}()
+	return nil
+}
+
+// validateAddr checks that addr parses and (for TCP) carries a port.
+func validateAddr(network, addr string) error {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return err
+	}
+	if port == "" {
+		return fmt.Errorf("missing port")
+	}
+	if network == "tcp" && host == "" {
+		return nil
+	}
+	return nil
+}
+
+// DoHHTTPAddr reports the address of the optional plain-HTTP DoH listener
+// ("" if it is not running).
+func (s *Server) DoHHTTPAddr() string {
+	s.dohPlainMu.Lock()
+	defer s.dohPlainMu.Unlock()
+	return s.dohPlainAddr
+}
+
+// stopDoHPlainLocked stops the plain-HTTP DoH listener; caller holds dohPlainMu.
+func (s *Server) stopDoHPlainLocked() {
+	if s.dohPlain == nil {
+		s.dohPlainAddr = ""
+		return
+	}
+	srv := s.dohPlain
+	s.dohPlain = nil
+	s.dohPlainAddr = ""
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = srv.Close()
+	_ = srv.Shutdown(ctx)
 }
 
 // Shutdown stops all listeners.
 func (s *Server) Shutdown() {
 	s.once.Do(func() {
 		close(s.close)
+		s.dohPlainMu.Lock()
+		s.stopDoHPlainLocked()
+		s.dohPlainMu.Unlock()
 		if s.udp != nil {
 			_ = s.udp.Shutdown()
 		}

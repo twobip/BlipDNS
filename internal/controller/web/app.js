@@ -878,6 +878,53 @@ let savedDefaultPolicy = null; // fleet default policy held by blipc
 let savedOverrides = {};       // sparse per-instance overrides keyed by instance id
 let scopeState = "default";    // "default" or an instance id
 
+// DoH plain-HTTP editor state
+let savedFleetDoH = "";        // fleet-wide plain-HTTP DoH address ("" = off)
+let dohScopeState = "default"; // "default" or an instance id
+
+function renderDoHScopeSelect() {
+  const sel = $("s-doh-scope");
+  sel.innerHTML = "";
+  const opt = (v, label) => {
+    const o = document.createElement("option");
+    o.value = v; o.textContent = label; sel.appendChild(o);
+  };
+  opt("default", "Fleet-wide default");
+  for (const i of instances) {
+    const has = savedOverrides[i.id] && savedOverrides[i.id].doh_http_addr;
+    opt(i.id, "instance: " + (i.label || i.id) + (has ? " (custom)" : ""));
+  }
+  if (!instances.some((i) => i.id === dohScopeState)) dohScopeState = "default";
+  sel.value = dohScopeState;
+}
+
+function loadDoHEditor() {
+  renderDoHScopeSelect();
+  const badge = $("s-doh-badge");
+  const plainCb = $("s-doh-plain");
+  const addrIn = $("s-doh-addr");
+  const hint = $("s-doh-scope-hint");
+  if (dohScopeState === "default") {
+    badge.textContent = "fleet-wide";
+    badge.className = "badge accent";
+    const on = savedFleetDoH !== "";
+    plainCb.checked = on;
+    addrIn.disabled = !on;
+    addrIn.value = on ? savedFleetDoH : "";
+    hint.textContent = "Enables a plain-HTTP DoH listener in addition to DoH over HTTPS.";
+  } else {
+    badge.textContent = "instance";
+    badge.className = "badge purple";
+    const o = savedOverrides[dohScopeState];
+    const addr = o && o.doh_http_addr;
+    const has = addr !== undefined && addr !== null;
+    plainCb.checked = !!has;
+    addrIn.disabled = !has;
+    addrIn.value = has ? (addr || "") : "";
+    hint.textContent = "Unchecked = inherit the fleet-wide default.";
+  }
+}
+
 function renderScopeSelect() {
   const sel = $("s-scope");
   sel.innerHTML = "";
@@ -920,7 +967,11 @@ async function refreshSettings() {
     const d = await r.json();
     savedDefaultPolicy = d.default_policy || { id: "default" };
     savedOverrides = d.instance_overrides || {};
+    // fleet-wide plain-HTTP DoH address ("" = off)
+    savedFleetDoH = (d.doh_http_addr != null && d.doh_http_addr !== undefined) ? (d.doh_http_addr || "") : "";
+    // carry over any per-instance doh_http_addr not already surfaced
     loadScopeEditor();
+    loadDoHEditor();
     $("s-up-status").textContent = "";
   } catch {}
 }
@@ -1113,6 +1164,56 @@ $("s-save-upstream").onclick = async () => {
   } catch (e) { st.textContent = ""; toast("save failed: " + e.message, "err"); }
 };
 $("s-scope").addEventListener("change", (e) => { scopeState = e.target.value; loadScopeEditor(); });
+
+/* DoH editor wiring */
+$("s-doh-scope").addEventListener("change", (e) => { dohScopeState = e.target.value; loadDoHEditor(); });
+$("s-doh-plain").addEventListener("change", (e) => {
+  const plainCb = $("s-doh-plain");
+  const addrIn = $("s-doh-addr");
+  if (plainCb.checked && !addrIn.value) addrIn.value = "0.0.0.0:8445";
+  addrIn.disabled = !plainCb.checked;
+});
+function dohAddrForSave() {
+  const plainCb = $("s-doh-plain");
+  const addrIn = $("s-doh-addr");
+  if (!plainCb.checked) return "";
+  return (addrIn.value || "").trim();
+}
+$("s-save-doh").onclick = async () => {
+  const st = $("s-doh-status");
+  st.textContent = "saving…";
+  let body, msg;
+  const addr = dohAddrForSave();
+  if (dohScopeState === "default") {
+    body = { doh_http_addr: addr };
+    msg = addr ? "fleet DoH saved" : "fleet DoH disabled";
+  } else {
+    body = { scope: "instance", instance: dohScopeState, doh_http_addr: addr };
+    msg = addr ? "instance DoH override saved" : "instance DoH override cleared";
+  }
+  try {
+    const r = await API("/api/settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const d = await r.json();
+    const applied = d.applied || {};
+    const ids = Object.keys(applied);
+    const ok = ids.filter((k) => applied[k] === "ok").length;
+    const failed = ids.filter((k) => applied[k] !== "ok");
+    st.textContent = ids.length ? `saved on blipc · pushed to ${ok}/${ids.length} instance${ids.length > 1 ? "s" : ""}` + (failed.length ? ` · errors: ${failed.join(", ")}` : "") : "saved on blipc · no instance to push to yet";
+    toast(msg + (ids.length ? ` (${ok}/${ids.length})` : ""));
+    if (dohScopeState === "default") {
+      savedFleetDoH = addr;
+    } else {
+      const o = savedOverrides[dohScopeState];
+      if (addr) {
+        if (!o) savedOverrides[dohScopeState] = { doh_http_addr: addr };
+        else o.doh_http_addr = addr;
+      } else if (o) {
+        delete o.doh_http_addr;
+      }
+    }
+    loadDoHEditor();
+  } catch (e) { st.textContent = ""; toast("save failed: " + e.message, "err"); }
+};
 $("s-fetch").onclick = async () => {
   const urls = blSources.filter((u) => u.trim());
   if (!urls.length) return toast("no blocklist sources configured", "err");

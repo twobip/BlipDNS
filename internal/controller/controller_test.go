@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -29,14 +30,37 @@ func (r *policyRec) snapshot() []*control.Policy {
 	return out
 }
 
+// dohRec records every plain-HTTP DoH address pushed to a fake blipd and
+// reports it back from /api/v1/stats so the controller can converge it.
+type dohRec struct {
+	mu    sync.Mutex
+	addr  string
+	calls []string
+}
+
+func (r *dohRec) applied(addr string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.addr = addr
+	r.calls = append(r.calls, addr)
+}
+
+func (r *dohRec) snapshot() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]string, len(r.calls))
+	copy(out, r.calls)
+	return out
+}
+
 // fakeBlipd is a minimal blipd management API for controller tests. It
 // supports the claim-code adoption handshake: unauthenticated /adopt/status,
 // POST /adopt with the code returns a token once, then rejects re-adopt.
 func fakeBlipd(t *testing.T, token, claimCode string, health *control.HealthResponse, stats *control.StatsResponse, policies *control.ListResponse) *httptest.Server {
-	return fakeBlipdWithRec(t, token, claimCode, health, stats, policies, nil)
+	return fakeBlipdWithRec(t, token, claimCode, health, stats, policies, nil, nil)
 }
 
-func fakeBlipdWithRec(t *testing.T, token, claimCode string, health *control.HealthResponse, stats *control.StatsResponse, policies *control.ListResponse, rec *policyRec) *httptest.Server {
+func fakeBlipdWithRec(t *testing.T, token, claimCode string, health *control.HealthResponse, stats *control.StatsResponse, policies *control.ListResponse, rec *policyRec, doh *dohRec) *httptest.Server {
 	t.Helper()
 	var (
 		mu      sync.Mutex
@@ -65,6 +89,9 @@ func fakeBlipdWithRec(t *testing.T, token, claimCode string, health *control.Hea
 			}
 			rec.mu.Unlock()
 		}
+		if doh != nil {
+			st.DohHTTPAddr = doh.addr
+		}
 		writeJSONH(w, &st)
 	})
 	mux.HandleFunc("/api/v1/policies", func(w http.ResponseWriter, r *http.Request) {
@@ -79,6 +106,34 @@ func fakeBlipdWithRec(t *testing.T, token, claimCode string, health *control.Hea
 			rec.mu.Unlock()
 		}
 		writeJSONH(w, map[string]string{"ok": "set", "id": req.Policy.ID})
+	})
+	mux.HandleFunc("/api/v1/doh", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+token {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		switch r.Method {
+		case http.MethodGet:
+			addr := ""
+			if doh != nil {
+				doh.mu.Lock()
+				addr = doh.addr
+				doh.mu.Unlock()
+			}
+			writeJSONH(w, map[string]string{"http_addr": addr})
+		case http.MethodPut, http.MethodPost:
+			var req control.SetDoHRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if doh != nil {
+				doh.applied(req.HTTPAddr)
+			}
+			writeJSONH(w, map[string]string{"ok": "set", "addr": req.HTTPAddr})
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
 	})
 	mux.HandleFunc("/api/v1/adopt/status", func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
@@ -202,9 +257,9 @@ func TestParseQueryTS(t *testing.T) {
 
 func TestFleetSetDefaultPolicy(t *testing.T) {
 	recA, recB := &policyRec{}, &policyRec{}
-	srvA := fakeBlipdWithRec(t, "t", "", &control.HealthResponse{OK: true}, &control.StatsResponse{}, &control.ListResponse{}, recA)
+	srvA := fakeBlipdWithRec(t, "t", "", &control.HealthResponse{OK: true}, &control.StatsResponse{}, &control.ListResponse{}, recA, nil)
 	defer srvA.Close()
-	srvB := fakeBlipdWithRec(t, "t", "", &control.HealthResponse{OK: true}, &control.StatsResponse{}, &control.ListResponse{}, recB)
+	srvB := fakeBlipdWithRec(t, "t", "", &control.HealthResponse{OK: true}, &control.StatsResponse{}, &control.ListResponse{}, recB, nil)
 	defer srvB.Close()
 
 	cfgPath := filepath.Join(t.TempDir(), "blipc.yaml")
@@ -248,7 +303,7 @@ func TestFleetSetDefaultPolicy(t *testing.T) {
 
 func TestFleetSetDefaultPolicyReconcileOnAdd(t *testing.T) {
 	rec := &policyRec{}
-	srv := fakeBlipdWithRec(t, "t", "", &control.HealthResponse{OK: true}, &control.StatsResponse{}, &control.ListResponse{}, rec)
+	srv := fakeBlipdWithRec(t, "t", "", &control.HealthResponse{OK: true}, &control.StatsResponse{}, &control.ListResponse{}, rec, nil)
 	defer srv.Close()
 
 	fleet := NewFleet("/tmp/blip-test-config.yaml")
@@ -290,7 +345,7 @@ func TestFleetReconcileRestartRevert(t *testing.T) {
 	pollInterval = 100 * time.Millisecond
 	defer func() { pollInterval = 5 * time.Second }()
 	rec := &policyRec{}
-	srv := fakeBlipdWithRec(t, "t", "", &control.HealthResponse{OK: true}, &control.StatsResponse{}, &control.ListResponse{}, rec)
+	srv := fakeBlipdWithRec(t, "t", "", &control.HealthResponse{OK: true}, &control.StatsResponse{}, &control.ListResponse{}, rec, nil)
 	defer srv.Close()
 
 	fleet := NewFleet("/tmp/blip-test-config.yaml")
@@ -331,9 +386,9 @@ func TestFleetReconcileRestartRevert(t *testing.T) {
 // clearing it reverts the instance to the default.
 func TestFleetInstanceOverride(t *testing.T) {
 	recA, recB := &policyRec{}, &policyRec{}
-	srvA := fakeBlipdWithRec(t, "t", "", &control.HealthResponse{OK: true}, &control.StatsResponse{}, &control.ListResponse{}, recA)
+	srvA := fakeBlipdWithRec(t, "t", "", &control.HealthResponse{OK: true}, &control.StatsResponse{}, &control.ListResponse{}, recA, nil)
 	defer srvA.Close()
-	srvB := fakeBlipdWithRec(t, "t", "", &control.HealthResponse{OK: true}, &control.StatsResponse{}, &control.ListResponse{}, recB)
+	srvB := fakeBlipdWithRec(t, "t", "", &control.HealthResponse{OK: true}, &control.StatsResponse{}, &control.ListResponse{}, recB, nil)
 	defer srvB.Close()
 
 	cfgPath := filepath.Join(t.TempDir(), "blipc.yaml")
@@ -417,7 +472,7 @@ func TestFleetConfigSynced(t *testing.T) {
 	pollInterval = 100 * time.Millisecond
 	defer func() { pollInterval = 5 * time.Second }()
 	rec := &policyRec{}
-	srv := fakeBlipdWithRec(t, "t", "", &control.HealthResponse{OK: true}, &control.StatsResponse{}, &control.ListResponse{}, rec)
+	srv := fakeBlipdWithRec(t, "t", "", &control.HealthResponse{OK: true}, &control.StatsResponse{}, &control.ListResponse{}, rec, nil)
 	defer srv.Close()
 
 	fleet := NewFleet("/tmp/blip-test-config.yaml")
@@ -720,5 +775,324 @@ func TestFleetAdoptRejectsWrongCode(t *testing.T) {
 	st := fleet.List()[0]
 	if st.Adopted {
 		t.Error("instance should NOT be adopted with a wrong code")
+	}
+}
+
+// TestFleetSetDoHHTTPAddr verifies the fleet-wide plain-HTTP DoH address is
+// pushed to every instance, then persisted to the controller config.
+func TestFleetSetDoHHTTPAddr(t *testing.T) {
+	dohA, dohB := &dohRec{}, &dohRec{}
+	srvA := fakeBlipdWithRec(t, "t", "", &control.HealthResponse{OK: true}, &control.StatsResponse{}, &control.ListResponse{}, nil, dohA)
+	defer srvA.Close()
+	srvB := fakeBlipdWithRec(t, "t", "", &control.HealthResponse{OK: true}, &control.StatsResponse{}, &control.ListResponse{}, nil, dohB)
+	defer srvB.Close()
+
+	cfgPath := filepath.Join(t.TempDir(), "blipc.yaml")
+	fleet := NewFleet(cfgPath)
+	ctx := context.Background()
+	if err := fleet.Add(ctx, InstanceConfig{ID: "a", URL: srvA.URL, Token: "t"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := fleet.Add(ctx, InstanceConfig{ID: "b", URL: srvB.URL, Token: "t"}); err != nil {
+		t.Fatal(err)
+	}
+
+	res := fleet.SetDoHHTTPAddr(ctx, "0.0.0.0:8445")
+	if res["a"] != "ok" || res["b"] != "ok" {
+		t.Fatalf("expected both ok, got %+v", res)
+	}
+	// Each instance must have received the address (possibly twice: once from
+	// the initial poll reconcile and once from the explicit fleet-wide push).
+	lastDoh := func(r *dohRec) string {
+		s := r.snapshot()
+		if len(s) == 0 {
+			t.Helper()
+			return ""
+		}
+		return s[len(s)-1]
+	}
+	if last := lastDoh(dohA); last != "0.0.0.0:8445" {
+		t.Errorf("instance a last doh push = %q, want 0.0.0.0:8445 (history=%v)", last, dohA.snapshot())
+	}
+	if last := lastDoh(dohB); last != "0.0.0.0:8445" {
+		t.Errorf("instance b last doh push = %q, want 0.0.0.0:8445 (history=%v)", last, dohB.snapshot())
+	}
+	if fleet.DoHHTTPAddr() != "0.0.0.0:8445" {
+		t.Errorf("fleet DoHHTTPAddr = %q", fleet.DoHHTTPAddr())
+	}
+	// persisted to the controller config
+	b, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(b, []byte("doh_http_addr:")) || !bytes.Contains(b, []byte("0.0.0.0:8445")) {
+		t.Errorf("doh_http_addr not persisted:\n%s", b)
+	}
+}
+
+// TestFleetDoHReconcileRestartRevert simulates a blipd restart that reverts the
+// plain-HTTP DoH listener to off; the controller must re-push the fleet value.
+func TestFleetDoHReconcileRestartRevert(t *testing.T) {
+	pollInterval = 100 * time.Millisecond
+	defer func() { pollInterval = 5 * time.Second }()
+	doh := &dohRec{}
+	srv := fakeBlipdWithRec(t, "t", "", &control.HealthResponse{OK: true}, &control.StatsResponse{}, &control.ListResponse{}, nil, doh)
+	defer srv.Close()
+
+	fleet := NewFleet("/tmp/blip-test-config.yaml")
+	fleet.SetDoHDefault("0.0.0.0:8445")
+	if err := fleet.Add(context.Background(), InstanceConfig{ID: "a", URL: srv.URL, Token: "t"}); err != nil {
+		t.Fatal(err)
+	}
+	// initial push from Add (via poll reconcile) lands the fleet value.
+	waitForDoh := func(n int, msg string) {
+		deadline := time.After(3 * time.Second)
+		for {
+			if len(doh.snapshot()) >= n {
+				return
+			}
+			select {
+			case <-deadline:
+				t.Fatal(msg)
+			case <-time.After(20 * time.Millisecond):
+			}
+		}
+	}
+	waitForDoh(1, "initial doh push never happened")
+
+	// Simulate restart revert: blipd forgot the address.
+	doh.mu.Lock()
+	doh.addr = ""
+	doh.mu.Unlock()
+
+	waitForDoh(2, "no re-push after simulated restart revert")
+	if got := doh.snapshot(); got[len(got)-1] != "0.0.0.0:8445" {
+		t.Errorf("last doh push = %q, want 0.0.0.0:8445", got[len(got)-1])
+	}
+}
+
+// TestFleetDoHOverride verifies a per-instance DoH override is pushed to that
+// instance only; other instances keep the fleet value.
+func TestFleetDoHOverride(t *testing.T) {
+	dohA, dohB := &dohRec{}, &dohRec{}
+	srvA := fakeBlipdWithRec(t, "t", "", &control.HealthResponse{OK: true}, &control.StatsResponse{}, &control.ListResponse{}, nil, dohA)
+	defer srvA.Close()
+	srvB := fakeBlipdWithRec(t, "t", "", &control.HealthResponse{OK: true}, &control.StatsResponse{}, &control.ListResponse{}, nil, dohB)
+	defer srvB.Close()
+
+	cfgPath := filepath.Join(t.TempDir(), "blipc.yaml")
+	fleet := NewFleet(cfgPath)
+	ctx := context.Background()
+	if err := fleet.Add(ctx, InstanceConfig{ID: "a", URL: srvA.URL, Token: "t"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := fleet.Add(ctx, InstanceConfig{ID: "b", URL: srvB.URL, Token: "t"}); err != nil {
+		t.Fatal(err)
+	}
+	addr := "0.0.0.0:9999"
+	aOvr := addr
+	res := fleet.SetInstanceOverride(ctx, "a", &InstanceOverride{DoHHTTPAddr: &aOvr})
+	if res["a"] != "ok" {
+		t.Fatalf("expected a ok, got %+v", res)
+	}
+	// Instance a must have received its override address at least once; other
+	// instances keep the fleet value ("" here) and receive no address.
+	lastDoh := func(r *dohRec) string {
+		sn := r.snapshot()
+		if len(sn) == 0 {
+			return ""
+		}
+		return sn[len(sn)-1]
+	}
+	if last := lastDoh(dohA); last != addr {
+		t.Errorf("instance a last doh = %q, want %q (history=%v)", last, addr, dohA.snapshot())
+	}
+	if len(dohB.snapshot()) != 0 {
+		t.Errorf("instance b should receive no doh push, got %v", dohB.snapshot())
+	}
+	if o := fleet.InstanceOverrideOf("a"); o == nil || o.DoHHTTPAddr == nil || *o.DoHHTTPAddr != addr {
+		t.Errorf("override for a = %+v", o)
+	}
+	// clearing the override reverts the instance to the fleet default
+	if res := fleet.SetInstanceOverride(ctx, "a", &InstanceOverride{}); res["a"] != "ok" {
+		t.Fatalf("expected clear ok, got %+v", res)
+	}
+	if o := fleet.InstanceOverrideOf("a"); o != nil && !o.IsEmpty() {
+		t.Errorf("override should be removed after clear, got %+v", o)
+	}
+}
+
+// newAuthedClient logs in to a controller Server and returns a client whose
+// requests carry the resulting session cookie (mirrors TestServerAuth's flow).
+func newAuthedClient(t *testing.T, s *Server) *http.Client {
+	t.Helper()
+	body, _ := json.Marshal(map[string]string{"username": "admin", "password": "secret"})
+	req := httptest.NewRequest(http.MethodPost, "/api/login", strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("login: %d", rec.Code)
+	}
+	cookie := ""
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == sessionCookie {
+			cookie = c.Value
+		}
+	}
+	if cookie == "" {
+		t.Fatal("no session cookie")
+	}
+	return &http.Client{Transport: &sessionRoundTripper{base: s.Handler(), cookie: cookie}}
+}
+
+// sessionRoundTripper injects the session cookie into every request so tests can
+// call the token-gated controller API through a real *http.Client.
+type sessionRoundTripper struct {
+	base   http.Handler
+	cookie string
+}
+
+func (rt *sessionRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: rt.cookie})
+	rec := httptest.NewRecorder()
+	rt.base.ServeHTTP(rec, req)
+	resp := rec.Result()
+	resp.Request = req
+	return resp, nil
+}
+
+func TestServerSettingsDoHFleet(t *testing.T) {
+	dohA := &dohRec{}
+	srv := fakeBlipdWithRec(t, "t", "", &control.HealthResponse{OK: true}, &control.StatsResponse{}, &control.ListResponse{}, nil, dohA)
+	defer srv.Close()
+
+	fleet := NewFleet(filepath.Join(t.TempDir(), "blipc.yaml"))
+	if err := fleet.Add(context.Background(), InstanceConfig{ID: "a", URL: srv.URL, Token: "t"}); err != nil {
+		t.Fatal(err)
+	}
+
+	s := NewServer("admin", "secret", fleet, nil)
+	c := newAuthedClient(t, s)
+
+	// GET surfaces the fleet-wide (empty) default.
+	resp, err := c.Get("/api/settings")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var d map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&d); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if d["doh_http_addr"] != "" {
+		t.Errorf("initial doh_http_addr = %v, want empty", d["doh_http_addr"])
+	}
+
+	// PUT a fleet-wide plain-HTTP DoH address -> pushed to instances.
+	body, _ := json.Marshal(map[string]string{"doh_http_addr": "0.0.0.0:8445"})
+	req, _ := http.NewRequest(http.MethodPut, "/api/settings", strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err = c.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ack map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&ack); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if ack["ok"] != true {
+		t.Fatalf("PUT ok = %v", ack["ok"])
+	}
+	applied := ack["applied"].(map[string]interface{})
+	if applied["a"] != "ok" {
+		t.Errorf("applied a = %v", applied["a"])
+	}
+	hist := dohA.snapshot()
+	if len(hist) == 0 || hist[len(hist)-1] != "0.0.0.0:8445" {
+		t.Errorf("doh pushes = %v, want last 0.0.0.0:8445", hist)
+	}
+	// persisted + readable back.
+	resp, _ = c.Get("/api/settings")
+	json.NewDecoder(resp.Body).Decode(&d)
+	resp.Body.Close()
+	if d["doh_http_addr"] != "0.0.0.0:8445" {
+		t.Errorf("read-back doh_http_addr = %v", d["doh_http_addr"])
+	}
+
+	// a bad address is rejected (400) and never pushed.
+	body, _ = json.Marshal(map[string]string{"doh_http_addr": "nope"})
+	req, _ = http.NewRequest(http.MethodPut, "/api/settings", strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	resp, _ = c.Do(req)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("bad addr status = %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestServerSettingsDoHInstanceOverride(t *testing.T) {
+	dohA, dohB := &dohRec{}, &dohRec{}
+	srvA := fakeBlipdWithRec(t, "t", "", &control.HealthResponse{OK: true}, &control.StatsResponse{}, &control.ListResponse{}, nil, dohA)
+	defer srvA.Close()
+	srvB := fakeBlipdWithRec(t, "t", "", &control.HealthResponse{OK: true}, &control.StatsResponse{}, &control.ListResponse{}, nil, dohB)
+	defer srvB.Close()
+
+	cfgPath := filepath.Join(t.TempDir(), "blipc.yaml")
+	fleet := NewFleet(cfgPath)
+	if err := fleet.Add(context.Background(), InstanceConfig{ID: "a", URL: srvA.URL, Token: "t"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := fleet.Add(context.Background(), InstanceConfig{ID: "b", URL: srvB.URL, Token: "t"}); err != nil {
+		t.Fatal(err)
+	}
+	if res := fleet.SetDoHHTTPAddr(context.Background(), "0.0.0.0:8445"); res["a"] != "ok" || res["b"] != "ok" {
+		t.Fatalf("fleet doh push: %+v", res)
+	}
+	time.Sleep(150 * time.Millisecond) // let poll reconcile settle
+
+	s := NewServer("admin", "secret", fleet, nil)
+	c := newAuthedClient(t, s)
+
+	// First give instance b a per-instance upstream override.
+	upBody, _ := json.Marshal(map[string]interface{}{"scope": "instance", "instance": "b", "override": map[string]string{"upstream": "udp://9.9.9.9:53"}})
+	req, _ := http.NewRequest(http.MethodPut, "/api/settings", strings.NewReader(string(upBody)))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("upstream override PUT status = %d", resp.StatusCode)
+	}
+
+	// Then override b's plain-HTTP DoH address. The upstream must survive.
+	body, _ := json.Marshal(map[string]interface{}{"scope": "instance", "instance": "b", "doh_http_addr": "0.0.0.0:9999"})
+	req, _ = http.NewRequest(http.MethodPut, "/api/settings", strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err = c.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("instance doh PUT status = %d", resp.StatusCode)
+	}
+
+	// The saved GET must keep both override fields for b.
+	resp, _ = c.Get("/api/settings")
+	var d map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&d); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	o := d["instance_overrides"].(map[string]interface{})["b"].(map[string]interface{})
+	if o["doh_http_addr"] != "0.0.0.0:9999" {
+		t.Errorf("b override doh = %v, want 0.0.0.0:9999", o["doh_http_addr"])
+	}
+	if o["upstream"] != "udp://9.9.9.9:53" {
+		t.Errorf("b override upstream = %v, want udp://9.9.9.9:53 (merge must preserve it)", o["upstream"])
 	}
 }

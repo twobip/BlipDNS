@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"sync"
@@ -53,6 +54,34 @@ type Server struct {
 	instanceID string
 	adoptFails int
 	adoptUntil time.Time
+
+	// dohCtrl drives the optional plain-HTTP DoH listener at runtime.
+	dohCtrl DoHController
+}
+
+// DoHController is the piece of the DNS server the management API can reconfigure
+// at runtime: the optional plain-HTTP DoH listener address ("" = off). The
+// controller reports it back via stats so its poll loop can converge it.
+type DoHController interface {
+	SetDoHHTTPAddr(addr string) error
+	DoHHTTPAddr() string
+}
+
+// SetDoHController wires the DNS server (which owns its DoH listeners) into
+// the management API so Settings changes can toggle plain-HTTP DoH live.
+func (s *Server) SetDoHController(c DoHController) {
+	s.mu.Lock()
+	s.dohCtrl = c
+	s.mu.Unlock()
+}
+
+// dohController returns the wired DoH controller (may be nil, e.g. when blipd
+// runs API-only without a DNS server).
+func (s *Server) dohController() DoHController {
+	s.mu.RLock()
+	c := s.dohCtrl
+	s.mu.RUnlock()
+	return c
 }
 
 // NewServer builds a management API server guarded by token.
@@ -167,6 +196,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/policies", s.auth(s.handleListPolicies))
 	mux.HandleFunc("/api/v1/policy", s.auth(s.handlePolicy))
 	mux.HandleFunc("/api/v1/blocklist", s.auth(s.handleBlocklist))
+	mux.HandleFunc("/api/v1/doh", s.auth(s.handleDoH)) // toggle plain-HTTP DoH
 	mux.HandleFunc("/api/v1/watch", s.auth(s.handleWatch))
 	// unauthenticated adoption handshake
 	mux.HandleFunc("/api/v1/adopt/status", s.handleAdoptStatus)
@@ -225,8 +255,46 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 			st.BlocklistCount = s.blocklist.Count()
 			st.BlocklistHash = s.blocklist.Checksum()
 		}
+		// Report the optional plain-HTTP DoH listener address so the
+		// controller can converge it (and surface it in the UI / health).
+		if dc := s.dohController(); dc != nil {
+			st.DohHTTPAddr = dc.DoHHTTPAddr()
+		}
 	}
 	writeJSON(w, st)
+}
+
+// handleDoH toggles the optional plain-HTTP DoH listener at runtime. The
+// controller pushes this from the Settings page; an empty http_addr disables it.
+func (s *Server) handleDoH(w http.ResponseWriter, r *http.Request) {
+	dc := s.dohController()
+	if dc == nil {
+		http.Error(w, "doh settings not available on this instance", http.StatusServiceUnavailable)
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, map[string]interface{}{"http_addr": dc.DoHHTTPAddr()})
+	case http.MethodPut, http.MethodPost:
+		var req SetDoHRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if req.HTTPAddr != "" {
+			if _, _, err := net.SplitHostPort(req.HTTPAddr); err != nil {
+				http.Error(w, "invalid http_addr: must be host:port", http.StatusBadRequest)
+				return
+			}
+		}
+		if err := dc.SetDoHHTTPAddr(req.HTTPAddr); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, AckResponse{OK: true, Msg: "doh http addr set"})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
 func (s *Server) handleListPolicies(w http.ResponseWriter, r *http.Request) {

@@ -359,6 +359,25 @@
           </div>
 
           <div class="panel">
+            <div class="panel-head"><h3>DoH (DNS over HTTPS)</h3><span class="spacer"></span><span class="badge accent" id="s-doh-badge">fleet-wide</span></div>
+            <div class="panel-body">
+              <div class="field">
+                <label>Scope</label>
+                <select class="select" id="s-doh-scope" style="max-width:340px"></select>
+                <span class="hint" id="s-doh-scope-hint">Accepts plain-text HTTP DoH on blipd's DoH port (HTTPS, self-signed cert). blipd already serves DoH over HTTPS.</span>
+              </div>
+              <div class="field">
+                <label class="row" style="gap:8px"><input type="checkbox" id="s-doh-plain" style="accent-color:var(--accent)"/> <span>Enable plain-HTTP DoH listener</span></label>
+                <input class="input" id="s-doh-addr" placeholder="0.0.0.0:8445"/>
+              </div>
+              <div class="row mt">
+                <button class="btn btn-primary" id="s-save-doh">Save</button>
+                <span class="hint" id="s-doh-status"></span>
+              </div>
+            </div>
+          </div>
+
+          <div class="panel">
             <div class="panel-head"><h3>About</h3></div>
             <div class="panel-body">
               <div class="row"><span class="muted" style="width:120px">Controller</span><span class="mono" id="s-ctrl-ver">—</span></div>

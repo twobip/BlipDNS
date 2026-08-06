@@ -3,15 +3,18 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"flag"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
 	"github.com/twobip/BlipDNS/internal/blocklist"
+	"github.com/twobip/BlipDNS/internal/certgen"
 	"github.com/twobip/BlipDNS/internal/config"
 	"github.com/twobip/BlipDNS/internal/dnsserver"
 	"github.com/twobip/BlipDNS/internal/filter"
@@ -94,11 +97,45 @@ func main() {
 		blockAction = cfg.Default.BlockAction
 	}
 
+	// Materialise the TLS material for DoH. When doh_tls is enabled and no
+	// explicit cert/key files are given, blipd generates a self-signed cert
+	// (persisted under tls_dir so the fingerprint is stable across restarts).
+	var tlsCert *tls.Certificate
+	if cfg.DoHTLS {
+		if cfg.CertFile != "" && cfg.KeyFile != "" {
+			pair, err := tls.LoadX509KeyPair(cfg.CertFile, cfg.KeyFile)
+			if err != nil {
+				log.Fatalf("blipd: load tls cert/key: %v", err)
+			}
+			tlsCert = &pair
+		} else {
+			certPath := filepath.Join(cfg.TLSDir, "doh-cert.pem")
+			keyPath := filepath.Join(cfg.TLSDir, "doh-key.pem")
+			certPEM, keyPEM, persisted, err := certgen.EnsureFiles(certPath, keyPath)
+			if err != nil {
+				log.Printf("blipd: self-signed DoH cert: %v (serving with in-memory cert this session)", err)
+			} else if !persisted {
+				log.Printf("blipd: TLS cert dir %s not writable; DoH cert is in-memory only", cfg.TLSDir)
+			}
+			pair, err := tls.X509KeyPair(certPEM, keyPEM)
+			if err != nil {
+				log.Fatalf("blipd: build self-signed cert: %v", err)
+			}
+			tlsCert = &pair
+			if persisted {
+				log.Printf("blipd: DoH serving HTTPS with certificate %s", certPath)
+			}
+		}
+	}
+
 	srv, err := dnsserver.New(dnsserver.Config{
 		DNSAddr:           cfg.DNSAddr,
 		DoHAddr:           cfg.DoHAddr,
 		CertFile:          cfg.CertFile,
 		KeyFile:           cfg.KeyFile,
+		DoHTLS:            cfg.DoHTLS,
+		DoHHTTPAddr:       cfg.DoHHTTPAddr,
+		TLSCert:           tlsCert,
 		Upstream:          cfg.Upstream,
 		CacheCap:          cfg.CacheCap,
 		CacheSize:         cfg.CacheSize,
@@ -137,7 +174,10 @@ func main() {
 		}()
 	}
 
-	log.Printf("blipd: DNS on %s, DoH on %s, upstream=%s", cfg.DNSAddr, cfg.DoHAddr, cfg.Upstream)
+	log.Printf("blipd: DNS on %s, DoH on %s (%s), upstream=%s", cfg.DNSAddr, cfg.DoHAddr, dohScheme(cfg), cfg.Upstream)
+	if cfg.DoHHTTPAddr != "" {
+		log.Printf("blipd: also accepting plain-HTTP DoH on %s", cfg.DoHHTTPAddr)
+	}
 
 	go func() {
 		if err := srv.Start(); err != nil {
@@ -151,4 +191,11 @@ func main() {
 	log.Println("blipd: shutting down")
 	srv.Shutdown()
 	_ = context.Background()
+}
+
+func dohScheme(cfg *config.Config) string {
+	if cfg.DoHTLS {
+		return "https"
+	}
+	return "http"
 }

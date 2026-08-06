@@ -26,6 +26,7 @@ type config struct {
 	Password             string                                  `yaml:"password"`
 	DefaultPolicy        *control.Policy                         `yaml:"default_policy"`
 	InstanceOverrides    map[string]*controller.InstanceOverride `yaml:"instance_overrides"`
+	DoHHTTPAddr          string                                  `yaml:"doh_http_addr"`
 	BlocklistSources     []string                                `yaml:"blocklist_sources"`
 	BlocklistUpdateHours int                                     `yaml:"blocklist_update_hours"`
 	Instances            []controller.InstanceConfig             `yaml:"instances"`
@@ -55,6 +56,9 @@ func main() {
 	}
 	for id, o := range cfg.InstanceOverrides {
 		fleet.SetOverride(id, o)
+	}
+	if cfg.DoHHTTPAddr != "" {
+		fleet.SetDoHDefault(cfg.DoHHTTPAddr)
 	}
 	ctx := context.Background()
 	for _, ic := range cfg.Instances {

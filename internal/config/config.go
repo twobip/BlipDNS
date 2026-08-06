@@ -16,6 +16,9 @@ type Config struct {
 	DoHAddr              string           `yaml:"doh_addr"`
 	CertFile             string           `yaml:"cert_file"`
 	KeyFile              string           `yaml:"key_file"`
+	DoHTLS               bool             `yaml:"doh_tls"`       // serve DoH over HTTPS on DoHAddr (self-signed cert auto-generated when CertFile/KeyFile unset)
+	DoHHTTPAddr          string           `yaml:"doh_http_addr"` // additional plain-HTTP DoH listener ("" = off)
+	TLSDir               string           `yaml:"tls_dir"`       // where a generated self-signed DoH cert/key are persisted
 	AdminAddr            string           `yaml:"admin_addr"`
 	AdminToken           string           `yaml:"admin_token"`
 	StateFile            string           `yaml:"state_file"`  // persists "adopted" so the claim code isn't regenerated
@@ -40,6 +43,8 @@ func Default() *Config {
 	return &Config{
 		DNSAddr:            "127.0.0.1:5353",
 		DoHAddr:            "127.0.0.1:8443",
+		DoHTLS:             true,
+		TLSDir:             "/var/lib/blipd",
 		AdminAddr:          "127.0.0.1:8443",
 		Upstream:           "udp://1.1.1.1:53 https://1.1.1.1/dns-query",
 		CacheCap:           1 * time.Hour,

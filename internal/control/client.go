@@ -123,6 +123,12 @@ func (c *Client) DeletePolicy(ctx context.Context, id string) error {
 	return c.do(ctx, http.MethodDelete, "/api/v1/policy?id="+id, nil, nil)
 }
 
+// SetDoHHTTPAddr toggles the instance's optional plain-HTTP DoH listener. An
+// empty addr disables the listener; a non-empty host:port starts it.
+func (c *Client) SetDoHHTTPAddr(ctx context.Context, addr string) error {
+	return c.do(ctx, http.MethodPut, "/api/v1/doh", &SetDoHRequest{HTTPAddr: addr}, nil)
+}
+
 // AdoptStatus fetches the instance's adoption state (unauthenticated).
 func (c *Client) AdoptStatus(ctx context.Context) (*AdoptStatus, error) {
 	var st AdoptStatus

@@ -192,6 +192,8 @@ func (i *Instance) poll(ctx context.Context) {
 		// Converge the instance to the fleet default config if it is behind
 		// (newly added/adopted, restarted, or reverted to its own config).
 		i.fleet.maybePushConfig(ctx, i, s)
+		// Converge the optional plain-HTTP DoH listener the same way.
+		i.fleet.maybePushDoH(ctx, i, s)
 		// Converge the instance's global blocklist the same way.
 		i.fleet.maybePushBlocklist(ctx, i, s)
 		// Also log to query log
