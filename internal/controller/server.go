@@ -51,6 +51,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/blocklist/export", api(s.handleBlocklistExport))        // GET text
 	mux.HandleFunc("/api/blocklist/sources", api(s.handleBlocklistSources))      // PUT sources + import / GET status
 	mux.HandleFunc("/api/blocklist/status", api(s.handleBlocklistStatus))        // GET import progress
+	mux.HandleFunc("/api/blocklist/clear-log", api(s.handleBlocklistClearLog))   // POST clear import output
 	mux.HandleFunc("/api/blocklist/import-url", api(s.handleBlocklistImportURL)) // POST fetch from URL (legacy)
 
 	// UI: login page is public; static assets (js/css) are public; everything
@@ -594,6 +595,16 @@ func (s *Server) handleBlocklistStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, s.fleet.BlocklistStatus())
+}
+
+// handleBlocklistClearLog drops the buffered import output shown in the UI.
+func (s *Server) handleBlocklistClearLog(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	s.fleet.ClearImportLog()
+	writeJSON(w, map[string]interface{}{"ok": true})
 }
 
 // serveUI dispatches inbound HTTP to embedded assets (public) or the SPA

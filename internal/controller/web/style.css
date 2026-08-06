@@ -473,6 +473,14 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
 .feed li { display:flex; align-items:flex-start; gap:12px; padding:13px 24px; border-bottom:1px solid var(--hairline); font-size:13px; }
 .feed .t { font-size:11.5px; color:var(--faint); font-family:var(--mono); white-space:nowrap; padding-top:2px; }
 
+/* ---------- terminal (blocklist import output) ---------- */
+.term { background:#0b0e14; border:1px solid var(--border); border-radius:10px; padding:14px 16px; margin:16px 20px 20px; font-family:var(--mono); font-size:12.5px; line-height:1.7; color:var(--text-2); max-height:320px; overflow-y:auto; white-space:pre-wrap; word-break:break-all; }
+.term .t-ok { color:#7ee787; }
+.term .t-err { color:#f76b6b; }
+.term .t-dim { color:var(--faint); }
+.term-empty { color:var(--faint); font-style:italic; }
+.term::-webkit-scrollbar { width: 8px; height: 8px; }
+
 /* scrollbar for tables/feeds */
 .table-wrap::-webkit-scrollbar, .feed::-webkit-scrollbar, .nav::-webkit-scrollbar { width: 8px; height: 8px; }
 

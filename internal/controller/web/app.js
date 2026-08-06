@@ -537,6 +537,24 @@ function renderBlStatus() {
     else if (blSources.length) { badge.textContent = `${blSources.length} src · ${fmt(blStatus.domains)}${blAutoHours ? " · " + blAutoHours + "h" : ""}`; badge.classList.remove("accent"); }
     else { badge.textContent = "off"; badge.classList.remove("accent"); }
   }
+  renderBlLog();
+}
+function renderBlLog() {
+  const el = $("bl-log");
+  if (!el) return;
+  const lines = blStatus.log || [];
+  if (!lines.length) {
+    el.innerHTML = blStatus.running
+      ? `<div class="term-empty">starting…</div>`
+      : `<div class="term-empty">Press "Update now" to watch a live import.</div>`;
+    return;
+  }
+  const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+  el.innerHTML = lines.map((l) => {
+    const cls = /failed|error/i.test(l) ? "t-err" : /ok:|merged|persisted|distributed|finished/.test(l) ? "t-ok" : "";
+    return `<div class="${cls}">${esc(l)}</div>`;
+  }).join("");
+  if (atBottom) el.scrollTop = el.scrollHeight;
 }
 function removeSource(u) {
   blSources = blSources.filter((s) => s !== u);
@@ -857,6 +875,10 @@ $("bl-url-add").onclick = () => {
   renderSources();
 };
 $("bl-update").onclick = updateBlocklist;
+$("bl-log-clear").onclick = async () => {
+  try { await API("/api/blocklist/clear-log", { method: "POST" }); blStatus.log = []; renderBlLog(); }
+  catch (e) { toast("clear failed", "err"); }
+};
 $("bl-auto-save").onclick = async () => {
   const h = parseInt(($("bl-auto-hours") || {}).value ?? "0", 10);
   if (isNaN(h) || h < 0) return toast("enter hours (0 = off)", "err");

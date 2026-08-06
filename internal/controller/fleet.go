@@ -79,6 +79,7 @@ type Fleet struct {
 	blCancel         context.CancelFunc
 	blStatus         BlocklistStatus
 	sourceStats      []SourceStat                 // per-source download stats, refreshed on import
+	importLog        []string                     // recent import output lines (capped ring buffer)
 	autoUpdateHours  int                          // hours between automatic refreshes; 0 = manual only
 	configPath       string                       // path to controller config YAML (for persisting tokens)
 	defaultPolicy    *control.Policy              // fleet-wide default policy (source of truth)
@@ -97,6 +98,7 @@ type BlocklistStatus struct {
 	Errors          []string     `json:"errors,omitempty"`
 	Sources         []string     `json:"sources"`
 	SourceStats     []SourceStat `json:"source_stats,omitempty"`
+	Log             []string     `json:"log,omitempty"`
 	AutoUpdateHours int          `json:"auto_update_hours"`
 	NextUpdate      time.Time    `json:"next_update,omitempty"`
 }
@@ -573,6 +575,7 @@ func (f *Fleet) BlocklistStatus() BlocklistStatus {
 	st := f.blStatus
 	st.Sources = append([]string(nil), f.blocklistSources...)
 	st.SourceStats = append([]SourceStat(nil), f.sourceStats...)
+	st.Log = append([]string(nil), f.importLog...)
 	st.AutoUpdateHours = f.autoUpdateHours
 	if !st.Running && f.blocklist != nil {
 		st.Domains = f.blocklist.Count()
@@ -736,8 +739,28 @@ func (f *Fleet) startBlocklistImport() {
 	f.blCancel = cancel
 	f.blRunning = true
 	f.blStatus = BlocklistStatus{Running: true, SourceTotal: len(f.blocklistSources)}
+	f.importLog = nil
 	f.blMu.Unlock()
+	f.logImport("starting import of %d source(s)", len(f.blocklistSources))
 	go f.runBlocklistImport(ctx, gen)
+}
+
+// logImport appends a timestamped line to the in-memory import log surfaced in
+// the web UI. The buffer is capped so a long-running sync can't grow forever.
+func (f *Fleet) logImport(format string, args ...interface{}) {
+	f.blMu.Lock()
+	defer f.blMu.Unlock()
+	f.importLog = append(f.importLog, fmt.Sprintf("%s %s", f.now().Format("15:04:05"), fmt.Sprintf(format, args...)))
+	if len(f.importLog) > 300 {
+		f.importLog = append([]string(nil), f.importLog[len(f.importLog)-300:]...)
+	}
+}
+
+// ClearImportLog drops all buffered import output.
+func (f *Fleet) ClearImportLog() {
+	f.blMu.Lock()
+	defer f.blMu.Unlock()
+	f.importLog = nil
 }
 
 // runBlocklistImport fetches and merges all sources, then distributes the
@@ -747,6 +770,7 @@ func (f *Fleet) startBlocklistImport() {
 // back to its last good snapshot in the local DB, so a flaky source never
 // wipes its domains out of the merged list.
 func (f *Fleet) runBlocklistImport(ctx context.Context, gen int) {
+	started := f.now()
 	applied := false
 	current := func() bool {
 		f.blMu.Lock()
@@ -765,7 +789,13 @@ func (f *Fleet) runBlocklistImport(ctx context.Context, gen int) {
 		if applied {
 			f.blStatus.LastUpdate = f.now()
 		}
+		errs := len(f.blStatus.Errors)
 		f.blMu.Unlock()
+		fin := fmt.Sprintf("finished in %s", time.Since(started).Round(time.Millisecond))
+		if errs > 0 {
+			fin += fmt.Sprintf(" · %d error(s)", errs)
+		}
+		f.logImport("%s", fin)
 		f.bus.Publish(Event{Type: "status", At: f.now(), Msg: "blocklist update finished"})
 	}()
 
@@ -775,6 +805,7 @@ func (f *Fleet) runBlocklistImport(ctx context.Context, gen int) {
 		f.blStatus.Errors = []string{"no blocklist sources configured"}
 		f.sourceStats = nil
 		f.blMu.Unlock()
+		f.logImport("no blocklist sources configured — list cleared")
 		// Clear the list and the stored source snapshots on every instance too.
 		if f.blocklistDB != nil {
 			_ = f.blocklistDB.PruneSources(context.Background(), nil)
@@ -799,10 +830,13 @@ func (f *Fleet) runBlocklistImport(ctx context.Context, gen int) {
 			return
 		}
 		st := SourceStat{URL: u}
+		t0 := f.now()
+		f.logImport("[%d/%d] fetching %s", i+1, len(urls), u)
 		set, ferr := blocklist.FetchSource(ctx, u)
 		if ferr != nil {
 			failed++
 			st.Error = ferr.Error()
+			f.logImport("[%d/%d] failed: %s", i+1, len(urls), ferr)
 			// Fall back to the last good snapshot from the local DB.
 			if f.blocklistDB != nil {
 				if dbSet, derr := f.blocklistDB.LoadSourceDomains(ctx, u); derr == nil && len(dbSet) > 0 {
@@ -818,7 +852,13 @@ func (f *Fleet) runBlocklistImport(ctx context.Context, gen int) {
 					st.Domains = prev.Domains
 				}
 			}
+			if st.Domains > 0 {
+				f.logImport("[%d/%d] keeping previous snapshot (%d domains)", i+1, len(urls), st.Domains)
+			} else {
+				f.logImport("[%d/%d] no fallback snapshot available", i+1, len(urls))
+			}
 		} else {
+			f.logImport("[%d/%d] ok: %d domains in %s", i+1, len(urls), len(set), time.Since(t0).Round(time.Millisecond))
 			for d := range set {
 				merged[d] = struct{}{}
 			}
@@ -865,9 +905,11 @@ func (f *Fleet) runBlocklistImport(ctx context.Context, gen int) {
 		f.blStatus.Errors = append(f.blStatus.Errors, fmt.Sprintf("no domains fetched from any source (%d failed)", failed))
 		f.sourceStats = append([]SourceStat(nil), stats...)
 		f.blMu.Unlock()
+		f.logImport("no domains fetched from any source (%d failed) — keeping previous merged list", failed)
 		return // keep the last good merged list untouched
 	}
 	f.blMu.Unlock()
+	f.logImport("merged %d domains from %d source(s)", len(merged), len(urls))
 
 	f.blocklist.FromDomainsMap(merged)
 	applied = true
@@ -880,23 +922,32 @@ func (f *Fleet) runBlocklistImport(ctx context.Context, gen int) {
 	// Persist the merged list so a controller restart loads it into RAM
 	// instantly instead of re-fetching every source.
 	f.persistBlocklist()
+	f.logImport("persisted merged list to local cache")
 	// Distribute the merged list to instances (background; a large list takes
 	// a while to ship over the management API).
+	f.logImport("distributing %d domains to instances", len(merged))
 	if results := f.pushBlocklist(context.Background()); results != nil {
 		if !current() {
 			return
 		}
 		f.blMu.Lock()
 		msgs := make([]string, 0, len(results))
+		ok := 0
 		for id, r := range results {
 			if r != "ok" {
 				msgs = append(msgs, id+": "+r)
+			} else {
+				ok++
 			}
 		}
 		if len(msgs) > 0 {
 			f.blStatus.Errors = append(f.blStatus.Errors, "distribution: "+strings.Join(msgs, "; "))
 		}
 		f.blMu.Unlock()
+		f.logImport("distributed to %d/%d instance(s)", ok, len(results))
+		if len(msgs) > 0 {
+			f.logImport("distribution errors: %s", strings.Join(msgs, "; "))
+		}
 	}
 }
 
