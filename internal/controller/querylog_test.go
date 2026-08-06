@@ -123,3 +123,68 @@ func TestQueryLogStoreMaintenance(t *testing.T) {
 		t.Fatalf("AggregateStats total after fresh baseline = %d, want 0", agg.TotalQueries)
 	}
 }
+
+func TestQueryLogStoreClientStats(t *testing.T) {
+	store, err := NewQueryLogStore(filepath.Join(t.TempDir(), "querylog.db"))
+	if err != nil {
+		t.Fatalf("NewQueryLogStore: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	now := time.Now()
+	entries := []QueryLogEntry{
+		{Timestamp: now.Add(-time.Minute), Instance: "a", Client: "laptop", Domain: "example.com", Action: "PASS"},
+		{Timestamp: now.Add(-2 * time.Minute), Instance: "a", Client: "laptop", Domain: "ads.test", Action: "BLOCK"},
+		{Timestamp: now.Add(-3 * time.Minute), Instance: "a", Client: "laptop", Domain: "health_check", Action: "PASS"},
+		{Timestamp: now.Add(-4 * time.Minute), Instance: "b", Client: "1.2.3.4", Domain: "example.com", Action: "PASS"},
+		{Timestamp: now.Add(-5 * time.Minute), Instance: "b", Client: "1.2.3.4", Domain: "tracker.test", Action: "BLOCK"},
+	}
+	for _, e := range entries {
+		if err := store.Insert(ctx, e); err != nil {
+			t.Fatalf("Insert: %v", err)
+		}
+	}
+
+	// All instances: health checks excluded, client "laptop" and IP both present.
+	stats, err := store.ClientStats(ctx, "", now.Add(-24*time.Hour), 250)
+	if err != nil {
+		t.Fatalf("ClientStats: %v", err)
+	}
+	if len(stats) != 2 {
+		t.Fatalf("ClientStats returned %d clients, want 2", len(stats))
+	}
+	var laptop, ip *ClientStat
+	for i := range stats {
+		switch stats[i].Client {
+		case "laptop":
+			laptop = &stats[i]
+		case "1.2.3.4":
+			ip = &stats[i]
+		}
+	}
+	if laptop == nil || laptop.Kind != "client" || laptop.Queries != 2 || laptop.Blocked != 1 {
+		t.Errorf("laptop stat = %+v, want kind=client queries=2 blocked=1", laptop)
+	}
+	if ip == nil || ip.Kind != "ip" || ip.Queries != 2 || ip.Blocked != 1 {
+		t.Errorf("ip stat = %+v, want kind=ip queries=2 blocked=1", ip)
+	}
+
+	// Instance filter narrows to instance "a" only.
+	stats, err = store.ClientStats(ctx, "a", now.Add(-24*time.Hour), 250)
+	if err != nil {
+		t.Fatalf("ClientStats(a): %v", err)
+	}
+	if len(stats) != 1 || stats[0].Client != "laptop" || stats[0].Queries != 2 {
+		t.Fatalf("ClientStats(a) = %+v, want only laptop with 2 queries", stats)
+	}
+
+	// Since window excludes everything.
+	stats, err = store.ClientStats(ctx, "", now.Add(time.Hour), 250)
+	if err != nil {
+		t.Fatalf("ClientStats(since): %v", err)
+	}
+	if len(stats) != 0 {
+		t.Fatalf("ClientStats(since) returned %d clients, want 0", len(stats))
+	}
+}

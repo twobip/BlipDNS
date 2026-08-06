@@ -54,6 +54,7 @@ const IC = {
 const NAV = [
   { id: "dashboard", label: "Dashboard", icon: IC.dash, group: "Overview" },
   { id: "queries", label: "Query Log", icon: IC.query, group: "Overview" },
+  { id: "clients", label: "Clients", icon: IC.device, group: "Overview" },
   { id: "instances", label: "Instances", icon: IC.inst, group: "DNS" },
   { id: "blocklist", label: "Blocklists", icon: IC.block, group: "DNS" },
   { id: "filters", label: "DNS Filters", icon: IC.shield, group: "DNS" },
@@ -62,6 +63,7 @@ const NAV = [
 const TITLES = {
   dashboard: ["Dashboard", "Fleet throughput &amp; health"],
   queries: ["Query Log", "Live DNS resolution history"],
+  clients: ["Clients", "Who is querying this resolver"],
   instances: ["Instances", "Managed blipd resolvers"],
   blocklist: ["Blocklists", "Global blocked domains and list sources"],
   filters: ["DNS Filters", "Per-instance policies and scope rules"],
@@ -137,6 +139,7 @@ async function refresh() {
     if (current === "dashboard") renderDashboard();
     else if (current === "instances") renderInstances();
     else if (current === "queries") renderQueries();
+    else if (current === "clients") renderClients();
     else if (current === "filters") renderPolicies();
   } catch (e) {
     const c = $("conn");
@@ -448,6 +451,44 @@ async function copyText(s) {
     }
     toast("copied " + s);
   } catch { toast("copy failed", "err"); }
+}
+
+/* ---------- clients ---------- */
+let cState = { inst: "" };
+async function renderClients() {
+  const tb = $("c-tbody");
+  try {
+    const res = await API("/api/clients?instance=" + encodeURIComponent(cState.inst) + "&since=24h&limit=250");
+    const rows = await res.json();
+    propsCInstanceOptions();
+    $("c-count").textContent = rows.length + " clients (24h)";
+    if (!rows.length) {
+      tb.innerHTML = `<tr class="empty-row"><td colspan="6"><div class="empty"><div class="empty-ic">${IC.device}</div><h4>No clients</h4><p>Nothing queried this resolver in the last 24 hours.</p></div></td></tr>`;
+      return;
+    }
+    tb.innerHTML = rows.map((r) => {
+      const isIp = r.kind === "ip";
+      const rate = r.queries > 0 ? Math.round(100 * r.blocked / r.queries) : 0;
+      const kindBadge = isIp ? `<span class="badge" title="Source IP">IP</span>` : `<span class="badge accent" title="DoH client ID">client</span>`;
+      return `<tr>
+        <td class="q-client"><span class="q-cicon">${IC.device}</span><span class="mono" title="${esc(r.client)}">${esc(r.client)}</span></td>
+        <td>${kindBadge}</td>
+        <td class="q-count">${fmt(r.queries)}</td>
+        <td class="q-count">${fmt(r.blocked)}</td>
+        <td class="q-count">${rate}%</td>
+        <td class="q-time"><span class="t" data-t="${esc(r.last_seen)}" title="${esc(r.last_seen)}">…</span></td>
+      </tr>`;
+    }).join("");
+    tb.querySelectorAll(".t").forEach((t) => { t.textContent = timeAgo(t.dataset.t); });
+  } catch (e) {
+    tb.innerHTML = `<tr class="empty-row"><td colspan="6"><div class="empty"><div class="empty-ic">${IC.warn}</div><h4>Clients unavailable</h4><p>${esc(e.message)}</p></div></td></tr>`;
+  }
+}
+function propsCInstanceOptions() {
+  const sel = $("c-instance");
+  const cur = sel.value;
+  const labels = [...new Set(instances.map((i) => i.label || i.id || ""))].filter(Boolean);
+  sel.innerHTML = `<option value="">All instances</option>` + labels.map((l) => `<option value="${esc(l)}" ${l === cur ? "selected" : ""}>${esc(l)}</option>`).join("");
 }
 
 /* ---------- blocklist ---------- */
@@ -873,6 +914,10 @@ document.querySelectorAll("#q-action-seg button").forEach((b) => b.onclick = () 
   qState.action = b.dataset.a;
   renderQueries();
 });
+
+/* clients */
+$("c-instance").addEventListener("change", (e) => { cState.inst = e.target.value; renderClients(); });
+$("c-refresh").onclick = renderClients;
 
 /* chart range */
 $("d-range").addEventListener("change", (e) => {

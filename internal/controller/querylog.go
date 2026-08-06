@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"net"
 	"strings"
 	"time"
 
@@ -29,6 +30,53 @@ type QueryLogEntry struct {
 	// Cached reports whether the answer was served from the response cache.
 	DurationUs int64 `json:"duration_us,omitempty"`
 	Cached     bool  `json:"cached"`
+}
+
+// ClientStat is the per-client summary shown on the Clients tab.
+type ClientStat struct {
+	Client   string    `json:"client"` // DoH client ID or client IP
+	Kind     string    `json:"kind"`   // "client" (DoH ID) or "ip"
+	Queries  int       `json:"queries"`
+	Blocked  int       `json:"blocked"`
+	LastSeen time.Time `json:"last_seen"`
+}
+
+// ClientStats aggregates query-log activity by client (DoH client ID or source
+// IP), most active first, capped at limit.
+func (s *QueryLogStore) ClientStats(ctx context.Context, instance string, since time.Time, limit int) ([]ClientStat, error) {
+	query := `SELECT client, COUNT(*), SUM(CASE WHEN action = 'BLOCK' THEN 1 ELSE 0 END), MAX(timestamp) FROM query_log WHERE timestamp >= ? AND domain != 'health_check'`
+	args := []interface{}{since}
+	if instance != "" {
+		query += " AND instance = ?"
+		args = append(args, instance)
+	}
+	query += " GROUP BY client ORDER BY COUNT(*) DESC LIMIT ?"
+	args = append(args, limit)
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []ClientStat
+	for rows.Next() {
+		var c ClientStat
+		var blocked sql.NullInt64
+		var last string
+		if err := rows.Scan(&c.Client, &c.Queries, &blocked, &last); err != nil {
+			return nil, err
+		}
+		c.Blocked = int(blocked.Int64)
+		c.LastSeen = parseQueryTS(last)
+		if net.ParseIP(c.Client) != nil {
+			c.Kind = "ip"
+		} else {
+			c.Kind = "client"
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
 }
 
 // TimeSeriesPoint represents a single point in a time series
