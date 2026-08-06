@@ -454,8 +454,32 @@ func (s *Server) handleAdoptStatus(w http.ResponseWriter, r *http.Request) {
 	s.adoptMu.Lock()
 	adopted := s.adopted
 	inst := s.instanceID
+	ver := s.version
 	s.adoptMu.Unlock()
-	writeJSON(w, AdoptStatus{Adopted: adopted, InstanceID: inst, Version: s.version})
+	// The adopt/status endpoint is unauthenticated. instance_id and version are
+	// useful reconnaissance for an attacker (instance fingerprinting, CVE
+	// matching), and the controller only needs the `adopted` boolean here — so
+	// they are masked unless the caller proves it is the operator (valid bearer
+	// token). Operators can read the real values through any authenticated
+	// management endpoint.
+	if !s.authenticated(r) {
+		inst = ""
+		ver = ""
+	}
+	writeJSON(w, AdoptStatus{Adopted: adopted, InstanceID: inst, Version: ver})
+}
+
+// authenticated reports whether the request carries the instance's management
+// bearer token (i.e. the operator, not a casual visitor).
+func (s *Server) authenticated(r *http.Request) bool {
+	if s.token == "" {
+		return false
+	}
+	tok := r.Header.Get("Authorization")
+	if len(tok) > 7 && tok[:7] == "Bearer " {
+		tok = tok[7:]
+	}
+	return tok != "" && tok == s.token
 }
 
 func (s *Server) handleAdopt(w http.ResponseWriter, r *http.Request) {

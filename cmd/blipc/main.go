@@ -24,6 +24,7 @@ type config struct {
 	Listen               string                                  `yaml:"listen"`
 	Username             string                                  `yaml:"username"`
 	Password             string                                  `yaml:"password"`
+	PasswordHash         string                                  `yaml:"password_hash"`
 	DefaultPolicy        *control.Policy                         `yaml:"default_policy"`
 	InstanceOverrides    map[string]*controller.InstanceOverride `yaml:"instance_overrides"`
 	DoHHTTPAddr          string                                  `yaml:"doh_http_addr"`
@@ -45,6 +46,9 @@ func main() {
 	}
 	if cfg.Password == "" {
 		cfg.Password = os.Getenv("BLIPC_PASS")
+	}
+	if cfg.PasswordHash == "" {
+		cfg.PasswordHash = os.Getenv("BLIPC_PASS_HASH")
 	}
 	if cfg.Listen == "" {
 		cfg.Listen = "0.0.0.0:8500"
@@ -84,7 +88,13 @@ func main() {
 	}
 	fleet.StartAutoUpdater()
 
-	srv := controller.NewServer(cfg.Username, cfg.Password, fleet, controller.UI())
+	// Prefer a pre-hashed bcrypt password (kept out of the config plaintext);
+	// fall back to the plaintext password, which NewAuth hashes at startup.
+	authPass := cfg.PasswordHash
+	if authPass == "" {
+		authPass = cfg.Password
+	}
+	srv := controller.NewServer(cfg.Username, authPass, fleet, controller.UI())
 	httpSrv := &http.Server{
 		Addr:    cfg.Listen,
 		Handler: srv.Handler(),

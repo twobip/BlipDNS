@@ -24,6 +24,31 @@ import (
 	"testing"
 )
 
+// TestMain disables the SSRF guard for the test suite, since the LoadFromURLs
+// tests fetch from httptest servers bound to 127.0.0.1. A dedicated test
+// (TestSSRFProtection) re-enables it to confirm private/metadata hosts are
+// blocked.
+func TestMain(m *testing.M) {
+	saved := ssrfEnabled
+	ssrfEnabled = false
+	code := m.Run()
+	ssrfEnabled = saved
+	os.Exit(code)
+}
+
+func TestSSRFProtection(t *testing.T) {
+	ssrfEnabled = true
+	defer func() { ssrfEnabled = false }()
+	for _, u := range []string{
+		"http://127.0.0.1/x", "http://localhost/x", "http://169.254.169.254/latest/x",
+		"http://10.0.0.1/x", "http://192.168.1.1/x", "ftp://example.com/x",
+	} {
+		if _, err := FetchSource(context.Background(), u); err == nil {
+			t.Errorf("FetchSource(%q) should have been blocked", u)
+		}
+	}
+}
+
 func TestIsBlocked(t *testing.T) {
 	b := New()
 	b.Add("ads.example.com")

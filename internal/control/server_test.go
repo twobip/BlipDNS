@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -201,4 +203,54 @@ func TestDoHEndpoint(t *testing.T) {
 		t.Errorf("bad addr status = %d, want 400", resp.StatusCode)
 	}
 	resp.Body.Close()
+
+	srv.SetDoHController(nil)
+}
+
+// TestAdoptStatusMasking verifies the unauthenticated adopt/status endpoint
+// does not leak instance_id/version to casual callers — only the operator
+// (valid bearer token) sees them.
+func TestAdoptStatusMasking(t *testing.T) {
+	tmp := filepath.Join(t.TempDir(), "blipd-state.json")
+	if err := os.WriteFile(tmp, []byte(`{"adopted":true,"instance_id":"prod-42","token":"tok"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	store := filter.NewStore(nil)
+	srv := NewServerWithBlocklist("", store, cache.New(0, 0), &Counters{}, "blipd/1.2.3", blocklist.New())
+	srv.ConfigureAdoption(tmp, "prod-42")
+
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	// Unauthenticated: adopted only, instance_id/version masked.
+	body, _ := http.Get(ts.URL + "/api/v1/adopt/status")
+	if body.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", body.StatusCode)
+	}
+	var anon AdoptStatus
+	json.NewDecoder(body.Body).Decode(&anon)
+	body.Body.Close()
+	if anon.InstanceID != "" {
+		t.Errorf("unauth instance_id = %q, want masked", anon.InstanceID)
+	}
+	if anon.Version != "" {
+		t.Errorf("unauth version = %q, want masked", anon.Version)
+	}
+
+	// Authenticated operator sees the real values.
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/v1/adopt/status", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var authed AdoptStatus
+	json.NewDecoder(resp.Body).Decode(&authed)
+	resp.Body.Close()
+	if authed.InstanceID != "prod-42" {
+		t.Errorf("auth instance_id = %q, want prod-42", authed.InstanceID)
+	}
+	if authed.Version != "blipd/1.2.3" {
+		t.Errorf("auth version = %q, want blipd/1.2.3", authed.Version)
+	}
 }

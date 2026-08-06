@@ -11,6 +11,7 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"strings"
@@ -53,9 +54,11 @@ type Auth struct {
 	fl   map[string]*loginFails // client IP -> failure state
 }
 
-// NewAuth builds an Auth from a username + password. The password is locked
-// (bcrypt-hashed). An empty password yields a *closed* Auth that rejects every
-// login — never an open one.
+// NewAuth builds an Auth from a username + password. The password may be either
+// plaintext (it is bcrypt-hashed at startup) or a pre-computed bcrypt hash
+// (string starting with "$2"), which lets operators keep a plaintext password
+// out of the config file. An empty password yields a *closed* Auth that
+// rejects every login — never an open one.
 func NewAuth(username, password string) *Auth {
 	a := &Auth{
 		sessions: make(map[string]time.Time),
@@ -64,14 +67,38 @@ func NewAuth(username, password string) *Auth {
 	if username == "" || password == "" {
 		return a // configured=false -> all logins rejected
 	}
-	h, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	hash, err := bcryptHashFor(password)
 	if err != nil {
 		return a
 	}
 	a.username = username
-	a.passHash = h
+	a.passHash = hash
 	a.configured = true
 	return a
+}
+
+// bcryptHashFor returns a bcrypt hash for the password, or returns the password
+// verbatim when it already looks like a bcrypt hash (so pre-hashed passwords
+// from config are stored as-is rather than re-hashed, which would fail later
+// comparison). A string that merely starts with "$2" but is not a valid bcrypt
+// hash is rejected (fail-closed) so a broken config doesn't silently accept
+// logins.
+func bcryptHashFor(password string) ([]byte, error) {
+	if looksLikeBcryptHash(password) {
+		err := bcrypt.CompareHashAndPassword([]byte(password), []byte(""))
+		// ErrMismatchedHashAndPassword means the hash is well-formed (just didn't
+		// match the empty probe) — valid format. Any other error means malformed.
+		if err != nil && !errors.Is(err, bcrypt.ErrMismatchedHashAndPassword) {
+			return nil, fmt.Errorf("password_hash is not a valid bcrypt hash")
+		}
+		return []byte(password), nil
+	}
+	return bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+}
+
+// looksLikeBcryptHash reports whether s is a bcrypt $2a/$2b/$2y hash.
+func looksLikeBcryptHash(s string) bool {
+	return strings.HasPrefix(s, "$2a$") || strings.HasPrefix(s, "$2b$") || strings.HasPrefix(s, "$2y$")
 }
 
 // Configured reports whether valid credentials were provided at startup.

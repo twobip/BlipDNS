@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/twobip/BlipDNS/internal/control"
+	"golang.org/x/crypto/bcrypt"
 )
 
 // policyRec records every policy pushed to a fake blipd.
@@ -1094,5 +1095,38 @@ func TestServerSettingsDoHInstanceOverride(t *testing.T) {
 	}
 	if o["upstream"] != "udp://9.9.9.9:53" {
 		t.Errorf("b override upstream = %v, want udp://9.9.9.9:53 (merge must preserve it)", o["upstream"])
+	}
+}
+
+// TestAuthPasswordHash verifies a pre-bcrypt-hashed password in the config is
+// accepted as-is (D2), and that plaintext passwords still hash+verify.
+func TestAuthPasswordHash(t *testing.T) {
+	// Pre-hash a password so the config never stores plaintext.
+	hashed, err := bcrypt.GenerateFromPassword([]byte("secret"), bcrypt.DefaultCost)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// NewAuth must detect the bcrypt hash and use it verbatim (no double-hash).
+	a := NewAuth("admin", string(hashed))
+	if !a.configured {
+		t.Fatal("auth not configured from hash")
+	}
+	if id, err := a.Login("admin", "secret", "127.0.0.1"); err != nil || id == "" {
+		t.Errorf("login with hashed password failed: id=%q err=%v", id, err)
+	}
+	if _, err := a.Login("admin", "wrong", "127.0.0.1"); err == nil {
+		t.Error("wrong password accepted against hash")
+	}
+
+	// Plaintext password still works (hashed at startup by NewAuth).
+	b := NewAuth("admin", "secret")
+	if id, err := b.Login("admin", "secret", "127.0.0.1"); err != nil || id == "" {
+		t.Errorf("login with plaintext password failed: id=%q err=%v", id, err)
+	}
+
+	// Garbage hash string is rejected (not configured).
+	if c := NewAuth("admin", "$2b$not-a-real-hash"); c.configured {
+		t.Error("garbage bcrypt hash should not configure auth")
 	}
 }

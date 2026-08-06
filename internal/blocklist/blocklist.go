@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -28,6 +29,108 @@ const maxSourceBytes = 1 << 30
 
 // maxLineLen bounds a single line in a list (hosts/ABP entries are short).
 const maxLineLen = 4 * 1024 * 1024
+
+// safeBlocklistTransport fetches only over plain HTTP(S) to publicly routable
+// destinations, blocking SSRF against loopback, link-local, private,
+// multicast, and cloud-metadata ranges. The check happens at connect time, so
+// DNS rebinding does not bypass it.
+var safeBlocklistTransport = &http.Transport{
+	Proxy: http.ProxyFromEnvironment,
+	DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+		if !ssrfEnabled {
+			return (&net.Dialer{}).DialContext(ctx, network, addr)
+		}
+		host, _, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, err
+		}
+		ips, err := net.DefaultResolver.LookupHost(ctx, host)
+		if err != nil {
+			return nil, err
+		}
+		d := net.Dialer{}
+		for _, ip := range ips {
+			if isPrivateIP(net.ParseIP(ip)) {
+				continue
+			}
+			c, err := d.DialContext(ctx, network, net.JoinHostPort(ip, mustPort(addr)))
+			if err != nil {
+				return nil, err
+			}
+			return c, nil
+		}
+		return nil, fmt.Errorf("blocklist source resolves only to non-public addresses")
+	},
+	ForceAttemptHTTP2:   true,
+	MaxIdleConns:        10,
+	IdleConnTimeout:     30 * time.Second,
+	TLSHandshakeTimeout: 10 * time.Second,
+}
+
+func mustPort(addr string) string {
+	_, p, err := net.SplitHostPort(addr)
+	if err != nil || p == "" {
+		return addr
+	}
+	return p
+}
+
+// isPrivateIP reports whether ip is loopback, link-local, private,
+// multicast, unspecified, or in the cloud-metadata 169.254.0.0/16 range.
+func isPrivateIP(ip net.IP) bool {
+	if ip == nil {
+		return true
+	}
+	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() {
+		return true
+	}
+	// Private ranges (RFC 1918) and 100.64/10 (RFC 6598 carrier-grade NAT).
+	priv := []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10"}
+	for _, p := range priv {
+		_, n, _ := net.ParseCIDR(p)
+		if n != nil && n.Contains(ip) {
+			return true
+		}
+	}
+	// 169.254.0.0/16 (AWS/GCP/Azure metadata)
+	if _, n, _ := net.ParseCIDR("169.254.0.0/16"); n != nil && n.Contains(ip) {
+		return true
+	}
+	return false
+}
+
+// ssrfEnabled gates the SSRF guard (literal-IP rejection + private-route dial
+// check). It is on by default for production; tests that must fetch from
+// httptest (127.0.0.1) servers disable it via TestMain.
+var ssrfEnabled = true
+
+// validateSourceURL rejects non-http(s) schemes and obviously internal hosts
+// before we even dial. The transport-level check is the real guard against DNS
+// rebinding; this is a fast early reject for literal IPs.
+func validateSourceURL(rawURL string) error {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return err
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("unsupported scheme %q", u.Scheme)
+	}
+	if u.Host == "" {
+		return fmt.Errorf("missing host")
+	}
+	if ssrfEnabled {
+		if h := strings.TrimPrefix(u.Hostname(), "["); net.ParseIP(h) != nil && isPrivateIP(net.ParseIP(h)) {
+			return fmt.Errorf("blocklist source must not target a private/metadata address")
+		}
+	}
+	return nil
+}
+
+// FetchTransport is the HTTP transport used to retrieve blocklist sources. It
+// defaults to safeBlocklistTransport, which denies private/loopback/link-local
+// and cloud-metadata destinations (SSRF hardening). Tests that fetch from
+// httptest (127.0.0.1) servers swap it for http.DefaultTransport in TestMain.
+var FetchTransport http.RoundTripper = safeBlocklistTransport
 
 // Progress reports incremental fetch/parse progress while loading sources.
 type Progress struct {
@@ -379,13 +482,16 @@ type LoadOptions struct {
 // returns the parsed domains (and wildcard roots) as a set. An error is
 // returned only when the source could not be fetched or parsed at all.
 func FetchSource(ctx context.Context, rawURL string) (map[string]struct{}, error) {
+	if err := validateSourceURL(rawURL); err != nil {
+		return nil, err
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("User-Agent", "blipdns-blocklist/1.0 (+https://blipdns.local)")
 
-	client := &http.Client{Timeout: 2 * time.Minute}
+	client := &http.Client{Transport: FetchTransport, Timeout: 2 * time.Minute}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
@@ -556,7 +662,8 @@ func (b *Blocklist) SaveCache(path string) error {
 		return err
 	}
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0640); err != nil {
+	// 0600: cache may reflect queried domains; no group/world access.
+	if err := os.WriteFile(tmp, data, 0600); err != nil {
 		return err
 	}
 	return os.Rename(tmp, path)
