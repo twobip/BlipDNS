@@ -188,3 +188,74 @@ func TestQueryLogStoreClientStats(t *testing.T) {
 		t.Fatalf("ClientStats(since) returned %d clients, want 0", len(stats))
 	}
 }
+
+func TestClientNames(t *testing.T) {
+	store, err := NewQueryLogStore(filepath.Join(t.TempDir(), "querylog.db"))
+	if err != nil {
+		t.Fatalf("NewQueryLogStore: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	if err := store.SetClientName(ctx, "laptop", "Kids Laptop"); err != nil {
+		t.Fatalf("SetClientName: %v", err)
+	}
+	if err := store.SetClientName(ctx, "1.2.3.4", "Living Room TV"); err != nil {
+		t.Fatalf("SetClientName 2: %v", err)
+	}
+	names, err := store.ClientNames(ctx)
+	if err != nil {
+		t.Fatalf("ClientNames: %v", err)
+	}
+	if names["laptop"] != "Kids Laptop" || names["1.2.3.4"] != "Living Room TV" {
+		t.Fatalf("ClientNames = %v", names)
+	}
+
+	// Rename overrides; empty clears.
+	if err := store.SetClientName(ctx, "laptop", "Gaming Rig"); err != nil {
+		t.Fatalf("SetClientName rename: %v", err)
+	}
+	if err := store.SetClientName(ctx, "1.2.3.4", ""); err != nil {
+		t.Fatalf("SetClientName clear: %v", err)
+	}
+	names, err = store.ClientNames(ctx)
+	if err != nil {
+		t.Fatalf("ClientNames 2: %v", err)
+	}
+	if names["laptop"] != "Gaming Rig" {
+		t.Fatalf("renamed laptop = %q, want Gaming Rig", names["laptop"])
+	}
+	if _, ok := names["1.2.3.4"]; ok {
+		t.Fatalf("cleared 1.2.3.4 still present: %v", names)
+	}
+
+	// Names propagate into stats and query entries.
+	now := time.Now()
+	for _, e := range []QueryLogEntry{
+		{Timestamp: now, Instance: "a", Client: "laptop", Domain: "example.com", Action: "PASS"},
+		{Timestamp: now.Add(time.Second), Instance: "a", Client: "7.7.7.7", Domain: "example.com", Action: "PASS"},
+	} {
+		if err := store.Insert(ctx, e); err != nil {
+			t.Fatalf("Insert: %v", err)
+		}
+	}
+	stats, err := store.ClientStats(ctx, "", now.Add(-time.Hour), 250)
+	if err != nil {
+		t.Fatalf("ClientStats: %v", err)
+	}
+	for _, s := range stats {
+		if s.Client == "laptop" && s.Name != "Gaming Rig" {
+			t.Errorf("ClientStats name = %q, want Gaming Rig", s.Name)
+		}
+		if s.Client == "7.7.7.7" && s.Name != "" {
+			t.Errorf("ClientStats unnamed got %q", s.Name)
+		}
+	}
+	entries, err := store.Query(ctx, "", "Gaming Rig", now.Add(-time.Hour), 100)
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Client != "laptop" || entries[0].Name != "Gaming Rig" {
+		t.Fatalf("Query by name = %+v, want one laptop entry named Gaming Rig", entries)
+	}
+}

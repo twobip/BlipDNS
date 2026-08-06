@@ -171,19 +171,33 @@
       <section id="view-clients" class="view hidden">
         <div class="panel">
           <div class="panel-head">
-            <h3>Clients</h3>
+            <h3>Origin IPs</h3>
+            <span class="muted" id="c-ip-count">0</span>
             <span class="spacer"></span>
             <select class="select" id="c-instance"><option value="">All instances</option></select>
             <button class="btn" id="c-refresh">
               <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-2.6-6.3M21 3v6h-6"/></svg>
               Refresh
             </button>
-            <span class="muted" id="c-count">0 clients</span>
           </div>
           <div class="table-wrap">
             <table class="tbl">
-              <thead><tr><th>Client</th><th>Kind</th><th>Queries</th><th>Blocked</th><th>Block rate</th><th>Last seen</th></tr></thead>
-              <tbody id="c-tbody"></tbody>
+              <thead><tr><th>Client</th><th>Name</th><th>Queries</th><th>Blocked</th><th>Block rate</th><th>Last seen</th><th style="width:40px"></th></tr></thead>
+              <tbody id="c-ip-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="panel-head">
+            <h3>DoH Clients</h3>
+            <span class="muted" id="c-client-count">0</span>
+            <span class="spacer"></span>
+            <span class="hint" title="Clients identified by a DoH client ID in the request URL">/dns-query/&#123;client-id&#125;</span>
+          </div>
+          <div class="table-wrap">
+            <table class="tbl">
+              <thead><tr><th>Client</th><th>Name</th><th>Queries</th><th>Blocked</th><th>Block rate</th><th>Last seen</th><th style="width:40px"></th></tr></thead>
+              <tbody id="c-client-tbody"></tbody>
             </table>
           </div>
         </div>
@@ -418,6 +432,21 @@
     <div class="modal-foot">
       <button class="btn" data-close="modal-confirm">Cancel</button>
       <button class="btn btn-danger" id="cf-ok">Confirm</button>
+    </div>
+  </div>
+</div>
+
+<div class="overlay hidden" id="modal-rename">
+  <div class="modal" style="max-width:420px">
+    <div class="modal-head"><h3 id="rn-title">Rename Client</h3><button class="icon-btn x" data-close="modal-rename">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button></div>
+    <div class="modal-body">
+      <p class="hint" style="margin:0 0 4px" id="rn-raw"></p>
+      <input class="input" id="rn-input" placeholder="Friendly name (empty to clear)"/>
+    </div>
+    <div class="modal-foot">
+      <button class="btn" data-close="modal-rename">Cancel</button>
+      <button class="btn btn-primary" id="rn-save">Save</button>
     </div>
   </div>
 </div>

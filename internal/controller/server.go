@@ -38,11 +38,12 @@ func (s *Server) Handler() http.Handler {
 		return s.requireAuth(h)
 	}
 	mux.HandleFunc("/api/instances", api(s.handleInstances))
-	mux.HandleFunc("/api/instances/", api(s.handleInstance))     // /add /delete /policies /policy /adopt /adopt/status /adopt/reset /label /query-log
-	mux.HandleFunc("/api/queries", api(s.handleQueries))         // query log
-	mux.HandleFunc("/api/clients", api(s.handleClients))         // per-client activity
-	mux.HandleFunc("/api/stats", api(s.handleStats))             // aggregated query stats for graphs
-	mux.HandleFunc("/api/maintenance", api(s.handleMaintenance)) // POST reset_stats / clear_query_log
+	mux.HandleFunc("/api/instances/", api(s.handleInstance))      // /add /delete /policies /policy /adopt /adopt/status /adopt/reset /label /query-log
+	mux.HandleFunc("/api/queries", api(s.handleQueries))          // query log
+	mux.HandleFunc("/api/clients", api(s.handleClients))          // per-client activity
+	mux.HandleFunc("/api/client-names", api(s.handleClientNames)) // friendly client renames
+	mux.HandleFunc("/api/stats", api(s.handleStats))              // aggregated query stats for graphs
+	mux.HandleFunc("/api/maintenance", api(s.handleMaintenance))  // POST reset_stats / clear_query_log
 	mux.HandleFunc("/api/events", api(s.handleEvents))
 	mux.HandleFunc("/api/health", api(s.handleHealth))
 	mux.HandleFunc("/api/settings", api(s.handleSettings)) // fleet-wide default config
@@ -400,6 +401,44 @@ func (s *Server) handleClients(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, stats)
+}
+
+// handleClientNames manages the client → friendly-name mapping used for
+// display only; the raw client ID/IP is never rewritten.
+func (s *Server) handleClientNames(w http.ResponseWriter, r *http.Request) {
+	if s.fleet.queryLog == nil {
+		http.Error(w, "query log not available", http.StatusServiceUnavailable)
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		names, err := s.fleet.queryLog.ClientNames(r.Context())
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		writeJSON(w, names)
+	case http.MethodPut:
+		var req struct {
+			Client string `json:"client"`
+			Name   string `json:"name"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if req.Client == "" {
+			http.Error(w, "client required", http.StatusBadRequest)
+			return
+		}
+		if err := s.fleet.queryLog.SetClientName(r.Context(), req.Client, req.Name); err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		writeJSON(w, map[string]interface{}{"ok": true})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {

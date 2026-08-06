@@ -381,7 +381,7 @@ async function renderQueries() {
     const rows = await res.json();
     const list = rows.filter((r) => {
       if (!r.domain) return false;
-      if (qState.filter && !(r.domain + " " + r.client + " " + r.instance).toLowerCase().includes(qState.filter.toLowerCase())) return false;
+      if (qState.filter && !(r.domain + " " + r.client + " " + (r.name || "") + " " + r.instance).toLowerCase().includes(qState.filter.toLowerCase())) return false;
       if (qState.action && (r.action || "").toUpperCase() !== qState.action) return false;
       return true;
     });
@@ -405,7 +405,7 @@ async function renderQueries() {
           <button class="icon-btn q-copy" data-copy="${esc(r.domain)}" title="Copy domain">${IC.copy}</button>
         </td>
         <td><span class="badge badge-action ${actionBadge}">${isBlock ? IC.block : action === "PASS" ? IC.arrow : ""}${actionLabel}</span></td>
-        <td class="q-client"><span class="q-cicon">${IC.device}</span><span class="mono" title="${esc(r.client)}">${esc(r.client)}</span></td>
+        <td class="q-client">${clientCellHtml(r)}</td>
         <td class="q-ips">${ipsHtml(r.ips)}</td>
         <td class="q-lat">${latencyHtml(r)}</td>
         <td class="q-inst"><span class="dot ${inst && inst.online ? "on" : "off"}"></span>${esc(inst ? (inst.label || inst.id) : r.instance)}</td>
@@ -455,40 +455,80 @@ async function copyText(s) {
 
 /* ---------- clients ---------- */
 let cState = { inst: "" };
+let rnState = { client: "", kind: "" };
+function clientCellHtml(r) {
+  const name = r.name ? esc(r.name) : "";
+  const raw = `<span class="mono" title="${esc(r.client)}">${esc(r.client)}</span>`;
+  return `<span class="q-cicon">${IC.device}</span>` + (name
+    ? `<span class="q-cname">${name}</span><span class="faint q-craw">${raw}</span>`
+    : raw);
+}
+function clientRowHtml(r) {
+  const rate = r.queries > 0 ? Math.round(100 * r.blocked / r.queries) : 0;
+  return `<tr>
+    <td class="q-client">${clientCellHtml(r)}</td>
+    <td class="q-name">${r.name ? esc(r.name) : '<span class="faint">—</span>'}</td>
+    <td class="q-count">${fmt(r.queries)}</td>
+    <td class="q-count">${fmt(r.blocked)}</td>
+    <td class="q-count">${rate}%</td>
+    <td class="q-time"><span class="t" data-t="${esc(r.last_seen)}" title="${esc(r.last_seen)}">…</span></td>
+    <td class="q-rename"><button class="icon-btn" data-rename="${esc(r.client)}" data-kind="${r.kind}" title="Rename client">${IC.edit}</button></td>
+  </tr>`;
+}
 async function renderClients() {
-  const tb = $("c-tbody");
   try {
     const res = await API("/api/clients?instance=" + encodeURIComponent(cState.inst) + "&since=24h&limit=250");
     const rows = await res.json();
     propsCInstanceOptions();
-    $("c-count").textContent = rows.length + " clients (24h)";
-    if (!rows.length) {
-      tb.innerHTML = `<tr class="empty-row"><td colspan="6"><div class="empty"><div class="empty-ic">${IC.device}</div><h4>No clients</h4><p>Nothing queried this resolver in the last 24 hours.</p></div></td></tr>`;
-      return;
-    }
-    tb.innerHTML = rows.map((r) => {
-      const isIp = r.kind === "ip";
-      const rate = r.queries > 0 ? Math.round(100 * r.blocked / r.queries) : 0;
-      const kindBadge = isIp ? `<span class="badge" title="Source IP">IP</span>` : `<span class="badge accent" title="DoH client ID">client</span>`;
-      return `<tr>
-        <td class="q-client"><span class="q-cicon">${IC.device}</span><span class="mono" title="${esc(r.client)}">${esc(r.client)}</span></td>
-        <td>${kindBadge}</td>
-        <td class="q-count">${fmt(r.queries)}</td>
-        <td class="q-count">${fmt(r.blocked)}</td>
-        <td class="q-count">${rate}%</td>
-        <td class="q-time"><span class="t" data-t="${esc(r.last_seen)}" title="${esc(r.last_seen)}">…</span></td>
-      </tr>`;
-    }).join("");
-    tb.querySelectorAll(".t").forEach((t) => { t.textContent = timeAgo(t.dataset.t); });
+    const ips = rows.filter((r) => r.kind === "ip");
+    const clients = rows.filter((r) => r.kind !== "ip");
+    $("c-ip-count").textContent = ips.length + " (24h)";
+    $("c-client-count").textContent = clients.length + " (24h)";
+    renderClientRows($("c-ip-tbody"), ips, 7, "No origin IPs", "Nothing queried this resolver in the last 24 hours.");
+    renderClientRows($("c-client-tbody"), clients, 7, "No DoH clients", "No request included a /dns-query/{client-id} path.");
   } catch (e) {
-    tb.innerHTML = `<tr class="empty-row"><td colspan="6"><div class="empty"><div class="empty-ic">${IC.warn}</div><h4>Clients unavailable</h4><p>${esc(e.message)}</p></div></td></tr>`;
+    renderClientErr($("c-ip-tbody"), e.message);
+    renderClientErr($("c-client-tbody"), e.message);
   }
+}
+function renderClientRows(tb, rows, cols, title, msg) {
+  if (!rows.length) {
+    tb.innerHTML = `<tr class="empty-row"><td colspan="${cols}"><div class="empty"><div class="empty-ic">${IC.device}</div><h4>${title}</h4><p>${msg}</p></div></td></tr>`;
+    return;
+  }
+  tb.innerHTML = rows.map(clientRowHtml).join("");
+  tb.querySelectorAll(".t").forEach((t) => { t.textContent = timeAgo(t.dataset.t); });
+}
+function renderClientErr(tb, msg) {
+  tb.innerHTML = `<tr class="empty-row"><td colspan="7"><div class="empty"><div class="empty-ic">${IC.warn}</div><h4>Clients unavailable</h4><p>${esc(msg)}</p></div></td></tr>`;
 }
 function propsCInstanceOptions() {
   const sel = $("c-instance");
   const cur = sel.value;
   const labels = [...new Set(instances.map((i) => i.label || i.id || ""))].filter(Boolean);
   sel.innerHTML = `<option value="">All instances</option>` + labels.map((l) => `<option value="${esc(l)}" ${l === cur ? "selected" : ""}>${esc(l)}</option>`).join("");
+}
+function openRename(client, kind) {
+  rnState.client = client;
+  rnState.kind = kind;
+  $("rn-title").textContent = kind === "ip" ? "Rename Origin IP" : "Rename Client";
+  $("rn-raw").innerHTML = `<span class="badge ${kind === "ip" ? "" : "accent"}">${kind === "ip" ? "IP" : "client"}</span> <span class="mono">${esc(client)}</span>`;
+  $("rn-input").value = "";
+  show("modal-rename");
+  $("rn-input").focus();
+}
+async function saveRename() {
+  const name = $("rn-input").value.trim();
+  try {
+    await API("/api/client-names", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ client: rnState.client, name }),
+    });
+    hide("modal-rename");
+    toast(name ? `renamed ${rnState.client} → ${name}` : `cleared name for ${rnState.client}`);
+    renderClients();
+  } catch (e) { toast("rename failed: " + e.message, "err"); }
 }
 
 /* ---------- blocklist ---------- */
@@ -918,6 +958,12 @@ document.querySelectorAll("#q-action-seg button").forEach((b) => b.onclick = () 
 /* clients */
 $("c-instance").addEventListener("change", (e) => { cState.inst = e.target.value; renderClients(); });
 $("c-refresh").onclick = renderClients;
+["c-ip-tbody", "c-client-tbody"].forEach((id) => $(id).addEventListener("click", (e) => {
+  const b = e.target.closest("[data-rename]"); if (!b) return;
+  openRename(b.dataset.rename, b.dataset.kind);
+}));
+$("rn-save").onclick = saveRename;
+$("rn-input").addEventListener("keydown", (e) => { if (e.key === "Enter") saveRename(); });
 
 /* chart range */
 $("d-range").addEventListener("change", (e) => {

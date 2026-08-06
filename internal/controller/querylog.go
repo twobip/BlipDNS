@@ -22,6 +22,7 @@ type QueryLogEntry struct {
 	Timestamp time.Time `json:"timestamp"`
 	Instance  string    `json:"instance"`
 	Client    string    `json:"client"`
+	Name      string    `json:"name,omitempty"` // friendly display name, if set
 	Domain    string    `json:"domain"`
 	Action    string    `json:"action"`
 	Upstream  string    `json:"upstream,omitempty"`
@@ -35,6 +36,7 @@ type QueryLogEntry struct {
 // ClientStat is the per-client summary shown on the Clients tab.
 type ClientStat struct {
 	Client   string    `json:"client"` // DoH client ID or client IP
+	Name     string    `json:"name"`   // friendly display name, if set
 	Kind     string    `json:"kind"`   // "client" (DoH ID) or "ip"
 	Queries  int       `json:"queries"`
 	Blocked  int       `json:"blocked"`
@@ -44,13 +46,13 @@ type ClientStat struct {
 // ClientStats aggregates query-log activity by client (DoH client ID or source
 // IP), most active first, capped at limit.
 func (s *QueryLogStore) ClientStats(ctx context.Context, instance string, since time.Time, limit int) ([]ClientStat, error) {
-	query := `SELECT client, COUNT(*), SUM(CASE WHEN action = 'BLOCK' THEN 1 ELSE 0 END), MAX(timestamp) FROM query_log WHERE timestamp >= ? AND domain != 'health_check'`
+	query := `SELECT ql.client, COALESCE(MAX(cn.name), ''), COUNT(*), SUM(CASE WHEN ql.action = 'BLOCK' THEN 1 ELSE 0 END), MAX(ql.timestamp) FROM query_log ql LEFT JOIN client_names cn ON cn.client = ql.client WHERE ql.timestamp >= ? AND ql.domain != 'health_check'`
 	args := []interface{}{since}
 	if instance != "" {
-		query += " AND instance = ?"
+		query += " AND ql.instance = ?"
 		args = append(args, instance)
 	}
-	query += " GROUP BY client ORDER BY COUNT(*) DESC LIMIT ?"
+	query += " GROUP BY ql.client ORDER BY COUNT(*) DESC LIMIT ?"
 	args = append(args, limit)
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
@@ -64,7 +66,7 @@ func (s *QueryLogStore) ClientStats(ctx context.Context, instance string, since 
 		var c ClientStat
 		var blocked sql.NullInt64
 		var last string
-		if err := rows.Scan(&c.Client, &c.Queries, &blocked, &last); err != nil {
+		if err := rows.Scan(&c.Client, &c.Name, &c.Queries, &blocked, &last); err != nil {
 			return nil, err
 		}
 		c.Blocked = int(blocked.Int64)
@@ -150,6 +152,11 @@ func NewQueryLogStore(dbPath string) (*QueryLogStore, error) {
 		errors INTEGER NOT NULL
 	);
 	CREATE INDEX IF NOT EXISTS idx_stats_samples_timestamp ON stats_samples(timestamp);
+	CREATE TABLE IF NOT EXISTS client_names (
+		client TEXT PRIMARY KEY,
+		name TEXT NOT NULL,
+		updated_at DATETIME NOT NULL
+	);
 	`
 	if _, err := db.Exec(schema); err != nil {
 		return nil, fmt.Errorf("create schema: %w", err)
@@ -185,22 +192,22 @@ func (s *QueryLogStore) Insert(ctx context.Context, e QueryLogEntry) error {
 
 // Query returns entries within the time range
 func (s *QueryLogStore) Query(ctx context.Context, instance, filter string, since time.Time, limit int) ([]QueryLogEntry, error) {
-	query := `SELECT id, timestamp, instance, client, domain, action, upstream, ips, duration_us, cached FROM query_log WHERE timestamp >= ? AND domain != 'health_check'`
+	query := `SELECT ql.id, ql.timestamp, ql.instance, ql.client, COALESCE(cn.name, ''), ql.domain, ql.action, ql.upstream, ql.ips, ql.duration_us, ql.cached FROM query_log ql LEFT JOIN client_names cn ON cn.client = ql.client WHERE ql.timestamp >= ? AND ql.domain != 'health_check'`
 	args := []interface{}{since}
 
 	if instance != "" {
-		query += " AND instance = ?"
+		query += " AND ql.instance = ?"
 		args = append(args, instance)
 	}
 
 	filterLower := ""
 	if filter != "" {
 		filterLower = "%" + filter + "%"
-		query += " AND (LOWER(client) LIKE ? OR LOWER(domain) LIKE ? OR LOWER(action) LIKE ?)"
-		args = append(args, filterLower, filterLower, filterLower)
+		query += " AND (LOWER(ql.client) LIKE ? OR LOWER(cn.name) LIKE ? OR LOWER(ql.domain) LIKE ? OR LOWER(ql.action) LIKE ?)"
+		args = append(args, filterLower, filterLower, filterLower, filterLower)
 	}
 
-	query += " ORDER BY timestamp DESC LIMIT ?"
+	query += " ORDER BY ql.timestamp DESC LIMIT ?"
 	args = append(args, limit)
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
@@ -215,7 +222,7 @@ func (s *QueryLogStore) Query(ctx context.Context, instance, filter string, sinc
 		var ts string
 		var ips sql.NullString
 		var dur, cached sql.NullInt64
-		if err := rows.Scan(&e.ID, &ts, &e.Instance, &e.Client, &e.Domain, &e.Action, &e.Upstream, &ips, &dur, &cached); err != nil {
+		if err := rows.Scan(&e.ID, &ts, &e.Instance, &e.Client, &e.Name, &e.Domain, &e.Action, &e.Upstream, &ips, &dur, &cached); err != nil {
 			return nil, err
 		}
 		e.Timestamp = parseQueryTS(ts)
@@ -227,6 +234,40 @@ func (s *QueryLogStore) Query(ctx context.Context, instance, filter string, sinc
 		results = append(results, e)
 	}
 	return results, rows.Err()
+}
+
+// SetClientName upserts the friendly display name for a client (DoH client ID
+// or source IP). An empty name removes the mapping.
+func (s *QueryLogStore) SetClientName(ctx context.Context, client, name string) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		_, err := s.db.ExecContext(ctx, `DELETE FROM client_names WHERE client = ?`, client)
+		return err
+	}
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO client_names (client, name, updated_at) VALUES (?, ?, ?)
+		 ON CONFLICT(client) DO UPDATE SET name = excluded.name, updated_at = excluded.updated_at`,
+		client, name, time.Now())
+	return err
+}
+
+// ClientNames returns the full client → friendly-name mapping.
+func (s *QueryLogStore) ClientNames(ctx context.Context) (map[string]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT client, name FROM client_names`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make(map[string]string)
+	for rows.Next() {
+		var c, n string
+		if err := rows.Scan(&c, &n); err != nil {
+			return nil, err
+		}
+		out[c] = n
+	}
+	return out, rows.Err()
 }
 
 // AddStatsSample records a snapshot of an instance's cumulative counters.

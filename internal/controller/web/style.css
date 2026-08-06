@@ -357,6 +357,10 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
 .q-cicon { color: var(--faint); display: inline-grid; place-items: center; vertical-align: middle; margin-right: 7px; }
 .q-cicon svg { width: 14px; height: 14px; }
 .q-client .mono { color: var(--text-2); font-size: 12px; max-width: 170px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-block; vertical-align: middle; }
+.q-cname { color: var(--text); font-weight: 600; font-size: 12.5px; vertical-align: middle; }
+.q-craw .mono { color: var(--faint); font-size: 11px; max-width: 130px; margin-left: 6px; }
+.q-name { color: var(--text-2); font-size: 12.5px; }
+.q-rename { text-align: right; }
 
 .q-ips { white-space: nowrap; }
 .q-chip {
