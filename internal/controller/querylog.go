@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -13,8 +15,19 @@ import (
 
 // QueryLogStore provides persistent storage for query log events
 type QueryLogStore struct {
-	db *sql.DB
+	db      *sql.DB
+	buf     chan QueryLogEntry // async batch buffer for high-frequency events
+	stop    chan struct{}
+	wg      sync.WaitGroup
+	dropped atomic.Uint64 // entries dropped because the buffer was full
 }
+
+// batch limits for the async writer: flushes when a batch fills or the
+// interval elapses, whichever comes first.
+const (
+	batchMax      = 500
+	batchInterval = 100 * time.Millisecond
+)
 
 // QueryLogEntry represents a single DNS query event
 type QueryLogEntry struct {
@@ -171,7 +184,13 @@ func NewQueryLogStore(dbPath string) (*QueryLogStore, error) {
 	}
 
 	// Start cleanup goroutine
-	store := &QueryLogStore{db: db}
+	store := &QueryLogStore{
+		db:   db,
+		buf:  make(chan QueryLogEntry, 4096),
+		stop: make(chan struct{}),
+	}
+	store.wg.Add(1)
+	go store.batchWriter()
 	go store.cleanupLoop()
 
 	return store, nil
@@ -388,8 +407,81 @@ func (s *QueryLogStore) cleanupLoop() {
 	}
 }
 
-// Close closes the database connection
+// Enqueue buffers a query-log entry for batched writing. It never blocks the
+// caller (the watch-stream consumer): if the buffer is full the entry is
+// dropped (and counted) rather than stalling event delivery.
+func (s *QueryLogStore) Enqueue(e QueryLogEntry) {
+	select {
+	case s.buf <- e:
+	default:
+		s.dropped.Add(1)
+	}
+}
+
+// DroppedEvents returns how many entries were dropped because the buffer was
+// full.
+func (s *QueryLogStore) DroppedEvents() uint64 {
+	return s.dropped.Load()
+}
+
+// batchWriter drains the async buffer into SQLite using batched transactions
+// so high-frequency block/pass events do not bottleneck the watch stream.
+func (s *QueryLogStore) batchWriter() {
+	defer s.wg.Done()
+	buf := make([]QueryLogEntry, 0, batchMax)
+	ticker := time.NewTicker(batchInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case e := <-s.buf:
+			buf = append(buf, e)
+			if len(buf) >= batchMax {
+				s.insertBatch(context.Background(), buf)
+				buf = buf[:0]
+			}
+		case <-ticker.C:
+			if len(buf) > 0 {
+				s.insertBatch(context.Background(), buf)
+				buf = buf[:0]
+			}
+		case <-s.stop:
+			if len(buf) > 0 {
+				s.insertBatch(context.Background(), buf)
+			}
+			return
+		}
+	}
+}
+
+// insertBatch writes entries in a single transaction.
+func (s *QueryLogStore) insertBatch(ctx context.Context, entries []QueryLogEntry) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return
+	}
+	stmt, err := tx.Prepare(`INSERT INTO query_log (timestamp, instance, client, domain, action, upstream, ips, duration_us, cached) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+	if err != nil {
+		_ = tx.Rollback()
+		return
+	}
+	defer stmt.Close()
+	for _, e := range entries {
+		cached := 0
+		if e.Cached {
+			cached = 1
+		}
+		if _, err := stmt.Exec(e.Timestamp, e.Instance, e.Client, e.Domain, e.Action, e.Upstream, strings.Join(e.IPs, ","), e.DurationUs, cached); err != nil {
+			_ = tx.Rollback()
+			return
+		}
+	}
+	_ = tx.Commit()
+}
+
+// Close flushes any buffered entries and closes the database.
 func (s *QueryLogStore) Close() error {
+	close(s.stop)
+	s.wg.Wait()
 	return s.db.Close()
 }
 

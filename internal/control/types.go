@@ -25,22 +25,25 @@ type HealthResponse struct {
 	Uptime  string    `json:"uptime"`
 	Started time.Time `json:"started"`
 	Version string    `json:"version"`
+	// DroppedEvents counts WatchEvents dropped because a consumer could not
+	// keep up. Non-zero is a signal that event delivery is falling behind.
+	DroppedEvents int64 `json:"dropped_events"`
 }
 
 type StatsResponse struct {
-	Cached       int            `json:"cached"`
-	QueriesTotal uint64         `json:"queries_total"`
-	BlockedTotal uint64         `json:"blocked_total"`
-	UpstreamErr  uint64         `json:"upstream_errors"`
-	PerClient    map[string]uint64 `json:"per_client,omitempty"`
-	Upstream     string         `json:"upstream,omitempty"`
-	BlocklistCount int          `json:"blocklist_count,omitempty"`
-	BlocklistHash  uint64       `json:"blocklist_hash,omitempty"`
+	Cached         int               `json:"cached"`
+	QueriesTotal   uint64            `json:"queries_total"`
+	BlockedTotal   uint64            `json:"blocked_total"`
+	UpstreamErr    uint64            `json:"upstream_errors"`
+	PerClient      map[string]uint64 `json:"per_client,omitempty"`
+	Upstream       string            `json:"upstream,omitempty"`
+	BlocklistCount int               `json:"blocklist_count,omitempty"`
+	BlocklistHash  uint64            `json:"blocklist_hash,omitempty"`
 }
 
 // ListResponse returns the default (nil ID indicates default) plus all policies.
 type ListResponse struct {
-	Default *Policy  `json:"default,omitempty"`
+	Default  *Policy   `json:"default,omitempty"`
 	Policies []*Policy `json:"policies"`
 }
 

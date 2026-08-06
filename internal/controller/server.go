@@ -342,7 +342,13 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, s.fleet.Health())
+	out := map[string]interface{}{
+		"instances": s.fleet.Health(),
+	}
+	if s.fleet.queryLog != nil {
+		out["query_log_dropped"] = s.fleet.queryLog.DroppedEvents()
+	}
+	writeJSON(w, out)
 }
 
 func (s *Server) handleQueries(w http.ResponseWriter, r *http.Request) {

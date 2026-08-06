@@ -14,9 +14,9 @@ import (
 // Client is the controller-side client that connects to a managed blipd
 // instance's management API.
 type Client struct {
-	base   string
-	token  string
-	http   *http.Client
+	base  string
+	token string
+	http  *http.Client
 }
 
 // NewClient creates a controller client for baseURL (e.g.
@@ -149,14 +149,17 @@ func (c *Client) ResetAdoption(ctx context.Context) error {
 }
 
 // Watch opens the SSE stream and invokes fn for each event until ctx is
-// cancelled.
+// cancelled. It deliberately uses a client without an overall timeout: the
+// stream is long-lived and an absolute deadline would kill it (and silently
+// lose events) every few seconds. Cancellation is handled via ctx; blipd
+// sends periodic stats keepalives to keep the connection healthy.
 func (c *Client) Watch(ctx context.Context, fn func(WatchEvent)) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+"/api/v1/watch", nil)
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
-	resp, err := c.http.Do(req)
+	resp, err := (&http.Client{}).Do(req)
 	if err != nil {
 		return err
 	}

@@ -93,7 +93,7 @@ GET    /api/instances/<id>/adopt/status  adoption state (unauth)
 POST   /api/instances/<id>/adopt         adopt with {code} (one-time bootstrap)
 POST   /api/instances/<id>/adopt/reset   reset adoption (requires instance token)
 GET    /api/events                    SSE fleet event stream
-GET    /api/health                    per-instance health
+GET    /api/health                    {instances: {per-instance health}, query_log_dropped}
 ```
 
 Token may be passed as `Authorization: Bearer <token>` or `?token=<token>`.

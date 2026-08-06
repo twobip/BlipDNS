@@ -259,3 +259,42 @@ func TestClientNames(t *testing.T) {
 		t.Fatalf("Query by name = %+v, want one laptop entry named Gaming Rig", entries)
 	}
 }
+
+func TestQueryLogStoreBatchWriter(t *testing.T) {
+	store, err := NewQueryLogStore(filepath.Join(t.TempDir(), "querylog.db"))
+	if err != nil {
+		t.Fatalf("NewQueryLogStore: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	now := time.Now()
+	const n = 2000
+	for i := 0; i < n; i++ {
+		store.Enqueue(QueryLogEntry{
+			Timestamp: now.Add(time.Duration(i) * time.Millisecond),
+			Instance:  "a", Client: "batch-client", Domain: "example.com", Action: "PASS",
+			DurationUs: int64(i),
+			Cached:     i%2 == 0,
+		})
+	}
+
+	// The async writer should flush everything shortly after the last enqueue.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		entries, err := store.Query(ctx, "", "", time.Time{}, 10000)
+		if err != nil {
+			t.Fatalf("Query: %v", err)
+		}
+		if len(entries) == n {
+			if entries[0].Client != "batch-client" || entries[0].DurationUs != int64(n-1) {
+				t.Fatalf("batch roundtrip mismatch: first=%+v", entries[0])
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("batch writer flushed %d/%d entries before deadline", len(entries), n)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}

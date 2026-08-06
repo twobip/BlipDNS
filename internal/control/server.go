@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/twobip/BlipDNS/internal/blocklist"
@@ -35,6 +36,10 @@ type Server struct {
 	mu        sync.RWMutex
 	watchMu   sync.Mutex
 	watchers  map[chan WatchEvent]struct{}
+
+	// droppedEvents counts WatchEvents dropped because a consumer's buffer was
+	// full. The send is non-blocking so the DNS hot path is never stalled.
+	droppedEvents atomic.Int64
 
 	// blocklistCachePath persists a received blocklist to disk so a restart
 	// keeps blocking without waiting for the controller to re-push.
@@ -136,7 +141,9 @@ func (s *Server) persistAdopted(adopted bool) {
 	}
 }
 
-// Notify pushes a WatchEvent to all connected watchers.
+// Notify pushes a WatchEvent to all connected watchers. Sends are
+// non-blocking: a consumer that cannot keep up has events dropped and counted
+// (see droppedEvents) rather than stalling the caller.
 func (s *Server) Notify(e WatchEvent) {
 	if s == nil {
 		return
@@ -147,6 +154,7 @@ func (s *Server) Notify(e WatchEvent) {
 		select {
 		case ch <- e:
 		default:
+			s.droppedEvents.Add(1)
 		}
 	}
 }
@@ -192,10 +200,11 @@ func writeJSON(w http.ResponseWriter, v interface{}) {
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, HealthResponse{
-		OK:      true,
-		Uptime:  time.Since(s.started).Round(time.Second).String(),
-		Started: s.started,
-		Version: s.version,
+		OK:            true,
+		Uptime:        time.Since(s.started).Round(time.Second).String(),
+		Started:       s.started,
+		Version:       s.version,
+		DroppedEvents: s.droppedEvents.Load(),
 	})
 }
 
@@ -318,7 +327,7 @@ func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
 		return
 	}
-	ch := make(chan WatchEvent, 16)
+	ch := make(chan WatchEvent, 4096)
 	s.watchMu.Lock()
 	s.watchers[ch] = struct{}{}
 	s.watchMu.Unlock()

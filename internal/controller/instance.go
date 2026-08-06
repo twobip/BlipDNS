@@ -11,20 +11,20 @@ import (
 
 // InstanceStatus is a point-in-time view of an instance.
 type InstanceStatus struct {
-	ID           string                  `json:"id"`
-	Label        string                  `json:"label"`
-	URL          string                  `json:"url"`
-	Online       bool                    `json:"online"`
-	Adopted      bool                    `json:"adopted"`
-	ConfigSynced bool                    `json:"config_synced"`
-	BlocklistSynced bool                 `json:"blocklist_synced"`
-	Health       *control.HealthResponse `json:"health,omitempty"`
-	Stats        *control.StatsResponse  `json:"stats,omitempty"`
-	LastOK       time.Time               `json:"last_ok"`
-	Err          string                  `json:"error,omitempty"`
-	PingAvgMs    float64                 `json:"ping_avg_ms"`
-	PingLastMs   float64                 `json:"ping_last_ms"`
-	PingSamples  int                     `json:"ping_samples"`
+	ID              string                  `json:"id"`
+	Label           string                  `json:"label"`
+	URL             string                  `json:"url"`
+	Online          bool                    `json:"online"`
+	Adopted         bool                    `json:"adopted"`
+	ConfigSynced    bool                    `json:"config_synced"`
+	BlocklistSynced bool                    `json:"blocklist_synced"`
+	Health          *control.HealthResponse `json:"health,omitempty"`
+	Stats           *control.StatsResponse  `json:"stats,omitempty"`
+	LastOK          time.Time               `json:"last_ok"`
+	Err             string                  `json:"error,omitempty"`
+	PingAvgMs       float64                 `json:"ping_avg_ms"`
+	PingLastMs      float64                 `json:"ping_last_ms"`
+	PingSamples     int                     `json:"ping_samples"`
 }
 
 // Instance is a managed blipd with background poll + watch loops.
@@ -225,9 +225,10 @@ func (i *Instance) watch(ctx context.Context) {
 				Client:     e.Client,
 				Domain:     e.Domain,
 			})
-			// Also log block/pass events to query log
+			// Also log block/pass events to query log (async, batched so the
+			// watch stream can't be bottlenecked by per-row SQLite writes).
 			if (e.Type == "block" || e.Type == "pass") && i.fleet.queryLog != nil {
-				_ = i.fleet.queryLog.Insert(ctx, QueryLogEntry{
+				i.fleet.queryLog.Enqueue(QueryLogEntry{
 					Timestamp:  e.At,
 					Instance:   i.Config.Label,
 					Client:     e.Client,
