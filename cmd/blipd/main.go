@@ -87,6 +87,13 @@ func main() {
 		}
 	}
 
+	// The global blocklist uses the default policy's block action so operators
+	// can choose 0.0.0.0 (zero) instead of NXDOMAIN for blocked domains.
+	blockAction := filter.DefaultAction
+	if cfg.Default != nil && cfg.Default.BlockAction != "" {
+		blockAction = cfg.Default.BlockAction
+	}
+
 	srv, err := dnsserver.New(dnsserver.Config{
 		DNSAddr:           cfg.DNSAddr,
 		DoHAddr:           cfg.DoHAddr,
@@ -101,6 +108,7 @@ func main() {
 		Store:             store,
 		Version:           version,
 		Blocklist:         bl,
+		BlockAction:       blockAction,
 	})
 	if err != nil {
 		log.Fatalf("blipd: %v", err)

@@ -36,6 +36,7 @@ type Config struct {
 	Store             *filter.Store
 	Version           string
 	Blocklist         *blocklist.Blocklist // global blocklist applied before per-client policy
+	BlockAction       filter.BlockAction   // response for global-blocklist hits ("" = nxdomain)
 }
 
 // Server is the DNS + DoH resolver.
@@ -178,7 +179,7 @@ func (s *Server) serve(ctx context.Context, clientIP net.IP, req *dns.Msg) *dns.
 		if s.logfn != nil {
 			s.logfn(clientIP.String(), domain)
 		}
-		resp.Rcode = dns.RcodeNameError // NXDOMAIN for blocklist hits
+		applyBlockAction(resp, q, s.cfg.BlockAction)
 		return resp
 	}
 
@@ -192,14 +193,7 @@ func (s *Server) serve(ctx context.Context, clientIP net.IP, req *dns.Msg) *dns.
 		if log && s.logfn != nil {
 			s.logfn(clientIP.String(), domain)
 		}
-		switch action {
-		case filter.ActionRefused:
-			resp.Rcode = dns.RcodeRefused
-		case filter.ActionZero:
-			resp.Rcode = dns.RcodeSuccess
-		default: // NXDOMAIN
-			resp.Rcode = dns.RcodeNameError
-		}
+		applyBlockAction(resp, q, action)
 		return resp
 	}
 
@@ -249,6 +243,32 @@ func (s *Server) serve(ctx context.Context, clientIP net.IP, req *dns.Msg) *dns.
 		IPs:    ips,
 	})
 	return out
+}
+
+// applyBlockAction sets the response status (and, for the zero action, a
+// blackhole answer) for a blocked query. An unset action ("") falls back to
+// the default nxdomain response.
+func applyBlockAction(resp *dns.Msg, q dns.Question, action filter.BlockAction) {
+	switch action {
+	case filter.ActionRefused:
+		resp.Rcode = dns.RcodeRefused
+	case filter.ActionZero:
+		resp.Rcode = dns.RcodeSuccess
+		switch q.Qtype {
+		case dns.TypeA:
+			resp.Answer = []dns.RR{&dns.A{
+				Hdr: dns.RR_Header{Name: q.Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60},
+				A:   net.IPv4zero.To4(),
+			}}
+		case dns.TypeAAAA:
+			resp.Answer = []dns.RR{&dns.AAAA{
+				Hdr:  dns.RR_Header{Name: q.Name, Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: 60},
+				AAAA: net.IPv6zero,
+			}}
+		}
+	default:
+		resp.Rcode = dns.RcodeNameError
+	}
 }
 
 // startWarmLoop periodically re-resolves the most popular cached responses

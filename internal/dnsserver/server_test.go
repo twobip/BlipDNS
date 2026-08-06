@@ -68,6 +68,92 @@ func TestServeBlocks(t *testing.T) {
 	}
 }
 
+// blSrv returns a server whose global blocklist blocks the given domain,
+// configured with the given block action.
+func blSrv(t *testing.T, action string) *Server {
+	t.Helper()
+	srv, _ := newTestServer(t)
+	srv.cfg.Blocklist = blocklist.New()
+	srv.cfg.Blocklist.FromDomains([]string{"ads.example.net"})
+	srv.cfg.BlockAction = filter.BlockAction(action)
+	return srv
+}
+
+func TestServeBlocklistZeroAction(t *testing.T) {
+	srv := blSrv(t, "zero")
+
+	q := new(dns.Msg)
+	q.SetQuestion("ads.example.net.", dns.TypeA)
+	resp := srv.serve(context.Background(), net.ParseIP("192.168.1.5"), q)
+	if resp.Rcode != dns.RcodeSuccess {
+		t.Fatalf("zero-action A rc=%d want NOERROR", resp.Rcode)
+	}
+	if len(resp.Answer) != 1 {
+		t.Fatalf("expected 1 synthesized answer, got %d", len(resp.Answer))
+	}
+	a, ok := resp.Answer[0].(*dns.A)
+	if !ok || !a.A.Equal(net.IPv4zero) {
+		t.Errorf("zero-action A answer = %v, want 0.0.0.0", resp.Answer[0])
+	}
+
+	q.SetQuestion("ads.example.net.", dns.TypeAAAA)
+	resp = srv.serve(context.Background(), net.ParseIP("192.168.1.5"), q)
+	if resp.Rcode != dns.RcodeSuccess {
+		t.Fatalf("zero-action AAAA rc=%d want NOERROR", resp.Rcode)
+	}
+	aaaa, ok := resp.Answer[0].(*dns.AAAA)
+	if !ok || !aaaa.AAAA.Equal(net.IPv6zero) {
+		t.Errorf("zero-action AAAA answer = %v, want ::", resp.Answer[0])
+	}
+
+	// Non-address queries get an empty NOERROR.
+	q.SetQuestion("ads.example.net.", dns.TypeMX)
+	resp = srv.serve(context.Background(), net.ParseIP("192.168.1.5"), q)
+	if resp.Rcode != dns.RcodeSuccess || len(resp.Answer) != 0 {
+		t.Errorf("zero-action MX rc=%d answers=%d, want NOERROR with no records", resp.Rcode, len(resp.Answer))
+	}
+}
+
+func TestServeBlocklistRefusedAction(t *testing.T) {
+	srv := blSrv(t, "refused")
+	q := new(dns.Msg)
+	q.SetQuestion("ads.example.net.", dns.TypeA)
+	resp := srv.serve(context.Background(), net.ParseIP("192.168.1.5"), q)
+	if resp.Rcode != dns.RcodeRefused {
+		t.Errorf("refused-action rc=%d want REFUSED", resp.Rcode)
+	}
+}
+
+func TestServeBlocklistDefaultIsNXDOMAIN(t *testing.T) {
+	srv := blSrv(t, "")
+	q := new(dns.Msg)
+	q.SetQuestion("ads.example.net.", dns.TypeA)
+	resp := srv.serve(context.Background(), net.ParseIP("192.168.1.5"), q)
+	if resp.Rcode != dns.RcodeNameError {
+		t.Errorf("default-action rc=%d want NXDOMAIN", resp.Rcode)
+	}
+}
+
+// The store (per-client policy) path shares the same zero-action answer.
+func TestServeStoreZeroActionSynthesizesZero(t *testing.T) {
+	srv, _ := newTestServer(t)
+	if err := srv.cfg.Store.SetPolicy(&filter.Policy{
+		ID: "z", Networks: []string{"192.168.77.0/24"}, Block: []string{"zp.test"}, BlockAction: filter.ActionZero,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	q := new(dns.Msg)
+	q.SetQuestion("zp.test.", dns.TypeA)
+	resp := srv.serve(context.Background(), net.ParseIP("192.168.77.5"), q)
+	if resp.Rcode != dns.RcodeSuccess {
+		t.Fatalf("rc=%d want NOERROR", resp.Rcode)
+	}
+	a, ok := resp.Answer[0].(*dns.A)
+	if !ok || !a.A.Equal(net.IPv4zero) {
+		t.Errorf("answer = %v, want 0.0.0.0", resp.Answer[0])
+	}
+}
+
 // The wire format carries the root dot ("google.com."); logs and watch events
 // must show the bare domain.
 func TestServeStripsRootDotFromLoggedDomain(t *testing.T) {
