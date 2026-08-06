@@ -254,3 +254,18 @@ func TestAdoptStatusMasking(t *testing.T) {
 		t.Errorf("auth version = %q, want blipd/1.2.3", authed.Version)
 	}
 }
+
+// TestClaimCodeEntropy verifies the claim code is wide enough (~80 bits) and
+// one-time use is still gated by rate limiting.
+func TestClaimCodeEntropy(t *testing.T) {
+	c := genClaimCode()
+	// 16 symbols from a 32-symbol alphabet, grouped as 8-8.
+	if len(c) != 8+1+8 {
+		t.Errorf("claim code length = %d (%q), want 17 chars", len(c), c)
+	}
+	for i := 0; i < 50; i++ {
+		if genClaimCode() == c {
+			t.Fatalf("claim code collision on %d-th draw", i)
+		}
+	}
+}

@@ -1419,19 +1419,44 @@ func (f *Fleet) saveConfig() error {
 	return os.WriteFile(f.configPath, out, 0600)
 }
 
-// ResolveTokenFile expands token paths like "@/path" or absolute/relative files
-// referenced in instance tokens (no-op if token isn't a path).
+// ResolveTokenFile expands token paths like "@/path" or an absolute file path
+// (no-op if the token isn't a path reference). This is a deliberate feature:
+// operators can keep instance management tokens in a separate file (e.g. a
+// file populated by a secret manager / init container) instead of inlining them
+// in the YAML config.
+//
+// Security note: the config file is trusted (it is loaded once at startup and
+// controls which instances blipc talks to). If an attacker can tamper with the
+// config they already have far greater leverage, so expansion is not treated as
+// a privilege boundary. As defense-in-depth, path traversal (`..`) is rejected
+// before any file is read.
 func ResolveTokenFile(cfg InstanceConfig) InstanceConfig {
-	if len(cfg.Token) > 1 && (cfg.Token[0] == '@' || cfg.Token[0] == '/') {
-		p := cfg.Token
-		if p[0] == '@' {
-			p = p[1:]
-		}
-		if b, err := os.ReadFile(p); err == nil {
-			cfg.Token = string(b)
-		}
+	if len(cfg.Token) <= 1 || (cfg.Token[0] != '@' && cfg.Token[0] != '/') {
+		return cfg
+	}
+	p := cfg.Token
+	if p[0] == '@' {
+		p = p[1:]
+	}
+	// Reject path-traversal attempts (e.g. "@/../../etc/shadow").
+	if hasTraversal(p) {
+		log.Printf("blipc: refusing token path with traversal: %q", cfg.Token)
+		return cfg
+	}
+	if b, err := os.ReadFile(p); err == nil {
+		cfg.Token = string(b)
 	}
 	return cfg
+}
+
+// hasTraversal reports whether p contains a ".." path component.
+func hasTraversal(p string) bool {
+	for _, el := range strings.Split(p, string(filepath.Separator)) {
+		if el == ".." {
+			return true
+		}
+	}
+	return false
 }
 
 // ConfigDir returns the controller config directory hint.

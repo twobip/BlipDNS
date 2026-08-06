@@ -1130,3 +1130,27 @@ func TestAuthPasswordHash(t *testing.T) {
 		t.Error("garbage bcrypt hash should not configure auth")
 	}
 }
+
+// TestResolveTokenFile verifies the @/path expansion feature and that path
+// traversal is refused (F3).
+func TestResolveTokenFile(t *testing.T) {
+	dir := t.TempDir()
+	secret := filepath.Join(dir, "token")
+	if err := os.WriteFile(secret, []byte("real-token"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	// @file path is expanded.
+	cfg := ResolveTokenFile(InstanceConfig{ID: "i", Token: "@" + secret})
+	if cfg.Token != "real-token" {
+		t.Errorf("token expansion = %q, want real-token", cfg.Token)
+	}
+	// A literal token is untouched.
+	if cfg := ResolveTokenFile(InstanceConfig{ID: "i", Token: "literal"}); cfg.Token != "literal" {
+		t.Error("literal token was modified")
+	}
+	// Path traversal is refused (token left as-is, file not read).
+	got := ResolveTokenFile(InstanceConfig{ID: "i", Token: "@/../../etc/passwd"})
+	if got.Token != "@/../../etc/passwd" {
+		t.Errorf("traversal token was modified: %q", got.Token)
+	}
+}

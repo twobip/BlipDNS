@@ -567,11 +567,14 @@ func toFilter(p *Policy) *filter.Policy {
 	}
 }
 
-// genClaimCode returns an 8-char grouped code from an unambiguous alphabet
-// (no I/O/0/1), ~40 bits of entropy.
+// genClaimCode returns a 16-char grouped (8-8) claim code from an
+// unambiguous 32-symbol alphabet (~80 bits of entropy). It is one-time use
+// and rate-limited, so 40 bits was already adequate in practice; the wider
+// alphabet space is defense-in-depth against offline brute force if a code
+// leaks (e.g. via logs).
 func genClaimCode() string {
 	const alpha = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
-	b := make([]byte, 8)
+	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {
 		for i := range b {
 			b[i] = alpha[(int(time.Now().UnixNano())+i)%len(alpha)]
@@ -580,7 +583,7 @@ func genClaimCode() string {
 	for i := range b {
 		b[i] = alpha[int(b[i])%len(alpha)]
 	}
-	return string(b[:4]) + "-" + string(b[4:])
+	return string(b[:8]) + "-" + string(b[8:])
 }
 
 // genToken returns a 32-byte hex token.
