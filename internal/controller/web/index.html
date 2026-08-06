@@ -377,6 +377,28 @@
             </div>
           </div>
 
+        <div class="panel">
+          <div class="panel-head"><h3>Rate Limit</h3><span class="spacer"></span><span class="badge accent" id="s-rl-badge">fleet-wide</span></div>
+          <div class="panel-body">
+            <div class="field">
+              <label>Scope</label>
+              <select class="select" id="s-rl-scope" style="max-width:340px"></select>
+              <span class="hint" id="s-rl-scope-hint">Per-client DNS query rate limit. Excess queries are dropped with REFUSED. 0 disables limiting.</span>
+            </div>
+            <div class="row" style="gap:8px; align-items:flex-end">
+              <div class="field" style="margin-bottom:0; flex:1">
+                <label>Queries / second (per client)</label>
+                <input class="input" id="s-rl-qps" type="number" min="0" placeholder="50" inputmode="numeric"/>
+              </div>
+              <span class="hint" id="s-rl-cur"></span>
+            </div>
+            <div class="row mt">
+              <button class="btn btn-primary" id="s-save-rl">Save</button>
+              <span class="hint" id="s-rl-status"></span>
+            </div>
+          </div>
+        </div>
+
           <div class="panel">
             <div class="panel-head"><h3>About</h3></div>
             <div class="panel-body">

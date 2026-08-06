@@ -882,6 +882,49 @@ let scopeState = "default";    // "default" or an instance id
 let savedFleetDoH = "";        // fleet-wide plain-HTTP DoH address ("" = off)
 let dohScopeState = "default"; // "default" or an instance id
 
+// Rate-limit editor state
+let savedRLQPS = 0;             // fleet-wide per-client QPS (0 = off)
+let rlScopeState = "default";   // "default" or an instance id
+function renderRlScopeSelect() {
+  const sel = $("s-rl-scope");
+  sel.innerHTML = "";
+  const opt = (v, label) => {
+    const o = document.createElement("option");
+    o.value = v; o.textContent = label; sel.appendChild(o);
+  };
+  opt("default", "Fleet-wide default");
+  for (const i of instances) {
+    const has = savedOverrides[i.id] && savedOverrides[i.id].rate_limit_qps != null;
+    opt(i.id, "instance: " + (i.label || i.id) + (has ? " (custom)" : ""));
+  }
+  if (!instances.some((i) => i.id === rlScopeState)) rlScopeState = "default";
+  sel.value = rlScopeState;
+}
+function loadRlEditor() {
+  renderRlScopeSelect();
+  const qpsIn = $("s-rl-qps");
+  const cur = $("s-rl-cur");
+  const badge = $("s-rl-badge");
+  const hint = $("s-rl-scope-hint");
+  const hasOverride = (id) => savedOverrides[id] && savedOverrides[id].rate_limit_qps != null;
+  if (rlScopeState === "default") {
+    badge.textContent = "fleet-wide";
+    badge.className = "badge accent";
+    qpsIn.value = savedRLQPS > 0 ? savedRLQPS : "";
+    cur.textContent = savedRLQPS === 0 ? "off" : (savedRLQPS + " qps");
+    hint.textContent = "Applies to every instance that doesn't have its own override.";
+  } else {
+    badge.textContent = "instance";
+    badge.className = "badge purple";
+    const o = savedOverrides[rlScopeState];
+    const set = hasOverride(rlScopeState);
+    const q = set ? o.rate_limit_qps : null;
+    qpsIn.value = q != null && q > 0 ? q : "";
+    cur.textContent = set ? (q === 0 ? "off" : (q + " qps")) : "inherits fleet default";
+    hint.textContent = "Blank = inherit the fleet-wide default.";
+  }
+}
+
 function renderDoHScopeSelect() {
   const sel = $("s-doh-scope");
   sel.innerHTML = "";
@@ -969,9 +1012,11 @@ async function refreshSettings() {
     savedOverrides = d.instance_overrides || {};
     // fleet-wide plain-HTTP DoH address ("" = off)
     savedFleetDoH = (d.doh_http_addr != null && d.doh_http_addr !== undefined) ? (d.doh_http_addr || "") : "";
+    savedRLQPS = (d.rate_limit_qps != null && d.rate_limit_qps !== undefined) ? Number(d.rate_limit_qps || 0) : 0;
     // carry over any per-instance doh_http_addr not already surfaced
     loadScopeEditor();
     loadDoHEditor();
+    loadRlEditor();
     $("s-up-status").textContent = "";
   } catch {}
 }
@@ -1173,6 +1218,50 @@ $("s-doh-plain").addEventListener("change", (e) => {
   if (plainCb.checked && !addrIn.value) addrIn.value = "0.0.0.0:8445";
   addrIn.disabled = !plainCb.checked;
 });
+$("s-rl-scope").addEventListener("change", (e) => {
+  rlScopeState = e.target.value;
+  loadRlEditor();
+});
+function rlQpsForSave() {
+  const v = $("s-rl-qps").value.trim();
+  return v === "" ? 0 : Number(v);
+}
+$("s-save-rl").onclick = async () => {
+  const st = $("s-rl-status");
+  st.textContent = "saving…";
+  const qps = rlQpsForSave();
+  let body, msg;
+  if (rlScopeState === "default") {
+    body = { rate_limit_qps: qps };
+    msg = qps === 0 ? "fleet rate limit disabled" : "fleet rate limit saved";
+  } else {
+    body = { scope: "instance", instance: rlScopeState, rate_limit_qps: qps };
+    msg = qps === 0 ? "instance rate limit override cleared" : "instance rate limit override saved";
+  }
+  try {
+    const r = await API("/api/settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const d = await r.json();
+    const applied = d.applied || {};
+    const ids = Object.keys(applied);
+    const ok = ids.filter((k) => applied[k] === "ok").length;
+    const failed = ids.filter((k) => applied[k] !== "ok");
+    st.textContent = ids.length ? "saved on blipc · pushed to " + ok + "/" + ids.length + " instance" + (ids.length > 1 ? "s" : "") + (failed.length ? " · errors: " + failed.join(", ") : "") : "saved on blipc · no instance to push to yet";
+    toast(msg + (ids.length ? " (" + ok + "/" + ids.length + ")" : ""));
+    if (rlScopeState === "default") {
+      savedRLQPS = qps;
+    } else {
+      const o = savedOverrides[rlScopeState];
+      if (qps === 0) {
+        if (o) delete o.rate_limit_qps;
+        if (!o || Object.keys(o).length === 0) delete savedOverrides[rlScopeState];
+      } else {
+        if (!o) savedOverrides[rlScopeState] = { rate_limit_qps: qps };
+        else o.rate_limit_qps = qps;
+      }
+    }
+    loadRlEditor();
+  } catch (e) { st.textContent = ""; toast("save failed: " + e.message, "err"); }
+};
 function dohAddrForSave() {
   const plainCb = $("s-doh-plain");
   const addrIn = $("s-doh-addr");
