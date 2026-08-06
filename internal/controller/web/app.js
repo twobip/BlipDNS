@@ -55,14 +55,16 @@ const NAV = [
   { id: "dashboard", label: "Dashboard", icon: IC.dash, group: "Overview" },
   { id: "queries", label: "Query Log", icon: IC.query, group: "Overview" },
   { id: "instances", label: "Instances", icon: IC.inst, group: "DNS" },
-  { id: "blocklist", label: "Rules & Blocklist", icon: IC.block, group: "DNS" },
+  { id: "blocklist", label: "Blocklists", icon: IC.block, group: "DNS" },
+  { id: "filters", label: "DNS Filters", icon: IC.shield, group: "DNS" },
   { id: "settings", label: "Settings", icon: IC.set, group: "System" },
 ];
 const TITLES = {
   dashboard: ["Dashboard", "Fleet throughput &amp; health"],
   queries: ["Query Log", "Live DNS resolution history"],
   instances: ["Instances", "Managed blipd resolvers"],
-  blocklist: ["Rules &amp; Blocklist", "Global domains and per-instance policies"],
+  blocklist: ["Blocklists", "Global blocked domains and list sources"],
+  filters: ["DNS Filters", "Per-instance policies and scope rules"],
   settings: ["Settings", "Upstreams and controller configuration"],
 };
 let current = "dashboard";
@@ -100,6 +102,7 @@ function go(page, push = true) {
   if (page === "instances") renderEvents();
   if (page === "settings") refreshSettings();
   if (page === "blocklist") loadBlocklist();
+  if (page === "filters") renderPolicies();
 }
 
 /* ---------- toast ---------- */
@@ -130,7 +133,7 @@ async function refresh() {
     if (current === "dashboard") renderDashboard();
     else if (current === "instances") renderInstances();
     else if (current === "queries") renderQueries();
-    else if (current === "blocklist") renderPolicies();
+    else if (current === "filters") renderPolicies();
   } catch (e) {
     const c = $("conn");
     if (c) { c.textContent = "offline"; c.className = "badge err"; }
