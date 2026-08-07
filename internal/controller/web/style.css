@@ -342,6 +342,7 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
 #view-queries .tbl thead th { font-size: 12.5px; padding: 14px 20px; }
 #view-queries .tbl tbody td { padding: 16px 20px; }
 #view-queries .tbl>thead th:first-child { width: 130px; }
+#view-queries .tbl>thead th:nth-child(2) { max-width: 240px; width: 240px; }
 #view-queries .tbl>thead th:nth-child(3) { width: 100px; }
 #view-queries .tbl>thead th:nth-child(4) { width: 200px; }
 #view-queries .tbl>thead th:nth-child(5) { width: 300px; }
@@ -371,12 +372,12 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
 .q-time { color: var(--muted); font-size: 12px; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .q-count { font-variant-numeric: tabular-nums; font-size: 12.5px; white-space: nowrap; }
 
-.q-domain { max-width: 360px; }
+.q-domain { max-width: 240px; }
 .q-globe { color: var(--faint); display: inline-grid; place-items: center; vertical-align: middle; margin-right: 8px; }
 .q-globe svg { width: 14px; height: 14px; }
 .q-dom {
   font-size: 13px; font-weight: 600; color: var(--text); letter-spacing: -0.01em;
-  max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   display: inline-block; vertical-align: middle;
 }
 .q-copy { width: 24px; height: 24px; border: none; background: transparent; opacity: 0; margin-left: 6px; vertical-align: middle; transition: all .12s; }

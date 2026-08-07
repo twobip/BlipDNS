@@ -576,7 +576,7 @@ function propsInstanceOptions() {
 const trunc = (s, n) => { const str = String(s); return str.length > n ? str.slice(0, n - 1) + "…" : str; };
 // RESOLVED_MAX caps how many characters each chip in the resolved/answer cell
 // may show, so long TXT/AAAA/etc. values don't blow out the row width.
-const RESOLVED_MAX = 60;
+const RESOLVED_MAX = 75;
 
 function ipsHtml(ips) {
   const list = ips || [];
