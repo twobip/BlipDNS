@@ -1475,13 +1475,79 @@ func TestServerSettingsUpstreamFleetPartialSave(t *testing.T) {
 		t.Errorf("after routes-only save = %+v / %+v, want %+v / %+v", gotS, gotR, servers, newRoutes)
 	}
 
-	// And a servers-only save must keep the fleet routes.
-	newServers := []upstream.UpstreamServer{{Name: "cloudflare", Address: "udp://1.1.1.1:53", Priority: 1}}
+	// And a servers-only save must keep the fleet routes (the route must still
+	// reference a defined server, so the pool stays valid).
+	newServers := []upstream.UpstreamServer{{Name: "quad9", Address: "udp://1.1.1.1:53", Priority: 1}}
 	if st := put(map[string]interface{}{"upstream_servers": newServers}); st != http.StatusOK {
 		t.Fatalf("servers-only PUT status = %d", st)
 	}
 	if gotS, gotR := getUpstream(); !reflect.DeepEqual(gotS, newServers) || !reflect.DeepEqual(gotR, newRoutes) {
 		t.Errorf("after servers-only save = %+v / %+v, want %+v / %+v", gotS, gotR, newServers, newRoutes)
+	}
+}
+
+// TestServerSettingsUpstreamRejectsInvalidPool verifies the controller refuses
+// to persist an invalid upstream pool (bad server spec, or a route referencing
+// an unknown server) — for both the fleet-wide and per-instance scope — instead
+// of saving it and failing every push to the instances.
+func TestServerSettingsUpstreamRejectsInvalidPool(t *testing.T) {
+	upA := &upstreamRec{}
+	srv := fakeBlipdWithRec(t, "t", "", &control.HealthResponse{OK: true}, &control.StatsResponse{}, &control.ListResponse{}, nil, nil, upA)
+	defer srv.Close()
+
+	fleet := NewFleet(filepath.Join(t.TempDir(), "blipc.yaml"))
+	if err := fleet.Add(context.Background(), InstanceConfig{ID: "a", URL: srv.URL, Token: "t"}); err != nil {
+		t.Fatal(err)
+	}
+
+	s := NewServer("admin", "secret", fleet, nil)
+	c := newAuthedClient(t, s)
+
+	put := func(body map[string]interface{}) *http.Response {
+		b, _ := json.Marshal(body)
+		req, _ := http.NewRequest(http.MethodPut, "/api/settings", strings.NewReader(string(b)))
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := c.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp
+	}
+
+	// A server with an unrecognized spec is rejected and nothing is persisted.
+	resp := put(map[string]interface{}{"upstream_servers": []upstream.UpstreamServer{{Name: "bad", Address: "wibble://x", Priority: 1}}})
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("bad spec status = %d, want 400", resp.StatusCode)
+	}
+	if gotS, _ := fleet.Upstream(); len(gotS) != 0 {
+		t.Errorf("invalid pool was persisted: %+v", gotS)
+	}
+	if len(upA.snapshot()) != 0 {
+		t.Errorf("instance received a push despite rejected pool: %v", upA.snapshot())
+	}
+
+	// A route referencing an unknown server is rejected too.
+	resp = put(map[string]interface{}{
+		"upstream_servers": []upstream.UpstreamServer{{Name: "quad9", Address: "udp://9.9.9.9:53", Priority: 1}},
+		"upstream_routes":  []upstream.UpstreamRoute{{Name: "r", QnameSuffix: ".corp.", Server: "ghost"}},
+	})
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("unknown-route-server status = %d, want 400", resp.StatusCode)
+	}
+	if gotS, _ := fleet.Upstream(); len(gotS) != 0 {
+		t.Errorf("invalid pool was persisted: %+v", gotS)
+	}
+
+	// The per-instance path rejects a bad pool the same way.
+	resp = put(map[string]interface{}{"scope": "instance", "instance": "a", "upstream_servers": []upstream.UpstreamServer{{Name: "bad", Address: "wibble://x", Priority: 1}}})
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("instance bad spec status = %d, want 400", resp.StatusCode)
+	}
+	if o := fleet.InstanceOverrideOf("a"); o != nil && !o.IsEmpty() {
+		t.Errorf("invalid instance override was persisted: %+v", o)
 	}
 }
 

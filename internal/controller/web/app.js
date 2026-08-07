@@ -836,7 +836,7 @@ function serverRow(u) {
   row.className = "row up-row";
   row.innerHTML = `
     <input class="input up-name" placeholder="name (e.g. quad9)" style="width:120px" value="${esc(u.name || "")}"/>
-    <input class="input grow up-addr" placeholder="udp://9.9.9.9:53 or https://1.1.1.1/dns-query" value="${esc(u.address || "")}"/>
+    <input class="input grow up-addr" placeholder="9.9.9.9 (udp:53) or https://1.1.1.1/dns-query" value="${esc(u.address || "")}"/>
     <input class="input up-prio" type="number" min="0" title="Priority — lower = higher priority; 0 = route-only" style="width:72px" value="${u.priority || ""}"/>
     <button class="icon-btn up-del" title="Remove">${IC.trash}</button>`;
   row.querySelector(".up-del").onclick = () => row.remove();
@@ -1259,7 +1259,7 @@ $("s-save-upstream").onclick = async () => {
     const ids = Object.keys(applied);
     const ok = ids.filter((k) => applied[k] === "ok").length;
     const failed = ids.filter((k) => applied[k] !== "ok");
-    st.textContent = ids.length ? `saved on blipc · pushed to ${ok}/${ids.length} instance${ids.length > 1 ? "s" : ""}` + (failed.length ? ` · errors: ${failed.join(", ")}` : "") : "saved on blipc · no instance to push to yet";
+    st.textContent = ids.length ? `saved on blipc · pushed to ${ok}/${ids.length} instance${ids.length > 1 ? "s" : ""}` + (failed.length ? ` · errors: ${failed.map((k) => k + ": " + applied[k]).join(", ")}` : "") : "saved on blipc · no instance to push to yet";
     toast(msg + (ids.length ? ` (${ok}/${ids.length})` : ""));
     renderScopeSelect();
   } catch (e) { st.textContent = ""; toast("save failed: " + e.message, "err"); }
@@ -1288,7 +1288,7 @@ $("s-save-cf").onclick = async () => {
     const ids = Object.keys(applied);
     const ok = ids.filter((k) => applied[k] === "ok").length;
     const failed = ids.filter((k) => applied[k] !== "ok");
-    st.textContent = ids.length ? `saved on blipc · pushed to ${ok}/${ids.length} instance${ids.length > 1 ? "s" : ""}` + (failed.length ? ` · errors: ${failed.join(", ")}` : "") : "saved on blipc · no instance to push to yet";
+    st.textContent = ids.length ? `saved on blipc · pushed to ${ok}/${ids.length} instance${ids.length > 1 ? "s" : ""}` + (failed.length ? ` · errors: ${failed.map((k) => k + ": " + applied[k]).join(", ")}` : "") : "saved on blipc · no instance to push to yet";
     toast(msg + (ids.length ? ` (${ok}/${ids.length})` : ""));
     renderScopeSelect();
   } catch (e) { st.textContent = ""; toast("save failed: " + e.message, "err"); }
@@ -1330,7 +1330,7 @@ $("s-save-rl").onclick = async () => {
     const ids = Object.keys(applied);
     const ok = ids.filter((k) => applied[k] === "ok").length;
     const failed = ids.filter((k) => applied[k] !== "ok");
-    st.textContent = ids.length ? "saved on blipc · pushed to " + ok + "/" + ids.length + " instance" + (ids.length > 1 ? "s" : "") + (failed.length ? " · errors: " + failed.join(", ") : "") : "saved on blipc · no instance to push to yet";
+    st.textContent = ids.length ? "saved on blipc · pushed to " + ok + "/" + ids.length + " instance" + (ids.length > 1 ? "s" : "") + (failed.length ? " · errors: " + failed.map((k) => k + ": " + applied[k]).join(", ") : "") : "saved on blipc · no instance to push to yet";
     toast(msg + (ids.length ? " (" + ok + "/" + ids.length + ")" : ""));
     if (rlScopeState === "default") {
       savedRLQPS = qps;
@@ -1372,7 +1372,7 @@ $("s-save-doh").onclick = async () => {
     const ids = Object.keys(applied);
     const ok = ids.filter((k) => applied[k] === "ok").length;
     const failed = ids.filter((k) => applied[k] !== "ok");
-    st.textContent = ids.length ? `saved on blipc · pushed to ${ok}/${ids.length} instance${ids.length > 1 ? "s" : ""}` + (failed.length ? ` · errors: ${failed.join(", ")}` : "") : "saved on blipc · no instance to push to yet";
+    st.textContent = ids.length ? `saved on blipc · pushed to ${ok}/${ids.length} instance${ids.length > 1 ? "s" : ""}` + (failed.length ? ` · errors: ${failed.map((k) => k + ": " + applied[k]).join(", ")}` : "") : "saved on blipc · no instance to push to yet";
     toast(msg + (ids.length ? ` (${ok}/${ids.length})` : ""));
     if (dohScopeState === "default") {
       savedFleetDoH = addr;

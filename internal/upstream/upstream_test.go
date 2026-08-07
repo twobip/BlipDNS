@@ -149,6 +149,34 @@ func TestParseSpecDefaultUDPPort(t *testing.T) {
 	}
 }
 
+func TestParseSpecBareUDPAssumption(t *testing.T) {
+	got, err := ParseSpec("192.168.30.221 9.9.9.9:53 https://dns.mullvad.net/dns-query [::1]")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []Spec{
+		{Type: "udp", Address: "192.168.30.221:53", Priority: 1},
+		{Type: "udp", Address: "9.9.9.9:53", Priority: 2},
+		{Type: "doh", Address: "dns.mullvad.net/dns-query", Priority: 3},
+		{Type: "udp", Address: "[::1]:53", Priority: 4},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %d specs, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("spec[%d] = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}
+
+func TestParseSpecRejectsAmbiguousBareHost(t *testing.T) {
+	_, err := ParseSpec("dns.google")
+	if err == nil {
+		t.Fatal("bare hostname without a port or scheme should be rejected")
+	}
+}
+
 func TestFromSpecPriorityOrder(t *testing.T) {
 	r, err := FromSpec("udp://8.8.8.8:53|2 udp://1.1.1.1:53|1")
 	if err != nil {

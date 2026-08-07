@@ -389,6 +389,13 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 		// fleet-wide default) while an absent field is left untouched so a
 		// servers-only save does not wipe the fleet routes (and vice-versa).
 		if req.UpstreamServers != nil || req.UpstreamRoutes != nil {
+			// An absent field keeps the current value (fleet default or an
+			// existing per-instance override); an explicitly-empty array clears
+			// it (per-instance: falls through to the fleet-wide default). The
+			// resulting pool is validated before persisting, so a bad server
+			// spec or a route to an unknown server is rejected up front instead
+			// of being saved and failing every push to the instances.
+			fleetServers, fleetRoutes := s.fleet.Upstream()
 			if req.Scope == "instance" && req.Instance != "" {
 				existing := s.fleet.InstanceOverrideOf(req.Instance)
 				merged := mergeOverride(existing, &InstanceOverride{
@@ -401,20 +408,32 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 				if req.UpstreamRoutes != nil && len(*req.UpstreamRoutes) == 0 {
 					merged.UpstreamRoutes = nil
 				}
+				effServers, effRoutes := fleetServers, fleetRoutes
+				if merged.UpstreamServers != nil {
+					effServers = *merged.UpstreamServers
+				}
+				if merged.UpstreamRoutes != nil {
+					effRoutes = *merged.UpstreamRoutes
+				}
+				if _, err := upstream.NewPool(effServers, effRoutes, ""); err != nil {
+					http.Error(w, "invalid upstream: "+err.Error(), http.StatusBadRequest)
+					return
+				}
 				applied := s.fleet.SetInstanceOverride(r.Context(), req.Instance, merged)
 				writeJSON(w, map[string]interface{}{"ok": true, "applied": applied})
 				return
 			}
-			// Fleet-wide: keep the current value of any field the request did
-			// not include.
-			curServers, curRoutes := s.fleet.Upstream()
 			if req.UpstreamServers != nil {
-				curServers = *req.UpstreamServers
+				fleetServers = *req.UpstreamServers
 			}
 			if req.UpstreamRoutes != nil {
-				curRoutes = *req.UpstreamRoutes
+				fleetRoutes = *req.UpstreamRoutes
 			}
-			applied := s.fleet.SetUpstream(r.Context(), curServers, curRoutes)
+			if _, err := upstream.NewPool(fleetServers, fleetRoutes, ""); err != nil {
+				http.Error(w, "invalid upstream: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+			applied := s.fleet.SetUpstream(r.Context(), fleetServers, fleetRoutes)
 			writeJSON(w, map[string]interface{}{"ok": true, "applied": applied})
 			return
 		}

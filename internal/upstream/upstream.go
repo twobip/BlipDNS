@@ -191,7 +191,9 @@ type Spec struct {
 // "doh://host/path") with an optional "|priority" suffix, e.g.
 // "udp://1.1.1.1:53|1". Tokens without a priority keep their position
 // (1-based) as priority, so plain space-separated lists still fail over
-// left to right.
+// left to right. A token with no scheme is assumed to be UDP when it is a
+// plain IP ("192.168.30.221") or a host:port pair ("9.9.9.9:53"), with a
+// missing port defaulting to 53.
 func ParseSpec(spec string) ([]Spec, error) {
 	tokens := splitSpec(spec)
 	if len(tokens) == 0 {
@@ -212,12 +214,33 @@ func ParseSpec(spec string) ([]Spec, error) {
 		case strings.HasPrefix(raw, "https://"):
 			s = Spec{Type: "doh", Address: raw[len("https://"):], Priority: prio}
 		default:
+			if isBareUDP(raw) {
+				s = Spec{Type: "udp", Address: ensurePort(raw), Priority: prio}
+				break
+			}
 			return nil, fmt.Errorf("upstream: unrecognized spec %q", tok)
 		}
 		out[i] = s
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Priority < out[j].Priority })
 	return out, nil
+}
+
+// isBareUDP reports whether an un-schemed spec token is unambiguous as a UDP
+// endpoint: a plain IP (IPv4 or bracketed IPv6) or a host:port pair with a
+// numeric port. Bare hostnames are deliberately left unrecognized because they
+// could equally mean UDP or DoH, and a non-numeric port (e.g. "wibble://x") is
+// not a valid endpoint.
+func isBareUDP(tok string) bool {
+	host, port, err := net.SplitHostPort(tok)
+	if err == nil {
+		if _, perr := strconv.Atoi(port); perr != nil {
+			return false
+		}
+		return host != ""
+	}
+	ip := strings.TrimSuffix(strings.TrimPrefix(tok, "["), "]")
+	return net.ParseIP(ip) != nil
 }
 
 // ensurePort appends ":53" to a UDP host when no port is present, so

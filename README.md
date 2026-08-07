@@ -39,7 +39,7 @@ It listens on:
 - `admin_addr`  management API (token-protected)
 
 The `upstream` field accepts space/comma-separated specs with failover:
-- `udp://host:port`
+- `udp://host:port` (or a bare `ip`/`host:port`; missing port defaults to 53)
 - `https://host/dns-query` or `doh://host/dns-query`
 
 Example: `upstream: "https://1.1.1.1/dns-query https://8.8.8.8/dns-query"`
