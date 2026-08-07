@@ -38,6 +38,25 @@ const timeAgo = (t) => {
 };
 const relTime = (t) => (t ? new Date(t).toLocaleString() : "—");
 
+/* ---------- relative-time ticking ---------- */
+// Recomputes every live relative-time label (.t[data-t]) on a 1s tick so the
+// "…s/min/h ago" text and the absolute date/time hover tooltip stay fresh
+// without needing to Refresh, as long as those rows are rendered.
+let clockTimer = null;
+function tickRelativeTimes() {
+  document.querySelectorAll(".t[data-t]").forEach((t) => {
+    const ts = t.dataset.t;
+    if (!ts) return;
+    t.textContent = timeAgo(ts);
+    t.title = relTime(ts);
+  });
+}
+function startClock() {
+  if (clockTimer) return;
+  tickRelativeTimes();
+  clockTimer = setInterval(tickRelativeTimes, 1000);
+}
+
 /* ---------- icons ---------- */
 const IC = {
   dash: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/></svg>',
@@ -551,6 +570,12 @@ function propsInstanceOptions() {
   sel.innerHTML = `<option value="">All instances</option>` + labels.map((l) => `<option value="${esc(l)}" ${l === cur ? "selected" : ""}>${esc(l)}</option>`).join("");
 }
 
+// trunc keeps a string under a max length, appending "…" when it is longer.
+const trunc = (s, n) => { const str = String(s); return str.length > n ? str.slice(0, n - 1) + "…" : str; };
+// RESOLVED_MAX caps how many characters each chip in the resolved/answer cell
+// may show, so long TXT/AAAA/etc. values don't blow out the row width.
+const RESOLVED_MAX = 40;
+
 function ipsHtml(ips) {
   const list = ips || [];
   if (!list.length) return `<span class="q-ips-empty">—</span>`;
@@ -563,7 +588,8 @@ function ipsHtml(ips) {
 // resolvedHtml renders the "Resolved IP" cell. Prefers the full answers list
 // (so TXT/CNAME/MX/SRV etc. are visible, not just A/AAAA), but falls back to
 // the legacy ips field for older persisted rows. TTL (seconds) is shown when
-// present (omitted for 0/unknown, and never on blocked answers).
+// present (omitted for 0/unknown, and never on blocked answers). Each answer is
+// truncated at RESOLVED_MAX characters; the full value stays on hover.
 function resolvedHtml(r) {
   const ans = r.answers && r.answers.length ? r.answers : [];
   const ips = r.ips || [];
@@ -578,7 +604,7 @@ function resolvedHtml(r) {
   if (!parts.length) return `<span class="q-ips-empty">—</span>`;
   const shown = parts.slice(0, 2);
   const extra = parts.length - shown.length;
-  return shown.map((p) => `<span class="q-chip" title="${esc(p)}">${esc(p)}</span>`).join("") +
+  return shown.map((p) => `<span class="q-chip" title="${esc(p)}">${esc(trunc(p, RESOLVED_MAX))}</span>`).join("") +
     (extra > 0 ? `<span class="q-chip-more" title="${esc(parts.join(", "))}">+${extra}</span>` : "");
 }
 
@@ -1950,6 +1976,7 @@ document.querySelectorAll("[data-goto]").forEach((a) => a.addEventListener("clic
 loadBlocklist();
 connectSSE();
 refresh();
+startClock();
 refreshSettings();
 pollTimer = setInterval(() => { if (current === "dashboard" || current === "instances" || current === "cache-stats" || current === "upstream-errors") refresh(); }, 5000);
 setInterval(() => { if (current === "dashboard") fetchStats(); }, 60000); // refresh chart/stats periodically

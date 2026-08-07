@@ -338,9 +338,16 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
   overflow-y: auto;
   border: none; border-radius: 0; box-shadow: none; background: transparent;
 }
-#view-queries .tbl { font-size: 14.5px; }
+#view-queries .tbl { font-size: 14.5px; table-layout: fixed; }
 #view-queries .tbl thead th { font-size: 12.5px; padding: 14px 20px; }
 #view-queries .tbl tbody td { padding: 16px 20px; }
+#view-queries .tbl>thead th:first-child { width: 130px; }
+#view-queries .tbl>thead th:nth-child(3) { width: 100px; }
+#view-queries .tbl>thead th:nth-child(4) { width: 200px; }
+#view-queries .tbl>thead th:nth-child(5) { width: 300px; }
+#view-queries .tbl>thead th:nth-child(6) { width: 110px; }
+#view-queries .tbl>thead th:nth-child(7) { width: 160px; }
+#view-queries .q-ips { overflow: hidden; }
 
 #view-queries .tbl tbody tr:hover td { background: rgba(255,255,255,.025); }
 #view-queries .tbl tbody tr:nth-child(even):not(.q-row-block) td { background: rgba(255,255,255,.012); }
