@@ -210,6 +210,9 @@ body.sidebar-collapsed .main { margin-left: 60px; }
 .up-row { flex-wrap: nowrap; gap: 8px; }
 .up-row .input { padding: 7px 10px; }
 
+.list-head { display: flex; align-items: center; margin-top: 4px; }
+.list-head span { color: var(--faint); font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .03em; padding-left: 12px; }
+
 .select {
   padding: 8px 30px 8px 12px; border-radius: var(--radius-sm);
   border: 1px solid var(--border); background: var(--surface); color: var(--text);

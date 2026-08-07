@@ -1551,6 +1551,64 @@ func TestServerSettingsUpstreamRejectsInvalidPool(t *testing.T) {
 	}
 }
 
+// TestServerSettingsUpstreamDisabledRoute verifies the default local-ptr rule
+// (disabled, no server picked yet) is accepted, persisted, and pushed.
+func TestServerSettingsUpstreamDisabledRoute(t *testing.T) {
+	upA := &upstreamRec{}
+	srv := fakeBlipdWithRec(t, "t", "", &control.HealthResponse{OK: true}, &control.StatsResponse{}, &control.ListResponse{}, nil, nil, upA)
+	defer srv.Close()
+
+	fleet := NewFleet(filepath.Join(t.TempDir(), "blipc.yaml"))
+	if err := fleet.Add(context.Background(), InstanceConfig{ID: "a", URL: srv.URL, Token: "t"}); err != nil {
+		t.Fatal(err)
+	}
+
+	s := NewServer("admin", "secret", fleet, nil)
+	c := newAuthedClient(t, s)
+
+	put := func(body map[string]interface{}) *http.Response {
+		b, _ := json.Marshal(body)
+		req, _ := http.NewRequest(http.MethodPut, "/api/settings", strings.NewReader(string(b)))
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := c.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp
+	}
+
+	resp := put(map[string]interface{}{
+		"upstream_servers": []upstream.UpstreamServer{{Name: "local", Address: "udp://192.168.30.221", Priority: 0}},
+		"upstream_routes": []upstream.UpstreamRoute{
+			{Name: "local-ptr", QnameSuffix: ".in-addr.arpa.", Disabled: true},
+		},
+	})
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if gotS, gotR := fleet.Upstream(); len(gotS) != 1 || len(gotR) != 1 || !gotR[0].Disabled {
+		t.Errorf("persisted = %+v / %+v, want disabled route kept", gotS, gotR)
+	}
+	sn := upA.snapshot()
+	if len(sn) != 1 || len(sn[0].routes) != 1 || !sn[0].routes[0].Disabled {
+		t.Errorf("pushed = %+v, want the disabled route", sn)
+	}
+
+	// Enabling the same route but referencing a server that does not exist in
+	// the pool is still rejected (validation applies to active rules only).
+	resp = put(map[string]interface{}{
+		"upstream_servers": []upstream.UpstreamServer{{Name: "local", Address: "udp://192.168.30.221", Priority: 0}},
+		"upstream_routes": []upstream.UpstreamRoute{
+			{Name: "local-ptr", QnameSuffix: ".in-addr.arpa.", Server: "ghost"},
+		},
+	})
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("enabled route to unknown server status = %d, want 400", resp.StatusCode)
+	}
+}
+
 // TestServerSettingsUpstreamInstanceOverride verifies a per-instance upstream
 // override set through the API survives a later DoH save, and that a
 // routes-only save does not wipe a previously saved per-instance server pool.

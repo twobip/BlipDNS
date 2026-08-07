@@ -333,6 +333,7 @@
               </div>
               <div class="field">
                 <label>Named resolvers <span class="faint">priority 1+ = auto-failover order · 0 = route-only</span></label>
+                <div class="list-head" style="gap:8px"><span style="width:120px">Name</span><span style="flex:1">Address</span><span style="width:72px">Priority</span><span style="width:28px"></span></div>
                 <div id="s-upstream-list"></div>
                 <button class="btn btn-sm" id="s-up-add">+ Add server</button>
                 <span class="hint" id="s-up-hint"></span>
@@ -349,6 +350,7 @@
             <div class="panel-body">
               <div class="field">
                 <label>Routes <span class="faint">qname suffix + client CIDR &rarr; named server</span></label>
+                <div class="list-head" style="gap:11px"><span style="width:16px"></span><span style="width:90px">Label</span><span style="flex:1">Suffix</span><span style="width:150px">Server</span><span style="width:120px">Client CIDR</span><span style="width:28px"></span></div>
                 <div id="s-cf-list"></div>
                 <button class="btn btn-sm" id="s-cf-add">+ Add route</button>
                 <span class="hint" id="s-cf-hint"></span>

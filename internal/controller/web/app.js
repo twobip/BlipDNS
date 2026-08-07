@@ -855,15 +855,19 @@ function collectServers() {
     priority: parseInt(row.querySelector(".up-prio").value, 10) || 0,
   })).filter((s) => s.address !== "");
 }
-// A route is {name, qname_suffix, server, client_cidr}. server references a
-// named server by name; matching queries are forwarded to it.
+// A route is {name, qname_suffix, server, client_cidr, disabled}. server
+// references a named server by name; matching queries are forwarded to it.
+// The leading checkbox is the enable/disable switch (a disabled route is kept
+// but never matches queries).
 function routeRow(r, serverOpts) {
   const row = document.createElement("div");
   row.className = "row cf-row";
   const opts = serverOpts.map((s) => `<option value="${esc(s.name)}" ${s.name === r.server ? "selected" : ""}>${esc(s.name || "server#" + s.address)}</option>`).join("");
   const extra = r.server && !serverOpts.some((s) => s.name === r.server) ? `<option value="${esc(r.server)}" selected>${esc(r.server)}</option>` : "";
   const fallback = opts ? "" : `<option value="">(add a server first)</option>`;
+  const on = !r.disabled ? "checked" : "";
   row.innerHTML = `
+    <input class="cf-on" type="checkbox" title="Enabled — off keeps the rule but it never matches" ${on} style="width:16px"/>
     <input class="input cf-name" placeholder="label" style="width:90px" value="${esc(r.name || "")}"/>
     <input class="input grow cf-suffix" placeholder=".corp." title="Query name suffix to match (trailing dot optional)" value="${esc(r.qname_suffix || "")}"/>
     <select class="select cf-server" style="width:150px">${extra}${opts}${fallback}</select>
@@ -872,9 +876,16 @@ function routeRow(r, serverOpts) {
   row.querySelector(".cf-del").onclick = () => row.remove();
   return row;
 }
-function renderRouteList(routes, serverOpts) {
+// defaultLocalPTRRoute is the built-in "local PTR forwarding" rule: reverse-DNS
+// lookups forwarded to a local resolver (the operator picks it from the server
+// dropdown). Seeded as a default rule, disabled, in the fleet-wide editor.
+function defaultLocalPTRRoute() {
+  return { name: "local-ptr", qname_suffix: ".in-addr.arpa.", server: "", client_cidr: "", disabled: true };
+}
+function renderRouteList(routes, serverOpts, seedDefault) {
   const wrap = $("s-cf-list");
   wrap.innerHTML = "";
+  if (!routes.length && seedDefault) routes = [defaultLocalPTRRoute()];
   for (const r of routes) wrap.appendChild(routeRow(r, serverOpts));
   if (!routes.length) wrap.innerHTML = `<div class="hint" style="padding:2px 0 6px">No conditional-forwarding routes — matching queries use the automatic rotation.</div>`;
 }
@@ -884,6 +895,7 @@ function collectRoutes() {
     qname_suffix: row.querySelector(".cf-suffix").value.trim(),
     server: row.querySelector(".cf-server").value,
     client_cidr: row.querySelector(".cf-cidr").value.trim(),
+    disabled: !row.querySelector(".cf-on").checked,
   })).filter((r) => r.qname_suffix !== "" || r.server !== "");
 }
 let savedOverrides = {};       // sparse per-instance overrides keyed by instance id
@@ -1040,10 +1052,10 @@ function loadScopeEditor() {
     cfBadge.textContent = "fleet-wide";
     cfBadge.className = "badge accent";
     hint.textContent = "Applies to every instance that doesn't have its own override.";
-    cfHint.textContent = "Matching queries are forwarded to the named server. Routes reference the servers above.";
+    cfHint.textContent = "Matching queries are forwarded to the named server. Routes reference the servers above; a default disabled local-PTR rule is pre-seeded for you.";
     upHint.textContent = "priority 1+ servers form the automatic failover rotation; priority 0 servers are used only by conditional-forwarding routes.";
     renderServerList(savedUpServers);
-    renderRouteList(savedUpRoutes, savedUpServers);
+    renderRouteList(savedUpRoutes, savedUpServers, true);
   } else {
     badge.textContent = "instance";
     badge.className = "badge purple";

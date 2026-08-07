@@ -19,12 +19,15 @@ type UpstreamServer struct {
 
 // UpstreamRoute conditionally forwards a query to a named server when its qname
 // ends with QnameSuffix and (optionally) the client source IP is inside
-// ClientCIDR. A ClientCIDR of "" or "0.0.0.0/0" matches every client.
+// ClientCIDR. A ClientCIDR of "" or "0.0.0.0/0" matches every client. A route
+// with Disabled set is carried through config/stats readback but never matches
+// queries — the operator can turn it on without losing the rule.
 type UpstreamRoute struct {
 	Name        string `json:"name,omitempty" yaml:"name,omitempty"`
 	QnameSuffix string `json:"qname_suffix" yaml:"qname_suffix"` // e.g. ".in-addr.arpa." (trailing dot optional)
 	Server      string `json:"server" yaml:"server"`             // references an UpstreamServer.Name
 	ClientCIDR  string `json:"client_cidr,omitempty" yaml:"client_cidr,omitempty"`
+	Disabled    bool   `json:"disabled,omitempty" yaml:"disabled,omitempty"` // absent/false = active
 }
 
 // ResolverPool is the runtime upstream configuration: named resolvers, the
@@ -100,6 +103,9 @@ func NewPool(servers []UpstreamServer, routes []UpstreamRoute, legacyUp string) 
 		p.auto = NewMulti(autos...)
 	}
 	for _, rt := range routes {
+		if rt.Disabled {
+			continue
+		}
 		rule, err := makeRouteRule(rt, p.named)
 		if err != nil {
 			return nil, err

@@ -2,6 +2,7 @@ package upstream
 
 import (
 	"context"
+	"net"
 	"testing"
 
 	"github.com/miekg/dns"
@@ -174,6 +175,29 @@ func TestParseSpecRejectsAmbiguousBareHost(t *testing.T) {
 	_, err := ParseSpec("dns.google")
 	if err == nil {
 		t.Fatal("bare hostname without a port or scheme should be rejected")
+	}
+}
+
+// TestNewPoolDisabledRoutes verifies a disabled route is kept in the config
+// (readback) but never matches queries, and is exempt from validation (so the
+// default local-ptr rule can exist with no server picked yet).
+func TestNewPoolDisabledRoutes(t *testing.T) {
+	servers := []UpstreamServer{{Name: "local", Address: "udp://192.168.30.221", Priority: 0}}
+	p, err := NewPool(servers, []UpstreamRoute{
+		{Name: "local-ptr", QnameSuffix: ".in-addr.arpa.", Server: "ghost", Disabled: true},
+		{Name: "corp", QnameSuffix: ".corp.", Server: "local"},
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r := p.Match("4.30.168.192.in-addr.arpa.", net.IPv4(192, 168, 1, 10)); r != nil {
+		t.Errorf("disabled route matched: %v", r)
+	}
+	if r := p.Match("host.corp.", net.IPv4(192, 168, 1, 10)); r == nil {
+		t.Error("enabled route did not match")
+	}
+	if got := p.Routes(); len(got) != 2 || !got[0].Disabled {
+		t.Errorf("routes readback = %+v, want disabled route preserved", got)
 	}
 }
 
