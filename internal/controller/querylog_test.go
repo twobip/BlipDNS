@@ -189,6 +189,70 @@ func TestQueryLogStoreClientStats(t *testing.T) {
 	}
 }
 
+func TestQueryLogStoreTopDomains(t *testing.T) {
+	store, err := NewQueryLogStore(filepath.Join(t.TempDir(), "querylog.db"))
+	if err != nil {
+		t.Fatalf("NewQueryLogStore: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	now := time.Now()
+	entries := []QueryLogEntry{
+		{Timestamp: now.Add(-time.Minute), Instance: "a", Client: "c", Domain: "example.com", Action: "PASS"},
+		{Timestamp: now.Add(-2 * time.Minute), Instance: "a", Client: "c", Domain: "example.com", Action: "PASS"},
+		{Timestamp: now.Add(-3 * time.Minute), Instance: "a", Client: "c", Domain: "example.com", Action: "BLOCK"},
+		{Timestamp: now.Add(-4 * time.Minute), Instance: "a", Client: "c", Domain: "news.test", Action: "PASS"},
+		{Timestamp: now.Add(-5 * time.Minute), Instance: "a", Client: "c", Domain: "health_check", Action: "PASS"},
+		{Timestamp: now.Add(-6 * time.Minute), Instance: "b", Client: "c", Domain: "example.com", Action: "PASS"},
+	}
+	for _, e := range entries {
+		if err := store.Insert(ctx, e); err != nil {
+			t.Fatalf("Insert: %v", err)
+		}
+	}
+
+	domains, err := store.TopDomains(ctx, "", now.Add(-24*time.Hour), 10)
+	if err != nil {
+		t.Fatalf("TopDomains: %v", err)
+	}
+	if len(domains) != 2 {
+		t.Fatalf("TopDomains returned %d domains, want 2 (health_check excluded): %+v", len(domains), domains)
+	}
+	// Most frequent first, health_check probe excluded from the ranking.
+	if domains[0].Domain != "example.com" || domains[0].Queries != 4 || domains[0].Blocked != 1 {
+		t.Errorf("top = %+v, want example.com with 4 queries / 1 blocked", domains[0])
+	}
+	if domains[1].Domain != "news.test" || domains[1].Queries != 1 || domains[1].Blocked != 0 {
+		t.Errorf("second = %+v, want news.test with 1 query", domains[1])
+	}
+
+	// Limit truncates and an instance filter narrows the tally.
+	domains, err = store.TopDomains(ctx, "", now.Add(-24*time.Hour), 1)
+	if err != nil {
+		t.Fatalf("TopDomains(limit=1): %v", err)
+	}
+	if len(domains) != 1 || domains[0].Domain != "example.com" {
+		t.Errorf("TopDomains(limit=1) = %+v, want only example.com", domains)
+	}
+	domains, err = store.TopDomains(ctx, "b", now.Add(-24*time.Hour), 10)
+	if err != nil {
+		t.Fatalf("TopDomains(b): %v", err)
+	}
+	if len(domains) != 1 || domains[0].Queries != 1 {
+		t.Errorf("TopDomains(b) = %+v, want one example.com entry with 1 query", domains)
+	}
+
+	// Empty window yields an empty, non-nil slice.
+	domains, err = store.TopDomains(ctx, "", now.Add(time.Hour), 10)
+	if err != nil {
+		t.Fatalf("TopDomains(since): %v", err)
+	}
+	if len(domains) != 0 || domains == nil {
+		t.Fatalf("TopDomains(since) = %#v, want empty slice", domains)
+	}
+}
+
 func TestClientNames(t *testing.T) {
 	store, err := NewQueryLogStore(filepath.Join(t.TempDir(), "querylog.db"))
 	if err != nil {

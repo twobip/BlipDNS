@@ -64,6 +64,13 @@ type ClientStat struct {
 	LastSeen time.Time `json:"last_seen"`
 }
 
+// TopDomain is one entry of the dashboard's most-queried list.
+type TopDomain struct {
+	Domain  string `json:"domain"`
+	Queries int    `json:"queries"`
+	Blocked int    `json:"blocked"`
+}
+
 // UpstreamError is a single upstream failure event streamed from an instance.
 type UpstreamError struct {
 	ID        int64     `json:"id"`
@@ -118,6 +125,40 @@ func (s *QueryLogStore) ClientStats(ctx context.Context, instance string, since 
 			c.Kind = "client"
 		}
 		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// TopDomains returns the most-queried domains within the range, by total query
+// count, with the blocked subset of each. health_check probes are excluded.
+func (s *QueryLogStore) TopDomains(ctx context.Context, instance string, since time.Time, limit int) ([]TopDomain, error) {
+	query := `SELECT ql.domain, COUNT(*), SUM(CASE WHEN ql.action = 'BLOCK' THEN 1 ELSE 0 END) FROM query_log ql WHERE ql.timestamp >= ? AND ql.domain != 'health_check'`
+	args := []interface{}{since}
+	if instance != "" {
+		query += " AND ql.instance = ?"
+		args = append(args, instance)
+	}
+	query += " GROUP BY ql.domain ORDER BY COUNT(*) DESC LIMIT ?"
+	args = append(args, limit)
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []TopDomain
+	for rows.Next() {
+		var td TopDomain
+		var blocked sql.NullInt64
+		if err := rows.Scan(&td.Domain, &td.Queries, &blocked); err != nil {
+			return nil, err
+		}
+		td.Blocked = int(blocked.Int64)
+		out = append(out, td)
+	}
+	if out == nil {
+		out = []TopDomain{}
 	}
 	return out, rows.Err()
 }

@@ -46,6 +46,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/clients", api(s.handleClients))                // per-client activity
 	mux.HandleFunc("/api/client-names", api(s.handleClientNames))       // friendly client renames
 	mux.HandleFunc("/api/stats", api(s.handleStats))                    // aggregated query stats for graphs
+	mux.HandleFunc("/api/top-domains", api(s.handleTopDomains))         // dashboard most-queried list
 	mux.HandleFunc("/api/cache-stats", api(s.handleCacheStats))         // cache hit rate + live cache sizes
 	mux.HandleFunc("/api/maintenance", api(s.handleMaintenance))        // POST reset_stats / clear_query_log
 	mux.HandleFunc("/api/events", api(s.handleEvents))
@@ -656,6 +657,36 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	}
 	agg.UpstreamErrors = n
 	writeJSON(w, agg)
+}
+
+// handleTopDomains returns the most-queried domains within the requested
+// range, most frequent first, for the dashboard's Top Queried Domains panel.
+func (s *Server) handleTopDomains(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.fleet.queryLog == nil {
+		http.Error(w, "query log not available", http.StatusServiceUnavailable)
+		return
+	}
+	instance := r.URL.Query().Get("instance")
+	limit := 10
+	if l := r.URL.Query().Get("limit"); l != "" {
+		fmt.Sscanf(l, "%d", &limit)
+	}
+	since := time.Now().Add(-24 * time.Hour)
+	if s := r.URL.Query().Get("since"); s != "" {
+		if d, err := time.ParseDuration(s); err == nil {
+			since = time.Now().Add(-d)
+		}
+	}
+	domains, err := s.fleet.queryLog.TopDomains(r.Context(), instance, since, limit)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	writeJSON(w, map[string]interface{}{"domains": domains})
 }
 
 // handleCacheStats reports per-instance cache hit rates over the query-log

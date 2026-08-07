@@ -111,9 +111,15 @@
           <div class="chart-wrap"><canvas id="chart-queries"></canvas></div>
         </div>
 
-        <div class="panel">
-          <div class="panel-head"><h3>Instances</h3><span class="spacer"></span><a href="#" data-goto="instances">View all →</a></div>
-          <div id="d-instances"><!-- rows --></div>
+        <div class="grid grid-2">
+          <div class="panel">
+            <div class="panel-head"><h3>Top Queried Domains</h3><span class="spacer"></span><a href="#" data-goto="queries">View log →</a></div>
+            <div class="list" id="d-topdomains"><!-- rows --></div>
+          </div>
+          <div class="panel">
+            <div class="panel-head"><h3>Instances</h3><span class="spacer"></span><a href="#" data-goto="instances">View all →</a></div>
+            <div id="d-instances"><!-- rows --></div>
+          </div>
         </div>
       </section>
 

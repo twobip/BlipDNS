@@ -220,6 +220,28 @@ function renderDashInstances(perInstance) {
   }).join("");
 }
 
+function renderTopDomains(domains) {
+  const el = $("d-topdomains");
+  const list = Array.isArray(domains) ? domains : [];
+  if (!list.length) {
+    el.innerHTML = `<div class="empty"><div class="empty-ic">${IC.globe}</div><h4>No queries yet</h4><p>Nothing resolved in this window.</p></div>`;
+    return;
+  }
+  const max = list[0].queries || 1;
+  el.innerHTML = list.map((d, i) => {
+    const pct = Math.max(4, Math.round(d.queries / max * 100));
+    const blocked = d.blocked > 0 ? `<span class="badge off" style="flex:none" title="blocked queries">${fmt(d.blocked)} blk</span>` : "";
+    return `<li>
+      <span class="mono" style="flex:none;width:22px;color:var(--faint);font-size:12px">${i + 1}</span>
+      <div class="grow" style="min-width:0">
+        <div style="font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(d.domain)}">${esc(d.domain)}</div>
+        <div class="cell-sub"><span class="meter"><i style="width:${pct}%"></i></span> <span class="muted">${fmt(d.queries)} queries</span></div>
+      </div>
+      ${blocked}
+    </li>`;
+  }).join("");
+}
+
 /* ---------- chart ---------- */
 async function fetchStats() {
   const ctx = $("chart-queries");
@@ -236,6 +258,10 @@ async function fetchStats() {
     $("d-qps-range-hint").textContent = rng.label;
     $("d-range-hint").textContent = rng.label;
     renderDashInstances(d.per_instance);
+    API(`/api/top-domains?since=${rng.since}&limit=10`)
+      .then((r) => r.json())
+      .then((t) => renderTopDomains(t.domains))
+      .catch(() => { /* best-effort */ });
     if (!ctx) return;
     const stats = d.series;
     const labels = stats.map((s) => new Date(s.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }));
