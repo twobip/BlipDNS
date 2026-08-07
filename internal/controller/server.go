@@ -716,14 +716,16 @@ func (s *Server) handleUpstreamErrors(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleMaintenance handles destructive maintenance actions: reset_stats
-// (clear + re-baseline aggregated statistics) and clear_query_log.
+// (clear + re-baseline aggregated statistics), clear_query_log and
+// clear_upstream_errors (optionally filtered to one instance).
 func (s *Server) handleMaintenance(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 	var req struct {
-		Action string `json:"action"`
+		Action   string `json:"action"`
+		Instance string `json:"instance"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
@@ -745,6 +747,15 @@ func (s *Server) handleMaintenance(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := s.fleet.queryLog.ClearQueryLog(r.Context()); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	case "clear_upstream_errors":
+		if s.fleet.queryLog == nil {
+			http.Error(w, "query log not available", http.StatusServiceUnavailable)
+			return
+		}
+		if err := s.fleet.queryLog.ClearUpstreamErrors(r.Context(), req.Instance); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}

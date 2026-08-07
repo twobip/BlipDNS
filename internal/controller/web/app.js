@@ -1297,6 +1297,16 @@ $("q-refresh").onclick = renderQueries;
 $("ue-instance").addEventListener("change", (e) => { ueState.inst = e.target.value; renderUpstreamErrors(); });
 $("ue-range").addEventListener("change", (e) => { ueState.since = e.target.value; renderUpstreamErrors(); });
 $("ue-refresh").onclick = renderUpstreamErrors;
+$("ue-clear").onclick = () => {
+  const scope = ueState.inst ? ` for "${ueState.inst}"` : "";
+  confirmDialog("Clear upstream errors?", `Removes the recorded upstream failures${scope}. This cannot be undone.`, async () => {
+    try {
+      await API("/api/maintenance", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "clear_upstream_errors", instance: ueState.inst }) });
+      toast("upstream errors cleared");
+      renderUpstreamErrors();
+    } catch (e) { toast("clear failed: " + e.message, "err"); }
+  });
+};
 
 /* cache stats */
 $("cs-range").addEventListener("change", (e) => { csState.since = e.target.value; renderCacheStats(); });

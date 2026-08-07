@@ -376,6 +376,30 @@ func TestQueryLogStoreUpstreamErrors(t *testing.T) {
 	if len(stats) != 0 {
 		t.Fatalf("UpstreamErrorStats(since) returned %d groups, want 0", len(stats))
 	}
+
+	// Clear only instance "a"; "b" must survive.
+	if err := store.ClearUpstreamErrors(ctx, "a"); err != nil {
+		t.Fatalf("ClearUpstreamErrors(a): %v", err)
+	}
+	stats, err = store.UpstreamErrorStats(ctx, "", now.Add(-24*time.Hour), 100)
+	if err != nil {
+		t.Fatalf("UpstreamErrorStats after clear: %v", err)
+	}
+	if len(stats) != 1 || stats[0].Instance != "b" || stats[0].Count != 2 {
+		t.Fatalf("after clear(a) = %+v, want only the b group with count 2", stats)
+	}
+
+	// Clearing everything empties the table.
+	if err := store.ClearUpstreamErrors(ctx, ""); err != nil {
+		t.Fatalf("ClearUpstreamErrors(all): %v", err)
+	}
+	stats, err = store.UpstreamErrorStats(ctx, "", now.Add(-24*time.Hour), 100)
+	if err != nil {
+		t.Fatalf("UpstreamErrorStats after clear-all: %v", err)
+	}
+	if len(stats) != 0 {
+		t.Fatalf("after clear-all = %+v, want no groups", stats)
+	}
 }
 
 func TestQueryLogStoreBatchWriter(t *testing.T) {

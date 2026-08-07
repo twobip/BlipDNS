@@ -415,6 +415,17 @@ func (s *QueryLogStore) UpstreamErrorStats(ctx context.Context, instance string,
 	return out, rows.Err()
 }
 
+// ClearUpstreamErrors removes stored upstream failures. An empty instance
+// clears the whole table; otherwise only that instance's errors are dropped.
+func (s *QueryLogStore) ClearUpstreamErrors(ctx context.Context, instance string) error {
+	if instance == "" {
+		_, err := s.db.ExecContext(ctx, `DELETE FROM upstream_errors`)
+		return err
+	}
+	_, err := s.db.ExecContext(ctx, `DELETE FROM upstream_errors WHERE instance = ?`, instance)
+	return err
+}
+
 // AddStatsSample records a snapshot of an instance's cumulative counters.
 func (s *QueryLogStore) AddStatsSample(ctx context.Context, e StatsSample) error {
 	_, err := s.db.ExecContext(ctx,
