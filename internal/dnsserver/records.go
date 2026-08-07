@@ -14,23 +14,44 @@ const defaultRecordTTL = 60
 
 // RecordStore holds static DNS records (A, AAAA, CNAME) answered locally by
 // blipd instead of being forwarded upstream. It implements control.RecordController.
+//
+// Records whose domain begins with "*." are treated as wildcards: e.g.
+// "*.lan.twobip.com" answers any subdomain of lan.twobip.com (host.lan.twobip.com,
+// deep.host.lan.twobip.com, …) but NOT lan.twobip.com itself. This mirrors the
+// suffix/wildcard matching used by the filter policy store. An exact (non-wildcard)
+// record always takes precedence over a wildcard.
 type RecordStore struct {
-	mu      sync.RWMutex
-	records map[string][]control.RecordEntry // keyed by lowercased domain
+	mu         sync.RWMutex
+	records    map[string][]control.RecordEntry // exact: keyed by lowercased domain (no trailing .)
+	wildcards  map[string][]control.RecordEntry // wildcard: keyed by the parent suffix (e.g. "lan.twobip.com" for "*.lan.twobip.com")
 }
 
 func NewRecordStore() *RecordStore {
-	return &RecordStore{records: make(map[string][]control.RecordEntry)}
+	return &RecordStore{
+		records:   make(map[string][]control.RecordEntry),
+		wildcards: make(map[string][]control.RecordEntry),
+	}
 }
 
-// SetRecords replaces all local records atomically.
+// SetRecords replaces all local records atomically. Records whose Domain
+// begins with "*." (e.g. "*.lan.twobip.com") are stored as wildcards and answered
+// for any matching subdomain; the apex itself is not matched by a wildcard.
 func (rs *RecordStore) SetRecords(records []control.RecordEntry) error {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
 	rs.records = make(map[string][]control.RecordEntry, len(records))
+	rs.wildcards = make(map[string][]control.RecordEntry, len(records))
 	for _, r := range records {
 		key := strings.ToLower(strings.TrimSuffix(r.Domain, "."))
 		if key == "" {
+			continue
+		}
+		if strings.HasPrefix(key, "*.") {
+			parent := key[2:]
+			if parent == "" {
+				continue
+			}
+			rs.wildcards[parent] = append(rs.wildcards[parent], r)
 			continue
 		}
 		rs.records[key] = append(rs.records[key], r)
@@ -38,12 +59,15 @@ func (rs *RecordStore) SetRecords(records []control.RecordEntry) error {
 	return nil
 }
 
-// GetRecords returns all records as a flat slice.
+// GetRecords returns all records as a flat slice (exact and wildcard).
 func (rs *RecordStore) GetRecords() ([]control.RecordEntry, error) {
 	rs.mu.RLock()
 	defer rs.mu.RUnlock()
-	out := make([]control.RecordEntry, 0, len(rs.records))
+	out := make([]control.RecordEntry, 0, len(rs.records)+len(rs.wildcards))
 	for _, recs := range rs.records {
+		out = append(out, recs...)
+	}
+	for _, recs := range rs.wildcards {
 		out = append(out, recs...)
 	}
 	return out, nil
@@ -54,6 +78,7 @@ func (rs *RecordStore) ClearRecords() error {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
 	rs.records = make(map[string][]control.RecordEntry)
+	rs.wildcards = make(map[string][]control.RecordEntry)
 	return nil
 }
 
@@ -70,8 +95,22 @@ func (rs *RecordStore) Lookup(req *dns.Msg) (*dns.Msg, bool) {
 		return nil, false
 	}
 
+	// An exact record always wins; otherwise fall back to the most specific
+	// (deepest) wildcard covering the queried subdomain. A wildcard "*.root"
+	// matches host.root and deep.host.root but not "root" itself (no apex match),
+	// matching the suffix/wildcard semantics used by the filter policy store.
 	rs.mu.RLock()
 	recs := rs.records[domain]
+	if len(recs) == 0 {
+		labels := strings.Split(domain, ".")
+		for i := 1; i < len(labels); i++ {
+			parent := strings.Join(labels[i:], ".")
+			if w, ok := rs.wildcards[parent]; ok {
+				recs = w
+				break
+			}
+		}
+	}
 	rs.mu.RUnlock()
 	if len(recs) == 0 {
 		return nil, false
@@ -137,8 +176,11 @@ func (rs *RecordStore) Hash() uint64 {
 	defer rs.mu.RUnlock()
 	// Collect a flat snapshot so the hash is order-independent of the map
 	// iteration, matching how the controller computes its expected hash.
-	all := make([]control.RecordEntry, 0, len(rs.records))
+	all := make([]control.RecordEntry, 0, len(rs.records)+len(rs.wildcards))
 	for _, recs := range rs.records {
+		all = append(all, recs...)
+	}
+	for _, recs := range rs.wildcards {
 		all = append(all, recs...)
 	}
 	return control.RecordsHash(all)

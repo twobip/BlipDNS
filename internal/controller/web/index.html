@@ -467,7 +467,7 @@
              <tbody id="r-tbody"></tbody>
            </table>
          </div>
-         <p class="muted" style="font-size:12px; margin-top:8px">Static DNS records answered locally by blipd before forwarding to upstream. A/AAAA records return IP addresses; CNAME records return a canonical name alias. Records are fleet-wide and pushed to every instance (use per-instance overrides in Settings for instance-specific values).</p>
+         <p class="muted" style="font-size:12px; margin-top:8px">Static DNS records answered locally by blipd before forwarding to upstream. A/AAAA records return IP addresses; CNAME records return a canonical name alias. A domain prefixed with <code>*.&nbsp;</code> (e.g. <code>*.lan.twobip.com</code>) is a wildcard that matches any subdomain but not the apex itself. Records are fleet-wide and pushed to every instance (use per-instance overrides in Settings for instance-specific values).</p>
         </section>
 
       <!-- ================= SETTINGS ================= -->
@@ -676,7 +676,7 @@
       <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button></div>
     <div class="modal-body">
       <div class="form-grid">
-        <div class="field"><label>Domain</label><input class="input" id="r-domain" placeholder="server.lan"/></div>
+        <div class="field"><label>Domain</label><input class="input" id="r-domain" placeholder="server.lan / *.lan"/></div>
         <div class="field"><label>Type</label>
           <select class="select" id="r-type">
             <option value="A">A</option>
