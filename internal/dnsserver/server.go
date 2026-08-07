@@ -232,22 +232,19 @@ func (s *Server) serve(ctx context.Context, clientIP net.IP, clientID string, re
 	if client == "" {
 		client = clientIP.String()
 	}
-	s.cnt.AddQuery(client)
 	// Per-client rate limit (DoH client-id or source IP). Excess queries are
-	// dropped with REFUSED so abusive clients can't exhaust upstream.
+	// dropped with REFUSED so abusive clients can't exhaust upstream. REFUSED
+	// queries are tracked separately (AddRateLimited) and excluded from the
+	// query totals / query log: only queries that actually get resolved count
+	// toward throughput, cache and top-domain stats.
 	if s.rl != nil && !s.rl.allow(client) {
 		s.cnt.AddRateLimited()
-		s.ctrl.Notify(control.WatchEvent{
-			Type:       "pass", // not blocked, just throttled
-			At:         time.Now(),
-			Client:     client,
-			DurationUs: time.Since(start).Microseconds(),
-		})
 		resp := new(dns.Msg)
 		resp.SetReply(req)
 		resp.Rcode = dns.RcodeRefused
 		return resp
 	}
+	s.cnt.AddQuery(client)
 	resp := new(dns.Msg)
 	resp.SetReply(req)
 	if len(req.Question) == 0 {
