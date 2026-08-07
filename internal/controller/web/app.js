@@ -1817,5 +1817,5 @@ loadBlocklist();
 connectSSE();
 refresh();
 refreshSettings();
-pollTimer = setInterval(() => { if (current === "dashboard" || current === "instances" || current === "queries" || current === "cache-stats" || current === "upstream-errors") refresh(); }, 5000);
+pollTimer = setInterval(() => { if (current === "dashboard" || current === "instances" || current === "cache-stats" || current === "upstream-errors") refresh(); }, 5000);
 setInterval(() => { if (current === "dashboard") fetchStats(); }, 60000); // refresh chart/stats periodically
