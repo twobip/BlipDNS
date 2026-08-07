@@ -231,3 +231,62 @@ func TestParseKey(t *testing.T) {
 		t.Error("expected parse failure on malformed key")
 	}
 }
+
+func TestTwoTierHold(t *testing.T) {
+	c := New(time.Hour, 0)
+	c.SetHold(2, time.Hour) // keep top-2 at record TTL, everyone else 1h
+	c.now = func() time.Time { return time.Unix(1000, 0) }
+
+	// Seed some entries with record TTL 5s.
+	for _, n := range []string{"a.test", "b.test", "c.test", "d.test"} {
+		c.Set(Key(mkMsg(n, 5)), mkMsg(n, 5))
+	}
+	// Make a and b clearly more popular than the rest (2 >= warm=2 higher-hit
+	// entries), so they rank in the top tier.
+	for i := 0; i < 5; i++ {
+		_, _ = c.Get(Key(mkMsg("a.test", 5)))
+		_, _ = c.Get(Key(mkMsg("b.test", 5)))
+	}
+	// Re-set a low-hit entry now that 2 others are more popular: it must fall
+	// into the regular-hold tier (1h), not its record TTL.
+	c.Set(Key(mkMsg("e.test", 5)), mkMsg("e.test", 5))
+
+	// 20s later: past every record TTL (5s).
+	c.now = func() time.Time { return time.Unix(1020, 0) }
+
+	// The non-top entry e stays cached for regularHold (may serve stale).
+	if _, ok := c.Get(Key(mkMsg("e.test", 5))); !ok {
+		t.Error("non-top entry should still be cached within regularHold")
+	}
+	// Top entries a,b expire at their own record TTL.
+	if _, ok := c.Get(Key(mkMsg("a.test", 5))); ok {
+		t.Error("top-2 entry should expire at its record TTL")
+	}
+	if _, ok := c.Get(Key(mkMsg("b.test", 5))); ok {
+		t.Error("top-2 entry should expire at its record TTL")
+	}
+}
+
+func TestTwoTierDefaultUsesRecordTTL(t *testing.T) {
+	c := New(time.Hour, 0)
+	c.SetHold(0, 0) // two-tier off -> record TTL everywhere
+	c.now = func() time.Time { return time.Unix(1000, 0) }
+	c.Set(Key(mkMsg("a.test", 5)), mkMsg("a.test", 5))
+	c.now = func() time.Time { return time.Unix(1006, 0) }
+	if _, ok := c.Get(Key(mkMsg("a.test", 5))); ok {
+		t.Error("without regularHold, entry should expire at its record TTL")
+	}
+}
+
+func TestServeTTLCappedAtSource(t *testing.T) {
+	c := New(time.Hour, 0)
+	c.SetHold(0, time.Hour) // non-top held 1h but source TTL is 60s
+	c.Set(Key(mkMsg("a.test", 60)), mkMsg("a.test", 60))
+	got, ok := c.Get(Key(mkMsg("a.test", 60)))
+	if !ok {
+		t.Fatal("expected hit")
+	}
+	if ttl := got.Answer[0].Header().Ttl; ttl > 60 {
+		t.Errorf("served TTL %d should not exceed source TTL 60", ttl)
+	}
+}

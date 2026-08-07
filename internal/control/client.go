@@ -136,9 +136,10 @@ func (c *Client) SetRateLimit(ctx context.Context, qps, burst int) error {
 }
 
 // SetCacheConfig tunes the instance's response cache: size is the max cached
-// responses (0 = unlimited), warm the auto-refresh count (0 = off).
-func (c *Client) SetCacheConfig(ctx context.Context, size, warm int) error {
-	return c.do(ctx, http.MethodPut, "/api/v1/cache", &SetCacheRequest{Size: size, Warm: warm}, nil)
+// responses (0 = unlimited), warm the auto-refresh count (0 = off), and regular
+// how long non-most-popular entries stay cached in seconds (0 = use record TTL).
+func (c *Client) SetCacheConfig(ctx context.Context, size, warm, regular int) error {
+	return c.do(ctx, http.MethodPut, "/api/v1/cache", &SetCacheRequest{Size: size, Warm: warm, Regular: regular}, nil)
 }
 
 // PurgeCache drops every cached response on the instance and returns how many

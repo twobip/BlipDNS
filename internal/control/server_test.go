@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/twobip/BlipDNS/internal/blocklist"
 	"github.com/twobip/BlipDNS/internal/cache"
@@ -392,17 +393,19 @@ type fakeCacheCtrl struct {
 	mu      sync.Mutex
 	size    int
 	warm    int
+	regular int // seconds
 	purged  int
 	counter int
 	c       *cache.Cache
 }
 
-func (f *fakeCacheCtrl) SetCacheConfig(size, warm int) error {
+func (f *fakeCacheCtrl) SetCacheConfig(size, warm int, regular time.Duration) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.counter++
 	f.size = size
 	f.warm = warm
+	f.regular = int(regular.Seconds())
 	return nil
 }
 
@@ -416,6 +419,12 @@ func (f *fakeCacheCtrl) CacheWarm() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.warm
+}
+
+func (f *fakeCacheCtrl) CacheRegular() time.Duration {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return time.Duration(f.regular) * time.Second
 }
 
 func (f *fakeCacheCtrl) PurgeCache() {

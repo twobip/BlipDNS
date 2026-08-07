@@ -356,7 +356,7 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		upServers, upRoutes := s.fleet.Upstream()
-		cacheSize, cacheWarm := s.fleet.CacheConfig()
+		cacheSize, cacheWarm, cacheRegular := s.fleet.CacheConfig()
 		writeJSON(w, map[string]interface{}{
 			"default_policy":            s.fleet.DefaultPolicy(),
 			"instance_overrides":        s.fleet.InstanceOverrides(),
@@ -366,6 +366,7 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			"upstream_routes":           upRoutes,
 			"cache_size":                cacheSize,
 			"cache_warm":                cacheWarm,
+			"cache_regular":             cacheRegular,
 			"query_log_retention_hours": s.fleet.QueryLogRetentionHours(),
 			"records":                   s.fleet.Records(),
 		})
@@ -379,6 +380,7 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			RateLimitQPS           *int                       `json:"rate_limit_qps"`
 			CacheSize              *int                       `json:"cache_size"`
 			CacheWarm              *int                       `json:"cache_warm"`
+			CacheRegular           *int                       `json:"cache_regular"`
 			QueryLogRetentionHours *int                       `json:"query_log_retention_hours"`
 			UpstreamServers        *[]upstream.UpstreamServer `json:"upstream_servers"`
 			UpstreamRoutes         *[]upstream.UpstreamRoute  `json:"upstream_routes"`
@@ -448,21 +450,24 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 		// Response cache settings (fleet-wide or per-instance): max size and
 		// auto-refresh count. Zero values mean "unlimited"/"off"; on an
 		// instance scope they fall through to the fleet-wide default.
-		if req.CacheSize != nil || req.CacheWarm != nil {
-			cacheSize, cacheWarm := 0, 0
+		if req.CacheSize != nil || req.CacheWarm != nil || req.CacheRegular != nil {
+			cacheSize, cacheWarm, cacheRegular := 0, 0, 0
 			if req.CacheSize != nil {
 				cacheSize = *req.CacheSize
 			}
 			if req.CacheWarm != nil {
 				cacheWarm = *req.CacheWarm
 			}
-			if cacheSize < 0 || cacheWarm < 0 {
-				http.Error(w, "cache size and warm count must be >= 0", http.StatusBadRequest)
+			if req.CacheRegular != nil {
+				cacheRegular = *req.CacheRegular
+			}
+			if cacheSize < 0 || cacheWarm < 0 || cacheRegular < 0 {
+				http.Error(w, "cache size, warm count and regular must be >= 0", http.StatusBadRequest)
 				return
 			}
 			if req.Scope == "instance" && req.Instance != "" {
 				existing := s.fleet.InstanceOverrideOf(req.Instance)
-				merged := mergeOverride(existing, &InstanceOverride{CacheSize: req.CacheSize, CacheWarm: req.CacheWarm})
+				merged := mergeOverride(existing, &InstanceOverride{CacheSize: req.CacheSize, CacheWarm: req.CacheWarm, CacheRegular: req.CacheRegular})
 				// Zero values mean "inherit the fleet-wide default": clear any
 				// previously set per-instance value.
 				if req.CacheSize != nil && cacheSize == 0 {
@@ -471,11 +476,14 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 				if req.CacheWarm != nil && cacheWarm == 0 {
 					merged.CacheWarm = nil
 				}
+				if req.CacheRegular != nil && cacheRegular == 0 {
+					merged.CacheRegular = nil
+				}
 				applied := s.fleet.SetInstanceOverride(r.Context(), req.Instance, merged)
 				writeJSON(w, map[string]interface{}{"ok": true, "applied": applied})
 				return
 			}
-			applied := s.fleet.SetCache(r.Context(), cacheSize, cacheWarm)
+			applied := s.fleet.SetCache(r.Context(), cacheSize, cacheWarm, cacheRegular)
 			writeJSON(w, map[string]interface{}{"ok": true, "applied": applied})
 			return
 		}

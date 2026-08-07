@@ -251,7 +251,7 @@ func TestRefreshPopularRefreshesStale(t *testing.T) {
 	// a generous lookahead makes the (fresh) entry count as stale
 	srv.cfg.CacheWarmAhead = 2 * time.Minute
 	// auto-refresh is runtime-tuned and starts off; enable it for this test
-	if err := srv.SetCacheConfig(0, 1); err != nil {
+	if err := srv.SetCacheConfig(0, 1, 0); err != nil {
 		t.Fatal(err)
 	}
 	srv.refreshPopular()

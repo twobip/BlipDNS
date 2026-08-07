@@ -145,6 +145,7 @@ func main() {
 		CacheWarmCount:    cfg.CacheWarmCount,
 		CacheWarmAhead:    cfg.CacheWarmAhead,
 		CacheWarmInterval: cfg.CacheWarmInterval,
+		CacheRegular:      cfg.CacheRegular,
 		Store:             store,
 		Version:           version,
 		Blocklist:         bl,

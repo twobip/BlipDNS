@@ -101,8 +101,9 @@ func lastUpstream(r *upstreamRec) ([]upstream.UpstreamServer, []upstream.Upstrea
 
 // cacheCall is one cache-config push observed by cacheRec.
 type cacheCall struct {
-	size int
-	warm int
+	size    int
+	warm    int
+	regular int
 }
 
 // recCall is one records push observed by recRec.
@@ -146,20 +147,22 @@ func (r *recRec) callCount() int {
 // and mirrors what an explicit purge would drop (fixed, so it is immune to
 // reconcile pushes rewriting the size/warm).
 type cacheRec struct {
-	mu     sync.Mutex
-	size   int
-	warm   int
-	drop   int
-	calls  []cacheCall
-	purged int
+	mu      sync.Mutex
+	size    int
+	warm    int
+	regular int
+	drop    int
+	calls   []cacheCall
+	purged  int
 }
 
-func (r *cacheRec) applied(size, warm int) {
+func (r *cacheRec) applied(size, warm, regular int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.size = size
 	r.warm = warm
-	r.calls = append(r.calls, cacheCall{size, warm})
+	r.regular = regular
+	r.calls = append(r.calls, cacheCall{size, warm, regular})
 }
 
 func (r *cacheRec) snapshot() []cacheCall {
@@ -233,6 +236,7 @@ func fakeBlipdWithRec(t *testing.T, token, claimCode string, health *control.Hea
 			cache.mu.Lock()
 			st.CacheSize = cache.size
 			st.CacheWarm = cache.warm
+			st.CacheRegular = cache.regular
 			cache.mu.Unlock()
 		}
 		if recCtrl != nil {
@@ -340,13 +344,13 @@ func fakeBlipdWithRec(t *testing.T, token, claimCode string, health *control.Hea
 		}
 		switch r.Method {
 		case http.MethodGet:
-			size, warm := 0, 0
+			size, warm, regular := 0, 0, 0
 			if cache != nil {
 				cache.mu.Lock()
-				size, warm = cache.size, cache.warm
+				size, warm, regular = cache.size, cache.warm, cache.regular
 				cache.mu.Unlock()
 			}
-			writeJSONH(w, map[string]int{"size": size, "warm": warm})
+			writeJSONH(w, map[string]int{"size": size, "warm": warm, "regular": regular})
 		case http.MethodPut, http.MethodPost:
 			var req control.SetCacheRequest
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -354,9 +358,9 @@ func fakeBlipdWithRec(t *testing.T, token, claimCode string, health *control.Hea
 				return
 			}
 			if cache != nil {
-				cache.applied(req.Size, req.Warm)
+				cache.applied(req.Size, req.Warm, req.Regular)
 			}
-			writeJSONH(w, map[string]int{"size": req.Size, "warm": req.Warm})
+			writeJSONH(w, map[string]int{"size": req.Size, "warm": req.Warm, "regular": req.Regular})
 		default:
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
@@ -1220,7 +1224,7 @@ func TestFleetSetCache(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res := fleet.SetCache(ctx, 5000, 10)
+	res := fleet.SetCache(ctx, 5000, 10, 3600)
 	if res["a"] != "ok" || res["b"] != "ok" {
 		t.Fatalf("expected both ok, got %+v", res)
 	}
@@ -1231,20 +1235,20 @@ func TestFleetSetCache(t *testing.T) {
 		}
 		return sn[len(sn)-1]
 	}
-	if got := last(cacheA); got.size != 5000 || got.warm != 10 {
-		t.Errorf("instance a last cache push = %+v, want 5000/10 (history=%v)", got, cacheA.snapshot())
+	if got := last(cacheA); got.size != 5000 || got.warm != 10 || got.regular != 3600 {
+		t.Errorf("instance a last cache push = %+v, want 5000/10/3600 (history=%v)", got, cacheA.snapshot())
 	}
-	if got := last(cacheB); got.size != 5000 || got.warm != 10 {
-		t.Errorf("instance b last cache push = %+v, want 5000/10 (history=%v)", got, cacheB.snapshot())
+	if got := last(cacheB); got.size != 5000 || got.warm != 10 || got.regular != 3600 {
+		t.Errorf("instance b last cache push = %+v, want 5000/10/3600 (history=%v)", got, cacheB.snapshot())
 	}
-	if s, w := fleet.CacheConfig(); s != 5000 || w != 10 {
-		t.Errorf("fleet CacheConfig = %d/%d, want 5000/10", s, w)
+	if s, w, reg := fleet.CacheConfig(); s != 5000 || w != 10 || reg != 3600 {
+		t.Errorf("fleet CacheConfig = %d/%d/%d, want 5000/10/3600", s, w, reg)
 	}
 	b, err := os.ReadFile(cfgPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Contains(b, []byte("cache_size:")) || !bytes.Contains(b, []byte("5000")) || !bytes.Contains(b, []byte("cache_warm:")) || !bytes.Contains(b, []byte("10")) {
+	if !bytes.Contains(b, []byte("cache_size:")) || !bytes.Contains(b, []byte("5000")) || !bytes.Contains(b, []byte("cache_warm:")) || !bytes.Contains(b, []byte("10")) || !bytes.Contains(b, []byte("cache_regular:")) || !bytes.Contains(b, []byte("3600")) {
 		t.Errorf("cache config not persisted:\n%s", b)
 	}
 }
@@ -1260,7 +1264,7 @@ func TestFleetCacheReconcileRestartRevert(t *testing.T) {
 	defer srv.Close()
 
 	fleet := NewFleet("/tmp/blip-test-config.yaml")
-	fleet.SetCacheDefault(5000, 10)
+	fleet.SetCacheDefault(5000, 10, 3600)
 	if err := fleet.Add(context.Background(), InstanceConfig{ID: "a", URL: srv.URL, Token: "t"}); err != nil {
 		t.Fatal(err)
 	}
@@ -1282,12 +1286,12 @@ func TestFleetCacheReconcileRestartRevert(t *testing.T) {
 
 	// Simulate restart revert: blipd's cache reverts to default (0/off).
 	cache.mu.Lock()
-	cache.size, cache.warm = 0, 0
+	cache.size, cache.warm, cache.regular = 0, 0, 0
 	cache.mu.Unlock()
 
 	got := waitFor(2, "no re-push after simulated restart revert")
 	last := got[len(got)-1]
-	if last.size != 5000 || last.warm != 10 {
+	if last.size != 5000 || last.warm != 10 || last.regular != 3600 {
 		t.Fatalf("unexpected re-push content: %+v", last)
 	}
 }
@@ -1303,7 +1307,7 @@ func TestFleetCacheOverride(t *testing.T) {
 	defer srvB.Close()
 
 	fleet := NewFleet(filepath.Join(t.TempDir(), "blipc.yaml"))
-	fleet.SetCacheDefault(5000, 10)
+	fleet.SetCacheDefault(5000, 10, 3600)
 	ctx := context.Background()
 	if err := fleet.Add(ctx, InstanceConfig{ID: "a", URL: srvA.URL, Token: "t"}); err != nil {
 		t.Fatal(err)

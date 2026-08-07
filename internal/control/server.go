@@ -123,9 +123,10 @@ func (s *Server) rateLimitController() RateLimitController {
 // and an explicit purge. The controller reports the config back via stats so
 // its poll loop can converge it.
 type CacheController interface {
-	SetCacheConfig(size, warm int) error
+	SetCacheConfig(size, warm int, regular time.Duration) error
 	CacheSize() int
 	CacheWarm() int
+	CacheRegular() time.Duration
 	PurgeCache()
 }
 
@@ -382,6 +383,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		if cc := s.cacheController(); cc != nil {
 			st.CacheSize = cc.CacheSize()
 			st.CacheWarm = cc.CacheWarm()
+			st.CacheRegular = int(cc.CacheRegular().Seconds())
 		}
 		// Report the local DNS record hash so the controller can converge them
 		// (e.g. after a restart) by re-pushing on drift.

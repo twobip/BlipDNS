@@ -48,6 +48,7 @@ type Config struct {
 	CacheWarmCount    int           // most-popular entries to auto-refresh (0 = off)
 	CacheWarmAhead    time.Duration // refresh a popular entry when its TTL drops below this
 	CacheWarmInterval time.Duration // how often to run the warm-refresh loop
+	CacheRegular      time.Duration // how long non-most-popular entries stay cached (0 = use record TTL)
 	Store             *filter.Store
 	Version           string
 	Blocklist         *blocklist.Blocklist // global blocklist applied before per-client policy
@@ -81,9 +82,10 @@ type Server struct {
 	rec *RecordStore
 	// cacheMu guards the runtime cache configuration; both fields are seeded
 	// from cfg and can be overridden live by the controller (settings page).
-	cacheMu   sync.RWMutex
-	cacheSize int // max cached responses (0 = unlimited)
-	cacheWarm int // most-popular entries auto-refreshed before expiry (0 = off)
+	cacheMu      sync.RWMutex
+	cacheSize    int           // max cached responses (0 = unlimited)
+	cacheWarm    int           // most-popular entries auto-refreshed before expiry (0 = off)
+	cacheRegular time.Duration // how long non-most-popular entries stay cached (0 = use record TTL)
 }
 
 // New builds a Server. If cfg.Store is nil a permissive default is used.
@@ -99,17 +101,19 @@ func New(cfg Config) (*Server, error) {
 	cnt := &control.Counters{}
 	ctrl := control.NewServerWithBlocklist("", cfg.Store, c, cnt, cfg.Version, cfg.Blocklist)
 	s := &Server{
-		cfg:       cfg,
-		cache:     c,
-		pool:      up,
-		ctrl:      ctrl,
-		cnt:       cnt,
-		rl:        newRateLimiter(),
-		rec:       NewRecordStore(),
-		cacheSize: cfg.CacheSize,
-		cacheWarm: cfg.CacheWarmCount,
-		close:     make(chan struct{}),
+		cfg:          cfg,
+		cache:        c,
+		pool:         up,
+		ctrl:         ctrl,
+		cnt:          cnt,
+		rl:           newRateLimiter(),
+		rec:          NewRecordStore(),
+		cacheSize:    cfg.CacheSize,
+		cacheWarm:    cfg.CacheWarmCount,
+		cacheRegular: cfg.CacheRegular,
+		close:        make(chan struct{}),
 	}
+	c.SetHold(cfg.CacheWarmCount, cfg.CacheRegular)
 	// Let the management API toggle the optional plain-HTTP DoH listener, the
 	// per-client rate limit, the conditional-forwarding upstream config, and
 	// the response cache (size / auto-refresh / purge) at runtime.
@@ -653,17 +657,21 @@ func (s *Server) RateLimitQPS() int {
 }
 
 // SetCacheConfig tunes the response cache at runtime: size is the max cached
-// responses (0 = unlimited), warm the number of most-popular entries to
-// auto-refresh before they expire (0 = off). Both values must be >= 0.
-func (s *Server) SetCacheConfig(size, warm int) error {
-	if size < 0 || warm < 0 {
+// responses (0 = unlimited), warm the number of most-popular entries kept at
+// their record TTL and auto-refreshed before expiry (0 = off), and regular the
+// duration every other entry stays cached (0 = use record TTL). All values
+// must be >= 0.
+func (s *Server) SetCacheConfig(size, warm int, regular time.Duration) error {
+	if size < 0 || warm < 0 || regular < 0 {
 		return fmt.Errorf("cache size and warm count must be >= 0")
 	}
 	s.cacheMu.Lock()
 	s.cacheSize = size
 	s.cacheWarm = warm
+	s.cacheRegular = regular
 	s.cacheMu.Unlock()
 	s.cache.SetMaxEntries(size)
+	s.cache.SetHold(warm, regular)
 	return nil
 }
 
@@ -679,6 +687,14 @@ func (s *Server) CacheWarm() int {
 	s.cacheMu.RLock()
 	defer s.cacheMu.RUnlock()
 	return s.cacheWarm
+}
+
+// CacheRegular returns how long non-most-popular entries stay cached
+// (0 = use the record TTL).
+func (s *Server) CacheRegular() time.Duration {
+	s.cacheMu.RLock()
+	defer s.cacheMu.RUnlock()
+	return s.cacheRegular
 }
 
 // PurgeCache drops every cached response (e.g. from the settings page).
