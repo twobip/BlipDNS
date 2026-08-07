@@ -77,6 +77,11 @@ type Server struct {
 	once         sync.Once
 	// rl enforces the per-client DNS query rate limit (configurable live).
 	rl *rateLimiter
+	// cacheMu guards the runtime cache configuration; both fields are seeded
+	// from cfg and can be overridden live by the controller (settings page).
+	cacheMu   sync.RWMutex
+	cacheSize int // max cached responses (0 = unlimited)
+	cacheWarm int // most-popular entries auto-refreshed before expiry (0 = off)
 }
 
 // New builds a Server. If cfg.Store is nil a permissive default is used.
@@ -92,20 +97,23 @@ func New(cfg Config) (*Server, error) {
 	cnt := &control.Counters{}
 	ctrl := control.NewServerWithBlocklist("", cfg.Store, c, cnt, cfg.Version, cfg.Blocklist)
 	s := &Server{
-		cfg:   cfg,
-		cache: c,
-		pool:  up,
-		ctrl:  ctrl,
-		cnt:   cnt,
-		rl:    newRateLimiter(),
-		close: make(chan struct{}),
+		cfg:       cfg,
+		cache:     c,
+		pool:      up,
+		ctrl:      ctrl,
+		cnt:       cnt,
+		rl:        newRateLimiter(),
+		cacheSize: cfg.CacheSize,
+		cacheWarm: cfg.CacheWarmCount,
+		close:     make(chan struct{}),
 	}
 	// Let the management API toggle the optional plain-HTTP DoH listener, the
-	// per-client rate limit, and the conditional-forwarding upstream config at
-	// runtime.
+	// per-client rate limit, the conditional-forwarding upstream config, and
+	// the response cache (size / auto-refresh / purge) at runtime.
 	ctrl.SetDoHController(s)
 	ctrl.SetRateLimitController(s)
 	ctrl.SetLocalResolverController(s)
+	ctrl.SetCacheController(s)
 	// Seed the rate limit from config (controller can override later).
 	if cfg.RateLimitQPS > 0 {
 		_ = s.SetRateLimit(cfg.RateLimitQPS, cfg.RateLimitBurst)
@@ -381,11 +389,10 @@ func applyBlockAction(resp *dns.Msg, q dns.Question, action filter.BlockAction) 
 }
 
 // startWarmLoop periodically re-resolves the most popular cached responses
-// shortly before they expire, so heavy hitters never go stale for clients.
+// shortly before they expire, so heavy hitters never go stale for clients. The
+// loop always runs and honors the runtime warm count, so the controller can
+// turn auto-refresh on/off without a restart.
 func (s *Server) startWarmLoop() {
-	if s.cfg.CacheWarmCount <= 0 {
-		return
-	}
 	interval := s.cfg.CacheWarmInterval
 	if interval <= 0 {
 		interval = 10 * time.Second
@@ -409,8 +416,16 @@ func (s *Server) startWarmLoop() {
 // re-caches the fresh responses. Best-effort: failures are skipped and the
 // next pass retries.
 func (s *Server) refreshPopular() {
-	keys := s.cache.Popular(s.cfg.CacheWarmCount)
+	warm := s.cacheWarmCount()
+	if warm <= 0 {
+		return
+	}
+	keys := s.cache.Popular(warm)
 	if len(keys) == 0 {
+		return
+	}
+	auto := s.upstreamAuto()
+	if auto == nil {
 		return
 	}
 	ahead := s.cfg.CacheWarmAhead
@@ -430,12 +445,19 @@ func (s *Server) refreshPopular() {
 		req := new(dns.Msg)
 		req.RecursionDesired = true
 		req.Question = []dns.Question{{Name: name, Qtype: qtype, Qclass: qclass}}
-		m, err := s.upstreamAuto().Resolve(ctx, req)
+		m, err := auto.Resolve(ctx, req)
 		if err != nil {
 			continue
 		}
 		s.cache.Set(k, m)
 	}
+}
+
+// cacheWarmCount returns the runtime auto-refresh count (0 = off).
+func (s *Server) cacheWarmCount() int {
+	s.cacheMu.RLock()
+	defer s.cacheMu.RUnlock()
+	return s.cacheWarm
 }
 
 // Start launches UDP, TCP and DoH listeners (DoH blocks).
@@ -557,6 +579,40 @@ func (s *Server) RateLimitQPS() int {
 		return 0
 	}
 	return s.rl.qps()
+}
+
+// SetCacheConfig tunes the response cache at runtime: size is the max cached
+// responses (0 = unlimited), warm the number of most-popular entries to
+// auto-refresh before they expire (0 = off). Both values must be >= 0.
+func (s *Server) SetCacheConfig(size, warm int) error {
+	if size < 0 || warm < 0 {
+		return fmt.Errorf("cache size and warm count must be >= 0")
+	}
+	s.cacheMu.Lock()
+	s.cacheSize = size
+	s.cacheWarm = warm
+	s.cacheMu.Unlock()
+	s.cache.SetMaxEntries(size)
+	return nil
+}
+
+// CacheSize returns the current max cached responses (0 = unlimited).
+func (s *Server) CacheSize() int {
+	s.cacheMu.RLock()
+	defer s.cacheMu.RUnlock()
+	return s.cacheSize
+}
+
+// CacheWarm returns the current auto-refresh count (0 = off).
+func (s *Server) CacheWarm() int {
+	s.cacheMu.RLock()
+	defer s.cacheMu.RUnlock()
+	return s.cacheWarm
+}
+
+// PurgeCache drops every cached response (e.g. from the settings page).
+func (s *Server) PurgeCache() {
+	s.cache.Purge()
 }
 
 // stopDoHPlainLocked stops the plain-HTTP DoH listener; caller holds dohPlainMu.

@@ -387,3 +387,163 @@ func TestClaimCodeEntropy(t *testing.T) {
 		}
 	}
 }
+
+type fakeCacheCtrl struct {
+	mu      sync.Mutex
+	size    int
+	warm    int
+	purged  int
+	counter int
+	c       *cache.Cache
+}
+
+func (f *fakeCacheCtrl) SetCacheConfig(size, warm int) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.counter++
+	f.size = size
+	f.warm = warm
+	return nil
+}
+
+func (f *fakeCacheCtrl) CacheSize() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.size
+}
+
+func (f *fakeCacheCtrl) CacheWarm() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.warm
+}
+
+func (f *fakeCacheCtrl) PurgeCache() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.purged++
+	if f.c != nil {
+		f.c.Purge()
+	}
+}
+
+// TestCacheEndpoint exercises GET /api/v1/cache, PUT /api/v1/cache and
+// POST /api/v1/cache/purge with a wired cache controller.
+func TestCacheEndpoint(t *testing.T) {
+	cc := &fakeCacheCtrl{size: 123, warm: 4}
+	store := filter.NewStore(nil)
+	c := cache.New(0, 0)
+	cc.c = c
+	srv := NewServerWithBlocklist("tok", store, c, &Counters{}, "blipd/test", blocklist.New())
+	srv.SetCacheController(cc)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	authReq := func(method, path, body string) *http.Response {
+		var rd *strings.Reader
+		if body == "" {
+			rd = strings.NewReader("")
+		} else {
+			rd = strings.NewReader(body)
+		}
+		req, _ := http.NewRequest(method, ts.URL+path, rd)
+		req.Header.Set("Authorization", "Bearer tok")
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp
+	}
+
+	// unauth -> 401
+	ureq, _ := http.NewRequest(http.MethodPut, ts.URL+"/api/v1/cache", strings.NewReader(`{"size":500,"warm":10}`))
+	uresp, err := http.DefaultClient.Do(ureq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	uresp.Body.Close()
+	if uresp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauth status = %d, want 401", uresp.StatusCode)
+	}
+
+	// GET reports the wired cache controller's config
+	resp := authReq(http.MethodGet, "/api/v1/cache", "")
+	var got struct {
+		Size int `json:"size"`
+		Warm int `json:"warm"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if got.Size != 123 || got.Warm != 4 {
+		t.Errorf("GET cache = %+v, want size=123 warm=4", got)
+	}
+
+	// PUT tunes it and reports in stats (for controller reconcile)
+	resp = authReq(http.MethodPut, "/api/v1/cache", `{"size":500,"warm":10}`)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("PUT status = %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+	if cc.CacheSize() != 500 || cc.CacheWarm() != 10 {
+		t.Errorf("controller cache = %d/%d, want 500/10", cc.CacheSize(), cc.CacheWarm())
+	}
+	sreq, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/v1/stats", nil)
+	sreq.Header.Set("Authorization", "Bearer tok")
+	sresp, err := http.DefaultClient.Do(sreq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var st StatsResponse
+	if err := json.NewDecoder(sresp.Body).Decode(&st); err != nil {
+		t.Fatal(err)
+	}
+	sresp.Body.Close()
+	if st.CacheSize != 500 || st.CacheWarm != 10 {
+		t.Errorf("stats cache = %d/%d, want 500/10", st.CacheSize, st.CacheWarm)
+	}
+
+	// negative values are rejected
+	resp = authReq(http.MethodPut, "/api/v1/cache", `{"size":-1,"warm":0}`)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("negative size status = %d, want 400", resp.StatusCode)
+	}
+	if cc.CacheSize() != 500 {
+		t.Errorf("cache size changed after rejected PUT: %d", cc.CacheSize())
+	}
+
+	// purge drops entries and reports the count
+	m := new(dns.Msg)
+	m.SetQuestion("a.com.", dns.TypeA)
+	m.Answer = []dns.RR{&dns.A{Hdr: dns.RR_Header{Name: "a.com.", Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60}, A: []byte{1, 2, 3, 4}}}
+	c.Set(cache.Key(m), m)
+	if c.Len() != 1 {
+		t.Fatalf("precondition: cache Len = %d, want 1", c.Len())
+	}
+	resp = authReq(http.MethodPost, "/api/v1/cache/purge", "")
+	var pr PurgeCacheResponse
+	if err := json.NewDecoder(resp.Body).Decode(&pr); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if pr.Purged != 1 {
+		t.Errorf("purged = %d, want 1", pr.Purged)
+	}
+	if c.Len() != 0 {
+		t.Errorf("cache Len after purge = %d, want 0", c.Len())
+	}
+	if cc.purged != 1 {
+		t.Errorf("controller PurgeCache called %d times, want 1", cc.purged)
+	}
+
+	// without a wired controller the endpoints are unavailable
+	srv.SetCacheController(nil)
+	resp = authReq(http.MethodGet, "/api/v1/cache", "")
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("nil controller status = %d, want 503", resp.StatusCode)
+	}
+}

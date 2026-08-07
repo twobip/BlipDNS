@@ -175,6 +175,19 @@ func (c *Cache) evictLocked() {
 	}
 }
 
+// SetMaxEntries adjusts the in-memory size limit at runtime (0 = unlimited).
+// The cache is trimmed immediately if the new limit is below the current size.
+// This lets the controller tune the cache without a blipd restart.
+func (c *Cache) SetMaxEntries(n int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if n < 0 {
+		n = 0
+	}
+	c.maxEntries = n
+	c.evictLocked()
+}
+
 // Do returns a cached response if present, otherwise runs fn (coalescing
 // concurrent identical requests) and caches the result.
 func (c *Cache) Do(ctx context.Context, k string, fn func() (*dns.Msg, error)) (*dns.Msg, error) {

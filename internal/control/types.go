@@ -53,6 +53,10 @@ type StatsResponse struct {
 	// RateLimited counts queries dropped because they exceeded the per-client
 	// rate limit.
 	RateLimited uint64 `json:"rate_limited,omitempty"`
+	// CacheSize / CacheWarm expose the instance's runtime cache config so the
+	// controller can reconcile it (0 = unlimited / auto-refresh off).
+	CacheSize int `json:"cache_size,omitempty"`
+	CacheWarm int `json:"cache_warm,omitempty"`
 	// UpstreamServers / UpstreamRoutes expose the instance's conditional
 	// forwarding configuration so the controller can detect drift.
 	UpstreamServers []upstream.UpstreamServer `json:"upstream_servers,omitempty"`
@@ -81,6 +85,19 @@ type SetDoHRequest struct {
 type SetRateLimitRequest struct {
 	QPS   int `json:"qps"`
 	Burst int `json:"burst,omitempty"`
+}
+
+// SetCacheRequest tunes the instance's response cache. Size is the max cached
+// responses in RAM (0 = unlimited); Warm is the number of most-popular entries
+// auto-refreshed shortly before expiry (0 = off).
+type SetCacheRequest struct {
+	Size int `json:"size"`
+	Warm int `json:"warm"`
+}
+
+// PurgeCacheResponse reports how many cached responses were dropped.
+type PurgeCacheResponse struct {
+	Purged int `json:"purged"`
 }
 
 // SetUpstreamRequest replaces the instance's upstream pool and conditional

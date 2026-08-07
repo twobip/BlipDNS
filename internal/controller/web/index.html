@@ -422,6 +422,35 @@
           </div>
         </div>
 
+        <div class="panel">
+          <div class="panel-head"><h3>Cache</h3><span class="spacer"></span><span class="badge accent" id="s-cache-badge">fleet-wide</span></div>
+          <div class="panel-body">
+            <div class="field">
+              <label>Scope</label>
+              <select class="select" id="s-cache-scope" style="max-width:340px"></select>
+              <span class="hint" id="s-cache-scope-hint">Response cache shared by all listeners (UDP/TCP/DoH).</span>
+            </div>
+            <div class="row" style="gap:8px; align-items:flex-end">
+              <div class="field" style="margin-bottom:0; flex:1">
+                <label>Max cached responses <span class="faint">(0 = unlimited)</span></label>
+                <input class="input" id="s-cache-size" type="number" min="0" placeholder="10000" inputmode="numeric"/>
+              </div>
+              <div class="field" style="margin-bottom:0; flex:1">
+                <label>Auto-refresh popular entries <span class="faint">(0 = off)</span></label>
+                <input class="input" id="s-cache-warm" type="number" min="0" placeholder="0" inputmode="numeric" title="Re-resolve this many of the most popular entries shortly before their TTL expires, so they never go stale for clients."/>
+              </div>
+            </div>
+            <div class="row" style="gap:8px; align-items:center">
+              <button class="btn" id="s-cache-purge" title="Drop every cached response on the instance(s)">Purge cache</button>
+              <span class="hint" id="s-cache-cur">—</span>
+            </div>
+            <div class="row mt">
+              <button class="btn btn-primary" id="s-save-cache">Save</button>
+              <span class="hint" id="s-cache-status"></span>
+            </div>
+          </div>
+        </div>
+
           <div class="panel">
             <div class="panel-head"><h3>About</h3></div>
             <div class="panel-body">

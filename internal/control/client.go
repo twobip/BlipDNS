@@ -135,6 +135,22 @@ func (c *Client) SetRateLimit(ctx context.Context, qps, burst int) error {
 	return c.do(ctx, http.MethodPut, "/api/v1/ratelimit", &SetRateLimitRequest{QPS: qps, Burst: burst}, nil)
 }
 
+// SetCacheConfig tunes the instance's response cache: size is the max cached
+// responses (0 = unlimited), warm the auto-refresh count (0 = off).
+func (c *Client) SetCacheConfig(ctx context.Context, size, warm int) error {
+	return c.do(ctx, http.MethodPut, "/api/v1/cache", &SetCacheRequest{Size: size, Warm: warm}, nil)
+}
+
+// PurgeCache drops every cached response on the instance and returns how many
+// entries were removed.
+func (c *Client) PurgeCache(ctx context.Context) (int, error) {
+	var out PurgeCacheResponse
+	if err := c.do(ctx, http.MethodPost, "/api/v1/cache/purge", nil, &out); err != nil {
+		return 0, err
+	}
+	return out.Purged, nil
+}
+
 // AdoptStatus fetches the instance's adoption state (unauthenticated).
 func (c *Client) AdoptStatus(ctx context.Context) (*AdoptStatus, error) {
 	var st AdoptStatus

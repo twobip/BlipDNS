@@ -981,8 +981,59 @@ function loadRlEditor() {
   }
 }
 
-function renderDoHScopeSelect() {
-  const sel = $("s-doh-scope");
+// Response-cache editor state
+let savedCacheSize = 0;          // fleet-wide max cached responses (0 = unlimited)
+let savedCacheWarm = 0;          // fleet-wide auto-refresh count (0 = off)
+let cacheScopeState = "default"; // "default" or an instance id
+function renderCacheScopeSelect() {
+  const sel = $("s-cache-scope");
+  sel.innerHTML = "";
+  const opt = (v, label) => {
+    const o = document.createElement("option");
+    o.value = v; o.textContent = label; sel.appendChild(o);
+  };
+  opt("default", "Fleet-wide default");
+  for (const i of instances) {
+    const o = savedOverrides[i.id] || {};
+    const has = o.cache_size != null || o.cache_warm != null;
+    opt(i.id, "instance: " + (i.label || i.id) + (has ? " (custom)" : ""));
+  }
+  if (!instances.some((i) => i.id === cacheScopeState)) cacheScopeState = "default";
+  sel.value = cacheScopeState;
+}
+function cacheLiveTotal() {
+  let t = 0;
+  for (const i of instances) t += Number(i.stats && i.stats.cached) || 0;
+  return t;
+}
+function loadCacheEditor() {
+  renderCacheScopeSelect();
+  const sizeIn = $("s-cache-size");
+  const warmIn = $("s-cache-warm");
+  const cur = $("s-cache-cur");
+  const badge = $("s-cache-badge");
+  const hint = $("s-cache-scope-hint");
+  const hasOverride = (id) => { const o = savedOverrides[id] || {}; return o.cache_size != null || o.cache_warm != null; };
+  if (cacheScopeState === "default") {
+    badge.textContent = "fleet-wide";
+    badge.className = "badge accent";
+    sizeIn.value = savedCacheSize > 0 ? savedCacheSize : "";
+    warmIn.value = savedCacheWarm > 0 ? savedCacheWarm : "";
+    cur.textContent = cacheLiveTotal() ? cacheLiveTotal() + " entries cached now" : "nothing cached yet";
+    hint.textContent = "Applies to every instance that doesn't have its own override.";
+  } else {
+    badge.textContent = "instance";
+    badge.className = "badge purple";
+    const o = savedOverrides[cacheScopeState] || {};
+    const set = hasOverride(cacheScopeState);
+    sizeIn.value = set && o.cache_size > 0 ? o.cache_size : "";
+    warmIn.value = set && o.cache_warm > 0 ? o.cache_warm : "";
+    cur.textContent = "Blank = inherit the fleet-wide default.";
+    hint.textContent = "Only for this instance. Blank fields inherit the fleet-wide default.";
+  }
+}
+
+function renderDoHScopeSelect() {  const sel = $("s-doh-scope");
   sel.innerHTML = "";
   const opt = (v, label) => {
     const o = document.createElement("option");
@@ -1083,6 +1134,8 @@ async function refreshSettings() {
     // fleet-wide plain-HTTP DoH address ("" = off)
     savedFleetDoH = (d.doh_http_addr != null && d.doh_http_addr !== undefined) ? (d.doh_http_addr || "") : "";
     savedRLQPS = (d.rate_limit_qps != null && d.rate_limit_qps !== undefined) ? Number(d.rate_limit_qps || 0) : 0;
+    savedCacheSize = (d.cache_size != null && d.cache_size !== undefined) ? Number(d.cache_size || 0) : 0;
+    savedCacheWarm = (d.cache_warm != null && d.cache_warm !== undefined) ? Number(d.cache_warm || 0) : 0;
     // fleet-wide default upstream pool + conditional-forwarding routes
     savedUpServers = Array.isArray(d.upstream_servers) ? d.upstream_servers : [];
     savedUpRoutes = Array.isArray(d.upstream_routes) ? d.upstream_routes : [];
@@ -1090,6 +1143,7 @@ async function refreshSettings() {
     loadScopeEditor();
     loadDoHEditor();
     loadRlEditor();
+    loadCacheEditor();
     $("s-up-status").textContent = "";
   } catch {}
 }
@@ -1359,6 +1413,62 @@ $("s-save-rl").onclick = async () => {
     loadRlEditor();
   } catch (e) { st.textContent = ""; toast("save failed: " + e.message, "err"); }
 };
+$("s-cache-scope").addEventListener("change", (e) => {
+  cacheScopeState = e.target.value;
+  loadCacheEditor();
+});
+function cacheValuesForSave() {
+  const size = $("s-cache-size").value.trim();
+  const warm = $("s-cache-warm").value.trim();
+  return { size: size === "" ? null : Math.max(0, Number(size)), warm: warm === "" ? null : Math.max(0, Number(warm)) };
+}
+$("s-save-cache").onclick = async () => {
+  const st = $("s-cache-status");
+  st.textContent = "saving…";
+  const { size, warm } = cacheValuesForSave();
+  const isDefault = cacheScopeState === "default";
+  const body = isDefault ? {} : { scope: "instance", instance: cacheScopeState };
+  if (size != null) body.cache_size = size;
+  if (warm != null) body.cache_warm = warm;
+  try {
+    const r = await API("/api/settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const d = await r.json();
+    const applied = d.applied || {};
+    const ids = Object.keys(applied);
+    const ok = ids.filter((k) => applied[k] === "ok").length;
+    const failed = ids.filter((k) => applied[k] !== "ok");
+    st.textContent = ids.length ? "saved on blipc · pushed to " + ok + "/" + ids.length + " instance" + (ids.length > 1 ? "s" : "") + (failed.length ? " · errors: " + failed.map((k) => k + ": " + applied[k]).join(", ") : "") : "saved on blipc · no instance to push to yet";
+    toast("cache settings saved" + (ids.length ? " (" + ok + "/" + ids.length + ")" : ""));
+    const o = savedOverrides[cacheScopeState] || {};
+    if (isDefault) {
+      savedCacheSize = size != null ? size : savedCacheSize;
+      savedCacheWarm = warm != null ? warm : savedCacheWarm;
+    } else {
+      if (size != null) { if (size > 0) o.cache_size = size; else delete o.cache_size; }
+      if (warm != null) { if (warm > 0) o.cache_warm = warm; else delete o.cache_warm; }
+      if (Object.keys(o).length) savedOverrides[cacheScopeState] = o;
+      else delete savedOverrides[cacheScopeState];
+    }
+    loadCacheEditor();
+  } catch (e) { st.textContent = ""; toast("save failed: " + e.message, "err"); }
+};
+$("s-cache-purge").onclick = async () => {
+  const t = cacheLiveTotal();
+  confirmDialog("Purge cache?", "Drops every cached response on every instance in the fleet. The cache refills as clients query again." + (t ? " Currently " + t + " entries across the fleet." : ""), async () => {
+    try {
+      const r = await API("/api/cache/purge", { method: "POST" });
+      const d = await r.json();
+      const applied = d.applied || {};
+      const ids = Object.keys(applied);
+      const ok = ids.filter((k) => applied[k] === "ok").length;
+      const failed = ids.filter((k) => applied[k] !== "ok");
+      $("s-cache-status").textContent = "purged " + (d.purged || 0) + " entries across " + ok + "/" + ids.length + " instance" + (ids.length > 1 ? "s" : "") + (failed.length ? " · errors: " + failed.map((k) => k + ": " + applied[k]).join(", ") : "");
+      toast("cache purged (" + (d.purged || 0) + " entries)");
+      loadCacheEditor();
+    } catch (e) { toast("purge failed: " + e.message, "err"); }
+  });
+};
+
 function dohAddrForSave() {
   const plainCb = $("s-doh-plain");
   const addrIn = $("s-doh-addr");

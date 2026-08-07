@@ -50,6 +50,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/events", api(s.handleEvents))
 	mux.HandleFunc("/api/health", api(s.handleHealth))
 	mux.HandleFunc("/api/settings", api(s.handleSettings)) // fleet-wide default config
+	mux.HandleFunc("/api/cache/purge", api(s.handleCachePurge))
 
 	// Blocklist (session-gated)
 	mux.HandleFunc("/api/blocklist", api(s.handleBlocklist))                     // GET list / POST add / DELETE remove
@@ -314,6 +315,7 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		upServers, upRoutes := s.fleet.Upstream()
+		cacheSize, cacheWarm := s.fleet.CacheConfig()
 		writeJSON(w, map[string]interface{}{
 			"default_policy":     s.fleet.DefaultPolicy(),
 			"instance_overrides": s.fleet.InstanceOverrides(),
@@ -321,6 +323,8 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			"rate_limit_qps":     s.fleet.RateLimitQPS(),
 			"upstream_servers":   upServers,
 			"upstream_routes":    upRoutes,
+			"cache_size":         cacheSize,
+			"cache_warm":         cacheWarm,
 		})
 	case http.MethodPut:
 		var req struct {
@@ -330,6 +334,8 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			Override        *InstanceOverride          `json:"override"`
 			DoHHTTPAddr     *string                    `json:"doh_http_addr"`
 			RateLimitQPS    *int                       `json:"rate_limit_qps"`
+			CacheSize       *int                       `json:"cache_size"`
+			CacheWarm       *int                       `json:"cache_warm"`
 			UpstreamServers *[]upstream.UpstreamServer `json:"upstream_servers"`
 			UpstreamRoutes  *[]upstream.UpstreamRoute  `json:"upstream_routes"`
 		}
@@ -380,6 +386,40 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			applied := s.fleet.SetRateLimitQPS(r.Context(), qps)
+			writeJSON(w, map[string]interface{}{"ok": true, "applied": applied})
+			return
+		}
+		// Response cache settings (fleet-wide or per-instance): max size and
+		// auto-refresh count. Zero values mean "unlimited"/"off"; on an
+		// instance scope they fall through to the fleet-wide default.
+		if req.CacheSize != nil || req.CacheWarm != nil {
+			cacheSize, cacheWarm := 0, 0
+			if req.CacheSize != nil {
+				cacheSize = *req.CacheSize
+			}
+			if req.CacheWarm != nil {
+				cacheWarm = *req.CacheWarm
+			}
+			if cacheSize < 0 || cacheWarm < 0 {
+				http.Error(w, "cache size and warm count must be >= 0", http.StatusBadRequest)
+				return
+			}
+			if req.Scope == "instance" && req.Instance != "" {
+				existing := s.fleet.InstanceOverrideOf(req.Instance)
+				merged := mergeOverride(existing, &InstanceOverride{CacheSize: req.CacheSize, CacheWarm: req.CacheWarm})
+				// Zero values mean "inherit the fleet-wide default": clear any
+				// previously set per-instance value.
+				if req.CacheSize != nil && cacheSize == 0 {
+					merged.CacheSize = nil
+				}
+				if req.CacheWarm != nil && cacheWarm == 0 {
+					merged.CacheWarm = nil
+				}
+				applied := s.fleet.SetInstanceOverride(r.Context(), req.Instance, merged)
+				writeJSON(w, map[string]interface{}{"ok": true, "applied": applied})
+				return
+			}
+			applied := s.fleet.SetCache(r.Context(), cacheSize, cacheWarm)
 			writeJSON(w, map[string]interface{}{"ok": true, "applied": applied})
 			return
 		}
@@ -694,6 +734,17 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 			flusher.Flush()
 		}
 	}
+}
+
+// handleCachePurge drops every cached response on every adopted instance and
+// reports how many entries were removed fleet-wide.
+func (s *Server) handleCachePurge(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	applied, total := s.fleet.PurgeCache(r.Context())
+	writeJSON(w, map[string]interface{}{"ok": true, "applied": applied, "purged": total})
 }
 
 func (s *Server) handleBlocklist(w http.ResponseWriter, r *http.Request) {

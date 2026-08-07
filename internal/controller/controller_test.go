@@ -99,6 +99,41 @@ func lastUpstream(r *upstreamRec) ([]upstream.UpstreamServer, []upstream.Upstrea
 	return sn[len(sn)-1].servers, sn[len(sn)-1].routes
 }
 
+// cacheCall is one cache-config push observed by cacheRec.
+type cacheCall struct {
+	size int
+	warm int
+}
+
+// cacheRec records every cache config (size + auto-refresh) pushed to a fake
+// blipd, reports the current values back from /api/v1/stats (for reconcile),
+// and mirrors what an explicit purge would drop (fixed, so it is immune to
+// reconcile pushes rewriting the size/warm).
+type cacheRec struct {
+	mu     sync.Mutex
+	size   int
+	warm   int
+	drop   int
+	calls  []cacheCall
+	purged int
+}
+
+func (r *cacheRec) applied(size, warm int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.size = size
+	r.warm = warm
+	r.calls = append(r.calls, cacheCall{size, warm})
+}
+
+func (r *cacheRec) snapshot() []cacheCall {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]cacheCall, len(r.calls))
+	copy(out, r.calls)
+	return out
+}
+
 // fakeBlipd is a minimal blipd management API for controller tests. It
 // supports the claim-code adoption handshake: unauthenticated /adopt/status,
 // POST /adopt with the code returns a token once, then rejects re-adopt.
@@ -106,7 +141,7 @@ func fakeBlipd(t *testing.T, token, claimCode string, health *control.HealthResp
 	return fakeBlipdWithRec(t, token, claimCode, health, stats, policies, nil, nil)
 }
 
-func fakeBlipdWithRec(t *testing.T, token, claimCode string, health *control.HealthResponse, stats *control.StatsResponse, policies *control.ListResponse, rec *policyRec, doh *dohRec, ups ...*upstreamRec) *httptest.Server {
+func fakeBlipdWithRec(t *testing.T, token, claimCode string, health *control.HealthResponse, stats *control.StatsResponse, policies *control.ListResponse, rec *policyRec, doh *dohRec, recs ...interface{}) *httptest.Server {
 	t.Helper()
 	var (
 		mu        sync.Mutex
@@ -115,8 +150,14 @@ func fakeBlipdWithRec(t *testing.T, token, claimCode string, health *control.Hea
 		appliedRL []int
 	)
 	var up *upstreamRec
-	if len(ups) > 0 {
-		up = ups[0]
+	var cache *cacheRec
+	for _, r := range recs {
+		switch rv := r.(type) {
+		case *upstreamRec:
+			up = rv
+		case *cacheRec:
+			cache = rv
+		}
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/health", func(w http.ResponseWriter, r *http.Request) {
@@ -148,6 +189,12 @@ func fakeBlipdWithRec(t *testing.T, token, claimCode string, health *control.Hea
 			st.UpstreamServers = up.servers
 			st.UpstreamRoutes = up.routes
 			up.mu.Unlock()
+		}
+		if cache != nil {
+			cache.mu.Lock()
+			st.CacheSize = cache.size
+			st.CacheWarm = cache.warm
+			cache.mu.Unlock()
 		}
 		writeJSONH(w, &st)
 	})
@@ -243,6 +290,51 @@ func fakeBlipdWithRec(t *testing.T, token, claimCode string, health *control.Hea
 		default:
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
+	})
+	mux.HandleFunc("/api/v1/cache", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+token {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		switch r.Method {
+		case http.MethodGet:
+			size, warm := 0, 0
+			if cache != nil {
+				cache.mu.Lock()
+				size, warm = cache.size, cache.warm
+				cache.mu.Unlock()
+			}
+			writeJSONH(w, map[string]int{"size": size, "warm": warm})
+		case http.MethodPut, http.MethodPost:
+			var req control.SetCacheRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if cache != nil {
+				cache.applied(req.Size, req.Warm)
+			}
+			writeJSONH(w, map[string]int{"size": req.Size, "warm": req.Warm})
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+	mux.HandleFunc("/api/v1/cache/purge", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+token {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		purged := 0
+		if cache != nil {
+			cache.mu.Lock()
+			purged = cache.drop
+			cache.mu.Unlock()
+		}
+		writeJSONH(w, control.PurgeCacheResponse{Purged: purged})
 	})
 	mux.HandleFunc("/api/v1/adopt/status", func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
@@ -1028,6 +1120,253 @@ func TestFleetDoHOverride(t *testing.T) {
 	}
 	if o := fleet.InstanceOverrideOf("a"); o != nil && !o.IsEmpty() {
 		t.Errorf("override should be removed after clear, got %+v", o)
+	}
+}
+
+// TestFleetSetCache verifies the fleet-wide response-cache config (max size +
+// auto-refresh count) is pushed to every instance and persisted to the
+// controller config.
+func TestFleetSetCache(t *testing.T) {
+	cacheA, cacheB := &cacheRec{}, &cacheRec{}
+	srvA := fakeBlipdWithRec(t, "t", "", &control.HealthResponse{OK: true}, &control.StatsResponse{}, &control.ListResponse{}, nil, nil, cacheA)
+	defer srvA.Close()
+	srvB := fakeBlipdWithRec(t, "t", "", &control.HealthResponse{OK: true}, &control.StatsResponse{}, &control.ListResponse{}, nil, nil, cacheB)
+	defer srvB.Close()
+
+	cfgPath := filepath.Join(t.TempDir(), "blipc.yaml")
+	fleet := NewFleet(cfgPath)
+	ctx := context.Background()
+	if err := fleet.Add(ctx, InstanceConfig{ID: "a", URL: srvA.URL, Token: "t"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := fleet.Add(ctx, InstanceConfig{ID: "b", URL: srvB.URL, Token: "t"}); err != nil {
+		t.Fatal(err)
+	}
+
+	res := fleet.SetCache(ctx, 5000, 10)
+	if res["a"] != "ok" || res["b"] != "ok" {
+		t.Fatalf("expected both ok, got %+v", res)
+	}
+	last := func(r *cacheRec) cacheCall {
+		sn := r.snapshot()
+		if len(sn) == 0 {
+			return cacheCall{}
+		}
+		return sn[len(sn)-1]
+	}
+	if got := last(cacheA); got.size != 5000 || got.warm != 10 {
+		t.Errorf("instance a last cache push = %+v, want 5000/10 (history=%v)", got, cacheA.snapshot())
+	}
+	if got := last(cacheB); got.size != 5000 || got.warm != 10 {
+		t.Errorf("instance b last cache push = %+v, want 5000/10 (history=%v)", got, cacheB.snapshot())
+	}
+	if s, w := fleet.CacheConfig(); s != 5000 || w != 10 {
+		t.Errorf("fleet CacheConfig = %d/%d, want 5000/10", s, w)
+	}
+	b, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(b, []byte("cache_size:")) || !bytes.Contains(b, []byte("5000")) || !bytes.Contains(b, []byte("cache_warm:")) || !bytes.Contains(b, []byte("10")) {
+		t.Errorf("cache config not persisted:\n%s", b)
+	}
+}
+
+// TestFleetCacheReconcileRestartRevert simulates a blipd restart that reverts
+// the cache config to 0/off; the controller must re-push the fleet default on a
+// subsequent poll.
+func TestFleetCacheReconcileRestartRevert(t *testing.T) {
+	pollInterval = 100 * time.Millisecond
+	defer func() { pollInterval = 5 * time.Second }()
+	cache := &cacheRec{}
+	srv := fakeBlipdWithRec(t, "t", "", &control.HealthResponse{OK: true}, &control.StatsResponse{}, &control.ListResponse{}, nil, nil, cache)
+	defer srv.Close()
+
+	fleet := NewFleet("/tmp/blip-test-config.yaml")
+	fleet.SetCacheDefault(5000, 10)
+	if err := fleet.Add(context.Background(), InstanceConfig{ID: "a", URL: srv.URL, Token: "t"}); err != nil {
+		t.Fatal(err)
+	}
+	waitFor := func(n int, msg string) []cacheCall {
+		deadline := time.After(3 * time.Second)
+		for {
+			got := cache.snapshot()
+			if len(got) >= n {
+				return got
+			}
+			select {
+			case <-deadline:
+				t.Fatal(msg)
+			case <-time.After(20 * time.Millisecond):
+			}
+		}
+	}
+	waitFor(1, "initial cache push never happened")
+
+	// Simulate restart revert: blipd's cache reverts to default (0/off).
+	cache.mu.Lock()
+	cache.size, cache.warm = 0, 0
+	cache.mu.Unlock()
+
+	got := waitFor(2, "no re-push after simulated restart revert")
+	last := got[len(got)-1]
+	if last.size != 5000 || last.warm != 10 {
+		t.Fatalf("unexpected re-push content: %+v", last)
+	}
+}
+
+// TestFleetCacheOverride verifies a sparse per-instance cache config is merged
+// over the fleet default, pushed only to that instance, and that clearing it
+// reverts the instance to the fleet default.
+func TestFleetCacheOverride(t *testing.T) {
+	cacheA, cacheB := &cacheRec{}, &cacheRec{}
+	srvA := fakeBlipdWithRec(t, "t", "", &control.HealthResponse{OK: true}, &control.StatsResponse{}, &control.ListResponse{}, nil, nil, cacheA)
+	defer srvA.Close()
+	srvB := fakeBlipdWithRec(t, "t", "", &control.HealthResponse{OK: true}, &control.StatsResponse{}, &control.ListResponse{}, nil, nil, cacheB)
+	defer srvB.Close()
+
+	fleet := NewFleet(filepath.Join(t.TempDir(), "blipc.yaml"))
+	fleet.SetCacheDefault(5000, 10)
+	ctx := context.Background()
+	if err := fleet.Add(ctx, InstanceConfig{ID: "a", URL: srvA.URL, Token: "t"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := fleet.Add(ctx, InstanceConfig{ID: "b", URL: srvB.URL, Token: "t"}); err != nil {
+		t.Fatal(err)
+	}
+	last := func(r *cacheRec) cacheCall {
+		sn := r.snapshot()
+		if len(sn) == 0 {
+			return cacheCall{}
+		}
+		return sn[len(sn)-1]
+	}
+	// Give the initial push a moment to land so the per-instance one is last.
+	deadline := time.After(3 * time.Second)
+	for len(cacheA.snapshot()) < 1 || len(cacheB.snapshot()) < 1 {
+		select {
+		case <-deadline:
+			t.Fatal("initial cache push never happened")
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+
+	size, warm := 1000, 3
+	res := fleet.SetInstanceOverride(ctx, "a", &InstanceOverride{CacheSize: &size, CacheWarm: &warm})
+	if res["a"] != "ok" {
+		t.Fatalf("expected a ok, got %+v", res)
+	}
+	if got := last(cacheA); got.size != 1000 || got.warm != 3 {
+		t.Errorf("instance a last cache push = %+v, want 1000/3 (history=%v)", got, cacheA.snapshot())
+	}
+	// instance b keeps the fleet default
+	if got := last(cacheB); got.size != 5000 || got.warm != 10 {
+		t.Errorf("instance b last cache push = %+v, want 5000/10", got)
+	}
+	if o := fleet.InstanceOverrideOf("a"); o == nil || o.CacheSize == nil || *o.CacheSize != 1000 {
+		t.Errorf("override for a = %+v", o)
+	}
+	// clearing the override reverts the instance to the fleet default
+	if res := fleet.SetInstanceOverride(ctx, "a", &InstanceOverride{}); res["a"] != "ok" {
+		t.Fatalf("expected clear ok, got %+v", res)
+	}
+	if o := fleet.InstanceOverrideOf("a"); o != nil && !o.IsEmpty() {
+		t.Errorf("override should be removed after clear, got %+v", o)
+	}
+}
+
+// TestFleetPurgeCache verifies a fleet-wide cache purge is sent to every
+// instance and the total count of dropped entries is summed.
+func TestFleetPurgeCache(t *testing.T) {
+	cacheA, cacheB := &cacheRec{drop: 40}, &cacheRec{drop: 12}
+	srvA := fakeBlipdWithRec(t, "t", "", &control.HealthResponse{OK: true}, &control.StatsResponse{}, &control.ListResponse{}, nil, nil, cacheA)
+	defer srvA.Close()
+	srvB := fakeBlipdWithRec(t, "t", "", &control.HealthResponse{OK: true}, &control.StatsResponse{}, &control.ListResponse{}, nil, nil, cacheB)
+	defer srvB.Close()
+
+	fleet := NewFleet(filepath.Join(t.TempDir(), "blipc.yaml"))
+	if err := fleet.Add(context.Background(), InstanceConfig{ID: "a", URL: srvA.URL, Token: "t"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := fleet.Add(context.Background(), InstanceConfig{ID: "b", URL: srvB.URL, Token: "t"}); err != nil {
+		t.Fatal(err)
+	}
+
+	applied, total := fleet.PurgeCache(context.Background())
+	if applied["a"] != "ok" || applied["b"] != "ok" {
+		t.Fatalf("expected both ok, got %+v", applied)
+	}
+	if total != 42+10 {
+		t.Errorf("total purged = %d, want 52", total)
+	}
+}
+
+// TestServerSettingsCacheFleet exercises the /api/settings GET+PUT round trip
+// for the fleet-wide cache config (size + auto-refresh) with a live instance.
+func TestServerSettingsCacheFleet(t *testing.T) {
+	cacheA := &cacheRec{}
+	srv := fakeBlipdWithRec(t, "t", "", &control.HealthResponse{OK: true}, &control.StatsResponse{}, &control.ListResponse{}, nil, nil, cacheA)
+	defer srv.Close()
+
+	fleet := NewFleet(filepath.Join(t.TempDir(), "blipc.yaml"))
+	if err := fleet.Add(context.Background(), InstanceConfig{ID: "a", URL: srv.URL, Token: "t"}); err != nil {
+		t.Fatal(err)
+	}
+
+	s := NewServer("admin", "secret", fleet, nil)
+	c := newAuthedClient(t, s)
+
+	resp, err := c.Get("/api/settings")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var d map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&d); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if d["cache_size"] != float64(0) || d["cache_warm"] != float64(0) {
+		t.Errorf("initial cache config = %v/%v, want 0/0", d["cache_size"], d["cache_warm"])
+	}
+
+	body, _ := json.Marshal(map[string]int{"cache_size": 5000, "cache_warm": 10})
+	req, _ := http.NewRequest(http.MethodPut, "/api/settings", strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err = c.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ack map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&ack); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if ack["ok"] != true {
+		t.Fatalf("PUT ok = %v", ack["ok"])
+	}
+	applied := ack["applied"].(map[string]interface{})
+	if applied["a"] != "ok" {
+		t.Errorf("applied a = %v", applied["a"])
+	}
+	hist := cacheA.snapshot()
+	if len(hist) == 0 || hist[len(hist)-1].size != 5000 || hist[len(hist)-1].warm != 10 {
+		t.Errorf("cache pushes = %v, want last 5000/10", hist)
+	}
+	resp, _ = c.Get("/api/settings")
+	json.NewDecoder(resp.Body).Decode(&d)
+	resp.Body.Close()
+	if d["cache_size"] != float64(5000) || d["cache_warm"] != float64(10) {
+		t.Errorf("read-back cache config = %v/%v, want 5000/10", d["cache_size"], d["cache_warm"])
+	}
+
+	// negative values are rejected
+	body, _ = json.Marshal(map[string]int{"cache_size": -1, "cache_warm": 0})
+	req, _ = http.NewRequest(http.MethodPut, "/api/settings", strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	resp, _ = c.Do(req)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("negative cache status = %d, want 400", resp.StatusCode)
 	}
 }
 

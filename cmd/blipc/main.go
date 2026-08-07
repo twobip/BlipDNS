@@ -30,6 +30,8 @@ type config struct {
 	InstanceOverrides    map[string]*controller.InstanceOverride `yaml:"instance_overrides"`
 	DoHHTTPAddr          string                                  `yaml:"doh_http_addr"`
 	RateLimitQPS         int                                     `yaml:"rate_limit_qps"`
+	CacheSize            int                                     `yaml:"cache_size"`
+	CacheWarm            int                                     `yaml:"cache_warm"`
 	UpstreamServers      []upstream.UpstreamServer               `yaml:"upstream_servers"`
 	UpstreamRoutes       []upstream.UpstreamRoute                `yaml:"upstream_routes"`
 	BlocklistSources     []string                                `yaml:"blocklist_sources"`
@@ -71,6 +73,9 @@ func main() {
 	}
 	if cfg.RateLimitQPS > 0 {
 		fleet.SetRateLimitQPSDefault(cfg.RateLimitQPS)
+	}
+	if cfg.CacheSize > 0 || cfg.CacheWarm > 0 {
+		fleet.SetCacheDefault(cfg.CacheSize, cfg.CacheWarm)
 	}
 	if len(cfg.UpstreamServers) > 0 || len(cfg.UpstreamRoutes) > 0 {
 		fleet.SetUpstreamDefault(cfg.UpstreamServers, cfg.UpstreamRoutes)

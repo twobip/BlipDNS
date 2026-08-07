@@ -196,6 +196,8 @@ func (i *Instance) poll(ctx context.Context) {
 		i.fleet.maybePushDoH(ctx, i, s)
 		// Converge the per-client DNS rate limit the same way.
 		i.fleet.maybePushRateLimit(ctx, i, s)
+		// Converge the response cache config (size / auto-refresh) the same way.
+		i.fleet.maybePushCache(ctx, i, s)
 		// Converge the upstream pool + routes the same way.
 		i.fleet.maybePushUpstream(ctx, i, s)
 		// Converge the instance's global blocklist the same way.

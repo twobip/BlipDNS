@@ -59,7 +59,9 @@ type Server struct {
 	dohCtrl DoHController
 	// rlCtrl drives the per-client DNS query rate limit at runtime.
 	rlCtrl RateLimitController
-	upCtrl LocalResolverController
+	// cacheCtrl tunes the response cache at runtime.
+	cacheCtrl CacheController
+	upCtrl    LocalResolverController
 }
 
 // DoHController is the piece of the DNS server the management API can reconfigure
@@ -108,6 +110,33 @@ func (s *Server) SetRateLimitController(c RateLimitController) {
 func (s *Server) rateLimitController() RateLimitController {
 	s.mu.RLock()
 	c := s.rlCtrl
+	s.mu.RUnlock()
+	return c
+}
+
+// CacheController is the piece of the DNS server the management API can tune
+// at runtime: the response cache size limit, the auto-refresh (warm) count,
+// and an explicit purge. The controller reports the config back via stats so
+// its poll loop can converge it.
+type CacheController interface {
+	SetCacheConfig(size, warm int) error
+	CacheSize() int
+	CacheWarm() int
+	PurgeCache()
+}
+
+// SetCacheController wires the DNS server (which owns the response cache) into
+// the management API so Settings changes can tune it live.
+func (s *Server) SetCacheController(c CacheController) {
+	s.mu.Lock()
+	s.cacheCtrl = c
+	s.mu.Unlock()
+}
+
+// cacheController returns the wired cache controller (may be nil).
+func (s *Server) cacheController() CacheController {
+	s.mu.RLock()
+	c := s.cacheCtrl
 	s.mu.RUnlock()
 	return c
 }
@@ -241,6 +270,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/doh", s.auth(s.handleDoH))             // toggle plain-HTTP DoH
 	mux.HandleFunc("/api/v1/ratelimit", s.auth(s.handleRateLimit)) // per-client QPS
 	mux.HandleFunc("/api/v1/upstream", s.auth(s.handleUpstream))   // conditional forwarding
+	mux.HandleFunc("/api/v1/cache", s.auth(s.handleCache))         // cache size + auto-refresh
+	mux.HandleFunc("/api/v1/cache/purge", s.auth(s.handleCachePurge))
 	mux.HandleFunc("/api/v1/watch", s.auth(s.handleWatch))
 	// unauthenticated adoption handshake
 	mux.HandleFunc("/api/v1/adopt/status", s.handleAdoptStatus)
@@ -324,6 +355,12 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		// and surface it in the UI.
 		if ifc := s.rateLimitController(); ifc != nil {
 			st.RateLimitQPS = ifc.RateLimitQPS()
+		}
+		// Report the runtime cache config so the controller can converge it
+		// (size limit + auto-refresh count) after a restart.
+		if cc := s.cacheController(); cc != nil {
+			st.CacheSize = cc.CacheSize()
+			st.CacheWarm = cc.CacheWarm()
 		}
 	}
 	s.addUpstreamStats(st)

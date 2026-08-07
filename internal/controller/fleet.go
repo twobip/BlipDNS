@@ -67,11 +67,17 @@ type InstanceOverride struct {
 	// UpstreamRoutes, when set, overrides the fleet-wide upstream routes
 	// (conditional forwarding) for this instance. nil = inherit the fleet default.
 	UpstreamRoutes *[]upstream.UpstreamRoute `json:"upstream_routes,omitempty" yaml:"upstream_routes,omitempty"`
+	// CacheSize, when set, overrides the fleet-wide max cached responses for
+	// this instance. nil = inherit the fleet default.
+	CacheSize *int `json:"cache_size,omitempty" yaml:"cache_size,omitempty"`
+	// CacheWarm, when set, overrides the fleet-wide auto-refresh count for this
+	// instance. nil = inherit the fleet default.
+	CacheWarm *int `json:"cache_warm,omitempty" yaml:"cache_warm,omitempty"`
 }
 
 // IsEmpty reports whether the override changes nothing.
 func (o *InstanceOverride) IsEmpty() bool {
-	return o == nil || (o.Upstream == nil && o.BlockAction == nil && o.Log == nil && o.DoHHTTPAddr == nil && o.RateLimitQPS == nil && o.UpstreamServers == nil && o.UpstreamRoutes == nil)
+	return o == nil || (o.Upstream == nil && o.BlockAction == nil && o.Log == nil && o.DoHHTTPAddr == nil && o.RateLimitQPS == nil && o.UpstreamServers == nil && o.UpstreamRoutes == nil && o.CacheSize == nil && o.CacheWarm == nil)
 }
 
 // Fleet holds all instances, the event bus, and the global blocklist.
@@ -101,6 +107,8 @@ type Fleet struct {
 	overrides        map[string]*InstanceOverride // per-instance partial configs (diff vs default)
 	dohHTTPAddr      string                       // fleet-wide plain-HTTP DoH address ("", off)
 	rateLimitQPS     int                          // fleet-wide DNS per-client QPS limit (0 = disabled)
+	cacheSize        int                          // fleet-wide max cached responses (0 = unlimited)
+	cacheWarm        int                          // fleet-wide auto-refresh count (0 = off)
 	upstreamServers  []upstream.UpstreamServer    // fleet-wide default upstream pool
 	upstreamRoutes   []upstream.UpstreamRoute     // fleet-wide default upstream routes
 }
@@ -573,6 +581,12 @@ func mergeOverride(existing, partial *InstanceOverride) *InstanceOverride {
 	if partial.UpstreamRoutes != nil {
 		merged.UpstreamRoutes = partial.UpstreamRoutes
 	}
+	if partial.CacheSize != nil {
+		merged.CacheSize = partial.CacheSize
+	}
+	if partial.CacheWarm != nil {
+		merged.CacheWarm = partial.CacheWarm
+	}
 	return &merged
 }
 
@@ -688,6 +702,128 @@ func (f *Fleet) maybePushRateLimit(ctx context.Context, i *Instance, reported *c
 	}
 }
 
+// CacheConfig returns the fleet-wide cache size limit and auto-refresh count
+// (0 = unlimited / off).
+func (f *Fleet) CacheConfig() (size, warm int) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return f.cacheSize, f.cacheWarm
+}
+
+// SetCacheDefault records the fleet-wide cache size + auto-refresh count
+// without distributing it. Used at startup from the controller config.
+func (f *Fleet) SetCacheDefault(size, warm int) {
+	if size < 0 {
+		size = 0
+	}
+	if warm < 0 {
+		warm = 0
+	}
+	f.mu.Lock()
+	f.cacheSize = size
+	f.cacheWarm = warm
+	f.mu.Unlock()
+}
+
+// effectiveCacheConfig returns the cache size + auto-refresh count an instance
+// should run: its own override if set, otherwise the fleet-wide default.
+func (f *Fleet) effectiveCacheConfig(id string) (size, warm int) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	size, warm = f.cacheSize, f.cacheWarm
+	if o := f.overrides[id]; o != nil {
+		if o.CacheSize != nil {
+			size = *o.CacheSize
+		}
+		if o.CacheWarm != nil {
+			warm = *o.CacheWarm
+		}
+	}
+	return size, warm
+}
+
+// SetCache records the fleet-wide cache size + auto-refresh count, persists it,
+// and pushes the effective value (default or per-instance override) to every
+// adopted instance. Returns the per-instance outcome.
+func (f *Fleet) SetCache(ctx context.Context, size, warm int) map[string]string {
+	f.SetCacheDefault(size, warm)
+	if f.configPath != "" {
+		if err := f.saveConfig(); err != nil {
+			log.Printf("blipc: warning: failed to persist cache setting: %v", err)
+		}
+	}
+	return f.pushCache(ctx)
+}
+
+// pushCache distributes the effective cache config (size + auto-refresh) to
+// every adopted instance.
+func (f *Fleet) pushCache(ctx context.Context) map[string]string {
+	f.mu.RLock()
+	insts := make([]*Instance, 0, len(f.instances))
+	for _, i := range f.instances {
+		insts = append(insts, i)
+	}
+	f.mu.RUnlock()
+	results := make(map[string]string, len(insts))
+	for _, i := range insts {
+		if !i.hasToken() {
+			results[i.Config.ID] = "not adopted"
+			continue
+		}
+		size, warm := f.effectiveCacheConfig(i.Config.ID)
+		if err := i.ctl().SetCacheConfig(ctx, size, warm); err != nil {
+			results[i.Config.ID] = err.Error()
+			continue
+		}
+		results[i.Config.ID] = "ok"
+	}
+	return results
+}
+
+// maybePushCache converges an instance's cache size + auto-refresh count to its
+// fleet default (or per-instance override) when the instance reports a
+// divergent value — e.g. after a restart it reverted to its own YAML.
+func (f *Fleet) maybePushCache(ctx context.Context, i *Instance, reported *control.StatsResponse) {
+	wantSize, wantWarm := f.effectiveCacheConfig(i.Config.ID)
+	repSize, repWarm := -1, -1
+	if reported != nil {
+		repSize, repWarm = reported.CacheSize, reported.CacheWarm
+	}
+	if (repSize == wantSize && repWarm == wantWarm) || !i.hasToken() {
+		return
+	}
+	if err := i.ctl().SetCacheConfig(ctx, wantSize, wantWarm); err != nil {
+		log.Printf("blipc: reconcile cache for %s: %v", i.Config.ID, err)
+	}
+}
+
+// PurgeCache drops every cached response on every adopted instance and returns
+// the per-instance outcome, including how many entries were purged.
+func (f *Fleet) PurgeCache(ctx context.Context) (map[string]string, int) {
+	f.mu.RLock()
+	insts := make([]*Instance, 0, len(f.instances))
+	for _, i := range f.instances {
+		insts = append(insts, i)
+	}
+	f.mu.RUnlock()
+	results := make(map[string]string, len(insts))
+	total := 0
+	for _, i := range insts {
+		if !i.hasToken() {
+			results[i.Config.ID] = "not adopted"
+			continue
+		}
+		n, err := i.ctl().PurgeCache(ctx)
+		if err != nil {
+			results[i.Config.ID] = err.Error()
+			continue
+		}
+		total += n
+		results[i.Config.ID] = "ok"
+	}
+	return results, total
+}
+
 // pushConfigs sends each instance's effective config to it and marks its
 // applied config hash on success.
 func (f *Fleet) pushConfigs(ctx context.Context) map[string]string {
@@ -728,6 +864,7 @@ func (f *Fleet) pushInstance(ctx context.Context, id string) map[string]string {
 	f.mu.RLock()
 	eff, _ := f.effectivePolicy(id)
 	wantDoH := f.effectiveDoHHTTPAddr(id)
+	wantSize, wantWarm := f.effectiveCacheConfig(id)
 	f.mu.RUnlock()
 	res := map[string]string{id: "ok"}
 	if !i.hasToken() {
@@ -736,6 +873,9 @@ func (f *Fleet) pushInstance(ctx context.Context, id string) map[string]string {
 	}
 	if err := i.ctl().SetDoHHTTPAddr(ctx, wantDoH); err != nil {
 		res[id] = "doh: " + err.Error()
+	}
+	if err := i.ctl().SetCacheConfig(ctx, wantSize, wantWarm); err != nil {
+		res[id] = "cache: " + err.Error()
 	}
 	if eff != nil {
 		if err := i.ctl().SetPolicy(ctx, eff); err != nil {
@@ -1622,6 +1762,8 @@ func (f *Fleet) saveConfig() error {
 		RateLimitQPS         int                          `yaml:"rate_limit_qps"`
 		UpstreamServers      []upstream.UpstreamServer    `yaml:"upstream_servers"`
 		UpstreamRoutes       []upstream.UpstreamRoute     `yaml:"upstream_routes"`
+		CacheSize            int                          `yaml:"cache_size"`
+		CacheWarm            int                          `yaml:"cache_warm"`
 		BlocklistSources     []string                     `yaml:"blocklist_sources"`
 		BlocklistUpdateHours int                          `yaml:"blocklist_update_hours"`
 		Instances            []InstanceConfig             `yaml:"instances"`
@@ -1654,6 +1796,7 @@ func (f *Fleet) saveConfig() error {
 	upstreamServers, upstreamRoutes := f.Upstream()
 	cfg.UpstreamServers = upstreamServers
 	cfg.UpstreamRoutes = upstreamRoutes
+	cfg.CacheSize, cfg.CacheWarm = f.CacheConfig()
 	cfg.BlocklistSources = blSources
 	cfg.BlocklistUpdateHours = autoHours
 
