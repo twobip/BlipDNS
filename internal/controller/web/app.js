@@ -839,7 +839,7 @@ function serverRow(u) {
     <input class="input grow up-addr" placeholder="9.9.9.9 (udp:53) or https://1.1.1.1/dns-query" value="${esc(u.address || "")}"/>
     <input class="input up-prio" type="number" min="0" title="Priority — lower = higher priority; 0 = route-only" style="width:72px" value="${u.priority || ""}"/>
     <button class="icon-btn up-del" title="Remove">${IC.trash}</button>`;
-  row.querySelector(".up-del").onclick = () => row.remove();
+  row.querySelector(".up-del").onclick = () => { row.remove(); refreshRouteServerOptions(); };
   return row;
 }
 function renderServerList(list) {
@@ -897,6 +897,22 @@ function collectRoutes() {
     client_cidr: row.querySelector(".cf-cidr").value.trim(),
     disabled: !row.querySelector(".cf-on").checked,
   })).filter((r) => r.qname_suffix !== "" || r.server !== "");
+}
+// refreshRouteServerOptions re-populates every conditional-forwarding server
+// dropdown with the servers currently in the editor (after adding/removing a
+// server row) so a newly added resolver shows up without a page refresh. Each
+// route keeps its current selection; a referenced-but-deleted server is kept so
+// the rule doesn't silently change.
+function refreshRouteServerOptions() {
+  const servers = collectServers();
+  const options = servers.map((s) => `<option value="${esc(s.name)}">${esc(s.name || "server#" + s.address)}</option>`).join("");
+  const fallback = options ? "" : `<option value="">(add a server first)</option>`;
+  document.querySelectorAll("#s-cf-list .cf-row .cf-server").forEach((sel) => {
+    const cur = sel.value;
+    const extra = cur && !servers.some((s) => s.name === cur) ? `<option value="${esc(cur)}" selected>${esc(cur)}</option>` : "";
+    sel.innerHTML = extra + options + fallback;
+    sel.value = cur;
+  });
 }
 let savedOverrides = {};       // sparse per-instance overrides keyed by instance id
 let scopeState = "default";    // "default" or an instance id
@@ -1303,6 +1319,9 @@ $("p-save").onclick = savePolicy;
 $("s-up-add").onclick = () => {
   const prios = collectServers().map((s) => s.priority).filter((p) => p > 0);
   $("s-upstream-list").appendChild(serverRow({ name: "", address: "", priority: (prios.length ? Math.max(...prios) + 1 : 1) }));
+  // Keep the conditional-forwarding dropdowns in sync so the new server is
+  // selectable immediately, without a page refresh.
+  refreshRouteServerOptions();
 };
 $("s-save-upstream").onclick = async () => {
   const servers = collectServers();
