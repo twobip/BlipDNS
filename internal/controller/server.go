@@ -83,6 +83,11 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("X-XSS-Protection", "1; mode=block")
+		// The SPA shell and embedded assets (app.js/style.css) are versioned by
+		// the binary, not the URL, so a rebuild must reach the browser without
+		// a manual cache clear. These responses are also session-gated/owned, so
+		// disable caching entirely: stale JS is the #1 "my edit didn't take" bug.
+		w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
 		w.Header().Set("Content-Security-Policy",
 			"default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; "+
 				"script-src 'self' https://unpkg.com; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'")

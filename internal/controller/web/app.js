@@ -140,6 +140,7 @@ function go(page, push = true) {
   if (page === "instances") renderEvents();
   if (page === "settings" || page === "upstream") refreshSettings();
   if (page === "blocklist" || page === "filters") loadBlocklist();
+  if (page === "records") loadRecords();
   if (page === "filters") renderPolicies();
 }
 
@@ -766,14 +767,15 @@ $("r-type").addEventListener("change", () => {
 
 $("r-add-btn").onclick = () => openRecordModal(-1);
 $("r-save").onclick = saveRecord;
-$("r-refresh").onclick = async () => {
+async function loadRecords() {
   try {
     const res = await API("/api/records");
     const d = await res.json();
     savedRecords = (d.records || []).map((r) => ({ ...r, _instance: "" }));
     renderRecords();
-  } catch (e) { toast("refresh failed: " + e.message, "err"); }
-};
+  } catch (e) { toast("failed to load records: " + e.message, "err"); }
+}
+$("r-refresh").onclick = loadRecords;
 $("r-tbody").addEventListener("click", (e) => {
   const b = e.target.closest("[data-r-act]");
   if (!b) return;
