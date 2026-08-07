@@ -1296,6 +1296,35 @@ func TestFleetCacheReconcileRestartRevert(t *testing.T) {
 	}
 }
 
+// TestFleetCacheNotConfiguredDefersToInstance verifies that when the operator
+// hasn't configured any cache setting in the controller (neither fleet-wide via
+// SetCacheDefault nor a per-instance override), the reconcile loop does NOT push
+// 0/0/0 to the instance — blipd keeps its own YAML defaults (e.g. 10000/100).
+func TestFleetCacheNotConfiguredDefersToInstance(t *testing.T) {
+	pollInterval = 100 * time.Millisecond
+	defer func() { pollInterval = 5 * time.Second }()
+	// Simulate blipd's own config defaults persisted from its YAML.
+	cache := &cacheRec{size: 10000, warm: 100, regular: 0}
+	srv := fakeBlipdWithRec(t, "t", "", &control.HealthResponse{OK: true}, &control.StatsResponse{}, &control.ListResponse{}, nil, nil, cache)
+	defer srv.Close()
+
+	fleet := NewFleet(filepath.Join(t.TempDir(), "blipc.yaml"))
+	// NOTE: deliberately NOT calling SetCacheDefault — no fleet-wide cache config.
+	if err := fleet.Add(context.Background(), InstanceConfig{ID: "a", URL: srv.URL, Token: "t"}); err != nil {
+		t.Fatal(err)
+	}
+	// Give the poll/reconcile loop time to run. It should NOT push cache config.
+	time.Sleep(500 * time.Millisecond)
+	if got := cache.snapshot(); len(got) != 0 {
+		t.Fatalf("expected no cache push when unconfigured, got %d calls: %+v", len(got), got)
+	}
+	cache.mu.Lock()
+	if cache.size != 10000 || cache.warm != 100 || cache.regular != 0 {
+		t.Errorf("instance cache overridden to %d/%d/%d, want 10000/100/0 (blipd defaults preserved)", cache.size, cache.warm, cache.regular)
+	}
+	cache.mu.Unlock()
+}
+
 // TestFleetCacheOverride verifies a sparse per-instance cache config is merged
 // over the fleet default, pushed only to that instance, and that clearing it
 // reverts the instance to the fleet default.

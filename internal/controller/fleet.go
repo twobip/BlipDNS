@@ -113,13 +113,14 @@ type Fleet struct {
 	overrides        map[string]*InstanceOverride // per-instance partial configs (diff vs default)
 	dohHTTPAddr      string                       // fleet-wide plain-HTTP DoH address ("", off)
 	rateLimitQPS     int                          // fleet-wide DNS per-client QPS limit (0 = disabled)
-	cacheSize        int           // fleet-wide max cached responses (0 = unlimited)
-	cacheWarm        int           // fleet-wide auto-refresh count (0 = off)
-	cacheRegular     int           // fleet-wide regular-hold seconds for non-top entries (0 = use record TTL)
+	cacheSize        int                          // fleet-wide max cached responses (0 = unlimited)
+	cacheWarm        int                          // fleet-wide auto-refresh count (0 = off)
+	cacheRegular     int                          // fleet-wide regular-hold seconds for non-top entries (0 = use record TTL)
+	cacheConfigured  bool                         // true once the operator explicitly set a fleet-wide cache value
 	upstreamServers  []upstream.UpstreamServer    // fleet-wide default upstream pool
 	upstreamRoutes   []upstream.UpstreamRoute     // fleet-wide default upstream routes
 	qlRetentionHours int                          // how long query log entries are kept (0 = 24h default)
-	records         []control.RecordEntry        // fleet-wide local DNS records
+	records          []control.RecordEntry        // fleet-wide local DNS records
 }
 
 // BlocklistStatus is a point-in-time view of the controller's blocklist
@@ -897,6 +898,7 @@ func (f *Fleet) SetCacheDefault(size, warm, regular int) {
 	f.cacheSize = size
 	f.cacheWarm = warm
 	f.cacheRegular = regular
+	f.cacheConfigured = true
 	f.mu.Unlock()
 }
 
@@ -918,6 +920,22 @@ func (f *Fleet) effectiveCacheConfig(id string) (size, warm, regular int) {
 		}
 	}
 	return size, warm, regular
+}
+
+// cacheConfiguredFor reports whether the operator has explicitly set any
+// cache configuration — either fleet-wide or for the given instance's
+// per-instance override. When false, reconcile skips pushing cache config so
+// blipd keeps its own YAML defaults.
+func (f *Fleet) cacheConfiguredFor(id string) bool {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	if f.cacheConfigured {
+		return true
+	}
+	if o := f.overrides[id]; o != nil {
+		return o.CacheSize != nil || o.CacheWarm != nil || o.CacheRegular != nil
+	}
+	return false
 }
 
 // SetCache records the fleet-wide cache size + auto-refresh count + regular-hold,
@@ -961,7 +979,12 @@ func (f *Fleet) pushCache(ctx context.Context) map[string]string {
 // maybePushCache converges an instance's cache size + auto-refresh count +
 // regular-hold to its fleet default (or per-instance override) when the instance
 // reports a divergent value — e.g. after a restart it reverted to its own YAML.
+// If the operator hasn't configured any cache setting (neither fleet-wide nor
+// per-instance), the instance's own blipd YAML defaults are left in place.
 func (f *Fleet) maybePushCache(ctx context.Context, i *Instance, reported *control.StatsResponse) {
+	if !f.cacheConfiguredFor(i.Config.ID) {
+		return
+	}
 	wantSize, wantWarm, wantRegular := f.effectiveCacheConfig(i.Config.ID)
 	repSize, repWarm, repRegular := -1, -1, -1
 	if reported != nil {
