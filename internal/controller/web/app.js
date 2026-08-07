@@ -295,6 +295,7 @@ async function fetchStats() {
       .then((t) => renderTopDomains(t.domains))
       .catch(() => { /* best-effort */ });
     if (!ctx) return;
+    const gl = ctx.getContext("2d");
     const stats = d.series;
     const labels = stats.map((s) => new Date(s.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }));
     const tq = stats.map((s) => s.total_queries);
@@ -302,13 +303,13 @@ async function fetchStats() {
     if (!chart) {
       Chart.defaults.color = "#7a8291";
       Chart.defaults.borderColor = "rgba(255,255,255,.06)";
-      chart = new Chart(ctx.getContext("2d"), {
+      chart = new Chart(gl, {
         type: "line",
         data: {
           labels,
           datasets: [
-            { label: "Total", data: tq, borderColor: "#4f8cff", backgroundColor: cgrad(ctx, "79,140,255"), fill: true, tension: .35, pointRadius: 0, borderWidth: 2 },
-            { label: "Blocked", data: bq, borderColor: "#f76b6b", backgroundColor: cgrad(ctx, "247,107,107"), fill: true, tension: .35, pointRadius: 0, borderWidth: 2 },
+            { label: "Total", data: tq, borderColor: "#4f8cff", backgroundColor: cgrad(gl, "79,140,255"), fill: true, tension: .35, pointRadius: 0, borderWidth: 2 },
+            { label: "Blocked", data: bq, borderColor: "#f76b6b", backgroundColor: cgrad(gl, "247,107,107"), fill: true, tension: .35, pointRadius: 0, borderWidth: 2 },
           ],
         },
         options: {
@@ -574,7 +575,7 @@ function propsInstanceOptions() {
 const trunc = (s, n) => { const str = String(s); return str.length > n ? str.slice(0, n - 1) + "…" : str; };
 // RESOLVED_MAX caps how many characters each chip in the resolved/answer cell
 // may show, so long TXT/AAAA/etc. values don't blow out the row width.
-const RESOLVED_MAX = 40;
+const RESOLVED_MAX = 60;
 
 function ipsHtml(ips) {
   const list = ips || [];
