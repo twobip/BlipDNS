@@ -424,7 +424,15 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
   cursor: pointer; transition: all .12s;
 }
 .q-chip:hover { color: var(--text); border-color: var(--accent-2); background: var(--surface-2); }
-.q-chip-more { font-size: 11.5px; color: var(--faint); font-family: var(--mono); }
+.q-chip-more {
+  display: inline-block; align-items: center; justify-content: center;
+  min-width: 28px; height: 20px; margin-left: 4px;
+  padding: 0 7px; border-radius: 999px;
+  font-size: 11.5px; color: var(--faint); font-family: var(--mono);
+  border: 1px solid var(--border); background: var(--surface-2);
+  cursor: help; transition: all .12s;
+}
+.q-chip-more:hover { color: var(--accent); border-color: var(--accent-2); background: rgba(79,140,255,.12); }
 .q-ips-empty { color: var(--faint); }
 
 .q-inst { white-space: nowrap; color: var(--text-2); font-size: 12.5px; }

@@ -605,9 +605,9 @@ function resolvedHtml(r) {
     : ips.map((ip) => ip);
   if (!parts.length) return `<span class="q-ips-empty">—</span>`;
   const shown = parts.slice(0, 2);
-  const extra = parts.length - shown.length;
+  const rest = parts.slice(2);
   return shown.map((p) => `<span class="q-chip" title="${esc(p)}">${esc(trunc(p, RESOLVED_MAX))}</span>`).join("") +
-    (extra > 0 ? `<span class="q-chip-more" title="${esc(parts.join(", "))}">+${extra}</span>` : "");
+    rest.map((p, i) => `<span class="q-chip-more" title="${esc(p)}">+${i + 1}</span>`).join("");
 }
 
 async function copyText(s) {
