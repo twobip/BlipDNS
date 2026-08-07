@@ -447,13 +447,118 @@ func (f *Fleet) SetUpstreamDefault(servers []upstream.UpstreamServer, routes []u
 // and pushes the effective value (default or per-instance override) to every
 // adopted instance.
 func (f *Fleet) SetUpstream(ctx context.Context, servers []upstream.UpstreamServer, routes []upstream.UpstreamRoute) map[string]string {
+	prev, _ := f.Upstream()
 	f.SetUpstreamDefault(servers, routes)
 	if f.configPath != "" {
 		if err := f.saveConfig(); err != nil {
 			log.Printf("blipc: warning: failed to persist upstream setting: %v", err)
 		}
 	}
+	f.warnRemovedPolicyUpstreams(prev, servers)
 	return f.pushUpstream(ctx)
+}
+
+// serverRefs normalizes a server pool into "type:address" references (UDP
+// specs gain ":53", DoH specs keep their path) so policy upstream overrides
+// can be compared against them.
+func serverRefs(servers []upstream.UpstreamServer) map[string]bool {
+	refs := make(map[string]bool, len(servers))
+	for _, sv := range servers {
+		specs, err := upstream.ParseSpec(sv.Address)
+		if err != nil {
+			continue
+		}
+		for _, s := range specs {
+			refs[s.Type+":"+s.Address] = true
+		}
+	}
+	return refs
+}
+
+// removedServerRefs returns the normalized references present in prev but not
+// in cur (i.e. the servers that just disappeared from the pool), or nil when
+// nothing was removed.
+func removedServerRefs(prev, cur []upstream.UpstreamServer) map[string]bool {
+	prevRefs := serverRefs(prev)
+	if len(prevRefs) == 0 {
+		return nil
+	}
+	curRefs := serverRefs(cur)
+	out := make(map[string]bool)
+	for ref := range prevRefs {
+		if !curRefs[ref] {
+			out[ref] = true
+		}
+	}
+	return out
+}
+
+// warnRemovedPolicyUpstreams logs a warning for each policy (fleet default or
+// per-instance override) whose upstream override points at a server that was
+// just removed from the pool. Deleting a server does not stop queries routed
+// by a policy override, so this tells the operator what still references it.
+func (f *Fleet) warnRemovedPolicyUpstreams(prev, cur []upstream.UpstreamServer) {
+	removed := removedServerRefs(prev, cur)
+	if len(removed) == 0 {
+		return
+	}
+	for _, w := range f.orphanPolicyUpstreams(func(ref string) bool { return removed[ref] }) {
+		log.Printf("blipc: warning: %s", w)
+	}
+}
+
+// WarnOrphanPolicyUpstreams logs a warning for every policy whose upstream
+// override is not one of the configured server-pool addresses. Called at
+// startup so a hand-edited config — a policy still pointing at a deleted
+// server — is caught without waiting for the next server deletion.
+func (f *Fleet) WarnOrphanPolicyUpstreams(servers []upstream.UpstreamServer) {
+	pool := serverRefs(servers)
+	for _, w := range f.orphanPolicyUpstreams(func(ref string) bool { return !pool[ref] }) {
+		log.Printf("blipc: warning: %s", w)
+	}
+}
+
+// orphanPolicyUpstreams returns one warning per policy whose upstream spec
+// references an endpoint for which match reports true (refs are normalized
+// "type:address" strings). Policies without an upstream override are skipped.
+func (f *Fleet) orphanPolicyUpstreams(match func(ref string) bool) []string {
+	if match == nil {
+		return nil
+	}
+	f.mu.RLock()
+	def := f.defaultPolicy
+	overs := make(map[string]*InstanceOverride, len(f.overrides))
+	for k, v := range f.overrides {
+		overs[k] = v
+	}
+	f.mu.RUnlock()
+	var out []string
+	check := func(owner, spec string) {
+		if spec == "" {
+			return
+		}
+		specs, err := upstream.ParseSpec(spec)
+		if err != nil {
+			return
+		}
+		for _, s := range specs {
+			if match(s.Type + ":" + s.Address) {
+				out = append(out, fmt.Sprintf(
+					"policy %s: upstream %q routes to %q which is not in the configured server pool (deleted or never configured); clear the policy's upstream override to stop queries going there",
+					owner, spec, s.Address))
+				return
+			}
+		}
+	}
+	if def != nil {
+		check("default ("+def.ID+")", def.Upstream)
+	}
+	for id, o := range overs {
+		if o.Upstream != nil {
+			check("instance "+id, *o.Upstream)
+		}
+	}
+	return out
 }
 
 // effectiveUpstream returns the upstream pool + routes an instance should have:

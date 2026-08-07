@@ -2110,3 +2110,38 @@ func TestResolveTokenFile(t *testing.T) {
 		t.Errorf("traversal token was modified: %q", got.Token)
 	}
 }
+
+// TestWarnOrphanPolicyUpstreams verifies that a policy (fleet default or
+// per-instance override) whose upstream points at a removed/unknown server is
+// reported, and that an override matching a configured pool server is not.
+func TestWarnOrphanPolicyUpstreams(t *testing.T) {
+	fleet := NewFleet("")
+	fleet.SetDefault(&control.Policy{ID: "default", Upstream: "udp://192.168.30.221|1"})
+	override := "udp://192.168.30.221"
+	fleet.SetOverride("inst1", &InstanceOverride{Upstream: &override})
+	ext := "https://1.1.1.1/dns-query"
+	fleet.SetOverride("inst2", &InstanceOverride{Upstream: &ext})
+
+	pool := []upstream.UpstreamServer{
+		{Name: "DoH", Address: "https://dns.mullvad.net/dns-query", Priority: 1},
+	}
+	// 192.168.30.221 was in the pool and is now gone: default + inst1 flagged.
+	removed := removedServerRefs([]upstream.UpstreamServer{
+		{Name: "old", Address: "udp://192.168.30.221|1"},
+	}, pool)
+	got := fleet.orphanPolicyUpstreams(func(ref string) bool { return removed[ref] })
+	if len(got) != 2 {
+		t.Fatalf("removed-scan flagged %d policies, want 2: %v", len(got), got)
+	}
+	for _, w := range got {
+		if !strings.Contains(w, "192.168.30.221") {
+			t.Errorf("warning missing removed address: %q", w)
+		}
+	}
+	// Startup scan: inst2's external override is not in the pool either, so all
+	// three non-empty overrides are flagged.
+	all := fleet.orphanPolicyUpstreams(func(ref string) bool { return !serverRefs(pool)[ref] })
+	if len(all) != 3 {
+		t.Fatalf("startup scan flagged %d policies, want 3: %v", len(all), all)
+	}
+}

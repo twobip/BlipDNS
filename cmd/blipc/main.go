@@ -79,6 +79,9 @@ func main() {
 	}
 	if len(cfg.UpstreamServers) > 0 || len(cfg.UpstreamRoutes) > 0 {
 		fleet.SetUpstreamDefault(cfg.UpstreamServers, cfg.UpstreamRoutes)
+		if len(cfg.UpstreamServers) > 0 {
+			fleet.WarnOrphanPolicyUpstreams(cfg.UpstreamServers)
+		}
 	}
 	ctx := context.Background()
 	for _, ic := range cfg.Instances {
