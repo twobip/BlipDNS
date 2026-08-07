@@ -77,6 +77,8 @@ type Server struct {
 	once         sync.Once
 	// rl enforces the per-client DNS query rate limit (configurable live).
 	rl *rateLimiter
+	// rec holds static local DNS records (A/AAAA/CNAME) answered before cache/upstream.
+	rec *RecordStore
 	// cacheMu guards the runtime cache configuration; both fields are seeded
 	// from cfg and can be overridden live by the controller (settings page).
 	cacheMu   sync.RWMutex
@@ -103,6 +105,7 @@ func New(cfg Config) (*Server, error) {
 		ctrl:      ctrl,
 		cnt:       cnt,
 		rl:        newRateLimiter(),
+		rec:       NewRecordStore(),
 		cacheSize: cfg.CacheSize,
 		cacheWarm: cfg.CacheWarmCount,
 		close:     make(chan struct{}),
@@ -114,6 +117,7 @@ func New(cfg Config) (*Server, error) {
 	ctrl.SetRateLimitController(s)
 	ctrl.SetLocalResolverController(s)
 	ctrl.SetCacheController(s)
+	ctrl.SetRecordController(s)
 	// Seed the rate limit from config (controller can override later).
 	if cfg.RateLimitQPS > 0 {
 		_ = s.SetRateLimit(cfg.RateLimitQPS, cfg.RateLimitBurst)
@@ -297,6 +301,24 @@ func (s *Server) serve(ctx context.Context, clientIP net.IP, clientID string, re
 	// Resolve the upstream. Order: a conditional-forwarding route (query name
 	// + client CIDR) wins; otherwise a per-policy upstream override that only
 	// applies when no route matched; otherwise the automatic rotation.
+	// Check local static records first — these short-circuit before cache/upstream.
+	if s.rec != nil {
+		if recResp, ok := s.rec.Lookup(req); ok {
+			s.ctrl.Notify(control.WatchEvent{
+				Type:       "pass",
+				At:         time.Now(),
+				Client:     client,
+				Domain:     domain,
+				QType:      qType(req),
+				Answers:    answersFor(req, recResp),
+				Cached:     false,
+				Upstream:   "local",
+				DurationUs: time.Since(start).Microseconds(),
+			})
+			out := recResp
+			return out
+		}
+	}
 	resolver, matchedRoute := s.upstreamFor(q.Name, clientIP)
 	if upstreamOverride != "" && !matchedRoute {
 		var err error
@@ -698,4 +720,39 @@ func (s *Server) Shutdown() {
 			_ = s.doch.Shutdown(ctx)
 		}
 	})
+}
+
+// SetRecords replaces the instance's local DNS records (implements
+// control.RecordController). Called by the management API when the controller
+// pushes the fleet-wide record set.
+func (s *Server) SetRecords(records []control.RecordEntry) error {
+	if s.rec == nil {
+		return nil
+	}
+	return s.rec.SetRecords(records)
+}
+
+// GetRecords returns the instance's current local DNS records.
+func (s *Server) GetRecords() ([]control.RecordEntry, error) {
+	if s.rec == nil {
+		return nil, nil
+	}
+	return s.rec.GetRecords()
+}
+
+// ClearRecords removes all local DNS records.
+func (s *Server) ClearRecords() error {
+	if s.rec == nil {
+		return nil
+	}
+	return s.rec.ClearRecords()
+}
+
+// RecordsHash returns a checksum of the current local records for the management
+// API stats readback (so the controller can detect drift after a restart).
+func (s *Server) RecordsHash() uint64 {
+	if s.rec == nil {
+		return 0
+	}
+	return s.rec.Hash()
 }

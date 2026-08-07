@@ -4,11 +4,13 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"log"
 	"net"
 	"net/http"
 	"os"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -61,7 +63,9 @@ type Server struct {
 	rlCtrl RateLimitController
 	// cacheCtrl tunes the response cache at runtime.
 	cacheCtrl CacheController
-	upCtrl    LocalResolverController
+	// recCtrl drives the local DNS records at runtime.
+	recCtrl RecordController
+	upCtrl LocalResolverController
 }
 
 // DoHController is the piece of the DNS server the management API can reconfigure
@@ -137,6 +141,22 @@ func (s *Server) SetCacheController(c CacheController) {
 func (s *Server) cacheController() CacheController {
 	s.mu.RLock()
 	c := s.cacheCtrl
+	s.mu.RUnlock()
+	return c
+}
+
+// SetRecordController wires the DNS server's local-record store into the
+// management API so records can be managed at runtime by the controller.
+func (s *Server) SetRecordController(c RecordController) {
+	s.mu.Lock()
+	s.recCtrl = c
+	s.mu.Unlock()
+}
+
+// recordController returns the wired record controller (may be nil).
+func (s *Server) recordController() RecordController {
+	s.mu.RLock()
+	c := s.recCtrl
 	s.mu.RUnlock()
 	return c
 }
@@ -272,6 +292,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/upstream", s.auth(s.handleUpstream))   // conditional forwarding
 	mux.HandleFunc("/api/v1/cache", s.auth(s.handleCache))         // cache size + auto-refresh
 	mux.HandleFunc("/api/v1/cache/purge", s.auth(s.handleCachePurge))
+	mux.HandleFunc("/api/v1/records", s.auth(s.handleRecords)) // local DNS records
 	mux.HandleFunc("/api/v1/watch", s.auth(s.handleWatch))
 	// unauthenticated adoption handshake
 	mux.HandleFunc("/api/v1/adopt/status", s.handleAdoptStatus)
@@ -361,6 +382,13 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		if cc := s.cacheController(); cc != nil {
 			st.CacheSize = cc.CacheSize()
 			st.CacheWarm = cc.CacheWarm()
+		}
+		// Report the local DNS record hash so the controller can converge them
+		// (e.g. after a restart) by re-pushing on drift.
+		if rc := s.recordController(); rc != nil {
+			if recs, err := rc.GetRecords(); err == nil {
+				st.RecordsHash = RecordsHash(recs)
+			}
 		}
 	}
 	s.addUpstreamStats(st)
@@ -524,6 +552,76 @@ func (s *Server) handleBlocklist(w http.ResponseWriter, r *http.Request) {
 		}()
 	}
 	writeJSON(w, AckResponse{OK: true, Msg: "blocklist updated"})
+}
+
+// RecordsHash returns a stable checksum of a record set so the controller can
+// detect drift after a restart (mirroring the blocklist checksum). Records are
+// sorted before hashing so the checksum is independent of slice order.
+func RecordsHash(records []RecordEntry) uint64 {
+	sorted := make([]RecordEntry, len(records))
+	copy(sorted, records)
+	sort.Slice(sorted, func(i, j int) bool {
+		if sorted[i].Domain != sorted[j].Domain {
+			return sorted[i].Domain < sorted[j].Domain
+		}
+		if sorted[i].Type != sorted[j].Type {
+			return sorted[i].Type < sorted[j].Type
+		}
+		if sorted[i].Value != sorted[j].Value {
+			return sorted[i].Value < sorted[j].Value
+		}
+		return sorted[i].TTL < sorted[j].TTL
+	})
+	h := fnv.New64()
+	for _, r := range sorted {
+		h.Write([]byte(r.Domain))
+		h.Write([]byte{0})
+		h.Write([]byte(r.Type))
+		h.Write([]byte{0})
+		h.Write([]byte(r.Value))
+		h.Write([]byte{0})
+		h.Write([]byte(fmt.Sprintf("%d", r.TTL)))
+		h.Write([]byte{0})
+	}
+	return h.Sum64()
+}
+
+// handleRecords manages the instance's local DNS records (A/AAAA/CNAME) that are
+// answered directly instead of being forwarded upstream.
+func (s *Server) handleRecords(w http.ResponseWriter, r *http.Request) {
+	rc := s.recordController()
+	if rc == nil {
+		http.Error(w, "records not available on this instance", http.StatusServiceUnavailable)
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		recs, err := rc.GetRecords()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, RecordsResponse{Records: recs})
+	case http.MethodPut, http.MethodPost:
+		var req SetRecordsRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if err := rc.SetRecords(req.Records); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, AckResponse{OK: true, Msg: "records set"})
+	case http.MethodDelete:
+		if err := rc.ClearRecords(); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, AckResponse{OK: true, Msg: "records cleared"})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
 func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request) {

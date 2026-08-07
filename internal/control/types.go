@@ -61,6 +61,9 @@ type StatsResponse struct {
 	// forwarding configuration so the controller can detect drift.
 	UpstreamServers []upstream.UpstreamServer `json:"upstream_servers,omitempty"`
 	UpstreamRoutes  []upstream.UpstreamRoute  `json:"upstream_routes,omitempty"`
+	// RecordsHash is a checksum of the instance's local DNS records so the
+	// controller can detect drift (e.g. after a restart) and re-push them.
+	RecordsHash uint64 `json:"records_hash,omitempty"`
 }
 
 // ListResponse returns the default (nil ID indicates default) plus all policies.
@@ -184,4 +187,26 @@ type AdoptResponse struct {
 	Adopted bool   `json:"adopted"`
 	Token   string `json:"token,omitempty"`
 	Message string `json:"message,omitempty"`
+}
+
+// RecordEntry is one static DNS record answered locally by blipd instead of
+// being forwarded upstream. Type is the textual RR mnemonic ("A", "AAAA",
+// "CNAME"); Value is the rdata (an IP, or a target name for CNAME); TTL is the
+// cache lifetime in seconds (0 = server default, 60s).
+type RecordEntry struct {
+	Domain string `json:"domain"`
+	Type   string `json:"type"`
+	Value  string `json:"value"`
+	TTL    int    `json:"ttl,omitempty"`
+}
+
+// RecordsResponse is the GET /api/v1/records payload.
+type RecordsResponse struct {
+	Records []RecordEntry `json:"records"`
+}
+
+// SetRecordsRequest replaces a blipd instance's local DNS records. An empty
+// records slice clears all local records.
+type SetRecordsRequest struct {
+	Records []RecordEntry `json:"records"`
 }

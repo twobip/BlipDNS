@@ -15,6 +15,7 @@ import (
 
 	"github.com/twobip/BlipDNS/internal/blocklist"
 	"github.com/twobip/BlipDNS/internal/cache"
+	"github.com/twobip/BlipDNS/internal/control"
 	"github.com/twobip/BlipDNS/internal/filter"
 	"github.com/twobip/BlipDNS/internal/upstream"
 	"github.com/miekg/dns"
@@ -450,5 +451,94 @@ func TestSetDoHHTTPAddrIdempotent(t *testing.T) {
 	}
 	if err := srv.SetDoHHTTPAddr(""); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestServeRecordsServed(t *testing.T) {
+	srv, up := newTestServer(t)
+	srv.rec = NewRecordStore()
+	srv.rec.SetRecords([]control.RecordEntry{
+		{Domain: "recorded.test.", Type: "A", Value: "10.10.10.10", TTL: 60},
+	})
+
+	q := new(dns.Msg)
+	q.SetQuestion("recorded.test.", dns.TypeA)
+	resp := srv.serve(context.Background(), net.ParseIP("192.168.1.5"), "", q)
+	if resp.Rcode != dns.RcodeSuccess {
+		t.Fatalf("rc=%d want NOERROR", resp.Rcode)
+	}
+	if up.calls != 0 {
+		t.Errorf("upstream calls = %d, want 0 (record should be served directly)", up.calls)
+	}
+	if len(resp.Answer) != 1 {
+		t.Fatalf("answers = %d, want 1", len(resp.Answer))
+	}
+	a, ok := resp.Answer[0].(*dns.A)
+	if !ok {
+		t.Fatalf("answer type = %T, want *dns.A", resp.Answer[0])
+	}
+	if !a.A.Equal(net.ParseIP("10.10.10.10")) {
+		t.Errorf("A = %v, want 10.10.10.10", a.A)
+	}
+}
+
+func TestServeRecordsFallthroughToUpstream(t *testing.T) {
+	srv, up := newTestServer(t)
+	srv.rec = NewRecordStore()
+	srv.rec.SetRecords([]control.RecordEntry{
+		{Domain: "recorded.test.", Type: "A", Value: "10.10.10.10", TTL: 60},
+	})
+
+	up.calls = 0
+	q := new(dns.Msg)
+	q.SetQuestion("other.test.", dns.TypeA)
+	srv.serve(context.Background(), net.ParseIP("192.168.1.5"), "", q)
+	// upstream was called (no matching record)
+	if up.calls != 1 {
+		t.Errorf("upstream calls = %d, want 1", up.calls)
+	}
+}
+
+func TestServeRecordsTypeSpecificMatch(t *testing.T) {
+	srv, up := newTestServer(t)
+	srv.rec = NewRecordStore()
+	srv.rec.SetRecords([]control.RecordEntry{
+		{Domain: "dual.test.", Type: "A", Value: "10.0.0.1", TTL: 60},
+		{Domain: "dual.test.", Type: "AAAA", Value: "2001:db8::1", TTL: 60},
+	})
+
+	// A query -> A record
+	q := new(dns.Msg)
+	q.SetQuestion("dual.test.", dns.TypeA)
+	resp := srv.serve(context.Background(), net.ParseIP("192.168.1.5"), "", q)
+	if len(resp.Answer) != 1 {
+		t.Fatalf("A answers = %d, want 1", len(resp.Answer))
+	}
+	a, ok := resp.Answer[0].(*dns.A)
+	if !ok || !a.A.Equal(net.ParseIP("10.0.0.1")) {
+		t.Errorf("A answer = %v, want 10.0.0.1", resp.Answer[0])
+	}
+
+	// AAAA query -> AAAA record
+	up.calls = 0
+	q.SetQuestion("dual.test.", dns.TypeAAAA)
+	resp = srv.serve(context.Background(), net.ParseIP("192.168.1.5"), "", q)
+	if up.calls != 0 {
+		t.Errorf("upstream calls after AAAA = %d, want 0", up.calls)
+	}
+	if len(resp.Answer) != 1 {
+		t.Fatalf("AAAA answers = %d, want 1", len(resp.Answer))
+	}
+	aaaa, ok := resp.Answer[0].(*dns.AAAA)
+	if !ok || !aaaa.AAAA.Equal(net.ParseIP("2001:db8::1")) {
+		t.Errorf("AAAA answer = %v, want 2001:db8::1", resp.Answer[0])
+	}
+
+	// CNAME query for "dual.test." has no matching record -> upstream
+	up.calls = 0
+	q.SetQuestion("dual.test.", dns.TypeCNAME)
+	srv.serve(context.Background(), net.ParseIP("192.168.1.5"), "", q)
+	if up.calls != 1 {
+		t.Errorf("upstream calls for CNAME = %d, want 1", up.calls)
 	}
 }

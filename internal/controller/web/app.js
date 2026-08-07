@@ -70,6 +70,7 @@ const NAV = [
   { id: "blocklist", label: "Blocklists", icon: IC.block, group: "DNS" },
   { id: "filters", label: "DNS Filters", icon: IC.shield, group: "DNS" },
   { id: "upstream", label: "Upstream", icon: IC.globe, group: "DNS" },
+  { id: "records", label: "Local Records", icon: IC.set, group: "DNS" },
   { id: "settings", label: "Settings", icon: IC.set, group: "System" },
 ];
 const TITLES = {
@@ -82,6 +83,7 @@ const TITLES = {
   blocklist: ["Blocklists", "Global blocked domains and list sources"],
   filters: ["DNS Filters", "Per-instance policies and scope rules"],
   upstream: ["Upstream &amp; Conditional Forwarding", "Named resolvers and per-suffix forwarding routes"],
+  records: ["Local Records", "Static DNS records answered locally before forwarding"],
   settings: ["Settings", "Controller configuration"],
 };
 let current = "dashboard";
@@ -153,8 +155,9 @@ async function refresh() {
     updateConn();
     	if (current === "dashboard") renderDashboard();
     	else if (current === "instances") renderInstances();
-    	else if (current === "queries") refreshQueryTop();
-    	else if (current === "cache-stats") renderCacheStats();
+     	else if (current === "queries") refreshQueryTop();
+     	else if (current === "records") renderRecords();
+     	else if (current === "cache-stats") renderCacheStats();
     else if (current === "upstream-errors") renderUpstreamErrors();
     else if (current === "clients") renderClients();
     else if (current === "filters") renderPolicies();
@@ -628,6 +631,135 @@ async function renderUpstreamErrors() {
     tb.innerHTML = `<tr class="empty-row"><td colspan="6"><div class="empty"><div class="empty-ic">${IC.warn}</div><h4>Upstream errors unavailable</h4><p>${esc(e.message)}</p></div></td></tr>`;
   }
 }
+
+/* ---------- local records ---------- */
+let savedRecords = [];     // fleet-wide local DNS records
+let rEditIndex = -1;       // -1 = adding, >=0 = editing an existing record
+
+function recordTypeLabel(t) { return t || "A"; }
+function recordValuePlaceholder(t) {
+  return t === "A" ? "192.168.1.100" :
+         t === "AAAA" ? "2001:db8::1" :
+         t === "CNAME" ? "target.example.com" : "value";
+}
+
+function recordInstLabel(rec) {
+  return rec._instance || "";
+}
+
+function renderRecords() {
+  const tb = $("r-tbody");
+  $("r-count").textContent = savedRecords.length + (savedRecords.length === 1 ? " record" : " records");
+  if (!savedRecords.length) {
+    tb.innerHTML = `<tr class="empty-row"><td colspan="6"><div class="empty"><div class="empty-ic">${IC.set}</div><h4>No local records</h4><p>Click "Add Record" to create a static DNS entry answered locally before forwarding.</p></div></td></tr>`;
+    return;
+  }
+  tb.innerHTML = savedRecords.map((r, i) => {
+    const t = recordTypeLabel(r.type);
+    return `<tr>
+      <td><span class="mono">${esc(r.domain)}</span></td>
+      <td>${t}</td>
+      <td><span class="mono">${esc(r.value)}</span></td>
+      <td class="num mono">${r.ttl > 0 ? r.ttl : "—"}</td>
+      <td class="q-inst">${esc(recordInstLabel(r))}</td>
+      <td>
+        <div class="row-actions">
+          <button class="icon-btn" data-r-act="edit" data-r-i="${i}" title="Edit">${IC.edit}</button>
+          <button class="icon-btn" data-r-act="del" data-r-i="${i}" title="Delete">${IC.trash}</button>
+        </div>
+      </td>
+    </tr>`;
+  }).join("");
+}
+
+async function saveRecords() {
+  const st = $("r-save-status");
+  st.textContent = "saving…";
+  try {
+    const r = await API("/api/records", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ records: savedRecords }) });
+    const d = await r.json();
+    const applied = d.applied || {};
+    const ids = Object.keys(applied);
+    const ok = ids.filter((k) => applied[k] === "ok").length;
+    const failed = ids.filter((k) => applied[k] !== "ok");
+    st.textContent = ids.length ? `saved on blipc · pushed to ${ok}/${ids.length} instance${ids.length > 1 ? "s" : ""}` + (failed.length ? ` · errors: ${failed.map((k) => k + ": " + applied[k]).join(", ")}` : "") : "saved on blipc · no instance to push to yet";
+    toast("records saved" + (ids.length ? ` (${ok}/${ids.length})` : ""));
+    st.textContent = "";
+  } catch (e) { st.textContent = ""; toast("save failed: " + e.message, "err"); }
+}
+
+function openRecordModal(idx) {
+  const modal = $("modal-record");
+  const inputs = { domain: $("r-domain"), type: $("r-type"), value: $("r-value"), ttl: $("r-ttl") };
+  if (idx >= 0) {
+    rEditIndex = idx;
+    $("r-modal-title").textContent = "Edit Record";
+    const r = savedRecords[idx];
+    inputs.domain.value = r.domain;
+    inputs.type.value = r.type || "A";
+    inputs.value.value = r.value;
+    inputs.ttl.value = r.ttl > 0 ? r.ttl : "";
+  } else {
+    rEditIndex = -1;
+    $("r-modal-title").textContent = "Add Record";
+    inputs.domain.value = "";
+    inputs.type.value = "A";
+    inputs.value.value = "";
+    inputs.ttl.value = "";
+  }
+  show("modal-record");
+}
+
+function saveRecord() {
+  const domain = ($("r-domain").value || "").trim();
+  const typ = $("r-type").value;
+  const value = ($("r-value").value || "").trim();
+  const ttlStr = $("r-ttl").value.trim();
+  if (!domain || !value) {
+    toast("domain and value are required", "err");
+    return;
+  }
+  const ttl = ttlStr === "" ? 0 : Math.max(0, parseInt(ttlStr, 10));
+  const rec = { domain, type: typ, value, ttl };
+  if (rEditIndex >= 0) {
+    savedRecords[rEditIndex] = rec;
+  } else {
+    savedRecords = [...savedRecords, rec];
+  }
+  hide("modal-record");
+  renderRecords();
+  saveRecords();
+}
+
+$("r-type").addEventListener("change", () => {
+  // Reset the value placeholder to guide the user for the selected type.
+  const v = $("r-value");
+  if (!v.value) v.placeholder = recordValuePlaceholder($("r-type").value);
+});
+
+$("r-add-btn").onclick = () => openRecordModal(-1);
+$("r-save").onclick = saveRecord;
+$("r-refresh").onclick = async () => {
+  try {
+    const res = await API("/api/records");
+    const d = await res.json();
+    savedRecords = (d.records || []).map((r) => ({ ...r, _instance: "" }));
+    renderRecords();
+  } catch (e) { toast("refresh failed: " + e.message, "err"); }
+};
+$("r-tbody").addEventListener("click", (e) => {
+  const b = e.target.closest("[data-r-act]");
+  if (!b) return;
+  const i = parseInt(b.dataset.rI, 10);
+  if (b.dataset.rAct === "edit") openRecordModal(i);
+  else if (b.dataset.rAct === "del") {
+    confirmDialog("Delete record?", `Remove <span class="mono">${esc(savedRecords[i].domain)}</span> (${savedRecords[i].type})?`, () => {
+      savedRecords = savedRecords.filter((_, k) => k !== i);
+      renderRecords();
+      saveRecords();
+    });
+  }
+});
 
 /* ---------- cache stats ---------- */
 let csState = { since: "24h" };
@@ -1336,6 +1468,8 @@ async function refreshSettings() {
     savedCacheSize = (d.cache_size != null && d.cache_size !== undefined) ? Number(d.cache_size || 0) : 0;
     savedCacheWarm = (d.cache_warm != null && d.cache_warm !== undefined) ? Number(d.cache_warm || 0) : 0;
     savedQLRetention = (d.query_log_retention_hours != null && d.query_log_retention_hours !== undefined) ? Number(d.query_log_retention_hours || 24) : 24;
+    // fleet-wide local DNS records
+    savedRecords = (d.records || []).map((r) => ({ ...r, _instance: "" }));
     // fleet-wide default upstream pool + conditional-forwarding routes
     savedUpServers = Array.isArray(d.upstream_servers) ? d.upstream_servers : [];
     savedUpRoutes = Array.isArray(d.upstream_routes) ? d.upstream_routes : [];

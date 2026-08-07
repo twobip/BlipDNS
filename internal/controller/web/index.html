@@ -402,8 +402,8 @@
         </div>
       </section>
 
-      <!-- ================= UPSTREAM ================= -->
-      <section id="view-upstream" class="view hidden">
+       <!-- ================= UPSTREAM ================= -->
+       <section id="view-upstream" class="view hidden">
         <div class="grid grid-2">
           <div class="panel">
             <div class="panel-head"><h3>Upstream Servers</h3><span class="spacer"></span><span class="badge accent" id="s-scope-badge">fleet-wide</span></div>
@@ -444,7 +444,30 @@
             </div>
           </div>
         </div>
-      </section>
+       </section>
+
+       <!-- ================= LOCAL RECORDS ================= -->
+       <section id="view-records" class="view hidden">
+         <div class="row">
+           <span class="right"></span>
+           <button class="btn btn-primary" id="r-add-btn">
+             <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+             Add Record
+           </button>
+           <button class="btn" id="r-refresh">
+             <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-2.6-6.3M21 3v6h-6"/></svg>
+             Refresh
+           </button>
+           <span class="muted" id="r-count">0 records</span>
+         </div>
+         <div class="table-wrap" id="r-table-wrap">
+           <table class="tbl">
+             <thead><tr><th>Domain</th><th>Type</th><th>Value</th><th>TTL</th><th>Instance</th><th style="width:100px"></th></tr></thead>
+             <tbody id="r-tbody"></tbody>
+           </table>
+         </div>
+         <p class="muted" style="font-size:12px; margin-top:8px">Static DNS records answered locally by blipd before forwarding to upstream. A/AAAA records return IP addresses; CNAME records return a canonical name alias. Records are fleet-wide and pushed to every instance (use per-instance overrides in Settings for instance-specific values).</p>
+        </section>
 
       <!-- ================= SETTINGS ================= -->
       <section id="view-settings" class="view hidden">
@@ -641,6 +664,32 @@
       <span class="spacer grow"></span>
       <button class="btn" data-close="modal-policy">Close</button>
       <button class="btn btn-primary hidden" id="p-save">Save Policy</button>
+    </div>
+   </div>
+ </div>
+
+<!-- ============ RECORD MODAL ============ -->
+<div class="overlay hidden" id="modal-record">
+  <div class="modal" style="max-width:460px">
+    <div class="modal-head"><h3 id="r-modal-title">Add Record</h3><button class="icon-btn x" data-close="modal-record">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button></div>
+    <div class="modal-body">
+      <div class="form-grid">
+        <div class="field"><label>Domain</label><input class="input" id="r-domain" placeholder="server.lan"/></div>
+        <div class="field"><label>Type</label>
+          <select class="select" id="r-type">
+            <option value="A">A</option>
+            <option value="AAAA">AAAA</option>
+            <option value="CNAME">CNAME</option>
+          </select>
+        </div>
+      </div>
+      <div class="field"><label>Value</label><input class="input" id="r-value" placeholder="192.168.1.100 / 2001:db8::1 / target.example.com"/></div>
+      <div class="field"><label>TTL (seconds) <span class="faint">(0 = server default 60s)</span></label><input class="input" id="r-ttl" type="number" min="0" placeholder="0"/></div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn" data-close="modal-record">Cancel</button>
+      <button class="btn btn-primary" id="r-save">Save Record</button>
     </div>
   </div>
 </div>

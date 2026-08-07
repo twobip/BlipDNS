@@ -547,3 +547,147 @@ func TestCacheEndpoint(t *testing.T) {
 		t.Errorf("nil controller status = %d, want 503", resp.StatusCode)
 	}
 }
+
+// fakeRecordController records every record push and serves reads from it,
+// mirroring the contract the real dnsserver.RecordStore implements.
+type fakeRecordController struct {
+	mu      sync.Mutex
+	records []RecordEntry
+}
+
+func (f *fakeRecordController) SetRecords(records []RecordEntry) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.records = make([]RecordEntry, len(records))
+	copy(f.records, records)
+	return nil
+}
+
+func (f *fakeRecordController) GetRecords() ([]RecordEntry, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]RecordEntry, len(f.records))
+	copy(out, f.records)
+	return out, nil
+}
+
+func (f *fakeRecordController) ClearRecords() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.records = nil
+	return nil
+}
+
+func TestRecordsEndpoint(t *testing.T) {
+	rc := &fakeRecordController{}
+	store := filter.NewStore(nil)
+	srv := NewServerWithBlocklist("tok", store, cache.New(0, 0), &Counters{}, "blipd/test", blocklist.New())
+	srv.SetRecordController(rc)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	authReq := func(method, body string) *http.Response {
+		var rd *strings.Reader
+		if body == "" {
+			rd = strings.NewReader("")
+		} else {
+			rd = strings.NewReader(body)
+		}
+		req, _ := http.NewRequest(method, ts.URL+"/api/v1/records", rd)
+		req.Header.Set("Authorization", "Bearer tok")
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp
+	}
+
+	// unauthenticated -> 401
+	ureq, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/v1/records", nil)
+	uresp, err := http.DefaultClient.Do(ureq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	uresp.Body.Close()
+	if uresp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauth status = %d, want 401", uresp.StatusCode)
+	}
+
+	// GET reports empty initially.
+	resp := authReq(http.MethodGet, "")
+	var got RecordsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if len(got.Records) != 0 {
+		t.Fatalf("initial records = %d, want 0", len(got.Records))
+	}
+
+	// PUT installs records.
+	recs := []RecordEntry{
+		{Domain: "server.lan", Type: "A", Value: "192.168.1.100", TTL: 60},
+		{Domain: "server.lan", Type: "AAAA", Value: "2001:db8::1", TTL: 60},
+		{Domain: "alias.lan", Type: "CNAME", Value: "server.lan", TTL: 0},
+	}
+	body, _ := json.Marshal(SetRecordsRequest{Records: recs})
+	resp = authReq(http.MethodPut, string(body))
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("PUT status = %d, want 200", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// GET reports the pushed records.
+	resp = authReq(http.MethodGet, "")
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if len(got.Records) != 3 {
+		t.Fatalf("records after PUT = %d, want 3", len(got.Records))
+	}
+
+	// stats now report the records hash so the controller can converge.
+	sreq, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/v1/stats", nil)
+	sreq.Header.Set("Authorization", "Bearer tok")
+	sresp, err := http.DefaultClient.Do(sreq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var st StatsResponse
+	if err := json.NewDecoder(sresp.Body).Decode(&st); err != nil {
+		t.Fatal(err)
+	}
+	sresp.Body.Close()
+	if st.RecordsHash != RecordsHash(recs) {
+		t.Errorf("stats records_hash = %d, want %d", st.RecordsHash, RecordsHash(recs))
+	}
+
+	// PUT with empty records clears.
+	authReq(http.MethodPut, `{"records":[]}`)
+	got2, _ := rc.GetRecords()
+	if len(got2) != 0 {
+		t.Errorf("records after empty PUT = %d, want 0", len(got2))
+	}
+
+	// DELETE clears.
+	authReq(http.MethodPut, string(body))
+	resp = authReq(http.MethodDelete, "")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("DELETE status = %d, want 200", resp.StatusCode)
+	}
+	resp.Body.Close()
+	got3, _ := rc.GetRecords()
+	if len(got3) != 0 {
+		t.Errorf("records after DELETE = %d, want 0", len(got3))
+	}
+
+	// without a wired controller the endpoints are unavailable
+	srv.SetRecordController(nil)
+	resp = authReq(http.MethodGet, "")
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("nil controller status = %d, want 503", resp.StatusCode)
+	}
+}

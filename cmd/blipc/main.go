@@ -38,6 +38,7 @@ type config struct {
 	BlocklistSources       []string                                `yaml:"blocklist_sources"`
 	BlocklistUpdateHours   int                                     `yaml:"blocklist_update_hours"`
 	Instances              []controller.InstanceConfig             `yaml:"instances"`
+	Records                []control.RecordEntry                   `yaml:"records"`
 }
 
 func main() {
@@ -79,6 +80,7 @@ func main() {
 		fleet.SetCacheDefault(cfg.CacheSize, cfg.CacheWarm)
 	}
 	fleet.SetQueryLogRetentionDefault(cfg.QueryLogRetentionHours)
+	fleet.SetRecords(context.Background(), cfg.Records)
 	if len(cfg.UpstreamServers) > 0 || len(cfg.UpstreamRoutes) > 0 {
 		fleet.SetUpstreamDefault(cfg.UpstreamServers, cfg.UpstreamRoutes)
 		if len(cfg.UpstreamServers) > 0 {

@@ -71,13 +71,16 @@ type InstanceOverride struct {
 	// this instance. nil = inherit the fleet default.
 	CacheSize *int `json:"cache_size,omitempty" yaml:"cache_size,omitempty"`
 	// CacheWarm, when set, overrides the fleet-wide auto-refresh count for this
-	// instance. nil = inherit the fleet default.
+	// instance. nil = inherit the fleet-wide default.
 	CacheWarm *int `json:"cache_warm,omitempty" yaml:"cache_warm,omitempty"`
+	// Records, when set, overrides the fleet-wide local DNS records for this
+	// instance. nil = inherit the fleet-wide default.
+	Records *[]control.RecordEntry `json:"records,omitempty" yaml:"records,omitempty"`
 }
 
 // IsEmpty reports whether the override changes nothing.
 func (o *InstanceOverride) IsEmpty() bool {
-	return o == nil || (o.Upstream == nil && o.BlockAction == nil && o.Log == nil && o.DoHHTTPAddr == nil && o.RateLimitQPS == nil && o.UpstreamServers == nil && o.UpstreamRoutes == nil && o.CacheSize == nil && o.CacheWarm == nil)
+	return o == nil || (o.Upstream == nil && o.BlockAction == nil && o.Log == nil && o.DoHHTTPAddr == nil && o.RateLimitQPS == nil && o.UpstreamServers == nil && o.UpstreamRoutes == nil && o.CacheSize == nil && o.CacheWarm == nil && o.Records == nil)
 }
 
 // Fleet holds all instances, the event bus, and the global blocklist.
@@ -112,6 +115,7 @@ type Fleet struct {
 	upstreamServers  []upstream.UpstreamServer    // fleet-wide default upstream pool
 	upstreamRoutes   []upstream.UpstreamRoute     // fleet-wide default upstream routes
 	qlRetentionHours int                          // how long query log entries are kept (0 = 24h default)
+	records         []control.RecordEntry        // fleet-wide local DNS records
 }
 
 // BlocklistStatus is a point-in-time view of the controller's blocklist
@@ -693,6 +697,9 @@ func mergeOverride(existing, partial *InstanceOverride) *InstanceOverride {
 	if partial.CacheWarm != nil {
 		merged.CacheWarm = partial.CacheWarm
 	}
+	if partial.Records != nil {
+		merged.Records = partial.Records
+	}
 	return &merged
 }
 
@@ -980,8 +987,91 @@ func (f *Fleet) PurgeCache(ctx context.Context) (map[string]string, int) {
 	return results, total
 }
 
-// pushConfigs sends each instance's effective config to it and marks its
-// applied config hash on success.
+// Records returns the fleet-wide local DNS records.
+func (f *Fleet) Records() []control.RecordEntry {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return append([]control.RecordEntry(nil), f.records...)
+}
+
+// SetRecords records the fleet-wide local DNS records, persists them, and pushes
+// the effective value (default or per-instance override) to every adopted
+// instance. Returns the per-instance outcome.
+func (f *Fleet) SetRecords(ctx context.Context, recs []control.RecordEntry) map[string]string {
+	f.mu.Lock()
+	f.records = append([]control.RecordEntry(nil), recs...)
+	f.mu.Unlock()
+	if f.configPath != "" {
+		if err := f.saveConfig(); err != nil {
+			log.Printf("blipc: warning: failed to persist records: %v", err)
+		}
+	}
+	return f.pushRecords(ctx)
+}
+
+// recordsHash returns a stable checksum of the fleet-wide records for
+// reconciliation (an empty list hashes to 0).
+func (f *Fleet) recordsHash() uint64 {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return control.RecordsHash(f.records)
+}
+
+// effectiveRecords returns the records an instance should have: its own override
+// if set, otherwise the fleet-wide default.
+func (f *Fleet) effectiveRecords(instID string) []control.RecordEntry {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	if o := f.overrides[instID]; o != nil && o.Records != nil {
+		return append([]control.RecordEntry(nil), *o.Records...)
+	}
+	return append([]control.RecordEntry(nil), f.records...)
+}
+
+// pushRecords distributes the effective local DNS records to every adopted
+// instance.
+func (f *Fleet) pushRecords(ctx context.Context) map[string]string {
+	f.mu.RLock()
+	insts := make([]*Instance, 0, len(f.instances))
+	for _, i := range f.instances {
+		insts = append(insts, i)
+	}
+	f.mu.RUnlock()
+	results := make(map[string]string, len(insts))
+	for _, i := range insts {
+		if !i.hasToken() {
+			results[i.Config.ID] = "not adopted"
+			continue
+		}
+		want := f.effectiveRecords(i.Config.ID)
+		if err := i.ctl().SetRecords(ctx, want); err != nil {
+			results[i.Config.ID] = err.Error()
+			continue
+		}
+		results[i.Config.ID] = "ok"
+	}
+	return results
+}
+
+// maybePushRecords converges an instance's local DNS records to its fleet
+// default (or per-instance override) when the instance reports a divergent hash
+// — e.g. after a restart it reverted to its own (empty) config.
+func (f *Fleet) maybePushRecords(ctx context.Context, i *Instance, reported *control.StatsResponse) {
+	wantHash := f.recordsHash()
+	repHash := uint64(0)
+	if reported != nil {
+		repHash = reported.RecordsHash
+	}
+	if repHash == wantHash || !i.hasToken() {
+		return
+	}
+	want := f.effectiveRecords(i.Config.ID)
+	if err := i.ctl().SetRecords(ctx, want); err != nil {
+		log.Printf("blipc: reconcile records for %s: %v", i.Config.ID, err)
+	}
+}
+
+// pushInstance sends one instance's effective config to it.
 func (f *Fleet) pushConfigs(ctx context.Context) map[string]string {
 	f.mu.RLock()
 	insts := make([]*Instance, 0, len(f.instances))
@@ -1940,6 +2030,7 @@ func (f *Fleet) saveConfig() error {
 		BlocklistSources       []string                     `yaml:"blocklist_sources"`
 		BlocklistUpdateHours   int                          `yaml:"blocklist_update_hours"`
 		Instances              []InstanceConfig             `yaml:"instances"`
+		Records                []control.RecordEntry        `yaml:"records"`
 	}
 
 	var cfg fullConfig
@@ -1973,6 +2064,7 @@ func (f *Fleet) saveConfig() error {
 	cfg.QueryLogRetentionHours = f.QueryLogRetentionHours()
 	cfg.BlocklistSources = blSources
 	cfg.BlocklistUpdateHours = autoHours
+	cfg.Records = f.Records()
 
 	out, err := yaml.Marshal(cfg)
 	if err != nil {

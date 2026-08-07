@@ -105,6 +105,42 @@ type cacheCall struct {
 	warm int
 }
 
+// recCall is one records push observed by recRec.
+type recCall struct {
+	records []control.RecordEntry
+}
+
+// recRec records every records push to a fake blipd, and reports the current
+// set back from /api/v1/stats so the controller can converge a restarted
+// instance (mirroring cacheRec/dohRec).
+type recRec struct {
+	mu      sync.Mutex
+	records []control.RecordEntry
+	calls   []recCall
+}
+
+func (r *recRec) applied(records []control.RecordEntry) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.records = make([]control.RecordEntry, len(records))
+	copy(r.records, records)
+	r.calls = append(r.calls, recCall{records: append([]control.RecordEntry(nil), records...)})
+}
+
+func (r *recRec) snapshot() []control.RecordEntry {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]control.RecordEntry, len(r.records))
+	copy(out, r.records)
+	return out
+}
+
+func (r *recRec) callCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.calls)
+}
+
 // cacheRec records every cache config (size + auto-refresh) pushed to a fake
 // blipd, reports the current values back from /api/v1/stats (for reconcile),
 // and mirrors what an explicit purge would drop (fixed, so it is immune to
@@ -151,12 +187,15 @@ func fakeBlipdWithRec(t *testing.T, token, claimCode string, health *control.Hea
 	)
 	var up *upstreamRec
 	var cache *cacheRec
+	var recCtrl *recRec
 	for _, r := range recs {
 		switch rv := r.(type) {
 		case *upstreamRec:
 			up = rv
 		case *cacheRec:
 			cache = rv
+		case *recRec:
+			recCtrl = rv
 		}
 	}
 	mux := http.NewServeMux()
@@ -195,6 +234,9 @@ func fakeBlipdWithRec(t *testing.T, token, claimCode string, health *control.Hea
 			st.CacheSize = cache.size
 			st.CacheWarm = cache.warm
 			cache.mu.Unlock()
+		}
+		if recCtrl != nil {
+			st.RecordsHash = control.RecordsHash(recCtrl.snapshot())
 		}
 		writeJSONH(w, &st)
 	})
@@ -335,6 +377,37 @@ func fakeBlipdWithRec(t *testing.T, token, claimCode string, health *control.Hea
 			cache.mu.Unlock()
 		}
 		writeJSONH(w, control.PurgeCacheResponse{Purged: purged})
+	})
+	mux.HandleFunc("/api/v1/records", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+token {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		switch r.Method {
+		case http.MethodGet:
+			var current []control.RecordEntry
+			if recCtrl != nil {
+				current = recCtrl.snapshot()
+			}
+			writeJSONH(w, control.RecordsResponse{Records: current})
+		case http.MethodPut, http.MethodPost:
+			var req control.SetRecordsRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if recCtrl != nil {
+				recCtrl.applied(req.Records)
+			}
+			writeJSONH(w, map[string]bool{"ok": true})
+		case http.MethodDelete:
+			if recCtrl != nil {
+				recCtrl.applied(nil)
+			}
+			writeJSONH(w, map[string]bool{"ok": true})
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
 	})
 	mux.HandleFunc("/api/v1/adopt/status", func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()

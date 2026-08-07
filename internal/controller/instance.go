@@ -202,6 +202,8 @@ func (i *Instance) poll(ctx context.Context) {
 		i.fleet.maybePushUpstream(ctx, i, s)
 		// Converge the instance's global blocklist the same way.
 		i.fleet.maybePushBlocklist(ctx, i, s)
+		// Converge the instance's local DNS records the same way.
+		i.fleet.maybePushRecords(ctx, i, s)
 		// Also log to query log
 		if i.fleet.queryLog != nil && s != nil {
 			_ = i.fleet.queryLog.Insert(ctx, QueryLogEntry{

@@ -176,6 +176,26 @@ func (c *Client) ResetAdoption(ctx context.Context) error {
 	return c.do(ctx, http.MethodPost, "/api/v1/adopt/reset", nil, nil)
 }
 
+// GetRecords returns the instance's current local DNS records.
+func (c *Client) GetRecords(ctx context.Context) ([]RecordEntry, error) {
+	var out RecordsResponse
+	if err := c.do(ctx, http.MethodGet, "/api/v1/records", nil, &out); err != nil {
+		return nil, err
+	}
+	return out.Records, nil
+}
+
+// SetRecords replaces the instance's local DNS records. An empty slice clears
+// all local records.
+func (c *Client) SetRecords(ctx context.Context, records []RecordEntry) error {
+	return c.do(ctx, http.MethodPut, "/api/v1/records", &SetRecordsRequest{Records: records}, nil)
+}
+
+// ClearRecords removes all local DNS records from the instance.
+func (c *Client) ClearRecords(ctx context.Context) error {
+	return c.do(ctx, http.MethodDelete, "/api/v1/records", nil, nil)
+}
+
 // Watch opens the SSE stream and invokes fn for each event until ctx is
 // cancelled. It deliberately uses a client without an overall timeout: the
 // stream is long-lived and an absolute deadline would kill it (and silently

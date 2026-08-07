@@ -51,6 +51,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/maintenance", api(s.handleMaintenance))        // POST reset_stats / clear_query_log
 	mux.HandleFunc("/api/events", api(s.handleEvents))
 	mux.HandleFunc("/api/health", api(s.handleHealth))
+	mux.HandleFunc("/api/records", api(s.handleRecords))
 	mux.HandleFunc("/api/settings", api(s.handleSettings)) // fleet-wide default config
 	mux.HandleFunc("/api/cache/purge", api(s.handleCachePurge))
 
@@ -317,6 +318,31 @@ func (s *Server) handleInstance(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleRecords manages the fleet-wide local DNS records (A/AAAA/CNAME). blipd
+// is the runtime store; blipc persists the fleet-wide set and pushes it to every
+// adopted instance, reconciling on poll.
+func (s *Server) handleRecords(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, map[string]interface{}{"records": s.fleet.Records()})
+	case http.MethodPut, http.MethodPost:
+		var req struct {
+			Records []control.RecordEntry `json:"records"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		applied := s.fleet.SetRecords(r.Context(), req.Records)
+		writeJSON(w, map[string]interface{}{"ok": true, "applied": applied})
+	case http.MethodDelete:
+		applied := s.fleet.SetRecords(r.Context(), nil)
+		writeJSON(w, map[string]interface{}{"ok": true, "applied": applied})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
 // handleSettings reads/updates the fleet default policy and per-instance
 // overrides. blipc is the source of truth; PUT persists the change and
 // distributes the effective config (default for the fleet scope, merged
@@ -336,6 +362,7 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			"cache_size":                cacheSize,
 			"cache_warm":                cacheWarm,
 			"query_log_retention_hours": s.fleet.QueryLogRetentionHours(),
+			"records":                   s.fleet.Records(),
 		})
 	case http.MethodPut:
 		var req struct {
