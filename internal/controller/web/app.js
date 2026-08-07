@@ -192,6 +192,16 @@ async function renderDashboard() {
   const on = instances.filter((i) => i.online).length;
   $("d-online").textContent = on;
   $("d-total").textContent = instances.length;
+  // Fleet-wide refused count = sum of each instance's cumulative rate_limited
+  // counter (cumulative since its last restart; tracked separately from the
+  // resolved query totals so the limiter no longer pollutes QPS/cache stats).
+  let refused = 0;
+  for (const i of instances) {
+    if (i.online && i.stats) {
+      refused += Number(i.stats.rate_limited) || 0;
+    }
+  }
+  $("d-refused").textContent = fmt(refused);
   fetchStats();
 }
 

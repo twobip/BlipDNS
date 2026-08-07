@@ -79,6 +79,14 @@
             <div class="stat-value" id="d-errors">—</div>
             <div class="stat-sub">failed upstream requests</div>
           </div>
+          <div class="stat" title="Queries refused by the per-client rate limiter (tracked separately from resolved-totals)">
+            <div class="stat-icon i-amber">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>
+            </div>
+            <div class="stat-label">Refused (rate limit)</div>
+            <div class="stat-value" id="d-refused">—</div>
+            <div class="stat-sub">refused in this fleet · <a href="#" data-goto="settings" class="muted" title="Change in Settings → Rate Limit">tune limit</a></div>
+          </div>
           <div class="stat" title="Average query rate over the selected range">
             <div class="stat-icon i-green">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20a8 8 0 1 0 0-16 8 8 0 0 0 0 16z"/><path d="M12 12l3.5-3.5"/><path d="M12 4v2m0 12v2M4 12h2m12 0h2"/></svg>
