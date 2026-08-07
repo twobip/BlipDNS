@@ -29,7 +29,7 @@ func TestQueryLogStoreRoundtrip(t *testing.T) {
 	if err := store.Insert(ctx, want); err != nil {
 		t.Fatalf("Insert: %v", err)
 	}
-	entries, err := store.Query(ctx, "", "", time.Time{}, 100)
+	entries, err := store.Query(ctx, "", "", "", time.Time{}, 0, 100)
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}
@@ -48,9 +48,9 @@ func TestQueryLogStoreRoundtrip(t *testing.T) {
 	if err := store.Insert(ctx, QueryLogEntry{Timestamp: now.Add(time.Second), Instance: "a", Client: "1.2.3.4", Domain: "ads.test", Action: "BLOCK"}); err != nil {
 		t.Fatalf("Insert block: %v", err)
 	}
-	entries, err = store.Query(ctx, "", "", time.Time{}, 100)
+	entries, err = store.Query(ctx, "", "", "", time.Time{}, 0, 100)
 	if err != nil {
-		t.Fatalf("Query 2: %v", err)
+		t.Fatalf("Query: %v", err)
 	}
 	if len(entries) != 2 {
 		t.Fatalf("Query returned %d entries, want 2", len(entries))
@@ -86,7 +86,7 @@ func TestQueryLogStoreMaintenance(t *testing.T) {
 	if err := store.ClearQueryLog(ctx); err != nil {
 		t.Fatalf("ClearQueryLog: %v", err)
 	}
-	entries, err := store.Query(ctx, "", "", time.Time{}, 100)
+	entries, err := store.Query(ctx, "", "", "", time.Time{}, 0, 100)
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}
@@ -253,6 +253,74 @@ func TestQueryLogStoreTopDomains(t *testing.T) {
 	}
 }
 
+func TestQueryLogStoreQueryCountAndPagination(t *testing.T) {
+	store, err := NewQueryLogStore(filepath.Join(t.TempDir(), "querylog.db"))
+	if err != nil {
+		t.Fatalf("NewQueryLogStore: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	now := time.Now()
+	// 4 pass + 2 block for example.com, 1 empty-domain (excluded), 1 health_check (excluded).
+	for i := 0; i < 4; i++ {
+		if err := store.Insert(ctx, QueryLogEntry{Timestamp: now.Add(-time.Duration(i) * time.Minute), Instance: "a", Client: "c", Domain: "example.com", Action: "PASS"}); err != nil {
+			t.Fatalf("Insert: %v", err)
+		}
+	}
+	for i := 0; i < 2; i++ {
+		if err := store.Insert(ctx, QueryLogEntry{Timestamp: now.Add(-time.Duration(i) * time.Minute), Instance: "a", Client: "c", Domain: "example.com", Action: "BLOCK"}); err != nil {
+			t.Fatalf("Insert: %v", err)
+		}
+	}
+	if err := store.Insert(ctx, QueryLogEntry{Timestamp: now, Instance: "a", Client: "c", Domain: "", Action: "PASS"}); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+	if err := store.Insert(ctx, QueryLogEntry{Timestamp: now, Instance: "a", Client: "c", Domain: "health_check", Action: "PASS"}); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+
+	// All actions: 4 pass + 2 block = 6 (empty + health_check excluded).
+	if n, err := store.QueryCount(ctx, "", "", "", now.Add(-24*time.Hour)); err != nil {
+		t.Fatalf("QueryCount: %v", err)
+	} else if n != 6 {
+		t.Errorf("QueryCount = %d, want 6", n)
+	}
+
+	// Action filter: pass=4, block=2.
+	if n, err := store.QueryCount(ctx, "", "", "PASS", now.Add(-24*time.Hour)); err != nil {
+		t.Fatalf("QueryCount(PASS): %v", err)
+	} else if n != 4 {
+		t.Errorf("QueryCount(PASS) = %d, want 4", n)
+	}
+	if n, err := store.QueryCount(ctx, "", "", "BLOCK", now.Add(-24*time.Hour)); err != nil {
+		t.Fatalf("QueryCount(BLOCK): %v", err)
+	} else if n != 2 {
+		t.Errorf("QueryCount(BLOCK) = %d, want 2", n)
+	}
+
+	// Pagination: limit 2, offset 0 then 2 yields disjoint, stable pages
+	// (newest first), totaling 6 with no overlap.
+	p0, err := store.Query(ctx, "", "", "", now.Add(-24*time.Hour), 0, 2)
+	if err != nil {
+		t.Fatalf("Query page0: %v", err)
+	}
+	p1, err := store.Query(ctx, "", "", "", now.Add(-24*time.Hour), 2, 2)
+	if err != nil {
+		t.Fatalf("Query page1: %v", err)
+	}
+	if len(p0) != 2 || len(p1) != 2 {
+		t.Fatalf("pages = %d,%d want 2,2", len(p0), len(p1))
+	}
+	if p0[0].ID == p1[0].ID {
+		t.Errorf("pagination overlapped: p0 first == p1 first (%d)", p0[0].ID)
+	}
+	// Newest page's first row is the most recent overall.
+	if p0[0].Timestamp.Before(p1[0].Timestamp) {
+		t.Errorf("page0 first %v should be >= page1 first %v", p0[0].Timestamp, p1[0].Timestamp)
+	}
+}
+
 func TestClientNames(t *testing.T) {
 	store, err := NewQueryLogStore(filepath.Join(t.TempDir(), "querylog.db"))
 	if err != nil {
@@ -315,7 +383,7 @@ func TestClientNames(t *testing.T) {
 			t.Errorf("ClientStats unnamed got %q", s.Name)
 		}
 	}
-	entries, err := store.Query(ctx, "", "Gaming Rig", now.Add(-time.Hour), 100)
+	entries, err := store.Query(ctx, "", "Gaming Rig", "", now.Add(-time.Hour), 0, 100)
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}
@@ -402,7 +470,7 @@ func TestQueryLogStoreRetention(t *testing.T) {
 
 	// Widening the window keeps everything.
 	store.SetRetention(7 * 24 * time.Hour)
-	entries, err := store.Query(ctx, "", "", now.Add(-7*24*time.Hour), 100)
+	entries, err := store.Query(ctx, "", "", "", now.Add(-7*24*time.Hour), 0, 100)
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}
@@ -415,7 +483,7 @@ func TestQueryLogStoreRetention(t *testing.T) {
 	if st := store.Retention(); st != 24*time.Hour {
 		t.Fatalf("retention after SetRetention = %v, want 24h", st)
 	}
-	entries, err = store.Query(ctx, "", "", now.Add(-7*24*time.Hour), 100)
+	entries, err = store.Query(ctx, "", "", "", now.Add(-7*24*time.Hour), 0, 100)
 	if err != nil {
 		t.Fatalf("Query after shrink: %v", err)
 	}
@@ -543,7 +611,7 @@ func TestQueryLogStoreBatchWriter(t *testing.T) {
 	// The async writer should flush everything shortly after the last enqueue.
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		entries, err := store.Query(ctx, "", "", time.Time{}, 10000)
+		entries, err := store.Query(ctx, "", "", "", time.Time{}, 0, 10000)
 		if err != nil {
 			t.Fatalf("Query: %v", err)
 		}

@@ -94,7 +94,7 @@ type UpstreamErrorStat struct {
 // ClientStats aggregates query-log activity by client (DoH client ID or source
 // IP), most active first, capped at limit.
 func (s *QueryLogStore) ClientStats(ctx context.Context, instance string, since time.Time, limit int) ([]ClientStat, error) {
-	query := `SELECT ql.client, COALESCE(MAX(cn.name), ''), COUNT(*), SUM(CASE WHEN ql.action = 'BLOCK' THEN 1 ELSE 0 END), MAX(ql.timestamp) FROM query_log ql LEFT JOIN client_names cn ON cn.client = ql.client WHERE ql.timestamp >= ? AND ql.domain != 'health_check'`
+	query := `SELECT ql.client, COALESCE(MAX(cn.name), ''), COUNT(*), SUM(CASE WHEN ql.action = 'BLOCK' THEN 1 ELSE 0 END), MAX(ql.timestamp) FROM query_log ql LEFT JOIN client_names cn ON cn.client = ql.client WHERE ql.timestamp >= ? AND ql.domain != 'health_check' AND ql.domain != ''`
 	args := []interface{}{since}
 	if instance != "" {
 		query += " AND ql.instance = ?"
@@ -176,7 +176,7 @@ type InstanceCacheStat struct {
 // through the cache and are excluded, so the percentage reflects resolved
 // queries only. When instance is non-empty only that instance is returned.
 func (s *QueryLogStore) CacheStats(ctx context.Context, instance string, since time.Time) (map[string]InstanceCacheStat, error) {
-	query := `SELECT ql.instance, COUNT(*), COALESCE(SUM(CASE WHEN ql.cached = 1 THEN 1 ELSE 0 END), 0) FROM query_log ql WHERE ql.timestamp >= ? AND ql.domain != 'health_check' AND ql.action = 'PASS'`
+	query := `SELECT ql.instance, COUNT(*), COALESCE(SUM(CASE WHEN ql.cached = 1 THEN 1 ELSE 0 END), 0) FROM query_log ql WHERE ql.timestamp >= ? AND ql.domain != 'health_check' AND ql.domain != '' AND ql.action = 'PASS'`
 	args := []interface{}{since}
 	if instance != "" {
 		query += " AND ql.instance = ?"
@@ -334,14 +334,21 @@ func (s *QueryLogStore) Insert(ctx context.Context, e QueryLogEntry) error {
 	return err
 }
 
-// Query returns entries within the time range
-func (s *QueryLogStore) Query(ctx context.Context, instance, filter string, since time.Time, limit int) ([]QueryLogEntry, error) {
-	query := `SELECT ql.id, ql.timestamp, ql.instance, ql.client, COALESCE(cn.name, ''), ql.domain, ql.action, ql.upstream, ql.blocklist, ql.ips, ql.duration_us, ql.cached FROM query_log ql LEFT JOIN client_names cn ON cn.client = ql.client WHERE ql.timestamp >= ? AND ql.domain != 'health_check'`
+// Query returns entries within the time range. offset/limit page through the
+// results backwards in time (newest first); ordering is stable on (timestamp,
+// id) DESC so consecutive pages never duplicate or skip a row. An empty action
+// means "any action"; pass "PASS" or "BLOCK" to narrow by query outcome.
+func (s *QueryLogStore) Query(ctx context.Context, instance, filter, action string, since time.Time, offset, limit int) ([]QueryLogEntry, error) {
+	query := `SELECT ql.id, ql.timestamp, ql.instance, ql.client, COALESCE(cn.name, ''), ql.domain, ql.action, ql.upstream, ql.blocklist, ql.ips, ql.duration_us, ql.cached FROM query_log ql LEFT JOIN client_names cn ON cn.client = ql.client WHERE ql.timestamp >= ? AND ql.domain != 'health_check' AND ql.domain != ''`
 	args := []interface{}{since}
 
 	if instance != "" {
 		query += " AND ql.instance = ?"
 		args = append(args, instance)
+	}
+	if action != "" {
+		query += " AND ql.action = ?"
+		args = append(args, action)
 	}
 
 	filterLower := ""
@@ -351,8 +358,8 @@ func (s *QueryLogStore) Query(ctx context.Context, instance, filter string, sinc
 		args = append(args, filterLower, filterLower, filterLower, filterLower)
 	}
 
-	query += " ORDER BY ql.timestamp DESC LIMIT ?"
-	args = append(args, limit)
+	query += " ORDER BY ql.timestamp DESC, ql.id DESC LIMIT ? OFFSET ?"
+	args = append(args, limit, offset)
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -382,6 +389,32 @@ func (s *QueryLogStore) Query(ctx context.Context, instance, filter string, sinc
 		results = append(results, e)
 	}
 	return results, rows.Err()
+}
+
+// QueryCount returns the total number of query log entries that match the
+// (instance, filter, action, since) constraints, regardless of any
+// limit/offset paging.
+func (s *QueryLogStore) QueryCount(ctx context.Context, instance, filter, action string, since time.Time) (int, error) {
+	query := `SELECT COUNT(*) FROM query_log WHERE timestamp >= ? AND domain != 'health_check' AND domain != ''`
+	args := []interface{}{since}
+	if instance != "" {
+		query += " AND instance = ?"
+		args = append(args, instance)
+	}
+	if action != "" {
+		query += " AND action = ?"
+		args = append(args, action)
+	}
+	if filter != "" {
+		fl := "%" + filter + "%"
+		query += " AND (LOWER(client) LIKE ? OR LOWER(domain) LIKE ? OR LOWER(action) LIKE ?)"
+		args = append(args, fl, fl, fl)
+	}
+	var n int
+	if err := s.db.QueryRowContext(ctx, query, args...).Scan(&n); err != nil {
+		return 0, err
+	}
+	return n, nil
 }
 
 // SetClientName upserts the friendly display name for a client (DoH client ID

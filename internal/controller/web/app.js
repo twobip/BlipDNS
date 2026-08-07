@@ -151,10 +151,10 @@ async function refresh() {
     const res = await API("/api/instances");
     instances = await res.json();
     updateConn();
-    if (current === "dashboard") renderDashboard();
-    else if (current === "instances") renderInstances();
-    else if (current === "queries") renderQueries();
-    else if (current === "cache-stats") renderCacheStats();
+    	if (current === "dashboard") renderDashboard();
+    	else if (current === "instances") renderInstances();
+    	else if (current === "queries") refreshQueryTop();
+    	else if (current === "cache-stats") renderCacheStats();
     else if (current === "upstream-errors") renderUpstreamErrors();
     else if (current === "clients") renderClients();
     else if (current === "filters") renderPolicies();
@@ -418,55 +418,110 @@ function confirmRemove(id) {
 
 /* ---------- queries ---------- */
 let qState = { action: "", filter: "", inst: "" };
+// Paginated query-log state. The log is fetched 25 rows at a time, newest
+// first, and appended on scroll. Filtering (text + action + instance) is done
+// server-side so the total and the pages are consistent.
+let qPage = { offset: 0, total: 0, ended: false, loading: false, rows: [] };
+const QL_PAGE = 25;
+let qlObserver = null;
+
+function queryRowHtml(r) {
+  const action = (r.action || "").toUpperCase();
+  const isBlock = action === "BLOCK";
+  const inst = instances.find((i) => (i.label || i.id) === r.instance);
+  const actionLabel = isBlock ? "Blocked" : action === "PASS" ? "Allowed" : esc(action || "—");
+  const actionBadge = isBlock ? "err" : action === "PASS" ? "on" : "";
+  // info icon tooltip: which upstream answered, or which list blocked it
+  const tipLabel = isBlock ? "Blocked by" : r.cached ? "Cache" : "Upstream";
+  const tipValue = isBlock
+    ? (r.blocklist || "blocklist")
+    : r.cached ? "Served from cache" : (r.upstream || "unknown");
+  return `<tr class="${isBlock ? "q-row-block" : ""}">
+    <td class="q-time"><span class="t" data-t="${esc(r.timestamp)}" title="${esc(r.timestamp)}">…</span></td>
+    <td class="q-domain">
+      <span class="q-globe">${IC.globe}</span>
+      <span class="mono q-dom" title="${esc(r.domain)}">${esc(r.domain)}</span>
+      <span class="q-info" data-tipl="${esc(tipLabel)}" data-tipv="${esc(tipValue)}">${IC.info}</span>
+      <button class="icon-btn q-copy" data-copy="${esc(r.domain)}" title="Copy domain">${IC.copy}</button>
+    </td>
+    <td><span class="badge badge-action ${actionBadge}">${isBlock ? IC.block : action === "PASS" ? IC.arrow : ""}${actionLabel}</span></td>
+    <td class="q-client">${clientCellHtml(r)}</td>
+    <td class="q-ips">${ipsHtml(r.ips)}</td>
+    <td class="q-lat">${latencyHtml(r)}</td>
+    <td class="q-inst"><span class="dot ${inst && inst.online ? "on" : "off"}"></span>${esc(inst ? (inst.label || inst.id) : r.instance)}</td>
+  </tr>`;
+}
+
 async function renderQueries() {
   const tb = $("q-tbody");
-  const sinceQ = "&since=24h&limit=300";
   qTip.hide();
+  qPage = { offset: 0, total: 0, ended: false, loading: false, rows: [] };
+  propsInstanceOptions();
+  await fetchQueryPage(tb);
+}
+
+async function fetchQueryPage(tb) {
+  if (qPage.loading || qPage.ended || qPage.total > 0 && qPage.rows.length >= qPage.total) return;
+  qPage.loading = true;
+  const base = "/api/queries?instance=" + encodeURIComponent(qState.inst)
+    + "&action=" + encodeURIComponent(qState.action)
+    + "&filter=" + encodeURIComponent(qState.filter)
+    + "&since=24h&offset=" + qPage.offset + "&limit=" + QL_PAGE;
   try {
-    const res = await API("/api/queries?instance=" + encodeURIComponent(qState.inst) + sinceQ);
-    const rows = await res.json();
-    const list = rows.filter((r) => {
-      if (!r.domain) return false;
-      if (qState.filter && !(r.domain + " " + r.client + " " + (r.name || "") + " " + r.instance).toLowerCase().includes(qState.filter.toLowerCase())) return false;
-      if (qState.action && (r.action || "").toUpperCase() !== qState.action) return false;
-      return true;
-    });
-    propsInstanceOptions();
-    $("q-count").textContent = list.length + " entries (shown)";
-    if (!list.length) {
-      tb.innerHTML = `<tr class="empty-row"><td colspan="7"><div class="empty"><div class="empty-ic">${IC.query}</div><h4>No queries</h4><p>Nothing matched in the last 24 hours.</p></div></td></tr>`;
-      return;
-    }
-    tb.innerHTML = list.map((r) => {
-      const action = (r.action || "").toUpperCase();
-      const isBlock = action === "BLOCK";
-      const inst = instances.find((i) => (i.label || i.id) === r.instance);
-      const actionLabel = isBlock ? "Blocked" : action === "PASS" ? "Allowed" : esc(action || "—");
-      const actionBadge = isBlock ? "err" : action === "PASS" ? "on" : "";
-      // info icon tooltip: which upstream answered, or which list blocked it
-      const tipLabel = isBlock ? "Blocked by" : r.cached ? "Cache" : "Upstream";
-      const tipValue = isBlock
-        ? (r.blocklist || "blocklist")
-        : r.cached ? "Served from cache" : (r.upstream || "unknown");
-      return `<tr class="${isBlock ? "q-row-block" : ""}">
-        <td class="q-time"><span class="t" data-t="${esc(r.timestamp)}" title="${esc(r.timestamp)}">…</span></td>
-        <td class="q-domain">
-          <span class="q-globe">${IC.globe}</span>
-          <span class="mono q-dom" title="${esc(r.domain)}">${esc(r.domain)}</span>
-          <span class="q-info" data-tipl="${esc(tipLabel)}" data-tipv="${esc(tipValue)}">${IC.info}</span>
-          <button class="icon-btn q-copy" data-copy="${esc(r.domain)}" title="Copy domain">${IC.copy}</button>
-        </td>
-        <td><span class="badge badge-action ${actionBadge}">${isBlock ? IC.block : action === "PASS" ? IC.arrow : ""}${actionLabel}</span></td>
-        <td class="q-client">${clientCellHtml(r)}</td>
-        <td class="q-ips">${ipsHtml(r.ips)}</td>
-        <td class="q-lat">${latencyHtml(r)}</td>
-        <td class="q-inst"><span class="dot ${inst && inst.online ? "on" : "off"}"></span>${esc(inst ? (inst.label || inst.id) : r.instance)}</td>
-      </tr>`;
-    }).join("");
-    tb.querySelectorAll(".t").forEach((t) => { t.textContent = timeAgo(t.dataset.t); });
+    const res = await API(base);
+    const d = await res.json();
+    const page = Array.isArray(d.entries) ? d.entries : [];
+    qPage.total = Number(d.total) || 0;
+    qPage.offset += page.length;
+    qPage.rows = qPage.rows.concat(page);
+    qPage.ended = page.length < QL_PAGE || qPage.rows.length >= qPage.total;
+    renderQueryRows(tb);
   } catch (e) {
     tb.innerHTML = `<tr class="empty-row"><td colspan="7"><div class="empty"><div class="empty-ic">${IC.warn}</div><h4>Query log unavailable</h4><p>${esc(e.message)}</p></div></td></tr>`;
+    qPage.ended = true;
+  } finally {
+    qPage.loading = false;
   }
+  observeQuerySentinel();
+}
+
+function renderQueryRows(tb) {
+  if (!qPage.rows.length) {
+    tb.innerHTML = `
+      <tr class="empty-row"><td colspan="7"><div class="empty"><div class="empty-ic">${IC.query}</div><h4>No queries</h4><p>Nothing matched in the last 24 hours.</p></div></td></tr>
+      <tr id="q-sentinel"><td colspan="7"></td></tr>`;
+    return;
+  }
+  const rows = qPage.rows.map((r) => queryRowHtml(r)).join("");
+  const count = qPage.total > 0 ? qPage.total : qPage.rows.length;
+  $("q-count").textContent = qPage.rows.length + " of " + count + " entries loaded";
+  tb.innerHTML = rows + `<tr id="q-sentinel"><td colspan="7"></td></tr>`;
+  tb.querySelectorAll(".t").forEach((t) => { t.textContent = timeAgo(t.dataset.t); });
+}
+
+// Observe the sentinel <tr> at the bottom of the table; when it scrolls into
+// view, fetch the next page (classic infinite scroll).
+function observeQuerySentinel() {
+  if (qlObserver) qlObserver.disconnect();
+  const sentinel = $("q-sentinel");
+  if (!sentinel || qPage.ended || (qPage.total > 0 && qPage.rows.length >= qPage.total)) return;
+  qlObserver = new IntersectionObserver((entries) => {
+    if (entries[0].isIntersecting) fetchQueryPage($("q-tbody"));
+  });
+  qlObserver.observe(sentinel);
+}
+
+// Refresh the newest page of the query log only when the user hasn't scrolled
+// into history; otherwise leave them where they are (manual Refresh resets).
+function refreshQueryTop() {
+  if (qPage.offset > QL_PAGE) return;
+  renderQueries();
+}
+
+// debounce: delay a call until `ms` has elapsed since the last invocation.
+function debounce(fn, ms) {
+  let t = null;
+  return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); };
 }
 
 // latencyHtml renders the answer latency and a cache badge for a query row.
@@ -1318,7 +1373,7 @@ $("inst-tbody").addEventListener("click", (e) => {
 });
 
 /* queries */
-$("q-filter").addEventListener("input", (e) => { qState.filter = e.target.value; renderQueries(); });
+$("q-filter").addEventListener("input", debounce((e) => { qState.filter = e.target.value; renderQueries(); }, 300));
 $("q-instance").addEventListener("change", (e) => { qState.inst = e.target.value; renderQueries(); });
 $("q-refresh").onclick = renderQueries;
 

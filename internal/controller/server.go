@@ -281,9 +281,17 @@ func (s *Server) handleInstance(w http.ResponseWriter, r *http.Request) {
 		}
 		instance := r.URL.Query().Get("instance")
 		filter := r.URL.Query().Get("filter")
+		action := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("action")))
+		if action != "" && action != "PASS" && action != "BLOCK" {
+			action = ""
+		}
 		limit := 100
 		if l := r.URL.Query().Get("limit"); l != "" {
 			fmt.Sscanf(l, "%d", &limit)
+		}
+		offset := 0
+		if o := r.URL.Query().Get("offset"); o != "" {
+			fmt.Sscanf(o, "%d", &offset)
 		}
 		since := time.Now().Add(-24 * time.Hour)
 		if s := r.URL.Query().Get("since"); s != "" {
@@ -291,7 +299,7 @@ func (s *Server) handleInstance(w http.ResponseWriter, r *http.Request) {
 				since = time.Now().Add(-d)
 			}
 		}
-		entries, err := s.fleet.queryLog.Query(ctx, instance, filter, since, limit)
+		entries, err := s.fleet.queryLog.Query(ctx, instance, filter, action, since, offset, limit)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
@@ -535,9 +543,18 @@ func (s *Server) handleQueries(w http.ResponseWriter, r *http.Request) {
 	}
 	instance := r.URL.Query().Get("instance")
 	filter := r.URL.Query().Get("filter")
+	// action: "" (any), "PASS" or "BLOCK"
+	action := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("action")))
+	if action != "" && action != "PASS" && action != "BLOCK" {
+		action = ""
+	}
 	limit := 100
 	if l := r.URL.Query().Get("limit"); l != "" {
 		fmt.Sscanf(l, "%d", &limit)
+	}
+	offset := 0
+	if o := r.URL.Query().Get("offset"); o != "" {
+		fmt.Sscanf(o, "%d", &offset)
 	}
 	since := time.Now().Add(-24 * time.Hour)
 	if s := r.URL.Query().Get("since"); s != "" {
@@ -545,12 +562,21 @@ func (s *Server) handleQueries(w http.ResponseWriter, r *http.Request) {
 			since = time.Now().Add(-d)
 		}
 	}
-	entries, err := s.fleet.queryLog.Query(r.Context(), instance, filter, since, limit)
+	entries, err := s.fleet.queryLog.Query(r.Context(), instance, filter, action, since, offset, limit)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
-	writeJSON(w, entries)
+	total, err := s.fleet.queryLog.QueryCount(r.Context(), instance, filter, action, since)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	writeJSON(w, map[string]interface{}{
+		"entries":  entries,
+		"total":    total,
+		"has_more": len(entries) == limit && offset+limit < total,
+	})
 }
 
 // handleClients returns per-client activity (DoH client IDs and source IPs).
