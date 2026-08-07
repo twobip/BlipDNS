@@ -441,8 +441,8 @@ function queryRowHtml(r) {
   const inst = instances.find((i) => (i.label || i.id) === r.instance);
   const actionLabel = isBlock ? "Blocked" : action === "PASS" ? "Allowed" : esc(action || "—");
   const actionBadge = isBlock ? "err" : action === "PASS" ? "on" : "";
-  // info icon tooltip: which upstream answered, or which list blocked it
-  const tipLabel = isBlock ? "Blocked by" : r.cached ? "Cache" : "Upstream";
+  // info icon tooltip: request type (qtype) above the upstream/block source.
+  const tipLabel = (r.q_type || "") + (r.q_type ? " · " : "") + (isBlock ? "Blocked by" : r.cached ? "Cache" : "Upstream");
   const tipValue = isBlock
     ? (r.blocklist || "blocklist")
     : r.cached ? "Served from cache" : (r.upstream || "unknown");
@@ -456,7 +456,7 @@ function queryRowHtml(r) {
     </td>
     <td><span class="badge badge-action ${actionBadge}">${isBlock ? IC.block : action === "PASS" ? IC.arrow : ""}${actionLabel}</span></td>
     <td class="q-client">${clientCellHtml(r)}</td>
-    <td class="q-ips">${ipsHtml(r.ips)}</td>
+    <td class="q-ips">${resolvedHtml(r)}</td>
     <td class="q-lat">${latencyHtml(r)}</td>
     <td class="q-inst"><span class="dot ${inst && inst.online ? "on" : "off"}"></span>${esc(inst ? (inst.label || inst.id) : r.instance)}</td>
   </tr>`;
@@ -555,6 +555,28 @@ function ipsHtml(ips) {
   const extra = list.length - shown.length;
   return shown.map((ip) => `<span class="q-chip" data-copy="${esc(ip)}" title="Copy ${esc(ip)}">${esc(ip)}</span>`).join("") +
     (extra > 0 ? `<span class="q-chip-more" title="${esc(list.join(", "))}">+${extra}</span>` : "");
+}
+
+// resolvedHtml renders the "Resolved IP" cell. Prefers the full answers list
+// (so TXT/CNAME/MX/SRV etc. are visible, not just A/AAAA), but falls back to
+// the legacy ips field for older persisted rows. TTL (seconds) is shown when
+// present (omitted for 0/unknown, and never on blocked answers).
+function resolvedHtml(r) {
+  const ans = r.answers && r.answers.length ? r.answers : [];
+  const ips = r.ips || [];
+  const isBlock = (r.action || "").toUpperCase() === "BLOCK";
+  const parts = ans.length
+    ? ans.map((a) => {
+        const label = a.type + ": " + a.data;
+        if (isBlock || !a.ttl) return label;
+        return label + " (" + a.ttl + "s)";
+      })
+    : ips.map((ip) => ip);
+  if (!parts.length) return `<span class="q-ips-empty">—</span>`;
+  const shown = parts.slice(0, 2);
+  const extra = parts.length - shown.length;
+  return shown.map((p) => `<span class="q-chip" title="${esc(p)}">${esc(p)}</span>`).join("") +
+    (extra > 0 ? `<span class="q-chip-more" title="${esc(parts.join(", "))}">+${extra}</span>` : "");
 }
 
 async function copyText(s) {

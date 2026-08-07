@@ -247,9 +247,11 @@ func (i *Instance) watch(ctx context.Context) {
 					Client:     e.Client,
 					Domain:     e.Domain,
 					Action:     strings.ToUpper(e.Type), // "BLOCK" or "PASS"
+					QType:      e.QType,
 					Upstream:   e.Upstream,
 					BlockList:  blockList,
 					IPs:        e.IPs,
+					Answers:    toAnswers(e.Answers),
 					DurationUs: e.DurationUs,
 					Cached:     e.Cached,
 				})
@@ -272,6 +274,20 @@ func (i *Instance) watch(ctx context.Context) {
 			}
 		}
 	}
+}
+
+// toAnswers converts the []control.Answer carried by a WatchEvent into the
+// controller package's own Answer type for storage. The two types are
+// structurally identical; this avoids importing control from querylog.go.
+func toAnswers(in []control.Answer) []Answer {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]Answer, len(in))
+	for i, a := range in {
+		out[i] = Answer{Type: a.Type, Data: a.Data, TTL: a.TTL}
+	}
+	return out
 }
 
 func (i *Instance) status() *InstanceStatus {

@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"net"
 	"strings"
@@ -34,6 +35,13 @@ const (
 // operator picks a different retention in the controller settings.
 const defaultQueryLogRetention = 24 * time.Hour
 
+// Answer is a single resource record attached to a QueryLogEntry for display.
+type Answer struct {
+	Type string `json:"type"` // textual RR type, e.g. "A", "AAAA", "TXT", "CNAME", "MX", "SRV"
+	Data string `json:"data"` // rendered rdata (owner name omitted)
+	TTL  int    `json:"ttl,omitempty"`
+}
+
 // QueryLogEntry represents a single DNS query event
 type QueryLogEntry struct {
 	ID        int64     `json:"id"`
@@ -46,8 +54,15 @@ type QueryLogEntry struct {
 	Upstream  string    `json:"upstream,omitempty"`
 	// BlockList names the list/policy that blocked this query ("" when the
 	// query was not blocked).
-	BlockList string   `json:"blocklist,omitempty"`
-	IPs       []string `json:"ips,omitempty"`
+	BlockList string `json:"blocklist,omitempty"`
+	// QType is the textual RR type of the question (e.g. "A", "TXT", "MX").
+	QType string `json:"q_type,omitempty"`
+	// IPs holds the A/AAAA rdata (kept for backward compatibility with the
+	// Resolved IP column rendering).
+	IPs []string `json:"ips,omitempty"`
+	// Answers holds every response record in display form (type + data),
+	// preserving non-IP answers like TXT/CNAME/MX for the query log.
+	Answers []Answer `json:"answers,omitempty"`
 	// DurationUs is how long the query took to answer, in microseconds.
 	// Cached reports whether the answer was served from the response cache.
 	DurationUs int64 `json:"duration_us,omitempty"`
@@ -265,7 +280,9 @@ func NewQueryLogStore(dbPath string) (*QueryLogStore, error) {
 		domain TEXT NOT NULL,
 		action TEXT NOT NULL,
 		upstream TEXT,
+		q_type TEXT,
 		ips TEXT,
+		answers TEXT,
 		duration_us INTEGER,
 		cached INTEGER
 	);
@@ -299,6 +316,8 @@ func NewQueryLogStore(dbPath string) (*QueryLogStore, error) {
 	}
 	// Add columns to existing databases (no-ops if already present)
 	for _, col := range []string{
+		"ALTER TABLE query_log ADD COLUMN q_type TEXT",
+		"ALTER TABLE query_log ADD COLUMN answers TEXT",
 		"ALTER TABLE query_log ADD COLUMN ips TEXT",
 		"ALTER TABLE query_log ADD COLUMN duration_us INTEGER",
 		"ALTER TABLE query_log ADD COLUMN cached INTEGER",
@@ -324,13 +343,14 @@ func NewQueryLogStore(dbPath string) (*QueryLogStore, error) {
 // Insert adds a new query log entry
 func (s *QueryLogStore) Insert(ctx context.Context, e QueryLogEntry) error {
 	ips := strings.Join(e.IPs, ",")
+	ans, _ := json.Marshal(e.Answers)
 	cached := 0
 	if e.Cached {
 		cached = 1
 	}
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO query_log (timestamp, instance, client, domain, action, upstream, blocklist, ips, duration_us, cached) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		e.Timestamp, e.Instance, e.Client, e.Domain, e.Action, e.Upstream, e.BlockList, ips, e.DurationUs, cached)
+		`INSERT INTO query_log (timestamp, instance, client, domain, action, upstream, q_type, blocklist, ips, answers, duration_us, cached) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		e.Timestamp, e.Instance, e.Client, e.Domain, e.Action, e.Upstream, e.QType, e.BlockList, ips, string(ans), e.DurationUs, cached)
 	return err
 }
 
@@ -339,7 +359,7 @@ func (s *QueryLogStore) Insert(ctx context.Context, e QueryLogEntry) error {
 // id) DESC so consecutive pages never duplicate or skip a row. An empty action
 // means "any action"; pass "PASS" or "BLOCK" to narrow by query outcome.
 func (s *QueryLogStore) Query(ctx context.Context, instance, filter, action string, since time.Time, offset, limit int) ([]QueryLogEntry, error) {
-	query := `SELECT ql.id, ql.timestamp, ql.instance, ql.client, COALESCE(cn.name, ''), ql.domain, ql.action, ql.upstream, ql.blocklist, ql.ips, ql.duration_us, ql.cached FROM query_log ql LEFT JOIN client_names cn ON cn.client = ql.client WHERE ql.timestamp >= ? AND ql.domain != 'health_check' AND ql.domain != ''`
+	query := `SELECT ql.id, ql.timestamp, ql.instance, ql.client, COALESCE(cn.name, ''), ql.domain, ql.action, ql.upstream, ql.q_type, ql.blocklist, ql.ips, ql.answers, ql.duration_us, ql.cached FROM query_log ql LEFT JOIN client_names cn ON cn.client = ql.client WHERE ql.timestamp >= ? AND ql.domain != 'health_check' AND ql.domain != ''`
 	args := []interface{}{since}
 
 	if instance != "" {
@@ -371,18 +391,23 @@ func (s *QueryLogStore) Query(ctx context.Context, instance, filter, action stri
 	for rows.Next() {
 		var e QueryLogEntry
 		var ts string
-		var bl sql.NullString
-		var ips sql.NullString
+		var qType, bl, ips, ans sql.NullString
 		var dur, cached sql.NullInt64
-		if err := rows.Scan(&e.ID, &ts, &e.Instance, &e.Client, &e.Name, &e.Domain, &e.Action, &e.Upstream, &bl, &ips, &dur, &cached); err != nil {
+		if err := rows.Scan(&e.ID, &ts, &e.Instance, &e.Client, &e.Name, &e.Domain, &e.Action, &e.Upstream, &qType, &bl, &ips, &ans, &dur, &cached); err != nil {
 			return nil, err
 		}
 		e.Timestamp = parseQueryTS(ts)
+		if qType.Valid {
+			e.QType = qType.String
+		}
 		if bl.Valid {
 			e.BlockList = bl.String
 		}
 		if ips.Valid && ips.String != "" {
 			e.IPs = strings.Split(ips.String, ",")
+		}
+		if ans.Valid && ans.String != "" {
+			_ = json.Unmarshal([]byte(ans.String), &e.Answers)
 		}
 		e.DurationUs = dur.Int64
 		e.Cached = cached.Valid && cached.Int64 != 0
@@ -727,7 +752,7 @@ func (s *QueryLogStore) insertBatch(ctx context.Context, entries []QueryLogEntry
 	if err != nil {
 		return
 	}
-	stmt, err := tx.Prepare(`INSERT INTO query_log (timestamp, instance, client, domain, action, upstream, blocklist, ips, duration_us, cached) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+	stmt, err := tx.Prepare(`INSERT INTO query_log (timestamp, instance, client, domain, action, upstream, q_type, blocklist, ips, answers, duration_us, cached) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		_ = tx.Rollback()
 		return
@@ -738,7 +763,9 @@ func (s *QueryLogStore) insertBatch(ctx context.Context, entries []QueryLogEntry
 		if e.Cached {
 			cached = 1
 		}
-		if _, err := stmt.Exec(e.Timestamp, e.Instance, e.Client, e.Domain, e.Action, e.Upstream, e.BlockList, strings.Join(e.IPs, ","), e.DurationUs, cached); err != nil {
+		ips := strings.Join(e.IPs, ",")
+		ans, _ := json.Marshal(e.Answers)
+		if _, err := stmt.Exec(e.Timestamp, e.Instance, e.Client, e.Domain, e.Action, e.Upstream, e.QType, e.BlockList, ips, string(ans), e.DurationUs, cached); err != nil {
 			_ = tx.Rollback()
 			return
 		}

@@ -262,6 +262,7 @@ func (s *Server) serve(ctx context.Context, clientIP net.IP, clientID string, re
 		s.ctrl.Notify(control.WatchEvent{
 			Type: "block", At: time.Now(),
 			Client: client, Domain: domain,
+			QType: qType(req), Answers: answersFor(req, resp),
 			BlockList:  "global",
 			DurationUs: time.Since(start).Microseconds(),
 		})
@@ -278,6 +279,7 @@ func (s *Server) serve(ctx context.Context, clientIP net.IP, clientID string, re
 		s.ctrl.Notify(control.WatchEvent{
 			Type: "block", At: time.Now(),
 			Client: client, Domain: domain,
+			QType: qType(req), Answers: answersFor(req, resp),
 			BlockList:  s.cfg.Store.BlockSource(clientIP, clientID, domain),
 			DurationUs: time.Since(start).Microseconds(),
 		})
@@ -327,27 +329,73 @@ func (s *Server) serve(ctx context.Context, clientIP net.IP, clientID string, re
 	out.Id = req.Id
 	out.Question = req.Question
 
-	// Notify pass event for query log (with resolved IPs)
+	// Notify pass event for query log (with full answer records + qtype so
+	// non-address answers like TXT/CNAME/MX are preserved, not just A/AAAA).
+	answers := answersFor(req, out)
+	// answersFor already populated IPs for the legacy IPs field below.
 	var ips []string
-	for _, rr := range out.Answer {
-		switch a := rr.(type) {
-		case *dns.A:
-			ips = append(ips, a.A.String())
-		case *dns.AAAA:
-			ips = append(ips, a.AAAA.String())
+	for _, a := range answers {
+		if isAddressType(a.Type) {
+			ips = append(ips, a.Data)
 		}
 	}
 	s.ctrl.Notify(control.WatchEvent{
-		Type:   "pass",
-		At:     time.Now(),
-		Client: client,
-		Domain: domain,
-		IPs:    ips,
-		// Cached=true when the answer came from the response cache.
+		Type:       "pass",
+		At:         time.Now(),
+		Client:     client,
+		Domain:     domain,
+		QType:      qType(req),
+		IPs:        ips,
+		Answers:    answers,
 		Cached:     cached,
 		Upstream:   upstreamLabel,
 		DurationUs: time.Since(start).Microseconds(),
 	})
+	return out
+}
+
+// qType returns the textual RR-type mnemonic of the query question (e.g.
+// "A", "AAAA", "TXT"); falls back to the numeric code if unknown.
+func qType(req *dns.Msg) string {
+	if len(req.Question) == 0 {
+		return ""
+	}
+	return dns.TypeToString[req.Question[0].Qtype]
+}
+
+// isAddressType reports whether a rendered RR type is an IP address answer.
+func isAddressType(t string) bool {
+	return t == "A" || t == "AAAA"
+}
+
+// answersFor renders every resource record in a DNS response into a slice of
+// control.Answer, preserving A/AAAA addresses, TXT strings (unescaped/quote
+// trimmed), CNAME targets, and MX/SRV priorities. The owner name is omitted
+// (it is the query name itself) to keep rows compact.
+func answersFor(req *dns.Msg, resp *dns.Msg) []control.Answer {
+	if resp == nil || len(resp.Answer) == 0 {
+		return nil
+	}
+	out := make([]control.Answer, 0, len(resp.Answer))
+	for _, rr := range resp.Answer {
+		ttl := int(rr.Header().Ttl)
+		switch a := rr.(type) {
+		case *dns.A:
+			out = append(out, control.Answer{Type: "A", Data: a.A.String(), TTL: ttl})
+		case *dns.AAAA:
+			out = append(out, control.Answer{Type: "AAAA", Data: a.AAAA.String(), TTL: ttl})
+		case *dns.CNAME:
+			out = append(out, control.Answer{Type: "CNAME", Data: a.Target, TTL: ttl})
+		case *dns.TXT:
+			out = append(out, control.Answer{Type: "TXT", Data: strings.Join(a.Txt, ""), TTL: ttl})
+		case *dns.MX:
+			out = append(out, control.Answer{Type: "MX", Data: fmt.Sprintf("%s %d", a.Mx, a.Preference), TTL: ttl})
+		case *dns.SRV:
+			out = append(out, control.Answer{Type: "SRV", Data: fmt.Sprintf("%d %d %d %s", a.Priority, a.Weight, a.Port, a.Target), TTL: ttl})
+		default:
+			out = append(out, control.Answer{Type: dns.TypeToString[rr.Header().Rrtype], Data: rr.String(), TTL: ttl})
+		}
+	}
 	return out
 }
 

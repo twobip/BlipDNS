@@ -124,6 +124,17 @@ type AckResponse struct {
 	Msg string `json:"msg,omitempty"`
 }
 
+// Answer is a single resource record returned in a DNS response. Type is the
+// textual RR type (e.g. "A", "AAAA", "TXT", "CNAME", "MX"); Data is the rdata
+// rendered as it would appear on the wire (minus the owner name), e.g. an IP,
+// a quoted TXT string, or "10.0.0.1, preference=10" for MX. TTL is the
+// remaining TTL in seconds (0 if unknown).
+type Answer struct {
+	Type string `json:"type"`
+	Data string `json:"data"`
+	TTL  int    `json:"ttl,omitempty"`
+}
+
 // WatchEvent is streamed by GET /api/v1/watch as SSE.
 type WatchEvent struct {
 	Type   string         `json:"type"` // "stats" | "block" | "pass" | "error"
@@ -131,7 +142,14 @@ type WatchEvent struct {
 	Stats  *StatsResponse `json:"stats,omitempty"`
 	Client string         `json:"client,omitempty"`
 	Domain string         `json:"domain,omitempty"`
-	IPs    []string       `json:"ips,omitempty"`
+	// QType is the queried RR type as a textual mnemonic (e.g. "A", "AAAA",
+	// "TXT", "MX", "CNAME", "SRV"); derived from the DNS question.
+	QType string   `json:"q_type,omitempty"`
+	IPs   []string `json:"ips,omitempty"`
+	// Answers carries every resource record in the response in display form,
+	// so non-address answers (TXT, CNAME, MX, SRV, ...) are preserved instead
+	// of collapsing to A/AAAA addresses alone. Omitted when empty.
+	Answers []Answer `json:"answers,omitempty"`
 	// Msg carries the error detail for type "error".
 	Msg string `json:"msg,omitempty"`
 	// DurationUs is how long the query took to answer, in microseconds.
