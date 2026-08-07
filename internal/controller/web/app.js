@@ -1069,6 +1069,7 @@ function loadRlEditor() {
 // Response-cache editor state
 let savedCacheSize = 0;          // fleet-wide max cached responses (0 = unlimited)
 let savedCacheWarm = 0;          // fleet-wide auto-refresh count (0 = off)
+let savedQLRetention = 24;       // how long query log entries are kept (hours)
 let cacheScopeState = "default"; // "default" or an instance id
 function renderCacheScopeSelect() {
   const sel = $("s-cache-scope");
@@ -1221,6 +1222,7 @@ async function refreshSettings() {
     savedRLQPS = (d.rate_limit_qps != null && d.rate_limit_qps !== undefined) ? Number(d.rate_limit_qps || 0) : 0;
     savedCacheSize = (d.cache_size != null && d.cache_size !== undefined) ? Number(d.cache_size || 0) : 0;
     savedCacheWarm = (d.cache_warm != null && d.cache_warm !== undefined) ? Number(d.cache_warm || 0) : 0;
+    savedQLRetention = (d.query_log_retention_hours != null && d.query_log_retention_hours !== undefined) ? Number(d.query_log_retention_hours || 24) : 24;
     // fleet-wide default upstream pool + conditional-forwarding routes
     savedUpServers = Array.isArray(d.upstream_servers) ? d.upstream_servers : [];
     savedUpRoutes = Array.isArray(d.upstream_routes) ? d.upstream_routes : [];
@@ -1229,6 +1231,7 @@ async function refreshSettings() {
     loadDoHEditor();
     loadRlEditor();
     loadCacheEditor();
+    loadQLEditor();
     $("s-up-status").textContent = "";
   } catch {}
 }
@@ -1602,6 +1605,25 @@ $("s-cache-purge").onclick = async () => {
       loadCacheEditor();
     } catch (e) { toast("purge failed: " + e.message, "err"); }
   });
+};
+
+function loadQLEditor() {
+  const sel = $("s-ql-retention");
+  if (![24, 168, 720, 4320, 8760].includes(savedQLRetention)) savedQLRetention = 24;
+  sel.value = String(savedQLRetention);
+}
+$("s-save-ql").onclick = async () => {
+  const st = $("s-ql-status");
+  st.textContent = "saving…";
+  const hours = Number($("s-ql-retention").value);
+  try {
+    await API("/api/settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ query_log_retention_hours: hours }) });
+    savedQLRetention = hours;
+    st.textContent = "saved";
+    toast("query log retention saved");
+    loadQLEditor();
+    setTimeout(() => { st.textContent = ""; }, 3000);
+  } catch (e) { st.textContent = ""; toast("save failed: " + e.message, "err"); }
 };
 
 function dohAddrForSave() {

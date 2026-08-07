@@ -22,21 +22,22 @@ import (
 const version = "blipc/0.1.0"
 
 type config struct {
-	Listen               string                                  `yaml:"listen"`
-	Username             string                                  `yaml:"username"`
-	Password             string                                  `yaml:"password"`
-	PasswordHash         string                                  `yaml:"password_hash"`
-	DefaultPolicy        *control.Policy                         `yaml:"default_policy"`
-	InstanceOverrides    map[string]*controller.InstanceOverride `yaml:"instance_overrides"`
-	DoHHTTPAddr          string                                  `yaml:"doh_http_addr"`
-	RateLimitQPS         int                                     `yaml:"rate_limit_qps"`
-	CacheSize            int                                     `yaml:"cache_size"`
-	CacheWarm            int                                     `yaml:"cache_warm"`
-	UpstreamServers      []upstream.UpstreamServer               `yaml:"upstream_servers"`
-	UpstreamRoutes       []upstream.UpstreamRoute                `yaml:"upstream_routes"`
-	BlocklistSources     []string                                `yaml:"blocklist_sources"`
-	BlocklistUpdateHours int                                     `yaml:"blocklist_update_hours"`
-	Instances            []controller.InstanceConfig             `yaml:"instances"`
+	Listen                 string                                  `yaml:"listen"`
+	Username               string                                  `yaml:"username"`
+	Password               string                                  `yaml:"password"`
+	PasswordHash           string                                  `yaml:"password_hash"`
+	DefaultPolicy          *control.Policy                         `yaml:"default_policy"`
+	InstanceOverrides      map[string]*controller.InstanceOverride `yaml:"instance_overrides"`
+	DoHHTTPAddr            string                                  `yaml:"doh_http_addr"`
+	RateLimitQPS           int                                     `yaml:"rate_limit_qps"`
+	CacheSize              int                                     `yaml:"cache_size"`
+	CacheWarm              int                                     `yaml:"cache_warm"`
+	QueryLogRetentionHours int                                     `yaml:"query_log_retention_hours"`
+	UpstreamServers        []upstream.UpstreamServer               `yaml:"upstream_servers"`
+	UpstreamRoutes         []upstream.UpstreamRoute                `yaml:"upstream_routes"`
+	BlocklistSources       []string                                `yaml:"blocklist_sources"`
+	BlocklistUpdateHours   int                                     `yaml:"blocklist_update_hours"`
+	Instances              []controller.InstanceConfig             `yaml:"instances"`
 }
 
 func main() {
@@ -77,6 +78,7 @@ func main() {
 	if cfg.CacheSize > 0 || cfg.CacheWarm > 0 {
 		fleet.SetCacheDefault(cfg.CacheSize, cfg.CacheWarm)
 	}
+	fleet.SetQueryLogRetentionDefault(cfg.QueryLogRetentionHours)
 	if len(cfg.UpstreamServers) > 0 || len(cfg.UpstreamRoutes) > 0 {
 		fleet.SetUpstreamDefault(cfg.UpstreamServers, cfg.UpstreamRoutes)
 		if len(cfg.UpstreamServers) > 0 {

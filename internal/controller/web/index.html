@@ -450,6 +450,27 @@
           </div>
 
           <div class="panel">
+            <div class="panel-head"><h3>Query Log</h3></div>
+            <div class="panel-body">
+              <div class="field">
+                <label>Keep query log entries for</label>
+                <select class="select" id="s-ql-retention" style="max-width:340px">
+                  <option value="24">1 day</option>
+                  <option value="168">1 week</option>
+                  <option value="720">1 month</option>
+                  <option value="4320">6 months</option>
+                  <option value="8760">1 year</option>
+                </select>
+                <span class="hint">Older entries are pruned automatically every hour. Applies to the query log and the upstream-errors details. Longer retention uses more disk: a year at typical home traffic is a few hundred MB. Does not affect dashboard statistics or blocklists.</span>
+              </div>
+              <div class="row mt">
+                <button class="btn btn-primary" id="s-save-ql">Save</button>
+                <span class="hint" id="s-ql-status"></span>
+              </div>
+            </div>
+          </div>
+
+          <div class="panel">
             <div class="panel-head"><h3>DoH (DNS over HTTPS)</h3><span class="spacer"></span><span class="badge accent" id="s-doh-badge">fleet-wide</span></div>
             <div class="panel-body">
               <div class="field">

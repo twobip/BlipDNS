@@ -15,11 +15,12 @@ import (
 
 // QueryLogStore provides persistent storage for query log events
 type QueryLogStore struct {
-	db      *sql.DB
-	buf     chan QueryLogEntry // async batch buffer for high-frequency events
-	stop    chan struct{}
-	wg      sync.WaitGroup
-	dropped atomic.Uint64 // entries dropped because the buffer was full
+	db        *sql.DB
+	buf       chan QueryLogEntry // async batch buffer for high-frequency events
+	stop      chan struct{}
+	wg        sync.WaitGroup
+	dropped   atomic.Uint64 // entries dropped because the buffer was full
+	retention atomic.Int64  // how long query_log entries are kept (time.Duration)
 }
 
 // batch limits for the async writer: flushes when a batch fills or the
@@ -28,6 +29,10 @@ const (
 	batchMax      = 500
 	batchInterval = 100 * time.Millisecond
 )
+
+// defaultQueryLogRetention is how long query log entries are kept unless the
+// operator picks a different retention in the controller settings.
+const defaultQueryLogRetention = 24 * time.Hour
 
 // QueryLogEntry represents a single DNS query event
 type QueryLogEntry struct {
@@ -266,6 +271,7 @@ func NewQueryLogStore(dbPath string) (*QueryLogStore, error) {
 		buf:  make(chan QueryLogEntry, 4096),
 		stop: make(chan struct{}),
 	}
+	store.retention.Store(int64(defaultQueryLogRetention))
 	store.wg.Add(1)
 	go store.batchWriter()
 	go store.cleanupLoop()
@@ -415,6 +421,23 @@ func (s *QueryLogStore) UpstreamErrorStats(ctx context.Context, instance string,
 	return out, rows.Err()
 }
 
+// UpstreamErrorCount returns how many upstream failures are stored within the
+// window. It backs the dashboard stat so the count matches what the Upstream
+// Errors page shows (and both drop to zero when errors are cleared).
+func (s *QueryLogStore) UpstreamErrorCount(ctx context.Context, instance string, since time.Time) (int, error) {
+	query := `SELECT COUNT(*) FROM upstream_errors WHERE timestamp >= ?`
+	args := []interface{}{since}
+	if instance != "" {
+		query += " AND instance = ?"
+		args = append(args, instance)
+	}
+	var n int
+	if err := s.db.QueryRowContext(ctx, query, args...).Scan(&n); err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
 // ClearUpstreamErrors removes stored upstream failures. An empty instance
 // clears the whole table; otherwise only that instance's errors are dropped.
 func (s *QueryLogStore) ClearUpstreamErrors(ctx context.Context, instance string) error {
@@ -546,16 +569,35 @@ func (s *QueryLogStore) ClearStatsSamples(ctx context.Context) error {
 	return err
 }
 
-// cleanupLoop removes old query log entries (24h) and stats samples (1 month).
+// cleanupLoop removes old query log entries (retention window, which also
+// covers upstream errors) and stats samples (1 month).
 func (s *QueryLogStore) cleanupLoop() {
 	ticker := time.NewTicker(1 * time.Hour)
 	defer ticker.Stop()
 	for range ticker.C {
 		ctx := context.Background()
-		s.db.ExecContext(ctx, `DELETE FROM query_log WHERE timestamp < ?`, time.Now().Add(-24*time.Hour))
-		s.db.ExecContext(ctx, `DELETE FROM upstream_errors WHERE timestamp < ?`, time.Now().Add(-24*time.Hour))
+		s.db.ExecContext(ctx, `DELETE FROM query_log WHERE timestamp < ?`, time.Now().Add(-s.Retention()))
+		s.db.ExecContext(ctx, `DELETE FROM upstream_errors WHERE timestamp < ?`, time.Now().Add(-s.Retention()))
 		s.db.ExecContext(ctx, `DELETE FROM stats_samples WHERE timestamp < ?`, time.Now().Add(-31*24*time.Hour))
 	}
+}
+
+// Retention returns how long query log entries are kept.
+func (s *QueryLogStore) Retention() time.Duration {
+	return time.Duration(s.retention.Load())
+}
+
+// SetRetention updates how long query log entries are kept and immediately
+// prunes anything older than the new window. Durations shorter than an hour
+// are clamped up to an hour.
+func (s *QueryLogStore) SetRetention(d time.Duration) {
+	if d < time.Hour {
+		d = time.Hour
+	}
+	s.retention.Store(int64(d))
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	s.db.ExecContext(ctx, `DELETE FROM query_log WHERE timestamp < ?`, time.Now().Add(-d))
 }
 
 // Enqueue buffers a query-log entry for batched writing. It never blocks the

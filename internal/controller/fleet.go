@@ -111,6 +111,7 @@ type Fleet struct {
 	cacheWarm        int                          // fleet-wide auto-refresh count (0 = off)
 	upstreamServers  []upstream.UpstreamServer    // fleet-wide default upstream pool
 	upstreamRoutes   []upstream.UpstreamRoute     // fleet-wide default upstream routes
+	qlRetentionHours int                          // how long query log entries are kept (0 = 24h default)
 }
 
 // BlocklistStatus is a point-in-time view of the controller's blocklist
@@ -805,6 +806,56 @@ func (f *Fleet) maybePushRateLimit(ctx context.Context, i *Instance, reported *c
 	if err := i.ctl().SetRateLimit(ctx, want, 0); err != nil {
 		log.Printf("blipc: reconcile rate limit for %s: %v", i.Config.ID, err)
 	}
+}
+
+// QueryLogRetentionHours returns how long query log entries are kept on blipc.
+// 0 in the field means "unset": the 24h default applies.
+func (f *Fleet) QueryLogRetentionHours() int {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	if f.qlRetentionHours <= 0 {
+		return 24
+	}
+	return f.qlRetentionHours
+}
+
+// queryLogRetentionChoices are the accepted query log retention options, in
+// hours (1 day, 1 week, 1 month, 6 months, 1 year).
+var queryLogRetentionChoices = []int{24, 168, 720, 4320, 8760}
+
+// ValidQueryLogRetentionHours reports whether h is an accepted retention value.
+func ValidQueryLogRetentionHours(h int) bool {
+	for _, c := range queryLogRetentionChoices {
+		if c == h {
+			return true
+		}
+	}
+	return false
+}
+
+// SetQueryLogRetentionDefault records the query log retention without
+// persisting it. Used at startup from the controller config; 0 resets to the
+// 24h default.
+func (f *Fleet) SetQueryLogRetentionDefault(hours int) {
+	f.mu.Lock()
+	f.qlRetentionHours = hours
+	f.mu.Unlock()
+	if f.queryLog != nil {
+		f.queryLog.SetRetention(time.Duration(f.QueryLogRetentionHours()) * time.Hour)
+	}
+}
+
+// SetQueryLogRetention persists the query log retention and applies it to the
+// store immediately. The log lives on blipc, so nothing is pushed to the
+// instances.
+func (f *Fleet) SetQueryLogRetention(ctx context.Context, hours int) map[string]string {
+	f.SetQueryLogRetentionDefault(hours)
+	if f.configPath != "" {
+		if err := f.saveConfig(); err != nil {
+			log.Printf("blipc: warning: failed to persist query log retention: %v", err)
+		}
+	}
+	return map[string]string{}
 }
 
 // CacheConfig returns the fleet-wide cache size limit and auto-refresh count
@@ -1874,20 +1925,21 @@ func (f *Fleet) saveConfig() error {
 	}
 
 	type fullConfig struct {
-		Listen               string                       `yaml:"listen"`
-		Username             string                       `yaml:"username"`
-		Password             string                       `yaml:"password"`
-		DefaultPolicy        *control.Policy              `yaml:"default_policy"`
-		InstancePolicies     map[string]*InstanceOverride `yaml:"instance_overrides"`
-		DoHHTTPAddr          string                       `yaml:"doh_http_addr"`
-		RateLimitQPS         int                          `yaml:"rate_limit_qps"`
-		UpstreamServers      []upstream.UpstreamServer    `yaml:"upstream_servers"`
-		UpstreamRoutes       []upstream.UpstreamRoute     `yaml:"upstream_routes"`
-		CacheSize            int                          `yaml:"cache_size"`
-		CacheWarm            int                          `yaml:"cache_warm"`
-		BlocklistSources     []string                     `yaml:"blocklist_sources"`
-		BlocklistUpdateHours int                          `yaml:"blocklist_update_hours"`
-		Instances            []InstanceConfig             `yaml:"instances"`
+		Listen                 string                       `yaml:"listen"`
+		Username               string                       `yaml:"username"`
+		Password               string                       `yaml:"password"`
+		DefaultPolicy          *control.Policy              `yaml:"default_policy"`
+		InstancePolicies       map[string]*InstanceOverride `yaml:"instance_overrides"`
+		DoHHTTPAddr            string                       `yaml:"doh_http_addr"`
+		RateLimitQPS           int                          `yaml:"rate_limit_qps"`
+		UpstreamServers        []upstream.UpstreamServer    `yaml:"upstream_servers"`
+		UpstreamRoutes         []upstream.UpstreamRoute     `yaml:"upstream_routes"`
+		CacheSize              int                          `yaml:"cache_size"`
+		CacheWarm              int                          `yaml:"cache_warm"`
+		QueryLogRetentionHours int                          `yaml:"query_log_retention_hours"`
+		BlocklistSources       []string                     `yaml:"blocklist_sources"`
+		BlocklistUpdateHours   int                          `yaml:"blocklist_update_hours"`
+		Instances              []InstanceConfig             `yaml:"instances"`
 	}
 
 	var cfg fullConfig
@@ -1918,6 +1970,7 @@ func (f *Fleet) saveConfig() error {
 	cfg.UpstreamServers = upstreamServers
 	cfg.UpstreamRoutes = upstreamRoutes
 	cfg.CacheSize, cfg.CacheWarm = f.CacheConfig()
+	cfg.QueryLogRetentionHours = f.QueryLogRetentionHours()
 	cfg.BlocklistSources = blSources
 	cfg.BlocklistUpdateHours = autoHours
 

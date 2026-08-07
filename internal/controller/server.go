@@ -318,27 +318,29 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 		upServers, upRoutes := s.fleet.Upstream()
 		cacheSize, cacheWarm := s.fleet.CacheConfig()
 		writeJSON(w, map[string]interface{}{
-			"default_policy":     s.fleet.DefaultPolicy(),
-			"instance_overrides": s.fleet.InstanceOverrides(),
-			"doh_http_addr":      s.fleet.DoHHTTPAddr(),
-			"rate_limit_qps":     s.fleet.RateLimitQPS(),
-			"upstream_servers":   upServers,
-			"upstream_routes":    upRoutes,
-			"cache_size":         cacheSize,
-			"cache_warm":         cacheWarm,
+			"default_policy":            s.fleet.DefaultPolicy(),
+			"instance_overrides":        s.fleet.InstanceOverrides(),
+			"doh_http_addr":             s.fleet.DoHHTTPAddr(),
+			"rate_limit_qps":            s.fleet.RateLimitQPS(),
+			"upstream_servers":          upServers,
+			"upstream_routes":           upRoutes,
+			"cache_size":                cacheSize,
+			"cache_warm":                cacheWarm,
+			"query_log_retention_hours": s.fleet.QueryLogRetentionHours(),
 		})
 	case http.MethodPut:
 		var req struct {
-			Scope           string                     `json:"scope"`
-			Policy          *control.Policy            `json:"default_policy"`
-			Instance        string                     `json:"instance"`
-			Override        *InstanceOverride          `json:"override"`
-			DoHHTTPAddr     *string                    `json:"doh_http_addr"`
-			RateLimitQPS    *int                       `json:"rate_limit_qps"`
-			CacheSize       *int                       `json:"cache_size"`
-			CacheWarm       *int                       `json:"cache_warm"`
-			UpstreamServers *[]upstream.UpstreamServer `json:"upstream_servers"`
-			UpstreamRoutes  *[]upstream.UpstreamRoute  `json:"upstream_routes"`
+			Scope                  string                     `json:"scope"`
+			Policy                 *control.Policy            `json:"default_policy"`
+			Instance               string                     `json:"instance"`
+			Override               *InstanceOverride          `json:"override"`
+			DoHHTTPAddr            *string                    `json:"doh_http_addr"`
+			RateLimitQPS           *int                       `json:"rate_limit_qps"`
+			CacheSize              *int                       `json:"cache_size"`
+			CacheWarm              *int                       `json:"cache_warm"`
+			QueryLogRetentionHours *int                       `json:"query_log_retention_hours"`
+			UpstreamServers        *[]upstream.UpstreamServer `json:"upstream_servers"`
+			UpstreamRoutes         *[]upstream.UpstreamRoute  `json:"upstream_routes"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -367,6 +369,18 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			applied := s.fleet.SetDoHHTTPAddr(r.Context(), addr)
+			writeJSON(w, map[string]interface{}{"ok": true, "applied": applied})
+			return
+		}
+		// Query log retention (controller-local: the log is stored on blipc,
+		// so there is no per-instance scope and nothing to push).
+		if req.QueryLogRetentionHours != nil {
+			hours := *req.QueryLogRetentionHours
+			if !ValidQueryLogRetentionHours(hours) {
+				http.Error(w, "invalid query_log_retention_hours: must be 24, 168, 720, 4320 or 8760", http.StatusBadRequest)
+				return
+			}
+			applied := s.fleet.SetQueryLogRetention(r.Context(), hours)
 			writeJSON(w, map[string]interface{}{"ok": true, "applied": applied})
 			return
 		}
@@ -632,6 +646,15 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
+	// The dashboard errors stat must match the Upstream Errors page, which
+	// reads the upstream_errors table (and is cleared by "Clear errors").
+	// Override the counter-derived value so clearing the page zeroes the stat.
+	n, err := s.fleet.queryLog.UpstreamErrorCount(r.Context(), instance, since)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	agg.UpstreamErrors = n
 	writeJSON(w, agg)
 }
 

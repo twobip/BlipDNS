@@ -317,6 +317,49 @@ func TestQueryLogStoreCacheStats(t *testing.T) {
 	}
 }
 
+func TestQueryLogStoreRetention(t *testing.T) {
+	store, err := NewQueryLogStore(filepath.Join(t.TempDir(), "querylog.db"))
+	if err != nil {
+		t.Fatalf("NewQueryLogStore: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	now := time.Now()
+	old := now.Add(-48 * time.Hour)
+	for _, ts := range []time.Time{now, old} {
+		if err := store.Insert(ctx, QueryLogEntry{Timestamp: ts, Instance: "a", Client: "c", Domain: "example.com", Action: "PASS"}); err != nil {
+			t.Fatalf("Insert(%v): %v", ts, err)
+		}
+	}
+	if st := store.Retention(); st != defaultQueryLogRetention {
+		t.Fatalf("default retention = %v, want %v", st, defaultQueryLogRetention)
+	}
+
+	// Widening the window keeps everything.
+	store.SetRetention(7 * 24 * time.Hour)
+	entries, err := store.Query(ctx, "", "", now.Add(-7*24*time.Hour), 100)
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("after widen = %d entries, want 2", len(entries))
+	}
+
+	// Shrinking below the oldest entry prunes it immediately.
+	store.SetRetention(24 * time.Hour)
+	if st := store.Retention(); st != 24*time.Hour {
+		t.Fatalf("retention after SetRetention = %v, want 24h", st)
+	}
+	entries, err = store.Query(ctx, "", "", now.Add(-7*24*time.Hour), 100)
+	if err != nil {
+		t.Fatalf("Query after shrink: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Timestamp.Equal(old) {
+		t.Fatalf("after shrink = %+v, want only the fresh entry", entries)
+	}
+}
+
 func TestQueryLogStoreUpstreamErrors(t *testing.T) {
 	store, err := NewQueryLogStore(filepath.Join(t.TempDir(), "querylog.db"))
 	if err != nil {
@@ -357,6 +400,18 @@ func TestQueryLogStoreUpstreamErrors(t *testing.T) {
 		if st.Count <= 0 {
 			t.Errorf("group %+v has non-positive count", st)
 		}
+	}
+
+	// The dashboard stat reads this count so it matches the page.
+	if n, err := store.UpstreamErrorCount(ctx, "", now.Add(-24*time.Hour)); err != nil {
+		t.Fatalf("UpstreamErrorCount: %v", err)
+	} else if n != 5 {
+		t.Errorf("UpstreamErrorCount = %d, want 5", n)
+	}
+	if n, err := store.UpstreamErrorCount(ctx, "a", now.Add(-24*time.Hour)); err != nil {
+		t.Fatalf("UpstreamErrorCount(a): %v", err)
+	} else if n != 3 {
+		t.Errorf("UpstreamErrorCount(a) = %d, want 3", n)
 	}
 
 	// Instance filter narrows to one instance.
