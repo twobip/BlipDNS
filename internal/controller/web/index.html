@@ -117,6 +117,62 @@
         </div>
       </section>
 
+      <!-- ================= CACHE STATS ================= -->
+      <section id="view-cache-stats" class="view hidden">
+        <div class="row">
+          <select class="select" id="cs-range" title="Cache statistics range">
+            <option value="1h">1 hour</option>
+            <option value="6h">6 hours</option>
+            <option value="24h" selected>24 hours</option>
+          </select>
+          <span class="right"></span>
+          <span class="muted" id="cs-hint"></span>
+        </div>
+        <div class="grid grid-4">
+          <div class="stat" title="Percentage of resolved (non-blocked) queries served from the response cache">
+            <div class="stat-icon i-green">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z"/></svg>
+            </div>
+            <div class="stat-label">Queries Cached</div>
+            <div class="stat-value" id="cs-pct">—</div>
+            <div class="stat-sub">of resolved queries in range</div>
+          </div>
+          <div class="stat" title="Resolved queries answered from cache vs. fetched fresh from upstream">
+            <div class="stat-icon i-blue">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 20h20M6 16V8m6 8V4m6 12v-6"/></svg>
+            </div>
+            <div class="stat-label">Cached / Resolved</div>
+            <div class="stat-value" id="cs-cached">—</div>
+            <div class="stat-sub">queries answered from cache</div>
+          </div>
+          <div class="stat" title="Domains currently held in each instance's in-memory response cache">
+            <div class="stat-icon i-green">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.7 4 3 9 3s9-1.3 9-3V5"/><path d="M3 12c0 1.7 4 3 9 3s9-1.3 9-3"/></svg>
+            </div>
+            <div class="stat-label">Domains in Cache</div>
+            <div class="stat-value" id="cs-live">—</div>
+            <div class="stat-sub">across all instances · now</div>
+          </div>
+          <div class="stat" title="Configured maximum cached responses per instance">
+            <div class="stat-icon i-amber">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 4v5c0 5-3.5 8-7 9-3.5-1-7-4-7-9V7l7-4z"/><path d="m9 12 2 2 4-4"/></svg>
+            </div>
+            <div class="stat-label">Cache Limit</div>
+            <div class="stat-value" id="cs-limit">—</div>
+            <div class="stat-sub">max entries per instance</div>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><h3>Per instance</h3><span class="spacer"></span></div>
+          <div class="table-wrap">
+            <table class="tbl">
+              <thead><tr><th>Instance</th><th class="num">Domains in cache</th><th class="num">Cached</th><th class="num">Resolved</th><th class="num">% cached</th></tr></thead>
+              <tbody id="cs-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
       <!-- ================= UPSTREAM ERRORS ================= -->
       <section id="view-upstream-errors" class="view hidden">
         <div class="row">

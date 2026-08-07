@@ -260,6 +260,63 @@ func TestClientNames(t *testing.T) {
 	}
 }
 
+func TestQueryLogStoreCacheStats(t *testing.T) {
+	store, err := NewQueryLogStore(filepath.Join(t.TempDir(), "querylog.db"))
+	if err != nil {
+		t.Fatalf("NewQueryLogStore: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	now := time.Now()
+	entries := []QueryLogEntry{
+		{Timestamp: now.Add(-time.Minute), Instance: "a", Client: "c", Domain: "example.com", Action: "PASS", Cached: true},
+		{Timestamp: now.Add(-2 * time.Minute), Instance: "a", Client: "c", Domain: "foo.com", Action: "PASS", Cached: false},
+		{Timestamp: now.Add(-3 * time.Minute), Instance: "a", Client: "c", Domain: "ads.test", Action: "BLOCK"},
+		{Timestamp: now.Add(-4 * time.Minute), Instance: "a", Client: "c", Domain: "health_check", Action: "PASS"},
+		{Timestamp: now.Add(-5 * time.Minute), Instance: "b", Client: "c", Domain: "example.com", Action: "PASS", Cached: true},
+	}
+	for _, e := range entries {
+		if err := store.Insert(ctx, e); err != nil {
+			t.Fatalf("Insert: %v", err)
+		}
+	}
+
+	stats, err := store.CacheStats(ctx, "", now.Add(-24*time.Hour))
+	if err != nil {
+		t.Fatalf("CacheStats: %v", err)
+	}
+	if len(stats) != 2 {
+		t.Fatalf("CacheStats returned %d instances, want 2: %+v", len(stats), stats)
+	}
+	// a: 2 resolved (BLOCK + health_check excluded), 1 cached -> 50%.
+	// b: 1 resolved, 1 cached -> 100%.
+	if a := stats["a"]; a.Queries != 2 || a.CachedQueries != 1 || a.PercentCached != 50 {
+		t.Errorf("instance a = %+v, want 2/1/50", a)
+	}
+	if b := stats["b"]; b.Queries != 1 || b.CachedQueries != 1 || b.PercentCached != 100 {
+		t.Errorf("instance b = %+v, want 1/1/100", b)
+	}
+
+	// Instance filter narrows to a single instance.
+	stats, err = store.CacheStats(ctx, "a", now.Add(-24*time.Hour))
+	if err != nil {
+		t.Fatalf("CacheStats(a): %v", err)
+	}
+	if len(stats) != 1 {
+		t.Fatalf("CacheStats(a) returned %d instances, want 1", len(stats))
+	}
+
+	// Since window excludes everything.
+	stats, err = store.CacheStats(ctx, "", now.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("CacheStats(since): %v", err)
+	}
+	if len(stats) != 0 {
+		t.Fatalf("CacheStats(since) returned %d instances, want 0", len(stats))
+	}
+}
+
 func TestQueryLogStoreUpstreamErrors(t *testing.T) {
 	store, err := NewQueryLogStore(filepath.Join(t.TempDir(), "querylog.db"))
 	if err != nil {

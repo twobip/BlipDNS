@@ -117,6 +117,47 @@ func (s *QueryLogStore) ClientStats(ctx context.Context, instance string, since 
 	return out, rows.Err()
 }
 
+// InstanceCacheStat is one instance's cache hit/miss tally for a time range.
+type InstanceCacheStat struct {
+	Queries       int     `json:"queries"`
+	CachedQueries int     `json:"cached_queries"`
+	PercentCached float64 `json:"percent_cached"`
+}
+
+// CacheStats returns per-instance cache hit/miss tallies for "pass" (resolved)
+// queries in the time range. Blocked queries and health checks never pass
+// through the cache and are excluded, so the percentage reflects resolved
+// queries only. When instance is non-empty only that instance is returned.
+func (s *QueryLogStore) CacheStats(ctx context.Context, instance string, since time.Time) (map[string]InstanceCacheStat, error) {
+	query := `SELECT ql.instance, COUNT(*), COALESCE(SUM(CASE WHEN ql.cached = 1 THEN 1 ELSE 0 END), 0) FROM query_log ql WHERE ql.timestamp >= ? AND ql.domain != 'health_check' AND ql.action = 'PASS'`
+	args := []interface{}{since}
+	if instance != "" {
+		query += " AND ql.instance = ?"
+		args = append(args, instance)
+	}
+	query += " GROUP BY ql.instance ORDER BY ql.instance"
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make(map[string]InstanceCacheStat)
+	for rows.Next() {
+		var inst string
+		var c InstanceCacheStat
+		if err := rows.Scan(&inst, &c.Queries, &c.CachedQueries); err != nil {
+			return nil, err
+		}
+		if c.Queries > 0 {
+			c.PercentCached = float64(c.CachedQueries) / float64(c.Queries) * 100
+		}
+		out[inst] = c
+	}
+	return out, rows.Err()
+}
+
 // TimeSeriesPoint represents a single point in a time series
 type TimeSeriesPoint struct {
 	Timestamp      time.Time `json:"timestamp"`

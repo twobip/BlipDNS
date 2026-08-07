@@ -46,6 +46,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/clients", api(s.handleClients))                // per-client activity
 	mux.HandleFunc("/api/client-names", api(s.handleClientNames))       // friendly client renames
 	mux.HandleFunc("/api/stats", api(s.handleStats))                    // aggregated query stats for graphs
+	mux.HandleFunc("/api/cache-stats", api(s.handleCacheStats))         // cache hit rate + live cache sizes
 	mux.HandleFunc("/api/maintenance", api(s.handleMaintenance))        // POST reset_stats / clear_query_log
 	mux.HandleFunc("/api/events", api(s.handleEvents))
 	mux.HandleFunc("/api/health", api(s.handleHealth))
@@ -632,6 +633,52 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, agg)
+}
+
+// handleCacheStats reports per-instance cache hit rates over the query-log
+// window plus the current in-memory cache size (domains held) and configured
+// limit for each instance, from the last stats poll.
+func (s *Server) handleCacheStats(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.fleet.queryLog == nil {
+		http.Error(w, "query log not available", http.StatusServiceUnavailable)
+		return
+	}
+	instance := r.URL.Query().Get("instance")
+	since := time.Now().Add(-24 * time.Hour)
+	if d, err := time.ParseDuration(r.URL.Query().Get("since")); err == nil {
+		since = time.Now().Add(-d)
+	}
+	perInstance, err := s.fleet.queryLog.CacheStats(r.Context(), instance, since)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	total := InstanceCacheStat{}
+	for _, c := range perInstance {
+		total.Queries += c.Queries
+		total.CachedQueries += c.CachedQueries
+	}
+	if total.Queries > 0 {
+		total.PercentCached = float64(total.CachedQueries) / float64(total.Queries) * 100
+	}
+	live := make(map[string]int)
+	limit := make(map[string]int)
+	for _, is := range s.fleet.List() {
+		if is.Stats != nil {
+			live[is.ID] = is.Stats.Cached
+			limit[is.ID] = is.Stats.CacheSize
+		}
+	}
+	writeJSON(w, map[string]interface{}{
+		"total":        total,
+		"per_instance": perInstance,
+		"live":         live,
+		"limit":        limit,
+	})
 }
 
 // handleUpstreamErrors returns upstream failures grouped by message/domain/

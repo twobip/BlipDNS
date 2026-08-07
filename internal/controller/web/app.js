@@ -57,12 +57,14 @@ const IC = {
   globe: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.6 3.8 5.7 3.8 9S14.5 18.4 12 21c-2.5-2.6-3.8-5.7-3.8-9S9.5 5.6 12 3z"/></svg>',
   device: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg>',
   x: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12"/></svg>',
+  cache: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.7 4 3 9 3s9-1.3 9-3V5"/><path d="M3 12c0 1.7 4 3 9 3s9-1.3 9-3"/></svg>',
 };
 
 /* ---------- routing ---------- */
 const NAV = [
   { id: "dashboard", label: "Dashboard", icon: IC.dash, group: "Overview" },
   { id: "queries", label: "Query Log", icon: IC.query, group: "Overview" },
+  { id: "cache-stats", label: "Cache Stats", icon: IC.cache, group: "Overview" },
   { id: "clients", label: "Clients", icon: IC.device, group: "Overview" },
   { id: "instances", label: "Instances", icon: IC.inst, group: "DNS" },
   { id: "blocklist", label: "Blocklists", icon: IC.block, group: "DNS" },
@@ -73,6 +75,7 @@ const NAV = [
 const TITLES = {
   dashboard: ["Dashboard", "Fleet throughput &amp; health"],
   queries: ["Query Log", "Live DNS resolution history"],
+  "cache-stats": ["Cache Stats", "Cache hit rate and in-memory domain counts"],
   "upstream-errors": ["Upstream Errors", "Failed upstream requests and when they happened"],
   clients: ["Clients", "Who is querying this resolver"],
   instances: ["Instances", "Managed blipd resolvers"],
@@ -151,6 +154,7 @@ async function refresh() {
     if (current === "dashboard") renderDashboard();
     else if (current === "instances") renderInstances();
     else if (current === "queries") renderQueries();
+    else if (current === "cache-stats") renderCacheStats();
     else if (current === "upstream-errors") renderUpstreamErrors();
     else if (current === "clients") renderClients();
     else if (current === "filters") renderPolicies();
@@ -509,6 +513,53 @@ async function renderUpstreamErrors() {
     tb.querySelectorAll(".t").forEach((t) => { t.textContent = timeAgo(t.dataset.t); });
   } catch (e) {
     tb.innerHTML = `<tr class="empty-row"><td colspan="6"><div class="empty"><div class="empty-ic">${IC.warn}</div><h4>Upstream errors unavailable</h4><p>${esc(e.message)}</p></div></td></tr>`;
+  }
+}
+
+/* ---------- cache stats ---------- */
+let csState = { since: "24h" };
+async function renderCacheStats() {
+  try {
+    const res = await API(`/api/cache-stats?since=${csState.since}`);
+    const d = await res.json();
+    const total = d.total || { queries: 0, cached_queries: 0, percent_cached: 0 };
+    const hint = "resolved (non-blocked) queries · last " + csState.since;
+    $("cs-hint").textContent = hint;
+    $("cs-pct").textContent = total.queries ? total.percent_cached.toFixed(1) + "%" : "—";
+    $("cs-cached").textContent = total.queries ? fmt(total.cached_queries) + " / " + fmt(total.queries) : "—";
+    let live = 0, limit = 0;
+    for (const i of instances) {
+      live += Number(i.stats && i.stats.cached) || 0;
+      limit += Number(i.stats && i.stats.cache_size) || 0;
+    }
+    $("cs-live").textContent = fmt(live);
+    $("cs-limit").textContent = limit ? fmt(limit) : "unlimited";
+    const tb = $("cs-tbody");
+    const per = d.per_instance || {};
+    const keys = Object.keys(per);
+    if (!keys.length) {
+      tb.innerHTML = `<tr class="empty-row"><td colspan="5"><div class="empty"><div class="empty-ic">${IC.cache}</div><h4>No data yet</h4><p>No resolved queries in this window.</p></div></td></tr>`;
+      return;
+    }
+    let rows = "";
+    for (const id of keys) {
+      const c = per[id];
+      const is = instances.find((x) => x.id === id || (x.label || "") === id);
+      const label = (is && is.label) || id;
+      const liveN = Number(is && is.stats && is.stats.cached) || 0;
+      const limitN = Number(is && is.stats && is.stats.cache_size) || 0;
+      const pct = c.queries ? c.percent_cached.toFixed(1) + "%" : "—";
+      rows += `<tr>
+        <td>${esc(label)}</td>
+        <td class="num">${fmt(liveN)}${limitN ? " / " + fmt(limitN) : ""}</td>
+        <td class="num">${fmt(c.cached_queries)}</td>
+        <td class="num">${fmt(c.queries)}</td>
+        <td class="num">${pct}</td>
+      </tr>`;
+    }
+    tb.innerHTML = rows;
+  } catch (e) {
+    $("cs-tbody").innerHTML = `<tr class="empty-row"><td colspan="5"><div class="empty"><div class="empty-ic">${IC.warn}</div><h4>Cache stats unavailable</h4><p>${esc(e.message)}</p></div></td></tr>`;
   }
 }
 
@@ -1246,6 +1297,9 @@ $("q-refresh").onclick = renderQueries;
 $("ue-instance").addEventListener("change", (e) => { ueState.inst = e.target.value; renderUpstreamErrors(); });
 $("ue-range").addEventListener("change", (e) => { ueState.since = e.target.value; renderUpstreamErrors(); });
 $("ue-refresh").onclick = renderUpstreamErrors;
+
+/* cache stats */
+$("cs-range").addEventListener("change", (e) => { csState.since = e.target.value; renderCacheStats(); });
 $("q-tbody").addEventListener("click", (e) => {
   const c = e.target.closest("[data-copy]"); if (!c) return;
   copyText(c.dataset.copy);
@@ -1618,5 +1672,5 @@ loadBlocklist();
 connectSSE();
 refresh();
 refreshSettings();
-pollTimer = setInterval(() => { if (current === "dashboard" || current === "instances" || current === "queries" || current === "upstream-errors") refresh(); }, 5000);
+pollTimer = setInterval(() => { if (current === "dashboard" || current === "instances" || current === "queries" || current === "cache-stats" || current === "upstream-errors") refresh(); }, 5000);
 setInterval(() => { if (current === "dashboard") fetchStats(); }, 60000); // refresh chart/stats periodically
