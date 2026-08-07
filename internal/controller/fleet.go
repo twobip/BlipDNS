@@ -22,6 +22,7 @@ import (
 
 	"github.com/twobip/BlipDNS/internal/blocklist"
 	"github.com/twobip/BlipDNS/internal/control"
+	"github.com/twobip/BlipDNS/internal/upstream"
 	"gopkg.in/yaml.v3"
 )
 
@@ -60,11 +61,17 @@ type InstanceOverride struct {
 	// RateLimitQPS, when set, overrides the fleet-wide DNS query rate limit
 	// (QPS per client) for this instance. 0 disables rate limiting.
 	RateLimitQPS *int `json:"rate_limit_qps,omitempty" yaml:"rate_limit_qps,omitempty"`
+	// UpstreamServers, when set, overrides the fleet-wide upstream server pool
+	// for this instance. nil = inherit the fleet default.
+	UpstreamServers *[]upstream.UpstreamServer `json:"upstream_servers,omitempty" yaml:"upstream_servers,omitempty"`
+	// UpstreamRoutes, when set, overrides the fleet-wide upstream routes
+	// (conditional forwarding) for this instance. nil = inherit the fleet default.
+	UpstreamRoutes *[]upstream.UpstreamRoute `json:"upstream_routes,omitempty" yaml:"upstream_routes,omitempty"`
 }
 
 // IsEmpty reports whether the override changes nothing.
 func (o *InstanceOverride) IsEmpty() bool {
-	return o == nil || (o.Upstream == nil && o.BlockAction == nil && o.Log == nil && o.DoHHTTPAddr == nil && o.RateLimitQPS == nil)
+	return o == nil || (o.Upstream == nil && o.BlockAction == nil && o.Log == nil && o.DoHHTTPAddr == nil && o.RateLimitQPS == nil && o.UpstreamServers == nil && o.UpstreamRoutes == nil)
 }
 
 // Fleet holds all instances, the event bus, and the global blocklist.
@@ -94,6 +101,8 @@ type Fleet struct {
 	overrides        map[string]*InstanceOverride // per-instance partial configs (diff vs default)
 	dohHTTPAddr      string                       // fleet-wide plain-HTTP DoH address ("", off)
 	rateLimitQPS     int                          // fleet-wide DNS per-client QPS limit (0 = disabled)
+	upstreamServers  []upstream.UpstreamServer    // fleet-wide default upstream pool
+	upstreamRoutes   []upstream.UpstreamRoute     // fleet-wide default upstream routes
 }
 
 // BlocklistStatus is a point-in-time view of the controller's blocklist
@@ -410,6 +419,128 @@ func (f *Fleet) effectiveRateLimitQPS(id string) int {
 	return f.rateLimitQPS
 }
 
+// Upstream returns the fleet-wide default upstream pool and routes.
+func (f *Fleet) Upstream() ([]upstream.UpstreamServer, []upstream.UpstreamRoute) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return f.upstreamServers, f.upstreamRoutes
+}
+
+// SetUpstreamDefault records the fleet-wide default upstream pool and routes
+// without distributing it. Used at startup from the controller config.
+func (f *Fleet) SetUpstreamDefault(servers []upstream.UpstreamServer, routes []upstream.UpstreamRoute) {
+	f.mu.Lock()
+	f.upstreamServers = servers
+	f.upstreamRoutes = routes
+	f.mu.Unlock()
+}
+
+// SetUpstream sets the fleet-wide default upstream pool and routes, persists it,
+// and pushes the effective value (default or per-instance override) to every
+// adopted instance.
+func (f *Fleet) SetUpstream(ctx context.Context, servers []upstream.UpstreamServer, routes []upstream.UpstreamRoute) map[string]string {
+	f.SetUpstreamDefault(servers, routes)
+	if f.configPath != "" {
+		if err := f.saveConfig(); err != nil {
+			log.Printf("blipc: warning: failed to persist upstream setting: %v", err)
+		}
+	}
+	return f.pushUpstream(ctx)
+}
+
+// effectiveUpstream returns the upstream pool + routes an instance should have:
+// its own override if set, otherwise the fleet-wide default.
+func (f *Fleet) effectiveUpstream(instID string) ([]upstream.UpstreamServer, []upstream.UpstreamRoute) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	servers := f.upstreamServers
+	routes := f.upstreamRoutes
+	if o := f.overrides[instID]; o != nil {
+		if o.UpstreamServers != nil {
+			servers = *o.UpstreamServers
+		}
+		if o.UpstreamRoutes != nil {
+			routes = *o.UpstreamRoutes
+		}
+	}
+	return servers, routes
+}
+
+// upstreamHash returns a stable fingerprint of the upstream pool + routes so
+// the controller can detect drift after a restart (mirroring the DoH and
+// rate-limit reconcilers).
+func upstreamHash(servers []upstream.UpstreamServer, routes []upstream.UpstreamRoute) string {
+	if servers == nil {
+		servers = []upstream.UpstreamServer{}
+	}
+	if routes == nil {
+		routes = []upstream.UpstreamRoute{}
+	}
+	b, err := json.Marshal(struct {
+		Servers []upstream.UpstreamServer `json:"servers"`
+		Routes  []upstream.UpstreamRoute  `json:"routes"`
+	}{servers, routes})
+	if err != nil {
+		return ""
+	}
+	return fmt.Sprintf("%x", sha256.Sum256(b))
+}
+
+// pushUpstream distributes the effective upstream pool + routes to every
+// adopted instance. Instances whose effective upstream is empty (neither the
+// fleet default nor a per-instance override sets any servers or routes) are
+// skipped: the fleet is not managing upstream for them, so they keep whatever
+// they currently have (config-file or previously pushed).
+func (f *Fleet) pushUpstream(ctx context.Context) map[string]string {
+	f.mu.RLock()
+	insts := make([]*Instance, 0, len(f.instances))
+	for _, i := range f.instances {
+		insts = append(insts, i)
+	}
+	f.mu.RUnlock()
+	results := make(map[string]string, len(insts))
+	for _, i := range insts {
+		if !i.hasToken() {
+			results[i.Config.ID] = "not adopted"
+			continue
+		}
+		wantServers, wantRoutes := f.effectiveUpstream(i.Config.ID)
+		if len(wantServers) == 0 && len(wantRoutes) == 0 {
+			results[i.Config.ID] = "no upstream configured"
+			continue
+		}
+		if err := i.ctl().SetUpstream(ctx, wantServers, wantRoutes); err != nil {
+			results[i.Config.ID] = err.Error()
+			continue
+		}
+		results[i.Config.ID] = "ok"
+	}
+	return results
+}
+
+// maybePushUpstream converges an instance's upstream pool + routes to its fleet
+// default (or per-instance override) when the instance reports a divergent set —
+// e.g. after a restart it reverted to its own config-file pool. Skips instances
+// whose effective upstream is empty (the fleet is not managing upstream for
+// them).
+func (f *Fleet) maybePushUpstream(ctx context.Context, i *Instance, reported *control.StatsResponse) {
+	wantServers, wantRoutes := f.effectiveUpstream(i.Config.ID)
+	if len(wantServers) == 0 && len(wantRoutes) == 0 {
+		return
+	}
+	wantHash := upstreamHash(wantServers, wantRoutes)
+	repHash := ""
+	if reported != nil {
+		repHash = upstreamHash(reported.UpstreamServers, reported.UpstreamRoutes)
+	}
+	if wantHash == repHash || !i.hasToken() {
+		return
+	}
+	if err := i.ctl().SetUpstream(ctx, wantServers, wantRoutes); err != nil {
+		log.Printf("blipc: reconcile upstream for %s: %v", i.Config.ID, err)
+	}
+}
+
 // on top of the existing one, preserving fields the caller did not send. This
 // keeps saving the upstream editor from wiping a previously saved DoH override
 // and vice-versa.
@@ -432,6 +563,15 @@ func mergeOverride(existing, partial *InstanceOverride) *InstanceOverride {
 	}
 	if partial.DoHHTTPAddr != nil {
 		merged.DoHHTTPAddr = partial.DoHHTTPAddr
+	}
+	if partial.RateLimitQPS != nil {
+		merged.RateLimitQPS = partial.RateLimitQPS
+	}
+	if partial.UpstreamServers != nil {
+		merged.UpstreamServers = partial.UpstreamServers
+	}
+	if partial.UpstreamRoutes != nil {
+		merged.UpstreamRoutes = partial.UpstreamRoutes
 	}
 	return &merged
 }
@@ -603,6 +743,14 @@ func (f *Fleet) pushInstance(ctx context.Context, id string) map[string]string {
 			return res
 		}
 		i.markConfigAppliedWith(f.appliedHashFor(id), eff.Upstream)
+	}
+	// Push the effective upstream pool + routes when the fleet is managing
+	// upstream for this instance (non-empty server pool or routes).
+	wantServers, wantRoutes := f.effectiveUpstream(id)
+	if len(wantServers) > 0 || len(wantRoutes) > 0 {
+		if err := i.ctl().SetUpstream(ctx, wantServers, wantRoutes); err != nil {
+			res[id] = "upstream: " + err.Error()
+		}
 	}
 	return res
 }
@@ -1472,6 +1620,8 @@ func (f *Fleet) saveConfig() error {
 		InstancePolicies     map[string]*InstanceOverride `yaml:"instance_overrides"`
 		DoHHTTPAddr          string                       `yaml:"doh_http_addr"`
 		RateLimitQPS         int                          `yaml:"rate_limit_qps"`
+		UpstreamServers      []upstream.UpstreamServer    `yaml:"upstream_servers"`
+		UpstreamRoutes       []upstream.UpstreamRoute     `yaml:"upstream_routes"`
 		BlocklistSources     []string                     `yaml:"blocklist_sources"`
 		BlocklistUpdateHours int                          `yaml:"blocklist_update_hours"`
 		Instances            []InstanceConfig             `yaml:"instances"`
@@ -1501,6 +1651,9 @@ func (f *Fleet) saveConfig() error {
 	cfg.InstancePolicies = overs
 	cfg.DoHHTTPAddr = f.DoHHTTPAddr()
 	cfg.RateLimitQPS = f.RateLimitQPS()
+	upstreamServers, upstreamRoutes := f.Upstream()
+	cfg.UpstreamServers = upstreamServers
+	cfg.UpstreamRoutes = upstreamRoutes
 	cfg.BlocklistSources = blSources
 	cfg.BlocklistUpdateHours = autoHours
 

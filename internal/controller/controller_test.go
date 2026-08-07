@@ -8,12 +8,14 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/twobip/BlipDNS/internal/control"
+	"github.com/twobip/BlipDNS/internal/upstream"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -54,6 +56,49 @@ func (r *dohRec) snapshot() []string {
 	return out
 }
 
+// upstreamCall is one upstream pool+routes push observed by upstreamRec.
+type upstreamCall struct {
+	servers []upstream.UpstreamServer
+	routes  []upstream.UpstreamRoute
+}
+
+// upstreamRec records every upstream pool+routes push to a fake blipd and
+// reports the current set back from /api/v1/stats so the controller can
+// converge a restarted instance (mirroring dohRec).
+type upstreamRec struct {
+	mu      sync.Mutex
+	servers []upstream.UpstreamServer
+	routes  []upstream.UpstreamRoute
+	calls   []upstreamCall
+}
+
+func (r *upstreamRec) applied(servers []upstream.UpstreamServer, routes []upstream.UpstreamRoute) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.servers = make([]upstream.UpstreamServer, len(servers))
+	copy(r.servers, servers)
+	r.routes = make([]upstream.UpstreamRoute, len(routes))
+	copy(r.routes, routes)
+	r.calls = append(r.calls, upstreamCall{servers, routes})
+}
+
+func (r *upstreamRec) snapshot() []upstreamCall {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]upstreamCall, len(r.calls))
+	copy(out, r.calls)
+	return out
+}
+
+// lastUpstream returns the most recent upstream push an instance received.
+func lastUpstream(r *upstreamRec) ([]upstream.UpstreamServer, []upstream.UpstreamRoute) {
+	sn := r.snapshot()
+	if len(sn) == 0 {
+		return nil, nil
+	}
+	return sn[len(sn)-1].servers, sn[len(sn)-1].routes
+}
+
 // fakeBlipd is a minimal blipd management API for controller tests. It
 // supports the claim-code adoption handshake: unauthenticated /adopt/status,
 // POST /adopt with the code returns a token once, then rejects re-adopt.
@@ -61,7 +106,7 @@ func fakeBlipd(t *testing.T, token, claimCode string, health *control.HealthResp
 	return fakeBlipdWithRec(t, token, claimCode, health, stats, policies, nil, nil)
 }
 
-func fakeBlipdWithRec(t *testing.T, token, claimCode string, health *control.HealthResponse, stats *control.StatsResponse, policies *control.ListResponse, rec *policyRec, doh *dohRec) *httptest.Server {
+func fakeBlipdWithRec(t *testing.T, token, claimCode string, health *control.HealthResponse, stats *control.StatsResponse, policies *control.ListResponse, rec *policyRec, doh *dohRec, ups ...*upstreamRec) *httptest.Server {
 	t.Helper()
 	var (
 		mu        sync.Mutex
@@ -69,6 +114,10 @@ func fakeBlipdWithRec(t *testing.T, token, claimCode string, health *control.Hea
 		curCode   = claimCode
 		appliedRL []int
 	)
+	var up *upstreamRec
+	if len(ups) > 0 {
+		up = ups[0]
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/v1/health", func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer "+token {
@@ -93,6 +142,12 @@ func fakeBlipdWithRec(t *testing.T, token, claimCode string, health *control.Hea
 		}
 		if doh != nil {
 			st.DohHTTPAddr = doh.addr
+		}
+		if up != nil {
+			up.mu.Lock()
+			st.UpstreamServers = up.servers
+			st.UpstreamRoutes = up.routes
+			up.mu.Unlock()
 		}
 		writeJSONH(w, &st)
 	})
@@ -157,6 +212,34 @@ func fakeBlipdWithRec(t *testing.T, token, claimCode string, health *control.Hea
 			}
 			appliedRL = append(appliedRL, req.QPS)
 			writeJSONH(w, map[string]int{"qps": req.QPS, "burst": req.Burst})
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+	mux.HandleFunc("/api/v1/upstream", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+token {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		switch r.Method {
+		case http.MethodGet:
+			servers, routes := []upstream.UpstreamServer{}, []upstream.UpstreamRoute{}
+			if up != nil {
+				up.mu.Lock()
+				servers, routes = up.servers, up.routes
+				up.mu.Unlock()
+			}
+			writeJSONH(w, map[string]interface{}{"servers": servers, "routes": routes})
+		case http.MethodPut, http.MethodPost:
+			var req control.SetUpstreamRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if up != nil {
+				up.applied(req.Servers, req.Routes)
+			}
+			writeJSONH(w, map[string]bool{"ok": true})
 		default:
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
@@ -948,6 +1031,148 @@ func TestFleetDoHOverride(t *testing.T) {
 	}
 }
 
+// TestFleetSetUpstream verifies a fleet-wide upstream pool + conditional
+// forwarding routes are pushed to every instance and persisted to the
+// controller config.
+func TestFleetSetUpstream(t *testing.T) {
+	upA, upB := &upstreamRec{}, &upstreamRec{}
+	srvA := fakeBlipdWithRec(t, "t", "", &control.HealthResponse{OK: true}, &control.StatsResponse{}, &control.ListResponse{}, nil, nil, upA)
+	defer srvA.Close()
+	srvB := fakeBlipdWithRec(t, "t", "", &control.HealthResponse{OK: true}, &control.StatsResponse{}, &control.ListResponse{}, nil, nil, upB)
+	defer srvB.Close()
+
+	cfgPath := filepath.Join(t.TempDir(), "blipc.yaml")
+	fleet := NewFleet(cfgPath)
+	ctx := context.Background()
+	if err := fleet.Add(ctx, InstanceConfig{ID: "a", URL: srvA.URL, Token: "t"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := fleet.Add(ctx, InstanceConfig{ID: "b", URL: srvB.URL, Token: "t"}); err != nil {
+		t.Fatal(err)
+	}
+
+	servers := []upstream.UpstreamServer{
+		{Name: "quad9", Address: "udp://9.9.9.9:53", Priority: 1},
+		{Name: "rr", Address: "udp://10.1.1.1:53"},
+	}
+	routes := []upstream.UpstreamRoute{
+		{Name: "corp", QnameSuffix: ".corp.", Server: "rr", ClientCIDR: "10.0.0.0/8"},
+	}
+	res := fleet.SetUpstream(ctx, servers, routes)
+	if res["a"] != "ok" || res["b"] != "ok" {
+		t.Fatalf("expected both ok, got %+v", res)
+	}
+	// Each instance must have received the pool (possibly twice: once from the
+	// initial poll reconcile and once from the explicit fleet-wide push).
+	if gotS, gotR := lastUpstream(upA); !reflect.DeepEqual(gotS, servers) || !reflect.DeepEqual(gotR, routes) {
+		t.Errorf("instance a upstream = %+v / %+v, want %+v / %+v", gotS, gotR, servers, routes)
+	}
+	if gotS, gotR := lastUpstream(upB); !reflect.DeepEqual(gotS, servers) || !reflect.DeepEqual(gotR, routes) {
+		t.Errorf("instance b upstream = %+v / %+v, want %+v / %+v", gotS, gotR, servers, routes)
+	}
+	gotS, gotR := fleet.Upstream()
+	if !reflect.DeepEqual(gotS, servers) || !reflect.DeepEqual(gotR, routes) {
+		t.Errorf("fleet.Upstream = %+v / %+v", gotS, gotR)
+	}
+	// persisted to the controller config
+	b, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(b, []byte("upstream_servers:")) || !bytes.Contains(b, []byte("udp://9.9.9.9:53")) {
+		t.Errorf("upstream_servers not persisted:\n%s", b)
+	}
+	if !bytes.Contains(b, []byte("upstream_routes:")) || !bytes.Contains(b, []byte(".corp.")) {
+		t.Errorf("upstream_routes not persisted:\n%s", b)
+	}
+}
+
+// TestFleetUpstreamReconcileRestartRevert simulates a blipd restart that
+// reverts the upstream pool to off; the controller must re-push the fleet value.
+func TestFleetUpstreamReconcileRestartRevert(t *testing.T) {
+	pollInterval = 100 * time.Millisecond
+	defer func() { pollInterval = 5 * time.Second }()
+	up := &upstreamRec{}
+	srv := fakeBlipdWithRec(t, "t", "", &control.HealthResponse{OK: true}, &control.StatsResponse{}, &control.ListResponse{}, nil, nil, up)
+	defer srv.Close()
+
+	servers := []upstream.UpstreamServer{{Name: "quad9", Address: "udp://9.9.9.9:53", Priority: 1}}
+	fleet := NewFleet("/tmp/blip-test-config.yaml")
+	fleet.SetUpstreamDefault(servers, nil)
+	if err := fleet.Add(context.Background(), InstanceConfig{ID: "a", URL: srv.URL, Token: "t"}); err != nil {
+		t.Fatal(err)
+	}
+	// initial push from Add (via poll reconcile) lands the fleet value.
+	waitForUp := func(n int, msg string) {
+		deadline := time.After(3 * time.Second)
+		for {
+			if len(up.snapshot()) >= n {
+				return
+			}
+			select {
+			case <-deadline:
+				t.Fatal(msg)
+			case <-time.After(20 * time.Millisecond):
+			}
+		}
+	}
+	waitForUp(1, "initial upstream push never happened")
+
+	// Simulate restart revert: blipd forgot the pushed pool.
+	up.mu.Lock()
+	up.servers = nil
+	up.routes = nil
+	up.mu.Unlock()
+
+	waitForUp(2, "no re-push after simulated restart revert")
+	if gotS, _ := lastUpstream(up); !reflect.DeepEqual(gotS, servers) {
+		t.Errorf("last upstream push = %+v, want %+v", gotS, servers)
+	}
+}
+
+// TestFleetUpstreamOverride verifies a per-instance upstream override is pushed
+// to that instance only; other instances keep the fleet value.
+func TestFleetUpstreamOverride(t *testing.T) {
+	upA, upB := &upstreamRec{}, &upstreamRec{}
+	srvA := fakeBlipdWithRec(t, "t", "", &control.HealthResponse{OK: true}, &control.StatsResponse{}, &control.ListResponse{}, nil, nil, upA)
+	defer srvA.Close()
+	srvB := fakeBlipdWithRec(t, "t", "", &control.HealthResponse{OK: true}, &control.StatsResponse{}, &control.ListResponse{}, nil, nil, upB)
+	defer srvB.Close()
+
+	cfgPath := filepath.Join(t.TempDir(), "blipc.yaml")
+	fleet := NewFleet(cfgPath)
+	ctx := context.Background()
+	if err := fleet.Add(ctx, InstanceConfig{ID: "a", URL: srvA.URL, Token: "t"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := fleet.Add(ctx, InstanceConfig{ID: "b", URL: srvB.URL, Token: "t"}); err != nil {
+		t.Fatal(err)
+	}
+
+	servers := []upstream.UpstreamServer{{Name: "cloudflare", Address: "udp://1.1.1.1:53", Priority: 1}}
+	if res := fleet.SetInstanceOverride(ctx, "a", &InstanceOverride{UpstreamServers: &servers}); res["a"] != "ok" {
+		t.Fatalf("expected a ok, got %+v", res)
+	}
+	// Instance a must have received its override pool; b (fleet default empty)
+	// receives no upstream push.
+	if gotS, _ := lastUpstream(upA); !reflect.DeepEqual(gotS, servers) {
+		t.Errorf("instance a upstream = %+v, want %+v", gotS, servers)
+	}
+	if len(upB.snapshot()) != 0 {
+		t.Errorf("instance b should receive no upstream push, got %v", upB.snapshot())
+	}
+	if o := fleet.InstanceOverrideOf("a"); o == nil || !reflect.DeepEqual(*o.UpstreamServers, servers) {
+		t.Errorf("override for a = %+v", o)
+	}
+	// clearing the override removes it entirely.
+	if res := fleet.SetInstanceOverride(ctx, "a", &InstanceOverride{}); res["a"] != "ok" {
+		t.Fatalf("expected clear ok, got %+v", res)
+	}
+	if o := fleet.InstanceOverrideOf("a"); o != nil && !o.IsEmpty() {
+		t.Errorf("override should be removed after clear, got %+v", o)
+	}
+}
+
 // newAuthedClient logs in to a controller Server and returns a client whose
 // requests carry the resulting session cookie (mirrors TestServerAuth's flow).
 func newAuthedClient(t *testing.T, s *Server) *http.Client {
@@ -1120,6 +1345,245 @@ func TestServerSettingsDoHInstanceOverride(t *testing.T) {
 	}
 	if o["upstream"] != "udp://9.9.9.9:53" {
 		t.Errorf("b override upstream = %v, want udp://9.9.9.9:53 (merge must preserve it)", o["upstream"])
+	}
+}
+
+func TestServerSettingsUpstreamFleet(t *testing.T) {
+	upA := &upstreamRec{}
+	srv := fakeBlipdWithRec(t, "t", "", &control.HealthResponse{OK: true}, &control.StatsResponse{}, &control.ListResponse{}, nil, nil, upA)
+	defer srv.Close()
+
+	fleet := NewFleet(filepath.Join(t.TempDir(), "blipc.yaml"))
+	if err := fleet.Add(context.Background(), InstanceConfig{ID: "a", URL: srv.URL, Token: "t"}); err != nil {
+		t.Fatal(err)
+	}
+
+	s := NewServer("admin", "secret", fleet, nil)
+	c := newAuthedClient(t, s)
+
+	// GET surfaces the empty fleet-wide default.
+	resp, err := c.Get("/api/settings")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		UpstreamServers []upstream.UpstreamServer `json:"upstream_servers"`
+		UpstreamRoutes  []upstream.UpstreamRoute  `json:"upstream_routes"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if len(got.UpstreamServers) != 0 || len(got.UpstreamRoutes) != 0 {
+		t.Errorf("initial upstream = %+v / %+v, want empty", got.UpstreamServers, got.UpstreamRoutes)
+	}
+
+	// PUT a fleet-wide upstream pool + conditional-forwarding route.
+	servers := []upstream.UpstreamServer{{Name: "quad9", Address: "udp://9.9.9.9:53", Priority: 1}}
+	routes := []upstream.UpstreamRoute{{Name: "corp", QnameSuffix: ".corp.", Server: "quad9"}}
+	body, _ := json.Marshal(map[string]interface{}{
+		"upstream_servers": servers,
+		"upstream_routes":  routes,
+	})
+	req, _ := http.NewRequest(http.MethodPut, "/api/settings", strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err = c.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ack map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&ack); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if ack["ok"] != true {
+		t.Fatalf("PUT ok = %v", ack["ok"])
+	}
+	if applied := ack["applied"].(map[string]interface{}); applied["a"] != "ok" {
+		t.Errorf("applied a = %v", applied["a"])
+	}
+	if gotS, gotR := lastUpstream(upA); !reflect.DeepEqual(gotS, servers) || !reflect.DeepEqual(gotR, routes) {
+		t.Errorf("instance a upstream = %+v / %+v, want %+v / %+v", gotS, gotR, servers, routes)
+	}
+
+	// Persisted + readable back.
+	resp, _ = c.Get("/api/settings")
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if !reflect.DeepEqual(got.UpstreamServers, servers) || !reflect.DeepEqual(got.UpstreamRoutes, routes) {
+		t.Errorf("read-back upstream = %+v / %+v", got.UpstreamServers, got.UpstreamRoutes)
+	}
+}
+
+// TestServerSettingsUpstreamFleetPartialSave verifies a fleet-wide save that
+// touches only one of the two upstream fields preserves the other (a routes-only
+// save must not wipe the fleet servers and vice-versa).
+func TestServerSettingsUpstreamFleetPartialSave(t *testing.T) {
+	upA := &upstreamRec{}
+	srv := fakeBlipdWithRec(t, "t", "", &control.HealthResponse{OK: true}, &control.StatsResponse{}, &control.ListResponse{}, nil, nil, upA)
+	defer srv.Close()
+
+	fleet := NewFleet(filepath.Join(t.TempDir(), "blipc.yaml"))
+	if err := fleet.Add(context.Background(), InstanceConfig{ID: "a", URL: srv.URL, Token: "t"}); err != nil {
+		t.Fatal(err)
+	}
+
+	s := NewServer("admin", "secret", fleet, nil)
+	c := newAuthedClient(t, s)
+
+	put := func(body map[string]interface{}) int {
+		b, _ := json.Marshal(body)
+		req, _ := http.NewRequest(http.MethodPut, "/api/settings", strings.NewReader(string(b)))
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := c.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	getUpstream := func() ([]upstream.UpstreamServer, []upstream.UpstreamRoute) {
+		resp, err := c.Get("/api/settings")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var d struct {
+			UpstreamServers []upstream.UpstreamServer `json:"upstream_servers"`
+			UpstreamRoutes  []upstream.UpstreamRoute  `json:"upstream_routes"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&d); err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return d.UpstreamServers, d.UpstreamRoutes
+	}
+
+	servers := []upstream.UpstreamServer{{Name: "quad9", Address: "udp://9.9.9.9:53", Priority: 1}}
+	routes := []upstream.UpstreamRoute{{Name: "corp", QnameSuffix: ".corp.", Server: "quad9"}}
+	if st := put(map[string]interface{}{"upstream_servers": servers, "upstream_routes": routes}); st != http.StatusOK {
+		t.Fatalf("seed PUT status = %d", st)
+	}
+
+	// A routes-only save must keep the fleet servers.
+	newRoutes := []upstream.UpstreamRoute{{Name: "corp", QnameSuffix: ".corp.", Server: "quad9", ClientCIDR: "10.0.0.0/8"}}
+	if st := put(map[string]interface{}{"upstream_routes": newRoutes}); st != http.StatusOK {
+		t.Fatalf("routes-only PUT status = %d", st)
+	}
+	if gotS, gotR := getUpstream(); !reflect.DeepEqual(gotS, servers) || !reflect.DeepEqual(gotR, newRoutes) {
+		t.Errorf("after routes-only save = %+v / %+v, want %+v / %+v", gotS, gotR, servers, newRoutes)
+	}
+
+	// And a servers-only save must keep the fleet routes.
+	newServers := []upstream.UpstreamServer{{Name: "cloudflare", Address: "udp://1.1.1.1:53", Priority: 1}}
+	if st := put(map[string]interface{}{"upstream_servers": newServers}); st != http.StatusOK {
+		t.Fatalf("servers-only PUT status = %d", st)
+	}
+	if gotS, gotR := getUpstream(); !reflect.DeepEqual(gotS, newServers) || !reflect.DeepEqual(gotR, newRoutes) {
+		t.Errorf("after servers-only save = %+v / %+v, want %+v / %+v", gotS, gotR, newServers, newRoutes)
+	}
+}
+
+// TestServerSettingsUpstreamInstanceOverride verifies a per-instance upstream
+// override set through the API survives a later DoH save, and that a
+// routes-only save does not wipe a previously saved per-instance server pool.
+func TestServerSettingsUpstreamInstanceOverride(t *testing.T) {
+	upA, upB := &upstreamRec{}, &upstreamRec{}
+	dohA, dohB := &dohRec{}, &dohRec{}
+	srvA := fakeBlipdWithRec(t, "t", "", &control.HealthResponse{OK: true}, &control.StatsResponse{}, &control.ListResponse{}, nil, dohA, upA)
+	defer srvA.Close()
+	srvB := fakeBlipdWithRec(t, "t", "", &control.HealthResponse{OK: true}, &control.StatsResponse{}, &control.ListResponse{}, nil, dohB, upB)
+	defer srvB.Close()
+
+	cfgPath := filepath.Join(t.TempDir(), "blipc.yaml")
+	fleet := NewFleet(cfgPath)
+	if err := fleet.Add(context.Background(), InstanceConfig{ID: "a", URL: srvA.URL, Token: "t"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := fleet.Add(context.Background(), InstanceConfig{ID: "b", URL: srvB.URL, Token: "t"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Give the fleet a baseline default so both instances have one.
+	fleetServers := []upstream.UpstreamServer{{Name: "quad9", Address: "udp://9.9.9.9:53", Priority: 1}}
+	if res := fleet.SetUpstream(context.Background(), fleetServers, nil); res["a"] != "ok" || res["b"] != "ok" {
+		t.Fatalf("fleet upstream push: %+v", res)
+	}
+	time.Sleep(150 * time.Millisecond) // let poll reconcile settle
+
+	s := NewServer("admin", "secret", fleet, nil)
+	c := newAuthedClient(t, s)
+
+	// First give instance b a per-instance upstream override.
+	ovrServers := []upstream.UpstreamServer{{Name: "cloudflare", Address: "udp://1.1.1.1:53", Priority: 1}}
+	body, _ := json.Marshal(map[string]interface{}{"scope": "instance", "instance": "b", "upstream_servers": ovrServers, "upstream_routes": []upstream.UpstreamRoute{}})
+	req, _ := http.NewRequest(http.MethodPut, "/api/settings", strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("upstream override PUT status = %d", resp.StatusCode)
+	}
+
+	// A routes-only save must not clobber b's per-instance server pool.
+	routes := []upstream.UpstreamRoute{{Name: "corp", QnameSuffix: ".corp.", Server: "cloudflare"}}
+	body, _ = json.Marshal(map[string]interface{}{"scope": "instance", "instance": "b", "upstream_routes": routes})
+	req, _ = http.NewRequest(http.MethodPut, "/api/settings", strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err = c.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("routes-only PUT status = %d", resp.StatusCode)
+	}
+
+	// Then override b's plain-HTTP DoH address; the upstream must survive.
+	body, _ = json.Marshal(map[string]interface{}{"scope": "instance", "instance": "b", "doh_http_addr": "0.0.0.0:9999"})
+	req, _ = http.NewRequest(http.MethodPut, "/api/settings", strings.NewReader(string(body)))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err = c.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("instance doh PUT status = %d", resp.StatusCode)
+	}
+
+	// The saved GET must keep both upstream override fields plus the DoH one.
+	resp, _ = c.Get("/api/settings")
+	var d struct {
+		InstanceOverrides map[string]*InstanceOverride `json:"instance_overrides"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&d); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	o := d.InstanceOverrides["b"]
+	if o == nil {
+		t.Fatal("no override for b")
+	}
+	if o.DoHHTTPAddr == nil || *o.DoHHTTPAddr != "0.0.0.0:9999" {
+		t.Errorf("b override doh = %v, want 0.0.0.0:9999", o.DoHHTTPAddr)
+	}
+	if !reflect.DeepEqual(*o.UpstreamServers, ovrServers) {
+		t.Errorf("b override servers = %+v, want %+v (routes-only save must preserve it)", *o.UpstreamServers, ovrServers)
+	}
+	if !reflect.DeepEqual(*o.UpstreamRoutes, routes) {
+		t.Errorf("b override routes = %+v, want %+v", *o.UpstreamRoutes, routes)
+	}
+	// b's fake instance received the full merged pool + routes; a kept the fleet default.
+	if gotS, gotR := lastUpstream(upB); !reflect.DeepEqual(gotS, ovrServers) || !reflect.DeepEqual(gotR, routes) {
+		t.Errorf("instance b upstream = %+v / %+v, want %+v / %+v", gotS, gotR, ovrServers, routes)
+	}
+	if gotS, _ := lastUpstream(upA); !reflect.DeepEqual(gotS, fleetServers) {
+		t.Errorf("instance a upstream = %+v, want fleet default %+v", gotS, fleetServers)
 	}
 }
 

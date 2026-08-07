@@ -15,6 +15,7 @@ import (
 
 	"github.com/twobip/BlipDNS/internal/control"
 	"github.com/twobip/BlipDNS/internal/controller"
+	"github.com/twobip/BlipDNS/internal/upstream"
 	"gopkg.in/yaml.v3"
 )
 
@@ -29,6 +30,8 @@ type config struct {
 	InstanceOverrides    map[string]*controller.InstanceOverride `yaml:"instance_overrides"`
 	DoHHTTPAddr          string                                  `yaml:"doh_http_addr"`
 	RateLimitQPS         int                                     `yaml:"rate_limit_qps"`
+	UpstreamServers      []upstream.UpstreamServer               `yaml:"upstream_servers"`
+	UpstreamRoutes       []upstream.UpstreamRoute                `yaml:"upstream_routes"`
 	BlocklistSources     []string                                `yaml:"blocklist_sources"`
 	BlocklistUpdateHours int                                     `yaml:"blocklist_update_hours"`
 	Instances            []controller.InstanceConfig             `yaml:"instances"`
@@ -68,6 +71,9 @@ func main() {
 	}
 	if cfg.RateLimitQPS > 0 {
 		fleet.SetRateLimitQPSDefault(cfg.RateLimitQPS)
+	}
+	if len(cfg.UpstreamServers) > 0 || len(cfg.UpstreamRoutes) > 0 {
+		fleet.SetUpstreamDefault(cfg.UpstreamServers, cfg.UpstreamRoutes)
 	}
 	ctx := context.Background()
 	for _, ic := range cfg.Instances {

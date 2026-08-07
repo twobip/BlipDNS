@@ -58,6 +58,7 @@ const NAV = [
   { id: "instances", label: "Instances", icon: IC.inst, group: "DNS" },
   { id: "blocklist", label: "Blocklists", icon: IC.block, group: "DNS" },
   { id: "filters", label: "DNS Filters", icon: IC.shield, group: "DNS" },
+  { id: "upstream", label: "Upstream", icon: IC.globe, group: "DNS" },
   { id: "settings", label: "Settings", icon: IC.set, group: "System" },
 ];
 const TITLES = {
@@ -68,7 +69,8 @@ const TITLES = {
   instances: ["Instances", "Managed blipd resolvers"],
   blocklist: ["Blocklists", "Global blocked domains and list sources"],
   filters: ["DNS Filters", "Per-instance policies and scope rules"],
-  settings: ["Settings", "Upstreams and controller configuration"],
+  upstream: ["Upstream &amp; Conditional Forwarding", "Named resolvers and per-suffix forwarding routes"],
+  settings: ["Settings", "Controller configuration"],
 };
 let current = "dashboard";
 
@@ -103,7 +105,7 @@ function go(page, push = true) {
   $("page-sub").textContent = t[1];
   refresh();
   if (page === "instances") renderEvents();
-  if (page === "settings") refreshSettings();
+  if (page === "settings" || page === "upstream") refreshSettings();
   if (page === "blocklist" || page === "filters") loadBlocklist();
   if (page === "filters") renderPolicies();
 }
@@ -826,57 +828,99 @@ async function savePolicy() {
 }
 
 /* ---------- settings ---------- */
-function parseUpstreamSpec(str) {
-  return (String(str || "").match(/\S+/g) || []).map((tok, i) => {
-    let spec = tok, prio = i + 1;
-    if (tok.includes("|")) { const p = parseInt(tok.split("|")[1], 10); if (p > 0) prio = p; spec = tok.split("|")[0]; }
-    let type = "udp", addr = spec;
-    if (spec.startsWith("udp://")) addr = spec.slice(6);
-    else if (spec.startsWith("https://")) { type = "doh"; addr = spec.slice(8); }
-    else if (spec.startsWith("doh://")) { type = "doh"; addr = spec.slice(6); }
-    return { type, addr, prio };
-  });
-}
-function serializeUpstreams(rows) {
-  const specs = [];
-  for (const row of rows) {
-    const addr = (row.addr || "").trim();
-    if (!addr) continue;
-    specs.push((row.type === "doh" ? "https://" : "udp://") + addr + "|" + (row.prio > 0 ? row.prio : 1));
-  }
-  return specs.join(" ");
-}
-function upstreamRow(u) {
+/* ---------- upstream editor (named servers + conditional forwarding) ---------- */
+// A server is {name, address, priority}. priority 0 = route-only (never part
+// of the automatic rotation); 1+ = auto-failover order (lower first).
+function serverRow(u) {
   const row = document.createElement("div");
   row.className = "row up-row";
-  const ph = u.type === "doh" ? "1.1.1.1/dns-query" : "1.1.1.1:53";
   row.innerHTML = `
-    <select class="select up-type" style="width:104px">
-      <option value="udp" ${u.type === "doh" ? "" : "selected"}>UDP</option>
-      <option value="doh" ${u.type === "doh" ? "selected" : ""}>DoH / HTTPS</option>
-    </select>
-    <input class="input grow up-addr" placeholder="${ph}" value="${esc(u.addr)}"/>
-    <input class="input up-prio" type="number" min="1" title="Priority — lower = higher priority" style="width:72px" value="${u.prio || ""}"/>
+    <input class="input up-name" placeholder="name (e.g. quad9)" style="width:120px" value="${esc(u.name || "")}"/>
+    <input class="input grow up-addr" placeholder="udp://9.9.9.9:53 or https://1.1.1.1/dns-query" value="${esc(u.address || "")}"/>
+    <input class="input up-prio" type="number" min="0" title="Priority — lower = higher priority; 0 = route-only" style="width:72px" value="${u.priority || ""}"/>
     <button class="icon-btn up-del" title="Remove">${IC.trash}</button>`;
   row.querySelector(".up-del").onclick = () => row.remove();
   return row;
 }
-function renderUpstreamList(list) {
+function renderServerList(list) {
   const wrap = $("s-upstream-list");
   wrap.innerHTML = "";
-  for (const u of list) wrap.appendChild(upstreamRow(u));
-  if (!list.length) wrap.innerHTML = `<div class="hint" style="padding:2px 0 6px">No upstreams configured — instances use their compiled default.</div>`;
+  for (const u of list) wrap.appendChild(serverRow(u));
+  if (!list.length) wrap.innerHTML = `<div class="hint" style="padding:2px 0 6px">No named resolvers — the automatic rotation is disabled.</div>`;
 }
-function collectUpstreams() {
+function collectServers() {
   return [...document.querySelectorAll("#s-upstream-list .up-row")].map((row) => ({
-    type: row.querySelector(".up-type").value,
-    addr: row.querySelector(".up-addr").value,
-    prio: parseInt(row.querySelector(".up-prio").value, 10) || 0,
-  }));
+    name: row.querySelector(".up-name").value.trim(),
+    address: row.querySelector(".up-addr").value.trim(),
+    priority: parseInt(row.querySelector(".up-prio").value, 10) || 0,
+  })).filter((s) => s.address !== "");
 }
-let savedDefaultPolicy = null; // fleet default policy held by blipc
+// A route is {name, qname_suffix, server, client_cidr}. server references a
+// named server by name; matching queries are forwarded to it.
+function routeRow(r, serverOpts) {
+  const row = document.createElement("div");
+  row.className = "row cf-row";
+  const opts = serverOpts.map((s) => `<option value="${esc(s.name)}" ${s.name === r.server ? "selected" : ""}>${esc(s.name || "server#" + s.address)}</option>`).join("");
+  const extra = r.server && !serverOpts.some((s) => s.name === r.server) ? `<option value="${esc(r.server)}" selected>${esc(r.server)}</option>` : "";
+  const fallback = opts ? "" : `<option value="">(add a server first)</option>`;
+  row.innerHTML = `
+    <input class="input cf-name" placeholder="label" style="width:90px" value="${esc(r.name || "")}"/>
+    <input class="input grow cf-suffix" placeholder=".corp." title="Query name suffix to match (trailing dot optional)" value="${esc(r.qname_suffix || "")}"/>
+    <select class="select cf-server" style="width:150px">${extra}${opts}${fallback}</select>
+    <input class="input cf-cidr" placeholder="10.0.0.0/8" title="Client source CIDR (blank = all clients)" style="width:120px" value="${esc(r.client_cidr || "")}"/>
+    <button class="icon-btn cf-del" title="Remove">${IC.trash}</button>`;
+  row.querySelector(".cf-del").onclick = () => row.remove();
+  return row;
+}
+function renderRouteList(routes, serverOpts) {
+  const wrap = $("s-cf-list");
+  wrap.innerHTML = "";
+  for (const r of routes) wrap.appendChild(routeRow(r, serverOpts));
+  if (!routes.length) wrap.innerHTML = `<div class="hint" style="padding:2px 0 6px">No conditional-forwarding routes — matching queries use the automatic rotation.</div>`;
+}
+function collectRoutes() {
+  return [...document.querySelectorAll("#s-cf-list .cf-row")].map((row) => ({
+    name: row.querySelector(".cf-name").value.trim(),
+    qname_suffix: row.querySelector(".cf-suffix").value.trim(),
+    server: row.querySelector(".cf-server").value,
+    client_cidr: row.querySelector(".cf-cidr").value.trim(),
+  })).filter((r) => r.qname_suffix !== "" || r.server !== "");
+}
 let savedOverrides = {};       // sparse per-instance overrides keyed by instance id
 let scopeState = "default";    // "default" or an instance id
+let savedUpServers = [];       // fleet-wide default named servers
+let savedUpRoutes = [];        // fleet-wide default conditional-forwarding routes
+
+// visibleUpServers/visibleUpRoutes return what the editor should show for a
+// scope: the fleet default at "default", otherwise only the instance's own
+// override (blank = inherits the fleet default).
+function visibleUpServers(scope) {
+  if (scope === "default") return savedUpServers;
+  const o = savedOverrides[scope];
+  return Array.isArray(o && o.upstream_servers) ? o.upstream_servers : [];
+}
+function visibleUpRoutes(scope) {
+  if (scope === "default") return savedUpRoutes;
+  const o = savedOverrides[scope];
+  return Array.isArray(o && o.upstream_routes) ? o.upstream_routes : [];
+}
+// effectiveUpServers is the full pool an instance would run (override or fleet
+// default) — used to populate the route-server dropdown.
+function effectiveUpServers(scope) {
+  if (scope === "default") return savedUpServers;
+  const o = savedOverrides[scope];
+  return Array.isArray(o && o.upstream_servers) ? o.upstream_servers : savedUpServers;
+}
+// upsertOverrideField updates one field of the local override mirror; an empty
+// value clears the field (and the whole override when nothing is left).
+function upsertOverrideField(id, field, value) {
+  const o = { ...(savedOverrides[id] || {}) };
+  if (value.length) o[field] = value;
+  else delete o[field];
+  if (Object.keys(o).length) savedOverrides[id] = o;
+  else delete savedOverrides[id];
+}
+
 
 // DoH plain-HTTP editor state
 let savedFleetDoH = "";        // fleet-wide plain-HTTP DoH address ("" = off)
@@ -986,17 +1030,32 @@ function renderScopeSelect() {
 function loadScopeEditor() {
   renderScopeSelect();
   const badge = $("s-scope-badge");
+  const cfBadge = $("s-cf-badge");
+  const hint = $("s-scope-hint");
+  const cfHint = $("s-cf-hint");
+  const upHint = $("s-up-hint");
   if (scopeState === "default") {
     badge.textContent = "fleet-wide";
     badge.className = "badge accent";
-    renderUpstreamList(parseUpstreamSpec(savedDefaultPolicy.upstream));
-    $("s-scope-hint").textContent = "Applies to every instance that doesn't have its own override.";
+    cfBadge.textContent = "fleet-wide";
+    cfBadge.className = "badge accent";
+    hint.textContent = "Applies to every instance that doesn't have its own override.";
+    cfHint.textContent = "Matching queries are forwarded to the named server. Routes reference the servers above.";
+    upHint.textContent = "priority 1+ servers form the automatic failover rotation; priority 0 servers are used only by conditional-forwarding routes.";
+    renderServerList(savedUpServers);
+    renderRouteList(savedUpRoutes, savedUpServers);
   } else {
     badge.textContent = "instance";
     badge.className = "badge purple";
-    const o = savedOverrides[scopeState];
-    renderUpstreamList(parseUpstreamSpec(o && o.upstream));
-    $("s-scope-hint").textContent = "Only for this instance. Fields you leave unset inherit the fleet-wide default.";
+    cfBadge.textContent = "instance";
+    cfBadge.className = "badge purple";
+    hint.textContent = "Only for this instance. Fields you leave blank inherit the fleet-wide default.";
+    cfHint.textContent = "Only for this instance. Blank = inherit the fleet-wide default.";
+    upHint.textContent = "Blank = inherit the fleet-wide server pool.";
+    const o = savedOverrides[scopeState] || {};
+    renderServerList(Array.isArray(o.upstream_servers) ? o.upstream_servers : []);
+    const routes = Array.isArray(o.upstream_routes) ? o.upstream_routes : [];
+    renderRouteList(routes, effectiveUpServers(scopeState));
   }
 }
 
@@ -1008,11 +1067,13 @@ async function refreshSettings() {
   try {
     const r = await API("/api/settings");
     const d = await r.json();
-    savedDefaultPolicy = d.default_policy || { id: "default" };
     savedOverrides = d.instance_overrides || {};
     // fleet-wide plain-HTTP DoH address ("" = off)
     savedFleetDoH = (d.doh_http_addr != null && d.doh_http_addr !== undefined) ? (d.doh_http_addr || "") : "";
     savedRLQPS = (d.rate_limit_qps != null && d.rate_limit_qps !== undefined) ? Number(d.rate_limit_qps || 0) : 0;
+    // fleet-wide default upstream pool + conditional-forwarding routes
+    savedUpServers = Array.isArray(d.upstream_servers) ? d.upstream_servers : [];
+    savedUpRoutes = Array.isArray(d.upstream_routes) ? d.upstream_routes : [];
     // carry over any per-instance doh_http_addr not already surfaced
     loadScopeEditor();
     loadDoHEditor();
@@ -1174,31 +1235,55 @@ $("p-save").onclick = savePolicy;
 
 /* settings */
 $("s-up-add").onclick = () => {
-  const prios = collectUpstreams().map((r) => r.prio).filter((p) => p > 0);
-  $("s-upstream-list").appendChild(upstreamRow({ type: "udp", addr: "", prio: (prios.length ? Math.max(...prios) + 1 : 1) }));
+  const prios = collectServers().map((s) => s.priority).filter((p) => p > 0);
+  $("s-upstream-list").appendChild(serverRow({ name: "", address: "", priority: (prios.length ? Math.max(...prios) + 1 : 1) }));
 };
 $("s-save-upstream").onclick = async () => {
-  const up = serializeUpstreams(collectUpstreams());
+  const servers = collectServers();
   const st = $("s-up-status");
   st.textContent = "saving…";
   let body, msg;
   if (scopeState === "default") {
-    body = { default_policy: { id: "default", networks: [], block: [], allow: [], block_action: "nxdomain", log: true, ...(savedDefaultPolicy || {}), upstream: up } };
-    msg = "fleet default upstream saved";
+    body = { upstream_servers: servers };
+    msg = servers.length ? "fleet upstream servers saved" : "fleet upstream servers cleared";
   } else {
-    body = { scope: "instance", instance: scopeState, override: up ? { upstream: up } : {} };
-    msg = "instance override saved";
+    body = { scope: "instance", instance: scopeState, upstream_servers: servers };
+    msg = servers.length ? "instance upstream servers saved" : "instance upstream servers cleared (inherits fleet)";
   }
   try {
     const r = await API("/api/settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
     const d = await r.json();
-    if (scopeState === "default") {
-      savedDefaultPolicy = body.default_policy;
-    } else if (up) {
-      savedOverrides[scopeState] = { upstream: up };
-    } else {
-      delete savedOverrides[scopeState];
-    }
+    if (scopeState === "default") savedUpServers = servers;
+    else upsertOverrideField(scopeState, "upstream_servers", servers);
+    const applied = d.applied || {};
+    const ids = Object.keys(applied);
+    const ok = ids.filter((k) => applied[k] === "ok").length;
+    const failed = ids.filter((k) => applied[k] !== "ok");
+    st.textContent = ids.length ? `saved on blipc · pushed to ${ok}/${ids.length} instance${ids.length > 1 ? "s" : ""}` + (failed.length ? ` · errors: ${failed.join(", ")}` : "") : "saved on blipc · no instance to push to yet";
+    toast(msg + (ids.length ? ` (${ok}/${ids.length})` : ""));
+    renderScopeSelect();
+  } catch (e) { st.textContent = ""; toast("save failed: " + e.message, "err"); }
+};
+$("s-cf-add").onclick = () => {
+  $("s-cf-list").appendChild(routeRow({ name: "", qname_suffix: "", server: "", client_cidr: "" }, effectiveUpServers(scopeState)));
+};
+$("s-save-cf").onclick = async () => {
+  const routes = collectRoutes();
+  const st = $("s-cf-status");
+  st.textContent = "saving…";
+  let body, msg;
+  if (scopeState === "default") {
+    body = { upstream_routes: routes };
+    msg = routes.length ? "fleet conditional forwarding saved" : "fleet conditional forwarding cleared";
+  } else {
+    body = { scope: "instance", instance: scopeState, upstream_routes: routes };
+    msg = routes.length ? "instance conditional forwarding saved" : "instance conditional forwarding cleared (inherits fleet)";
+  }
+  try {
+    const r = await API("/api/settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const d = await r.json();
+    if (scopeState === "default") savedUpRoutes = routes;
+    else upsertOverrideField(scopeState, "upstream_routes", routes);
     const applied = d.applied || {};
     const ids = Object.keys(applied);
     const ok = ids.filter((k) => applied[k] === "ok").length;

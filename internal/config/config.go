@@ -7,34 +7,37 @@ import (
 	"time"
 
 	"github.com/twobip/BlipDNS/internal/filter"
+	"github.com/twobip/BlipDNS/internal/upstream"
 	"gopkg.in/yaml.v3"
 )
 
 // Config is the blipd YAML configuration.
 type Config struct {
-	DNSAddr              string           `yaml:"dns_addr"`
-	DoHAddr              string           `yaml:"doh_addr"`
-	CertFile             string           `yaml:"cert_file"`
-	KeyFile              string           `yaml:"key_file"`
-	DoHTLS               bool             `yaml:"doh_tls"`       // serve DoH over HTTPS on DoHAddr (self-signed cert auto-generated when CertFile/KeyFile unset)
-	DoHHTTPAddr          string           `yaml:"doh_http_addr"` // additional plain-HTTP DoH listener ("" = off)
-	TLSDir               string           `yaml:"tls_dir"`       // where a generated self-signed DoH cert/key are persisted
-	AdminAddr            string           `yaml:"admin_addr"`
-	AdminToken           string           `yaml:"admin_token"`
-	StateFile            string           `yaml:"state_file"`  // persists "adopted" so the claim code isn't regenerated
-	InstanceID           string           `yaml:"instance_id"` // stable id shown to the controller
-	Upstream             string           `yaml:"upstream"`
-	CacheCap             time.Duration    `yaml:"cache_cap"`              // max TTL for cached responses
-	CacheSize            int              `yaml:"cache_size"`             // max cached responses in RAM (0 = unlimited)
-	CacheWarmCount       int              `yaml:"cache_warm_count"`       // most-popular entries kept fresh (0 = off)
-	CacheWarmAhead       time.Duration    `yaml:"cache_warm_ahead"`       // refresh popular entries when TTL drops below this
-	CacheWarmInterval    time.Duration    `yaml:"cache_warm_interval"`    // how often to check for stale popular entries
-	BlocklistURL         string           `yaml:"blocklist_url"`          // AdBlock Plus feed URL (optional, legacy single)
-	BlocklistURLs        []string         `yaml:"blocklist_urls"`         // one or more ABP/hosts feeds (Pi-hole style)
-	BlocklistUpdateHours int              `yaml:"blocklist_update_hours"` // refresh interval (0 = no auto-refresh)
-	BlocklistCacheFile   string           `yaml:"blocklist_cache_file"`   // persisted snapshot restored into RAM at startup
-	Default              *filter.Policy   `yaml:"default_policy"`
-	Policies             []*filter.Policy `yaml:"policies"`
+	DNSAddr              string                    `yaml:"dns_addr"`
+	DoHAddr              string                    `yaml:"doh_addr"`
+	CertFile             string                    `yaml:"cert_file"`
+	KeyFile              string                    `yaml:"key_file"`
+	DoHTLS               bool                      `yaml:"doh_tls"`       // serve DoH over HTTPS on DoHAddr (self-signed cert auto-generated when CertFile/KeyFile unset)
+	DoHHTTPAddr          string                    `yaml:"doh_http_addr"` // additional plain-HTTP DoH listener ("" = off)
+	TLSDir               string                    `yaml:"tls_dir"`       // where a generated self-signed DoH cert/key are persisted
+	AdminAddr            string                    `yaml:"admin_addr"`
+	AdminToken           string                    `yaml:"admin_token"`
+	StateFile            string                    `yaml:"state_file"`  // persists "adopted" so the claim code isn't regenerated
+	InstanceID           string                    `yaml:"instance_id"` // stable id shown to the controller
+	Upstream             string                    `yaml:"upstream"`
+	UpstreamServers      []upstream.UpstreamServer `yaml:"upstream_servers"`       // named upstream pool (priority 0 = route-only)
+	UpstreamRoutes       []upstream.UpstreamRoute  `yaml:"upstream_routes"`        // conditional forwarding (qname/client -> server)
+	CacheCap             time.Duration             `yaml:"cache_cap"`              // max TTL for cached responses
+	CacheSize            int                       `yaml:"cache_size"`             // max cached responses in RAM (0 = unlimited)
+	CacheWarmCount       int                       `yaml:"cache_warm_count"`       // most-popular entries kept fresh (0 = off)
+	CacheWarmAhead       time.Duration             `yaml:"cache_warm_ahead"`       // refresh popular entries when TTL drops below this
+	CacheWarmInterval    time.Duration             `yaml:"cache_warm_interval"`    // how often to check for stale popular entries
+	BlocklistURL         string                    `yaml:"blocklist_url"`          // AdBlock Plus feed URL (optional, legacy single)
+	BlocklistURLs        []string                  `yaml:"blocklist_urls"`         // one or more ABP/hosts feeds (Pi-hole style)
+	BlocklistUpdateHours int                       `yaml:"blocklist_update_hours"` // refresh interval (0 = no auto-refresh)
+	BlocklistCacheFile   string                    `yaml:"blocklist_cache_file"`   // persisted snapshot restored into RAM at startup
+	Default              *filter.Policy            `yaml:"default_policy"`
+	Policies             []*filter.Policy          `yaml:"policies"`
 }
 
 // Default returns a configuration that works out of the box (listens on

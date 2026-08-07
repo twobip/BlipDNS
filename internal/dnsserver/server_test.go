@@ -59,7 +59,7 @@ func newTestServer(t *testing.T) (*Server, *recUp) {
 	srv := &Server{
 		cfg:   Config{Store: store, Upstream: ""},
 		cache: cache.New(0, 0),
-		up:    up,
+		pool:  upstream.NewPoolWithAuto(up),
 	}
 	return srv, up
 }

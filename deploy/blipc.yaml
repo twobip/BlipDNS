@@ -28,6 +28,26 @@ default_policy:
   upstream: "udp://1.1.1.1:53|1 https://1.1.1.1/dns-query|2"
   block_action: "nxdomain"
   log: true
+# Fleet-wide named upstream pool + conditional-forwarding routes. When set,
+# blipc pushes them to every instance (a server with priority 0 is route-only;
+# priority > 0 participates in the automatic failover rotation). Per-instance
+# overrides can be set from the Settings -> Conditional Forwarding panel.
+# Leave empty to let each instance use its own config-file upstream.
+# upstream_servers:
+#   - name: "cloudflare"
+#     address: "udp://1.1.1.1:53"
+#     priority: 1
+#   - name: "quad9"
+#     address: "udp://9.9.9.9:53"
+#     priority: 2
+#   - name: "internal"
+#     address: "udp://10.0.0.53:53"
+#     priority: 0 # route-only: never used unless a route points at it
+# upstream_routes:
+#   - name: "split-tunnel"
+#     qname_suffix: ".internal.corp."
+#     server: "internal"
+#     client_cidr: "10.0.0.0/8"
 # Pi-hole style blocklist sources: one or more AdBlock Plus (ABP) or hosts
 # format lists. blipc fetches + merges them, then pushes the merged list to
 # every blipd instance (and re-pushes on poll if an instance drifts). Edit

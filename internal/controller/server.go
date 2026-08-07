@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/twobip/BlipDNS/internal/control"
+	"github.com/twobip/BlipDNS/internal/upstream"
 )
 
 // Server is the blipc controller HTTP + UI server.
@@ -312,20 +313,25 @@ func (s *Server) handleInstance(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
+		upServers, upRoutes := s.fleet.Upstream()
 		writeJSON(w, map[string]interface{}{
 			"default_policy":     s.fleet.DefaultPolicy(),
 			"instance_overrides": s.fleet.InstanceOverrides(),
 			"doh_http_addr":      s.fleet.DoHHTTPAddr(),
 			"rate_limit_qps":     s.fleet.RateLimitQPS(),
+			"upstream_servers":   upServers,
+			"upstream_routes":    upRoutes,
 		})
 	case http.MethodPut:
 		var req struct {
-			Scope        string            `json:"scope"`
-			Policy       *control.Policy   `json:"default_policy"`
-			Instance     string            `json:"instance"`
-			Override     *InstanceOverride `json:"override"`
-			DoHHTTPAddr  *string           `json:"doh_http_addr"`
-			RateLimitQPS *int              `json:"rate_limit_qps"`
+			Scope           string                     `json:"scope"`
+			Policy          *control.Policy            `json:"default_policy"`
+			Instance        string                     `json:"instance"`
+			Override        *InstanceOverride          `json:"override"`
+			DoHHTTPAddr     *string                    `json:"doh_http_addr"`
+			RateLimitQPS    *int                       `json:"rate_limit_qps"`
+			UpstreamServers *[]upstream.UpstreamServer `json:"upstream_servers"`
+			UpstreamRoutes  *[]upstream.UpstreamRoute  `json:"upstream_routes"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -374,6 +380,41 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			applied := s.fleet.SetRateLimitQPS(r.Context(), qps)
+			writeJSON(w, map[string]interface{}{"ok": true, "applied": applied})
+			return
+		}
+		// Upstream server pool + conditional-forwarding routes (fleet-wide or
+		// per-instance). The arrays are sent whole from the upstream editor;
+		// an empty array clears the value (per-instance: falls through to the
+		// fleet-wide default) while an absent field is left untouched so a
+		// servers-only save does not wipe the fleet routes (and vice-versa).
+		if req.UpstreamServers != nil || req.UpstreamRoutes != nil {
+			if req.Scope == "instance" && req.Instance != "" {
+				existing := s.fleet.InstanceOverrideOf(req.Instance)
+				merged := mergeOverride(existing, &InstanceOverride{
+					UpstreamServers: req.UpstreamServers,
+					UpstreamRoutes:  req.UpstreamRoutes,
+				})
+				if req.UpstreamServers != nil && len(*req.UpstreamServers) == 0 {
+					merged.UpstreamServers = nil
+				}
+				if req.UpstreamRoutes != nil && len(*req.UpstreamRoutes) == 0 {
+					merged.UpstreamRoutes = nil
+				}
+				applied := s.fleet.SetInstanceOverride(r.Context(), req.Instance, merged)
+				writeJSON(w, map[string]interface{}{"ok": true, "applied": applied})
+				return
+			}
+			// Fleet-wide: keep the current value of any field the request did
+			// not include.
+			curServers, curRoutes := s.fleet.Upstream()
+			if req.UpstreamServers != nil {
+				curServers = *req.UpstreamServers
+			}
+			if req.UpstreamRoutes != nil {
+				curRoutes = *req.UpstreamRoutes
+			}
+			applied := s.fleet.SetUpstream(r.Context(), curServers, curRoutes)
 			writeJSON(w, map[string]interface{}{"ok": true, "applied": applied})
 			return
 		}

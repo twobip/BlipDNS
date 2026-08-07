@@ -320,11 +320,11 @@
         </div>
       </section>
 
-      <!-- ================= SETTINGS ================= -->
-      <section id="view-settings" class="view hidden">
+      <!-- ================= UPSTREAM ================= -->
+      <section id="view-upstream" class="view hidden">
         <div class="grid grid-2">
           <div class="panel">
-            <div class="panel-head"><h3>Upstream DNS</h3><span class="spacer"></span><span class="badge accent" id="s-scope-badge">fleet-wide</span></div>
+            <div class="panel-head"><h3>Upstream Servers</h3><span class="spacer"></span><span class="badge accent" id="s-scope-badge">fleet-wide</span></div>
             <div class="panel-body">
               <div class="field">
                 <label>Scope</label>
@@ -332,10 +332,10 @@
                 <span class="hint" id="s-scope-hint">Applies to every instance that doesn't have its own override.</span>
               </div>
               <div class="field">
-                <label>Upstream resolvers <span class="faint">priority 1 = primary, auto-failover on failure</span></label>
+                <label>Named resolvers <span class="faint">priority 1+ = auto-failover order · 0 = route-only</span></label>
                 <div id="s-upstream-list"></div>
-                <button class="btn btn-sm" id="s-up-add">+ Add upstream</button>
-                <span class="hint">Each row is one resolver, tried in priority order (lower first). Leave the list empty to inherit the fleet default.</span>
+                <button class="btn btn-sm" id="s-up-add">+ Add server</button>
+                <span class="hint" id="s-up-hint"></span>
               </div>
               <div class="row mt">
                 <button class="btn btn-primary" id="s-save-upstream">Save</button>
@@ -344,6 +344,27 @@
             </div>
           </div>
 
+          <div class="panel">
+            <div class="panel-head"><h3>Conditional Forwarding</h3><span class="spacer"></span><span class="badge accent" id="s-cf-badge">fleet-wide</span></div>
+            <div class="panel-body">
+              <div class="field">
+                <label>Routes <span class="faint">qname suffix + client CIDR &rarr; named server</span></label>
+                <div id="s-cf-list"></div>
+                <button class="btn btn-sm" id="s-cf-add">+ Add route</button>
+                <span class="hint" id="s-cf-hint"></span>
+              </div>
+              <div class="row mt">
+                <button class="btn btn-primary" id="s-save-cf">Save</button>
+                <span class="hint" id="s-cf-status"></span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ================= SETTINGS ================= -->
+      <section id="view-settings" class="view hidden">
+        <div class="grid grid-2">
           <div class="panel">
             <div class="panel-head"><h3>Blocklist Sync</h3><span class="spacer"></span><span class="badge" id="s-blsync">—</span></div>
             <div class="panel-body">

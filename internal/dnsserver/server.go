@@ -41,6 +41,8 @@ type Config struct {
 	RateLimitBurst    int              // per-client burst above QPS (0 = auto = QPS, min 1)
 	TLSCert           *tls.Certificate // in-memory cert+key (e.g. generated self-signed) used when DoHTLS
 	Upstream          string           // upstream spec(s)
+	UpstreamServers   []upstream.UpstreamServer
+	UpstreamRoutes    []upstream.UpstreamRoute
 	CacheCap          time.Duration
 	CacheSize         int           // max cached responses in RAM (0 = unlimited)
 	CacheWarmCount    int           // most-popular entries to auto-refresh (0 = off)
@@ -56,9 +58,13 @@ type Config struct {
 type Server struct {
 	cfg   Config
 	cache *cache.Cache
-	up    upstream.Resolver
 	ctrl  *control.Server
 	cnt   *control.Counters
+	upMu  sync.RWMutex
+	// pool is the runtime upstream configuration: named servers, the automatic
+	// failover rotation (priority>0 servers, or the configured upstream), and
+	// conditional-forwarding routes. nil only when no upstream is configured.
+	pool  *upstream.ResolverPool
 	logfn func(client, domain string)
 	udp   *dns.Server
 	tcp   *dns.Server
@@ -78,7 +84,7 @@ func New(cfg Config) (*Server, error) {
 	if cfg.Store == nil {
 		cfg.Store = filter.NewStore(nil)
 	}
-	up, err := upstream.FromSpec(cfg.Upstream)
+	up, err := upstream.NewPool(cfg.UpstreamServers, cfg.UpstreamRoutes, cfg.Upstream)
 	if err != nil {
 		return nil, err
 	}
@@ -88,16 +94,18 @@ func New(cfg Config) (*Server, error) {
 	s := &Server{
 		cfg:   cfg,
 		cache: c,
-		up:    up,
+		pool:  up,
 		ctrl:  ctrl,
 		cnt:   cnt,
 		rl:    newRateLimiter(),
 		close: make(chan struct{}),
 	}
-	// Let the management API toggle the optional plain-HTTP DoH listener and
-	// the per-client rate limit at runtime.
+	// Let the management API toggle the optional plain-HTTP DoH listener, the
+	// per-client rate limit, and the conditional-forwarding upstream config at
+	// runtime.
 	ctrl.SetDoHController(s)
 	ctrl.SetRateLimitController(s)
+	ctrl.SetLocalResolverController(s)
 	// Seed the rate limit from config (controller can override later).
 	if cfg.RateLimitQPS > 0 {
 		_ = s.SetRateLimit(cfg.RateLimitQPS, cfg.RateLimitBurst)
@@ -277,9 +285,11 @@ func (s *Server) serve(ctx context.Context, clientIP net.IP, clientID string, re
 		s.logfn(client, domain)
 	}
 
-	// Use policy-specific upstream if provided, else fall back to global
-	resolver := s.up
-	if upstreamOverride != "" {
+	// Resolve the upstream. Order: a conditional-forwarding route (query name
+	// + client CIDR) wins; otherwise a per-policy upstream override that only
+	// applies when no route matched; otherwise the automatic rotation.
+	resolver, matchedRoute := s.upstreamFor(q.Name, clientIP)
+	if upstreamOverride != "" && !matchedRoute {
 		var err error
 		resolver, err = upstream.FromSpec(upstreamOverride)
 		if err != nil {
@@ -288,6 +298,12 @@ func (s *Server) serve(ctx context.Context, clientIP net.IP, clientID string, re
 			resp.Rcode = dns.RcodeServerFailure
 			return resp
 		}
+	}
+	if resolver == nil {
+		s.cnt.AddUpErr()
+		s.notifyUpstreamError(client, domain, "no upstream configured")
+		resp.Rcode = dns.RcodeServerFailure
+		return resp
 	}
 
 	key := cache.Key(req)
@@ -414,7 +430,7 @@ func (s *Server) refreshPopular() {
 		req := new(dns.Msg)
 		req.RecursionDesired = true
 		req.Question = []dns.Question{{Name: name, Qtype: qtype, Qclass: qclass}}
-		m, err := s.up.Resolve(ctx, req)
+		m, err := s.upstreamAuto().Resolve(ctx, req)
 		if err != nil {
 			continue
 		}

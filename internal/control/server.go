@@ -59,6 +59,7 @@ type Server struct {
 	dohCtrl DoHController
 	// rlCtrl drives the per-client DNS query rate limit at runtime.
 	rlCtrl RateLimitController
+	upCtrl LocalResolverController
 }
 
 // DoHController is the piece of the DNS server the management API can reconfigure
@@ -107,6 +108,19 @@ func (s *Server) SetRateLimitController(c RateLimitController) {
 func (s *Server) rateLimitController() RateLimitController {
 	s.mu.RLock()
 	c := s.rlCtrl
+	s.mu.RUnlock()
+	return c
+}
+
+func (s *Server) SetLocalResolverController(c LocalResolverController) {
+	s.mu.Lock()
+	s.upCtrl = c
+	s.mu.Unlock()
+}
+
+func (s *Server) localResolverController() LocalResolverController {
+	s.mu.RLock()
+	c := s.upCtrl
 	s.mu.RUnlock()
 	return c
 }
@@ -226,6 +240,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/blocklist", s.auth(s.handleBlocklist))
 	mux.HandleFunc("/api/v1/doh", s.auth(s.handleDoH))             // toggle plain-HTTP DoH
 	mux.HandleFunc("/api/v1/ratelimit", s.auth(s.handleRateLimit)) // per-client QPS
+	mux.HandleFunc("/api/v1/upstream", s.auth(s.handleUpstream))   // conditional forwarding
 	mux.HandleFunc("/api/v1/watch", s.auth(s.handleWatch))
 	// unauthenticated adoption handshake
 	mux.HandleFunc("/api/v1/adopt/status", s.handleAdoptStatus)
@@ -311,6 +326,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 			st.RateLimitQPS = ifc.RateLimitQPS()
 		}
 	}
+	s.addUpstreamStats(st)
 	writeJSON(w, st)
 }
 

@@ -138,6 +138,8 @@ func main() {
 		DoHHTTPAddr:       cfg.DoHHTTPAddr,
 		TLSCert:           tlsCert,
 		Upstream:          cfg.Upstream,
+		UpstreamServers:   cfg.UpstreamServers,
+		UpstreamRoutes:    cfg.UpstreamRoutes,
 		CacheCap:          cfg.CacheCap,
 		CacheSize:         cfg.CacheSize,
 		CacheWarmCount:    cfg.CacheWarmCount,
@@ -175,7 +177,11 @@ func main() {
 		}()
 	}
 
-	log.Printf("blipd: DNS on %s, DoH on %s (%s), upstream=%s", cfg.DNSAddr, cfg.DoHAddr, dohScheme(cfg), cfg.Upstream)
+	if len(cfg.UpstreamServers) > 0 {
+		log.Printf("blipd: upstream pool = %d servers, %d routes", len(cfg.UpstreamServers), len(cfg.UpstreamRoutes))
+	} else {
+		log.Printf("blipd: DNS on %s, DoH on %s (%s), upstream=%s", cfg.DNSAddr, cfg.DoHAddr, dohScheme(cfg), cfg.Upstream)
+	}
 	if cfg.DoHHTTPAddr != "" {
 		log.Printf("blipd: also accepting plain-HTTP DoH on %s", cfg.DoHHTTPAddr)
 	}

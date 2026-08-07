@@ -4,7 +4,11 @@
 // connection, so blipd just needs to expose a small authenticated API.
 package control
 
-import "time"
+import (
+	"time"
+
+	"github.com/twobip/BlipDNS/internal/upstream"
+)
 
 // Policy mirrors filter.Policy over the wire.
 type Policy struct {
@@ -49,6 +53,10 @@ type StatsResponse struct {
 	// RateLimited counts queries dropped because they exceeded the per-client
 	// rate limit.
 	RateLimited uint64 `json:"rate_limited,omitempty"`
+	// UpstreamServers / UpstreamRoutes expose the instance's conditional
+	// forwarding configuration so the controller can detect drift.
+	UpstreamServers []upstream.UpstreamServer `json:"upstream_servers,omitempty"`
+	UpstreamRoutes  []upstream.UpstreamRoute  `json:"upstream_routes,omitempty"`
 }
 
 // ListResponse returns the default (nil ID indicates default) plus all policies.
@@ -75,7 +83,14 @@ type SetRateLimitRequest struct {
 	Burst int `json:"burst,omitempty"`
 }
 
-// SetBlocklistRequest replaces the instance's global blocklist with the given
+// SetUpstreamRequest replaces the instance's upstream pool and conditional
+// forwarding routes. Servers with priority 0 are route-only; an empty request
+// reverts the instance to its local (config-file) upstream.
+type SetUpstreamRequest struct {
+	Servers []upstream.UpstreamServer `json:"servers"`
+	Routes  []upstream.UpstreamRoute  `json:"routes"`
+}
+
 // domains (already normalized, plain "domain" or "*.root" wildcard entries).
 // Allowed lists a whitelist that takes precedence over the blocked domains.
 type SetBlocklistRequest struct {

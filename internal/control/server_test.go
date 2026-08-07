@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -14,6 +15,7 @@ import (
 	"github.com/twobip/BlipDNS/internal/blocklist"
 	"github.com/twobip/BlipDNS/internal/cache"
 	"github.com/twobip/BlipDNS/internal/filter"
+	"github.com/twobip/BlipDNS/internal/upstream"
 	"github.com/miekg/dns"
 )
 
@@ -205,6 +207,122 @@ func TestDoHEndpoint(t *testing.T) {
 	resp.Body.Close()
 
 	srv.SetDoHController(nil)
+}
+
+// fakeLocalResolver records every upstream pool+routes it is asked to run,
+// validating specs the way the real dnsserver.Server.SetUpstream does (via
+// upstream.NewPool).
+type fakeLocalResolver struct {
+	mu      sync.Mutex
+	servers []upstream.UpstreamServer
+	routes  []upstream.UpstreamRoute
+}
+
+func (f *fakeLocalResolver) SetUpstream(servers []upstream.UpstreamServer, routes []upstream.UpstreamRoute) error {
+	if _, err := upstream.NewPool(servers, routes, ""); err != nil {
+		return err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.servers = servers
+	f.routes = routes
+	return nil
+}
+
+func (f *fakeLocalResolver) Upstream() ([]upstream.UpstreamServer, []upstream.UpstreamRoute) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.servers, f.routes
+}
+
+func TestUpstreamEndpoint(t *testing.T) {
+	bl := blocklist.New()
+	store := filter.NewStore(nil)
+	uc := &fakeLocalResolver{}
+	srv := NewServerWithBlocklist("tok", store, cache.New(0, 0), &Counters{}, "blipd/test", bl)
+	srv.SetLocalResolverController(uc)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	// unauthenticated -> 401
+	req, _ := http.NewRequest(http.MethodPut, ts.URL+"/api/v1/upstream", strings.NewReader(`{"servers":[]}`))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauth status = %d, want 401", resp.StatusCode)
+	}
+
+	authReq := func(method, body string) *http.Response {
+		req, _ := http.NewRequest(method, ts.URL+"/api/v1/upstream", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer tok")
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp
+	}
+
+	// GET reports the (empty) current pool.
+	resp = authReq(http.MethodGet, "")
+	var got struct {
+		Servers []upstream.UpstreamServer `json:"servers"`
+		Routes  []upstream.UpstreamRoute  `json:"routes"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET status = %d", resp.StatusCode)
+	}
+	if len(got.Servers) != 0 || len(got.Routes) != 0 {
+		t.Errorf("initial upstream = %+v / %+v, want empty", got.Servers, got.Routes)
+	}
+
+	// PUT installs the pool + routes.
+	servers := []upstream.UpstreamServer{{Name: "quad9", Address: "udp://9.9.9.9:53", Priority: 1}}
+	routes := []upstream.UpstreamRoute{{Name: "corp", QnameSuffix: ".corp.", Server: "quad9"}}
+	body, _ := json.Marshal(map[string]interface{}{"servers": servers, "routes": routes})
+	resp = authReq(http.MethodPut, string(body))
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("PUT status = %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+	if gotS, gotR := uc.Upstream(); len(gotS) != 1 || gotS[0].Name != "quad9" || !reflect.DeepEqual(gotR, routes) {
+		t.Errorf("controller upstream = %+v / %+v", gotS, gotR)
+	}
+
+	// stats now report the pool so the controller can detect drift.
+	sreq, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/v1/stats", nil)
+	sreq.Header.Set("Authorization", "Bearer tok")
+	sresp, err := http.DefaultClient.Do(sreq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var st StatsResponse
+	if err := json.NewDecoder(sresp.Body).Decode(&st); err != nil {
+		t.Fatal(err)
+	}
+	sresp.Body.Close()
+	if !reflect.DeepEqual(st.UpstreamServers, servers) || !reflect.DeepEqual(st.UpstreamRoutes, routes) {
+		t.Errorf("stats upstream = %+v / %+v, want %+v / %+v", st.UpstreamServers, st.UpstreamRoutes, servers, routes)
+	}
+
+	// An invalid server spec is rejected; the pool is left unchanged.
+	resp = authReq(http.MethodPut, `{"servers":[{"name":"bad","address":"wibble://x"}]}`)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("bad server status = %d, want 400", resp.StatusCode)
+	}
+	resp.Body.Close()
+	if gotS, _ := uc.Upstream(); len(gotS) != 1 || gotS[0].Name != "quad9" {
+		t.Errorf("controller upstream changed after rejected PUT: %+v", gotS)
+	}
+
+	srv.SetLocalResolverController(nil)
 }
 
 // TestAdoptStatusMasking verifies the unauthenticated adopt/status endpoint
