@@ -741,6 +741,10 @@ func TestAggregateStats(t *testing.T) {
 	if agg.UpstreamErrors != 6 {
 		t.Errorf("upstream_errors = %d, want 6", agg.UpstreamErrors)
 	}
+	// Samples span 40s (t=0 → t=40) with 170 queries: avg = 170/40 = 4.25 qps.
+	if want := 170.0 / 40.0; agg.AvgQPS != want {
+		t.Errorf("avg_qps = %v, want %v", agg.AvgQPS, want)
+	}
 	if pi := agg.PerInstance["a"]; pi == nil || pi.Queries != 170 {
 		t.Errorf("per-instance a = %+v, want queries 170", pi)
 	}

@@ -141,11 +141,15 @@ type PerInstanceStats struct {
 
 // StatsAggregate is the aggregated statistics for a time range.
 type StatsAggregate struct {
-	TotalQueries   int                          `json:"total_queries"`
-	BlockedQueries int                          `json:"blocked_queries"`
-	UpstreamErrors int                          `json:"upstream_errors"`
-	PerInstance    map[string]*PerInstanceStats `json:"per_instance"`
-	Series         []TimeSeriesPoint            `json:"series"`
+	TotalQueries   int `json:"total_queries"`
+	BlockedQueries int `json:"blocked_queries"`
+	UpstreamErrors int `json:"upstream_errors"`
+	// AvgQPS is the fleet-wide average query rate over the sampled span of the
+	// range (total queries ÷ elapsed seconds), so it reflects actual coverage
+	// rather than the whole requested window.
+	AvgQPS      float64                      `json:"avg_qps"`
+	PerInstance map[string]*PerInstanceStats `json:"per_instance"`
+	Series      []TimeSeriesPoint            `json:"series"`
 }
 
 // NewQueryLogStore creates a new query log store backed by SQLite
@@ -393,6 +397,7 @@ func (s *QueryLogStore) AggregateStats(ctx context.Context, instance string, buc
 	last := make(map[string]StatsSample) // last cumulative counters per instance
 	buckets := make(map[int64]*TimeSeriesPoint)
 	secs := int64(bucketSize.Seconds())
+	var first, lastTS time.Time // earliest / latest sample timestamp in the range
 	for rows.Next() {
 		var tsStr, inst string
 		var q, b, e uint64
@@ -400,6 +405,12 @@ func (s *QueryLogStore) AggregateStats(ctx context.Context, instance string, buc
 			return nil, err
 		}
 		ts := parseQueryTS(tsStr)
+		if first.IsZero() || ts.Before(first) {
+			first = ts
+		}
+		if ts.After(lastTS) {
+			lastTS = ts
+		}
 
 		dq, db, de := uint64(0), uint64(0), uint64(0)
 		if prev, ok := last[inst]; ok {
@@ -431,6 +442,12 @@ func (s *QueryLogStore) AggregateStats(ctx context.Context, instance string, buc
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
+	}
+
+	// Average QPS over the sampled span: the delta sum divided by the elapsed
+	// seconds between the earliest and latest sample in the range.
+	if agg.TotalQueries > 0 && !lastTS.IsZero() && lastTS.After(first) {
+		agg.AvgQPS = float64(agg.TotalQueries) / lastTS.Sub(first).Seconds()
 	}
 
 	for _, v := range buckets {

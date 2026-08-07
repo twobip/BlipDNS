@@ -20,6 +20,14 @@ const API = (path, opts = {}) =>
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 const fmt = (n) => (n ?? 0).toLocaleString();
+// fmtQPS formats an average query rate with a sensible number of decimals so
+// small fleets show a real number (0.05 qps) instead of rounding to 0.
+const fmtQPS = (v) => {
+  if (!(v > 0)) return "0";
+  if (v >= 100) return v.toFixed(0);
+  if (v >= 1) return v.toFixed(1);
+  return v.toFixed(2);
+};
 const timeAgo = (t) => {
   if (!t) return "—";
   const s = (Date.now() - new Date(t).getTime()) / 1000;
@@ -219,6 +227,8 @@ async function fetchStats() {
     $("d-blocked").textContent = fmt(d.blocked_queries ?? 0);
     $("d-errors").textContent = fmt(d.upstream_errors ?? 0);
     $("d-blockrate").textContent = d.total_queries ? (d.blocked_queries / d.total_queries * 100).toFixed(1) + "%" : "0%";
+    $("d-qps").textContent = fmtQPS(d.avg_qps);
+    $("d-qps-range-hint").textContent = rng.label;
     $("d-range-hint").textContent = rng.label;
     renderDashInstances(d.per_instance);
     if (!ctx) return;

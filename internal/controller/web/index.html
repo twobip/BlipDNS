@@ -54,7 +54,7 @@
 
       <!-- ================= DASHBOARD ================= -->
       <section id="view-dashboard" class="view">
-        <div class="grid grid-4">
+        <div class="grid grid-5">
           <div class="stat" data-goto="queries" data-goto-action="" role="link" title="View query log" style="cursor:pointer">
             <div class="stat-icon i-blue">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 20h20M6 16V8m6 8V4m6 12v-6"/></svg>
@@ -78,6 +78,14 @@
             <div class="stat-label">Upstream Errors</div>
             <div class="stat-value" id="d-errors">—</div>
             <div class="stat-sub">failed upstream requests</div>
+          </div>
+          <div class="stat" title="Average query rate over the selected range">
+            <div class="stat-icon i-green">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20a8 8 0 1 0 0-16 8 8 0 0 0 0 16z"/><path d="M12 12l3.5-3.5"/><path d="M12 4v2m0 12v2M4 12h2m12 0h2"/></svg>
+            </div>
+            <div class="stat-label">Avg Queries/s</div>
+            <div class="stat-value" id="d-qps">—</div>
+            <div class="stat-sub">fleet-wide · over <span id="d-qps-range-hint">1 day</span></div>
           </div>
           <div class="stat" data-goto="instances" role="link" title="View instances" style="cursor:pointer">
             <div class="stat-icon i-green">
