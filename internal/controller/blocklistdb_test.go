@@ -344,3 +344,50 @@ func TestBlocklistStoreSourceSnapshots(t *testing.T) {
 		t.Errorf("kept source meta lost: %+v", meta[u2])
 	}
 }
+
+func TestBlocklistStoreBlockSourceLabel(t *testing.T) {
+	store, err := NewBlocklistStore(filepath.Join(t.TempDir(), "blocklist.db"))
+	if err != nil {
+		t.Fatalf("NewBlocklistStore: %v", err)
+	}
+	ctx := context.Background()
+	u1 := "https://example.com/list1.txt"
+	u2 := "https://example.com/list2.txt"
+	if err := store.ReplaceSourceDomains(ctx, u1, []string{"ads.example.com", "tracker.net"}); err != nil {
+		t.Fatalf("ReplaceSourceDomains u1: %v", err)
+	}
+	if err := store.ReplaceSourceDomains(ctx, u2, []string{"ads.example.com"}); err != nil {
+		t.Fatalf("ReplaceSourceDomains u2: %v", err)
+	}
+
+	// Domain in two sources -> both URLs, sorted.
+	got, err := store.BlockSourceLabel(ctx, "ads.example.com")
+	if err != nil {
+		t.Fatalf("BlockSourceLabel: %v", err)
+	}
+	want := u1 + ", " + u2
+	if got != want {
+		t.Errorf("BlockSourceLabel(ads.example.com) = %q, want %q", got, want)
+	}
+
+	// Manual domains take precedence over source URLs.
+	if err := store.ReplaceManualDomains(ctx, []string{"ads.example.com", "hand.added.net"}); err != nil {
+		t.Fatalf("ReplaceManualDomains: %v", err)
+	}
+	got, err = store.BlockSourceLabel(ctx, "ads.example.com")
+	if err != nil {
+		t.Fatalf("BlockSourceLabel manual: %v", err)
+	}
+	if got != "manual" {
+		t.Errorf("BlockSourceLabel(ads.example.com) = %q, want manual", got)
+	}
+
+	// Unknown domain -> empty label.
+	got, err = store.BlockSourceLabel(ctx, "nope.test")
+	if err != nil {
+		t.Fatalf("BlockSourceLabel unknown: %v", err)
+	}
+	if got != "" {
+		t.Errorf("BlockSourceLabel(nope.test) = %q, want empty", got)
+	}
+}

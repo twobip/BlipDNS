@@ -134,3 +134,29 @@ func TestInvalidNetwork(t *testing.T) {
 		t.Error("expected error for invalid CIDR")
 	}
 }
+
+func TestBlockSource(t *testing.T) {
+	p := &Policy{
+		ID:       "kids",
+		Networks: []string{"192.168.1.0/24"},
+		Block:    []string{"ads.example.com"},
+		Allow:    []string{"allowed.example.com"},
+	}
+	s := NewStore(nil)
+	if err := s.SetPolicy(p); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := s.BlockSource(mustIP("192.168.1.5"), "", "ads.example.com"); got != "policy:kids" {
+		t.Errorf("BlockSource(blocked) = %q, want policy:kids", got)
+	}
+	if got := s.BlockSource(mustIP("192.168.1.5"), "", "allowed.example.com"); got != "" {
+		t.Errorf("BlockSource(allowlisted) = %q, want empty", got)
+	}
+	if got := s.BlockSource(mustIP("192.168.1.5"), "", "plain.example.org"); got != "" {
+		t.Errorf("BlockSource(not blocked) = %q, want empty", got)
+	}
+	if got := s.BlockSource(mustIP("10.9.9.9"), "", "ads.example.com"); got != "" {
+		t.Errorf("BlockSource(outside network) = %q, want empty", got)
+	}
+}

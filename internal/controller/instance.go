@@ -237,13 +237,18 @@ func (i *Instance) watch(ctx context.Context) {
 			// Also log block/pass events to query log (async, batched so the
 			// watch stream can't be bottlenecked by per-row SQLite writes).
 			if (e.Type == "block" || e.Type == "pass") && i.fleet.queryLog != nil {
+				blockList := ""
+				if e.Type == "block" {
+					blockList = i.fleet.resolveBlockList(ctx, e.BlockList, e.Domain)
+				}
 				i.fleet.queryLog.Enqueue(QueryLogEntry{
 					Timestamp:  e.At,
 					Instance:   i.Config.Label,
 					Client:     e.Client,
 					Domain:     e.Domain,
 					Action:     strings.ToUpper(e.Type), // "BLOCK" or "PASS"
-					Upstream:   "",
+					Upstream:   e.Upstream,
+					BlockList:  blockList,
 					IPs:        e.IPs,
 					DurationUs: e.DurationUs,
 					Cached:     e.Cached,

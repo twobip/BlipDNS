@@ -197,12 +197,14 @@ func (c *Cache) Do(ctx context.Context, k string, fn func() (*dns.Msg, error)) (
 
 // DoHit is like Do but also reports whether the response was served from a
 // cache hit rather than fetched just now. Requests coalesced behind a
-// concurrent identical fetch are reported as misses.
+// concurrent identical fetch count as cache hits: they were answered from
+// in-memory state (the in-flight singleflight result) without a fresh
+// upstream round trip.
 func (c *Cache) DoHit(ctx context.Context, k string, fn func() (*dns.Msg, error)) (*dns.Msg, bool, error) {
 	if m, ok := c.Get(k); ok {
 		return m, true, nil
 	}
-	v, err, _ := c.group.Do(k, func() (interface{}, error) {
+	v, err, shared := c.group.Do(k, func() (interface{}, error) {
 		m, ferr := fn()
 		if ferr != nil {
 			return nil, ferr
@@ -213,7 +215,7 @@ func (c *Cache) DoHit(ctx context.Context, k string, fn func() (*dns.Msg, error)
 	if err != nil {
 		return nil, false, err
 	}
-	return v.(*dns.Msg), false, nil
+	return v.(*dns.Msg), shared, nil
 }
 
 // Purge drops every cached response. It is used when the blocklist changes so

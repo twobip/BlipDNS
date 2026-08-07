@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -327,4 +328,38 @@ func (s *BlocklistStore) PruneSources(ctx context.Context, keep []string) error 
 		}
 	}
 	return tx.Commit()
+}
+
+// BlockSourceLabel returns a display label for the list(s) that contain
+// domain: "manual" when it was added by hand, else the matching source URLs
+// joined with ", ", else "" when the domain is not in any known list.
+func (s *BlocklistStore) BlockSourceLabel(ctx context.Context, domain string) (string, error) {
+	if s.db == nil {
+		return "", nil
+	}
+	var one int
+	err := s.db.QueryRowContext(ctx, `SELECT 1 FROM blocklist_manual WHERE domain = ?`, domain).Scan(&one)
+	if err == nil {
+		return "manual", nil
+	}
+	if err != sql.ErrNoRows {
+		return "", err
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT source_url FROM blocklist_source_domains WHERE domain = ? ORDER BY source_url`, domain)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+	urls := make([]string, 0, 2)
+	for rows.Next() {
+		var u string
+		if err := rows.Scan(&u); err != nil {
+			return "", err
+		}
+		urls = append(urls, u)
+	}
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+	return strings.Join(urls, ", "), nil
 }

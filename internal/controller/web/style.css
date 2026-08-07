@@ -354,6 +354,25 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
 .q-copy:hover { background: var(--surface-3); color: var(--text); }
 .q-copy svg { width: 13px; height: 13px; }
 
+.q-info {
+  display: inline-grid; place-items: center;
+  width: 18px; height: 18px; margin-left: 8px; border-radius: 50%;
+  color: var(--faint); cursor: help; vertical-align: middle; transition: all .12s;
+}
+.q-info svg { width: 12px; height: 12px; }
+.q-info:hover { color: var(--accent); background: rgba(79,140,255,.12); }
+
+/* floating tooltip for the query-log info icon (appended to <body>) */
+.q-tip {
+  position: fixed; z-index: 120; pointer-events: none;
+  max-width: 340px; padding: 9px 12px;
+  border-radius: var(--radius-sm);
+  background: #111318; border: 1px solid var(--border-2); box-shadow: var(--shadow-2);
+  font-size: 12px; line-height: 1.45;
+}
+.q-tip-l { color: var(--faint); font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em; margin-bottom: 3px; }
+.q-tip-v { color: var(--text); word-break: break-all; }
+
 .badge-action { display: inline-flex; align-items: center; gap: 5px; padding: 3px 10px; min-width: 84px; justify-content: center; }
 .badge-action svg { width: 12px; height: 12px; }
 

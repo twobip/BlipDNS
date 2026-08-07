@@ -236,3 +236,34 @@ func (p *ResolverPool) Match(qname string, client net.IP) Resolver {
 	}
 	return p.named[best.server]
 }
+
+// LabelFor returns a short human-readable label describing r when it is one
+// of the pool's named servers or the automatic rotation, and "" otherwise
+// (e.g. a per-policy override built outside the pool). The label is used to
+// attribute a query to the upstream that answered it.
+func (p *ResolverPool) LabelFor(r Resolver) string {
+	if p == nil || r == nil {
+		return ""
+	}
+	if r == p.auto {
+		var names []string
+		for _, sv := range p.servers {
+			if sv.Priority > 0 {
+				names = append(names, sv.Name)
+			}
+		}
+		if len(names) == 0 {
+			return "auto"
+		}
+		return "auto (" + strings.Join(names, ", ") + ")"
+	}
+	for _, sv := range p.servers {
+		if sv.Name != "" && p.named[sv.Name] == r {
+			if sv.Address != "" {
+				return sv.Name + " (" + sv.Address + ")"
+			}
+			return sv.Name
+		}
+	}
+	return ""
+}

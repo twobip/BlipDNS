@@ -254,3 +254,30 @@ func TestMultiFailoverBreaker(t *testing.T) {
 		t.Errorf("down resolver tried %d times, want 1 (circuit breaker)", down.calls)
 	}
 }
+
+func TestPoolLabelFor(t *testing.T) {
+	servers := []UpstreamServer{
+		{Name: "DoH", Address: "https://dns.example.com/dns-query", Priority: 1},
+		{Name: "Local", Address: "udp://192.168.30.1:53", Priority: 0},
+	}
+	p, err := NewPool(servers, []UpstreamRoute{
+		{Name: "local-ptr", QnameSuffix: ".in-addr.arpa.", Server: "Local"},
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Route match is attributed to the named server it points at.
+	if r := p.Match("4.30.168.192.in-addr.arpa.", net.IPv4(192, 168, 1, 10)); r == nil {
+		t.Fatal("route did not match")
+	} else if got := p.LabelFor(r); got != "Local (udp://192.168.30.1:53)" {
+		t.Errorf("LabelFor(route resolver) = %q", got)
+	}
+	// The automatic rotation is labeled with its priority>0 members.
+	if got := p.LabelFor(p.Auto()); got != "auto (DoH)" {
+		t.Errorf("LabelFor(auto) = %q, want auto (DoH)", got)
+	}
+	// Resolvers not owned by the pool (e.g. per-policy overrides) get "".
+	if got := p.LabelFor(NewUDP("9.9.9.9:53")); got != "" {
+		t.Errorf("LabelFor(unrelated resolver) = %q, want empty", got)
+	}
+}

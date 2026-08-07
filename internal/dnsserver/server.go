@@ -265,6 +265,7 @@ func (s *Server) serve(ctx context.Context, clientIP net.IP, clientID string, re
 		s.ctrl.Notify(control.WatchEvent{
 			Type: "block", At: time.Now(),
 			Client: client, Domain: domain,
+			BlockList:  "global",
 			DurationUs: time.Since(start).Microseconds(),
 		})
 		if s.logfn != nil {
@@ -280,6 +281,7 @@ func (s *Server) serve(ctx context.Context, clientIP net.IP, clientID string, re
 		s.ctrl.Notify(control.WatchEvent{
 			Type: "block", At: time.Now(),
 			Client: client, Domain: domain,
+			BlockList:  s.cfg.Store.BlockSource(clientIP, clientID, domain),
 			DurationUs: time.Since(start).Microseconds(),
 		})
 		if log && s.logfn != nil {
@@ -313,6 +315,7 @@ func (s *Server) serve(ctx context.Context, clientIP net.IP, clientID string, re
 		resp.Rcode = dns.RcodeServerFailure
 		return resp
 	}
+	upstreamLabel := s.upstreamLabel(resolver, matchedRoute, upstreamOverride)
 
 	key := cache.Key(req)
 	out, cached, err := s.cache.DoHit(ctx, key, func() (*dns.Msg, error) {
@@ -345,6 +348,7 @@ func (s *Server) serve(ctx context.Context, clientIP net.IP, clientID string, re
 		IPs:    ips,
 		// Cached=true when the answer came from the response cache.
 		Cached:     cached,
+		Upstream:   upstreamLabel,
 		DurationUs: time.Since(start).Microseconds(),
 	})
 	return out

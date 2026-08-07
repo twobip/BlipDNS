@@ -52,6 +52,7 @@ const IC = {
   shield: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>',
   check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>',
   warn: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.8 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.8a2 2 0 0 0-3.4 0z"/><path d="M12 9v4m0 4h.01"/></svg>',
+  info: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4m0-4h.01"/></svg>',
   arrow: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14m-6-6 6 6-6 6"/></svg>',
   globe: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.6 3.8 5.7 3.8 9S14.5 18.4 12 21c-2.5-2.6-3.8-5.7-3.8-9S9.5 5.6 12 3z"/></svg>',
   device: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg>',
@@ -390,6 +391,7 @@ let qState = { action: "", filter: "", inst: "" };
 async function renderQueries() {
   const tb = $("q-tbody");
   const sinceQ = "&since=24h&limit=300";
+  qTip.hide();
   try {
     const res = await API("/api/queries?instance=" + encodeURIComponent(qState.inst) + sinceQ);
     const rows = await res.json();
@@ -411,11 +413,17 @@ async function renderQueries() {
       const inst = instances.find((i) => (i.label || i.id) === r.instance);
       const actionLabel = isBlock ? "Blocked" : action === "PASS" ? "Allowed" : esc(action || "—");
       const actionBadge = isBlock ? "err" : action === "PASS" ? "on" : "";
+      // info icon tooltip: which upstream answered, or which list blocked it
+      const tipLabel = isBlock ? "Blocked by" : r.cached ? "Cache" : "Upstream";
+      const tipValue = isBlock
+        ? (r.blocklist || "blocklist")
+        : r.cached ? "Served from cache" : (r.upstream || "unknown");
       return `<tr class="${isBlock ? "q-row-block" : ""}">
         <td class="q-time"><span class="t" data-t="${esc(r.timestamp)}" title="${esc(r.timestamp)}">…</span></td>
         <td class="q-domain">
           <span class="q-globe">${IC.globe}</span>
           <span class="mono q-dom" title="${esc(r.domain)}">${esc(r.domain)}</span>
+          <span class="q-info" data-tipl="${esc(tipLabel)}" data-tipv="${esc(tipValue)}">${IC.info}</span>
           <button class="icon-btn q-copy" data-copy="${esc(r.domain)}" title="Copy domain">${IC.copy}</button>
         </td>
         <td><span class="badge badge-action ${actionBadge}">${isBlock ? IC.block : action === "PASS" ? IC.arrow : ""}${actionLabel}</span></td>
@@ -847,7 +855,7 @@ function serverRow(u) {
   row.innerHTML = `
     <input class="input up-name" placeholder="name (e.g. quad9)" style="width:120px" value="${esc(u.name || "")}"/>
     <input class="input grow up-addr" placeholder="9.9.9.9 (udp:53) or https://1.1.1.1/dns-query" value="${esc(u.address || "")}"/>
-    <input class="input up-prio" type="number" min="0" title="Priority — lower = higher priority; 0 = route-only" style="width:72px" value="${u.priority || ""}"/>
+    <input class="input up-prio" type="number" min="0" title="Priority — lower = higher priority; 0 = route-only" style="width:72px" value="${u.priority ?? ""}"/>
     <button class="icon-btn up-del" title="Remove">${IC.trash}</button>`;
   row.querySelector(".up-del").onclick = () => { row.remove(); refreshRouteServerOptions(); };
   return row;
@@ -1242,6 +1250,40 @@ $("q-tbody").addEventListener("click", (e) => {
   const c = e.target.closest("[data-copy]"); if (!c) return;
   copyText(c.dataset.copy);
 });
+// Query-log info tooltip: a floating panel (appended to <body> so it is not
+// clipped by the table's scroll container) that shows which upstream answered
+// a query or which list blocked it when hovering the info icon on a row.
+const qTip = (() => {
+  const el = document.createElement("div");
+  el.className = "q-tip";
+  el.style.display = "none";
+  document.body.appendChild(el);
+  const hide = () => { el.style.display = "none"; };
+  const show = (trigger) => {
+    const label = trigger.dataset.tipl || "";
+    const value = trigger.dataset.tipv || "";
+    if (!label && !value) return hide();
+    el.innerHTML = `${label ? `<div class="q-tip-l">${esc(label)}</div>` : ""}<div class="q-tip-v">${esc(value)}</div>`;
+    const r = trigger.getBoundingClientRect();
+    el.style.display = "block";
+    const w = el.offsetWidth, h = el.offsetHeight;
+    let x = r.left + r.width / 2 - w / 2;
+    x = Math.max(8, Math.min(x, window.innerWidth - w - 8));
+    let y = r.bottom + 8;
+    if (y + h > window.innerHeight - 8) y = r.top - h - 8;
+    el.style.left = x + "px";
+    el.style.top = y + "px";
+  };
+  $("q-tbody").addEventListener("mouseover", (e) => {
+    const t = e.target.closest(".q-info");
+    if (t) { show(t); return; }
+    hide();
+  });
+  $("q-tbody").addEventListener("mouseout", (e) => {
+    if (!e.target.closest(".q-info")) hide();
+  });
+  return { hide };
+})();
 // setQueryAction updates the query-log action filter ("" = all, "PASS",
 // "BLOCK") and the highlighted segment button, then re-renders. Used by the
 // segment buttons and by dashboard links that deep-link into a filtered view.

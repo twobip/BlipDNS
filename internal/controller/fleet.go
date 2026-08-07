@@ -1063,6 +1063,22 @@ func (f *Fleet) Blocklist() *blocklist.Blocklist {
 	return f.blocklist
 }
 
+// resolveBlockList turns a block event's source marker into a display label
+// for the query log. "global" (or an empty marker) is resolved against the
+// persisted per-source snapshots so the block is attributed to the actual
+// source URL(s); anything else (e.g. "policy:default") is used verbatim.
+func (f *Fleet) resolveBlockList(ctx context.Context, src, domain string) string {
+	if src == "" || src == "global" {
+		if f.blocklistDB != nil {
+			if label, err := f.blocklistDB.BlockSourceLabel(ctx, domain); err == nil && label != "" {
+				return label
+			}
+		}
+		return "global blocklist"
+	}
+	return src
+}
+
 // BlocklistSources returns the configured source URLs.
 func (f *Fleet) BlocklistSources() []string {
 	f.blMu.Lock()

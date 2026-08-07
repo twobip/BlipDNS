@@ -39,7 +39,10 @@ type QueryLogEntry struct {
 	Domain    string    `json:"domain"`
 	Action    string    `json:"action"`
 	Upstream  string    `json:"upstream,omitempty"`
-	IPs       []string  `json:"ips,omitempty"`
+	// BlockList names the list/policy that blocked this query ("" when the
+	// query was not blocked).
+	BlockList string   `json:"blocklist,omitempty"`
+	IPs       []string `json:"ips,omitempty"`
 	// DurationUs is how long the query took to answer, in microseconds.
 	// Cached reports whether the answer was served from the response cache.
 	DurationUs int64 `json:"duration_us,omitempty"`
@@ -211,6 +214,7 @@ func NewQueryLogStore(dbPath string) (*QueryLogStore, error) {
 		"ALTER TABLE query_log ADD COLUMN ips TEXT",
 		"ALTER TABLE query_log ADD COLUMN duration_us INTEGER",
 		"ALTER TABLE query_log ADD COLUMN cached INTEGER",
+		"ALTER TABLE query_log ADD COLUMN blocklist TEXT",
 	} {
 		_, _ = db.Exec(col)
 	}
@@ -236,14 +240,14 @@ func (s *QueryLogStore) Insert(ctx context.Context, e QueryLogEntry) error {
 		cached = 1
 	}
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO query_log (timestamp, instance, client, domain, action, upstream, ips, duration_us, cached) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		e.Timestamp, e.Instance, e.Client, e.Domain, e.Action, e.Upstream, ips, e.DurationUs, cached)
+		`INSERT INTO query_log (timestamp, instance, client, domain, action, upstream, blocklist, ips, duration_us, cached) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		e.Timestamp, e.Instance, e.Client, e.Domain, e.Action, e.Upstream, e.BlockList, ips, e.DurationUs, cached)
 	return err
 }
 
 // Query returns entries within the time range
 func (s *QueryLogStore) Query(ctx context.Context, instance, filter string, since time.Time, limit int) ([]QueryLogEntry, error) {
-	query := `SELECT ql.id, ql.timestamp, ql.instance, ql.client, COALESCE(cn.name, ''), ql.domain, ql.action, ql.upstream, ql.ips, ql.duration_us, ql.cached FROM query_log ql LEFT JOIN client_names cn ON cn.client = ql.client WHERE ql.timestamp >= ? AND ql.domain != 'health_check'`
+	query := `SELECT ql.id, ql.timestamp, ql.instance, ql.client, COALESCE(cn.name, ''), ql.domain, ql.action, ql.upstream, ql.blocklist, ql.ips, ql.duration_us, ql.cached FROM query_log ql LEFT JOIN client_names cn ON cn.client = ql.client WHERE ql.timestamp >= ? AND ql.domain != 'health_check'`
 	args := []interface{}{since}
 
 	if instance != "" {
@@ -271,12 +275,16 @@ func (s *QueryLogStore) Query(ctx context.Context, instance, filter string, sinc
 	for rows.Next() {
 		var e QueryLogEntry
 		var ts string
+		var bl sql.NullString
 		var ips sql.NullString
 		var dur, cached sql.NullInt64
-		if err := rows.Scan(&e.ID, &ts, &e.Instance, &e.Client, &e.Name, &e.Domain, &e.Action, &e.Upstream, &ips, &dur, &cached); err != nil {
+		if err := rows.Scan(&e.ID, &ts, &e.Instance, &e.Client, &e.Name, &e.Domain, &e.Action, &e.Upstream, &bl, &ips, &dur, &cached); err != nil {
 			return nil, err
 		}
 		e.Timestamp = parseQueryTS(ts)
+		if bl.Valid {
+			e.BlockList = bl.String
+		}
 		if ips.Valid && ips.String != "" {
 			e.IPs = strings.Split(ips.String, ",")
 		}
@@ -550,7 +558,7 @@ func (s *QueryLogStore) insertBatch(ctx context.Context, entries []QueryLogEntry
 	if err != nil {
 		return
 	}
-	stmt, err := tx.Prepare(`INSERT INTO query_log (timestamp, instance, client, domain, action, upstream, ips, duration_us, cached) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+	stmt, err := tx.Prepare(`INSERT INTO query_log (timestamp, instance, client, domain, action, upstream, blocklist, ips, duration_us, cached) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		_ = tx.Rollback()
 		return
@@ -561,7 +569,7 @@ func (s *QueryLogStore) insertBatch(ctx context.Context, entries []QueryLogEntry
 		if e.Cached {
 			cached = 1
 		}
-		if _, err := stmt.Exec(e.Timestamp, e.Instance, e.Client, e.Domain, e.Action, e.Upstream, strings.Join(e.IPs, ","), e.DurationUs, cached); err != nil {
+		if _, err := stmt.Exec(e.Timestamp, e.Instance, e.Client, e.Domain, e.Action, e.Upstream, e.BlockList, strings.Join(e.IPs, ","), e.DurationUs, cached); err != nil {
 			_ = tx.Rollback()
 			return
 		}

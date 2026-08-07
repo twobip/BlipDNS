@@ -276,3 +276,22 @@ func (s *Store) Classify(clientIP net.IP, clientID, name string) (blocked bool, 
 	}
 	return false, p.action(), p.Upstream, p.Log
 }
+
+// BlockSource returns a short label identifying the rule that would block
+// name from clientIP (or DoH clientID), or "" when the name is not blocked —
+// e.g. it is allowed by an allowlist or no policy applies. Labels look like
+// "policy:default". Used to attribute block events to a specific policy.
+func (s *Store) BlockSource(clientIP net.IP, clientID, name string) string {
+	p := s.lookup(clientIP, clientID)
+	if p == nil {
+		return ""
+	}
+	if p.allowM.match(name) || !p.blockM.match(name) {
+		return ""
+	}
+	id := p.ID
+	if id == "" {
+		id = "default"
+	}
+	return "policy:" + id
+}

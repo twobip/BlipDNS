@@ -138,6 +138,12 @@ type WatchEvent struct {
 	// Cached reports whether the answer was served from the response cache.
 	DurationUs int64 `json:"duration_us,omitempty"`
 	Cached     bool  `json:"cached,omitempty"`
+	// Upstream names the resolver that answered a "pass" event (e.g.
+	// "auto (DoH)" or "Local (udp://...)"); "" when unknown or cache-served.
+	Upstream string `json:"upstream,omitempty"`
+	// BlockList identifies the source of a "block" decision: "global" for the
+	// merged blocklist, "policy:<id>" for a per-client policy, or "".
+	BlockList string `json:"blocklist,omitempty"`
 }
 
 // ---- adoption (claim-code bootstrap) ----

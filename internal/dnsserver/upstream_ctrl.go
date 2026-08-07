@@ -70,3 +70,19 @@ func (s *Server) upstreamFor(name string, clientIP net.IP) (r upstream.Resolver,
 	}
 	return s.upstreamAuto(), false
 }
+
+// upstreamLabel returns a short display label for the resolver used to answer
+// a query, for query-log attribution. A per-policy override that actually
+// took effect is labeled with its spec; otherwise the pool names the resolver
+// (named server or automatic rotation).
+func (s *Server) upstreamLabel(resolver upstream.Resolver, matchedRoute bool, override string) string {
+	if !matchedRoute && override != "" {
+		return "override: " + override
+	}
+	if p := s.safePool(); p != nil {
+		if l := p.LabelFor(resolver); l != "" {
+			return l
+		}
+	}
+	return "upstream"
+}
