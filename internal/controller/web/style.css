@@ -328,7 +328,19 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
 /* ============================================================
    QUERY LOG
    ============================================================ */
-#view-queries .table-wrap { max-height: calc(100vh - 280px); min-height: 320px; overflow-y: auto; }
+/* Query log fills the whole page: no chip/box around it, spans full width and
+   stretches to fill the available viewport so far more rows are visible. */
+#view-queries { flex: 1; min-height: 0; }
+#view-queries .table-wrap {
+  flex: 1;
+  min-height: calc(100vh - 250px);
+  max-height: none;
+  overflow-y: auto;
+  border: none; border-radius: 0; box-shadow: none; background: transparent;
+}
+#view-queries .tbl { font-size: 14.5px; }
+#view-queries .tbl thead th { font-size: 12.5px; padding: 14px 20px; }
+#view-queries .tbl tbody td { padding: 16px 20px; }
 
 #view-queries .tbl tbody tr:hover td { background: rgba(255,255,255,.025); }
 #view-queries .tbl tbody tr:nth-child(even):not(.q-row-block) td { background: rgba(255,255,255,.012); }
@@ -337,6 +349,17 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
 #view-queries .tbl tbody tr.q-row-block td { background: rgba(247,107,107,.05); }
 #view-queries .tbl tbody tr.q-row-block td:first-child { box-shadow: inset 3px 0 0 rgba(247,107,107,.55); }
 #view-queries .tbl tbody tr.q-row-block:hover td { background: rgba(247,107,107,.07); }
+
+#view-queries .q-time { font-size: 13.5px; }
+#view-queries .q-cname { font-size: 14px; }
+#view-queries .q-client .mono { font-size: 13px; }
+#view-queries .q-name { font-size: 14px; }
+#view-queries .q-inst { font-size: 14px; }
+#view-queries .q-chip { font-size: 13px; padding: 3px 10px; }
+#view-queries .q-chip-more { font-size: 13px; }
+#view-queries .q-dom { font-size: 15px; }
+#view-queries .q-globe svg { width: 15px; height: 15px; }
+#view-queries .q-cicon svg { width: 15px; height: 15px; }
 
 .q-time { color: var(--muted); font-size: 12px; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .q-count { font-variant-numeric: tabular-nums; font-size: 12.5px; white-space: nowrap; }
