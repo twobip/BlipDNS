@@ -295,6 +295,7 @@ body.sidebar-collapsed .main { margin-left: 60px; }
 .stat-icon.i-green svg{ color: var(--green); } .stat-icon.i-green{ background: rgba(53,210,154,.1); }
 .stat-icon.i-red svg  { color: var(--red); }   .stat-icon.i-red  { background: rgba(247,107,107,.1); }
 .stat-icon.i-amber svg{ color: var(--amber); } .stat-icon.i-amber{ background: rgba(245,185,74,.1); }
+.stat-icon.i-purple svg{ color: var(--purple); } .stat-icon.i-purple{ background: rgba(167,139,250,.1); }
 .stat-label { font-size: 12px; font-weight: 500; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
 .stat-value { font-size: 28px; font-weight: 700; letter-spacing: -0.02em; margin: 4px 0 2px; font-variant-numeric: tabular-nums; }
 .stat-sub { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 6px; }

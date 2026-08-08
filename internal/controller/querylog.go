@@ -184,14 +184,18 @@ type InstanceCacheStat struct {
 	Queries       int     `json:"queries"`
 	CachedQueries int     `json:"cached_queries"`
 	PercentCached float64 `json:"percent_cached"`
+	AvgCachedUs   float64 `json:"avg_cached_us"`  // avg latency of cache hits (microseconds, 0 if none)
+	AvgFetchedUs  float64 `json:"avg_fetched_us"` // avg latency of cache misses (microseconds, 0 if none)
 }
 
 // CacheStats returns per-instance cache hit/miss tallies for "pass" (resolved)
 // queries in the time range. Blocked queries and health checks never pass
 // through the cache and are excluded, so the percentage reflects resolved
 // queries only. When instance is non-empty only that instance is returned.
+// Average latencies for cached (hit) and fetched (miss) queries are also
+// returned in microseconds.
 func (s *QueryLogStore) CacheStats(ctx context.Context, instance string, since time.Time) (map[string]InstanceCacheStat, error) {
-	query := `SELECT ql.instance, COUNT(*), COALESCE(SUM(CASE WHEN ql.cached = 1 THEN 1 ELSE 0 END), 0) FROM query_log ql WHERE ql.timestamp >= ? AND ql.domain != 'health_check' AND ql.domain != '' AND ql.action = 'PASS'`
+	query := `SELECT ql.instance, COUNT(*), COALESCE(SUM(CASE WHEN ql.cached = 1 THEN 1 ELSE 0 END), 0), COALESCE(AVG(CASE WHEN ql.cached = 1 AND ql.duration_us > 0 THEN ql.duration_us END), 0), COALESCE(AVG(CASE WHEN ql.cached = 0 AND ql.duration_us > 0 THEN ql.duration_us END), 0) FROM query_log ql WHERE ql.timestamp >= ? AND ql.domain != 'health_check' AND ql.domain != '' AND ql.action = 'PASS'`
 	args := []interface{}{since}
 	if instance != "" {
 		query += " AND ql.instance = ?"
@@ -209,7 +213,7 @@ func (s *QueryLogStore) CacheStats(ctx context.Context, instance string, since t
 	for rows.Next() {
 		var inst string
 		var c InstanceCacheStat
-		if err := rows.Scan(&inst, &c.Queries, &c.CachedQueries); err != nil {
+		if err := rows.Scan(&inst, &c.Queries, &c.CachedQueries, &c.AvgCachedUs, &c.AvgFetchedUs); err != nil {
 			return nil, err
 		}
 		if c.Queries > 0 {

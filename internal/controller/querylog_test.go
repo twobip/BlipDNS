@@ -402,11 +402,11 @@ func TestQueryLogStoreCacheStats(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now()
 	entries := []QueryLogEntry{
-		{Timestamp: now.Add(-time.Minute), Instance: "a", Client: "c", Domain: "example.com", Action: "PASS", Cached: true},
-		{Timestamp: now.Add(-2 * time.Minute), Instance: "a", Client: "c", Domain: "foo.com", Action: "PASS", Cached: false},
+		{Timestamp: now.Add(-time.Minute), Instance: "a", Client: "c", Domain: "example.com", Action: "PASS", Cached: true, DurationUs: 200},
+		{Timestamp: now.Add(-2 * time.Minute), Instance: "a", Client: "c", Domain: "foo.com", Action: "PASS", Cached: false, DurationUs: 5000},
 		{Timestamp: now.Add(-3 * time.Minute), Instance: "a", Client: "c", Domain: "ads.test", Action: "BLOCK"},
 		{Timestamp: now.Add(-4 * time.Minute), Instance: "a", Client: "c", Domain: "health_check", Action: "PASS"},
-		{Timestamp: now.Add(-5 * time.Minute), Instance: "b", Client: "c", Domain: "example.com", Action: "PASS", Cached: true},
+		{Timestamp: now.Add(-5 * time.Minute), Instance: "b", Client: "c", Domain: "example.com", Action: "PASS", Cached: true, DurationUs: 100},
 	}
 	for _, e := range entries {
 		if err := store.Insert(ctx, e); err != nil {
@@ -428,6 +428,13 @@ func TestQueryLogStoreCacheStats(t *testing.T) {
 	}
 	if b := stats["b"]; b.Queries != 1 || b.CachedQueries != 1 || b.PercentCached != 100 {
 		t.Errorf("instance b = %+v, want 1/1/100", b)
+	}
+	// Average latency: a cached=200us, fetched=5000us. b cached=100us, no fetched.
+	if a := stats["a"]; a.AvgCachedUs != 200 || a.AvgFetchedUs != 5000 {
+		t.Errorf("instance a avg latency = %+.1f/%.1f, want 200/5000", a.AvgCachedUs, a.AvgFetchedUs)
+	}
+	if b := stats["b"]; b.AvgCachedUs != 100 || b.AvgFetchedUs != 0 {
+		t.Errorf("instance b avg latency = %+.1f/%.1f, want 100/0", b.AvgCachedUs, b.AvgFetchedUs)
 	}
 
 	// Instance filter narrows to a single instance.

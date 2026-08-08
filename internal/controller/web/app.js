@@ -37,6 +37,14 @@ const timeAgo = (t) => {
   return Math.round(s / 86400) + "d ago";
 };
 const relTime = (t) => (t ? new Date(t).toLocaleString() : "—");
+// fmtLat formats a microsecond duration into a human-friendly latency string.
+// Sub-millisecond values show as µs; millisecond and second values get a decimal.
+const fmtLat = (us) => {
+  if (!(us > 0)) return "—";
+  if (us < 1000) return Math.round(us) + "µs";
+  if (us < 1000000) return (us / 1000).toFixed(1) + "ms";
+  return (us / 1000000).toFixed(1) + "s";
+};
 
 /* ---------- relative-time ticking ---------- */
 // Recomputes every live relative-time label (.t[data-t]) on a 1s tick so the
@@ -796,11 +804,15 @@ async function renderCacheStats() {
   try {
     const res = await API(`/api/cache-stats?since=${csState.since}`);
     const d = await res.json();
-    const total = d.total || { queries: 0, cached_queries: 0, percent_cached: 0 };
+    const total = d.total || { queries: 0, cached_queries: 0, percent_cached: 0, avg_cached_us: 0, avg_fetched_us: 0 };
     const hint = "resolved (non-blocked) queries · last " + csState.since;
     $("cs-hint").textContent = hint;
     $("cs-pct").textContent = total.queries ? total.percent_cached.toFixed(1) + "%" : "—";
     $("cs-cached").textContent = total.queries ? fmt(total.cached_queries) + " / " + fmt(total.queries) : "—";
+    const cachedMs = total.avg_cached_us ? fmtLat(total.avg_cached_us) : null;
+    const fetchedMs = total.avg_fetched_us ? fmtLat(total.avg_fetched_us) : null;
+    $("cs-latency").textContent = cachedMs || fetchedMs ? (cachedMs || "—") + " / " + (fetchedMs || "—") : "—";
+    $("cs-latency-sub").textContent = "cached / fresh";
     let live = 0, limit = 0;
     for (const i of instances) {
       live += Number(i.stats && i.stats.cached) || 0;
@@ -812,7 +824,7 @@ async function renderCacheStats() {
     const per = d.per_instance || {};
     const keys = Object.keys(per);
     if (!keys.length) {
-      tb.innerHTML = `<tr class="empty-row"><td colspan="5"><div class="empty"><div class="empty-ic">${IC.cache}</div><h4>No data yet</h4><p>No resolved queries in this window.</p></div></td></tr>`;
+      tb.innerHTML = `<tr class="empty-row"><td colspan="7"><div class="empty"><div class="empty-ic">${IC.cache}</div><h4>No data yet</h4><p>No resolved queries in this window.</p></div></td></tr>`;
       return;
     }
     let rows = "";
@@ -823,17 +835,21 @@ async function renderCacheStats() {
       const liveN = Number(is && is.stats && is.stats.cached) || 0;
       const limitN = Number(is && is.stats && is.stats.cache_size) || 0;
       const pct = c.queries ? c.percent_cached.toFixed(1) + "%" : "—";
+      const cMs = c.avg_cached_us ? fmtLat(c.avg_cached_us) : "—";
+      const fMs = c.avg_fetched_us ? fmtLat(c.avg_fetched_us) : "—";
       rows += `<tr>
         <td>${esc(label)}</td>
         <td class="num">${fmt(liveN)}${limitN ? " / " + fmt(limitN) : ""}</td>
         <td class="num">${fmt(c.cached_queries)}</td>
         <td class="num">${fmt(c.queries)}</td>
         <td class="num">${pct}</td>
+        <td class="num mono">${cMs}</td>
+        <td class="num mono">${fMs}</td>
       </tr>`;
     }
     tb.innerHTML = rows;
   } catch (e) {
-    $("cs-tbody").innerHTML = `<tr class="empty-row"><td colspan="5"><div class="empty"><div class="empty-ic">${IC.warn}</div><h4>Cache stats unavailable</h4><p>${esc(e.message)}</p></div></td></tr>`;
+    $("cs-tbody").innerHTML = `<tr class="empty-row"><td colspan="7"><div class="empty"><div class="empty-ic">${IC.warn}</div><h4>Cache stats unavailable</h4><p>${esc(e.message)}</p></div></td></tr>`;
   }
 }
 

@@ -142,7 +142,7 @@
           <span class="right"></span>
           <span class="muted" id="cs-hint"></span>
         </div>
-        <div class="grid grid-4">
+        <div class="grid grid-5">
           <div class="stat" title="Percentage of resolved (non-blocked) queries served from the response cache">
             <div class="stat-icon i-green">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z"/></svg>
@@ -158,6 +158,14 @@
             <div class="stat-label">Cached / Resolved</div>
             <div class="stat-value" id="cs-cached">—</div>
             <div class="stat-sub">queries answered from cache</div>
+          </div>
+          <div class="stat" title="Average latency of a cache hit vs. a fresh upstream fetch">
+            <div class="stat-icon i-purple">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3M9 17h6a5 5 0 0 0 0-10H9a5 5 0 0 0 0 10z"/></svg>
+            </div>
+            <div class="stat-label">Avg Cache Latency</div>
+            <div class="stat-value" id="cs-latency">—</div>
+            <div class="stat-sub" id="cs-latency-sub">cached vs fresh</div>
           </div>
           <div class="stat" title="Domains currently held in each instance's in-memory response cache">
             <div class="stat-icon i-green">
@@ -180,7 +188,7 @@
           <div class="panel-head"><h3>Per instance</h3><span class="spacer"></span></div>
           <div class="table-wrap">
             <table class="tbl">
-              <thead><tr><th>Instance</th><th class="num">Domains in cache</th><th class="num">Cached</th><th class="num">Resolved</th><th class="num">% cached</th></tr></thead>
+              <thead><tr><th>Instance</th><th class="num">Domains in cache</th><th class="num">Cached</th><th class="num">Resolved</th><th class="num">% cached</th><th class="num">Cached ms</th><th class="num">Fetched ms</th></tr></thead>
               <tbody id="cs-tbody"></tbody>
             </table>
           </div>

@@ -778,12 +778,24 @@ func (s *Server) handleCacheStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	total := InstanceCacheStat{}
+	var cachedSum, fetchedSum float64
+	var cachedN, fetchedN int
 	for _, c := range perInstance {
 		total.Queries += c.Queries
 		total.CachedQueries += c.CachedQueries
+		cachedN += c.CachedQueries
+		fetchedN += c.Queries - c.CachedQueries
+		cachedSum += c.AvgCachedUs * float64(c.CachedQueries)
+		fetchedSum += c.AvgFetchedUs * float64(c.Queries-c.CachedQueries)
 	}
 	if total.Queries > 0 {
 		total.PercentCached = float64(total.CachedQueries) / float64(total.Queries) * 100
+	}
+	if cachedN > 0 {
+		total.AvgCachedUs = cachedSum / float64(cachedN)
+	}
+	if fetchedN > 0 {
+		total.AvgFetchedUs = fetchedSum / float64(fetchedN)
 	}
 	live := make(map[string]int)
 	limit := make(map[string]int)
