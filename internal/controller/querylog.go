@@ -188,27 +188,27 @@ type InstanceCacheStat struct {
 	AvgFetchedUs  float64 `json:"avg_fetched_us"` // avg latency of cache misses (microseconds, 0 if none)
 }
 
-// CacheRefreshedDomain is a domain whose cache entries are frequently expiring
-// and being re-fetched from upstream — the "auto refreshed" workhorse domains.
-type CacheRefreshedDomain struct {
-	Domain       string  `json:"domain"`
-	CacheMisses  int     `json:"cache_misses"`   // uncached (fresh) fetches in the window
-	CacheHits    int     `json:"cache_hits"`     // cached answers in the window
-	RefetchRate  float64 `json:"refetch_rate"`   // cache_misses / (cache_misses + cache_hits)
-	AvgFetchedUs float64 `json:"avg_fetched_us"` // avg latency of the fresh fetches
+// TopCachedDomain is a domain frequently served from the response cache — the
+// domains getting the most cache hits within the window.
+type TopCachedDomain struct {
+	Domain      string  `json:"domain"`
+	CacheHits   int     `json:"cache_hits"`    // cached answers in the window
+	CacheMisses int     `json:"cache_misses"`  // uncached (fresh) fetches in the window
+	HitRate     float64 `json:"hit_rate"`      // cache_hits / (cache_hits + cache_misses)
+	AvgCachedUs float64 `json:"avg_cached_us"` // avg latency of cache hits
 }
 
-// CacheRefreshedDomains returns the domains with the most upstream cache misses
-// (i.e. the domains whose cached entries are expiring most often and being
-// "auto refreshed" from upstream) within the time window, most active first.
-func (s *QueryLogStore) CacheRefreshedDomains(ctx context.Context, instance string, since time.Time, limit int) ([]CacheRefreshedDomain, error) {
-	query := `SELECT ql.domain, COALESCE(SUM(CASE WHEN ql.cached = 0 THEN 1 ELSE 0 END), 0), COALESCE(SUM(CASE WHEN ql.cached = 1 THEN 1 ELSE 0 END), 0), COALESCE(AVG(CASE WHEN ql.cached = 0 AND ql.duration_us > 0 THEN ql.duration_us END), 0) FROM query_log ql WHERE ql.timestamp >= ? AND ql.domain != 'health_check' AND ql.domain != '' AND ql.action = 'PASS'`
+// TopCachedDomains returns the domains with the most cache hits (i.e. the
+// domains most frequently served from cache) within the time window, most
+// cached first. Blocked queries and health checks are excluded.
+func (s *QueryLogStore) TopCachedDomains(ctx context.Context, instance string, since time.Time, limit int) ([]TopCachedDomain, error) {
+	query := `SELECT ql.domain, COALESCE(SUM(CASE WHEN ql.cached = 1 THEN 1 ELSE 0 END), 0), COALESCE(SUM(CASE WHEN ql.cached = 0 THEN 1 ELSE 0 END), 0), COALESCE(AVG(CASE WHEN ql.cached = 1 AND ql.duration_us > 0 THEN ql.duration_us END), 0) FROM query_log ql WHERE ql.timestamp >= ? AND ql.domain != 'health_check' AND ql.domain != '' AND ql.action = 'PASS'`
 	args := []interface{}{since}
 	if instance != "" {
 		query += " AND ql.instance = ?"
 		args = append(args, instance)
 	}
-	query += " GROUP BY ql.domain ORDER BY SUM(CASE WHEN ql.cached = 0 THEN 1 ELSE 0 END) DESC LIMIT ?"
+	query += " GROUP BY ql.domain ORDER BY SUM(CASE WHEN ql.cached = 1 THEN 1 ELSE 0 END) DESC LIMIT ?"
 	args = append(args, limit)
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
@@ -217,20 +217,20 @@ func (s *QueryLogStore) CacheRefreshedDomains(ctx context.Context, instance stri
 	}
 	defer rows.Close()
 
-	var out []CacheRefreshedDomain
+	var out []TopCachedDomain
 	for rows.Next() {
-		var d CacheRefreshedDomain
-		if err := rows.Scan(&d.Domain, &d.CacheMisses, &d.CacheHits, &d.AvgFetchedUs); err != nil {
+		var d TopCachedDomain
+		if err := rows.Scan(&d.Domain, &d.CacheHits, &d.CacheMisses, &d.AvgCachedUs); err != nil {
 			return nil, err
 		}
-		total := d.CacheMisses + d.CacheHits
+		total := d.CacheHits + d.CacheMisses
 		if total > 0 {
-			d.RefetchRate = float64(d.CacheMisses) / float64(total) * 100
+			d.HitRate = float64(d.CacheHits) / float64(total) * 100
 		}
 		out = append(out, d)
 	}
 	if out == nil {
-		out = []CacheRefreshedDomain{}
+		out = []TopCachedDomain{}
 	}
 	return out, rows.Err()
 }

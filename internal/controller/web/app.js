@@ -842,8 +842,7 @@ async function renderCacheStats() {
     const keys = Object.keys(per);
     if (!keys.length) {
       tb.innerHTML = `<tr class="empty-row"><td colspan="7"><div class="empty"><div class="empty-ic">${IC.cache}</div><h4>No data yet</h4><p>No resolved queries in this window.</p></div></td></tr>`;
-      return;
-    }
+    } else {
     let rows = "";
     for (const id of keys) {
       const c = per[id];
@@ -865,27 +864,28 @@ async function renderCacheStats() {
       </tr>`;
     }
     tb.innerHTML = rows;
+    }
+    renderTopCachedDomains(d.top_cached || []);
   } catch (e) {
     $("cs-tbody").innerHTML = `<tr class="empty-row"><td colspan="7"><div class="empty"><div class="empty-ic">${IC.warn}</div><h4>Cache stats unavailable</h4><p>${esc(e.message)}</p></div></td></tr>`;
   }
-  renderRefreshedDomains(d.refreshed || []);
 }
 
-/* ---------- cache stats: refreshed domains ---------- */
-function renderRefreshedDomains(list) {
-  const tb = $("cs-refreshed-tbody");
+/* ---------- cache stats: top cached domains ---------- */
+function renderTopCachedDomains(list) {
+  const tb = $("cs-top-cached-tbody");
   if (!list.length) {
     tb.innerHTML = `<tr class="empty-row"><td colspan="5"><div class="empty"><div class="empty-ic">${IC.cache}</div><h4>No data yet</h4><p>No resolved queries in this window.</p></div></td></tr>`;
     return;
   }
   let rows = "";
   for (const d of list) {
-    const rate = d.refetch_rate.toFixed(0) + "%";
-    const ms = d.avg_fetched_us ? fmtLat(d.avg_fetched_us) : "—";
+    const rate = d.hit_rate.toFixed(0) + "%";
+    const ms = d.avg_cached_us ? fmtLat(d.avg_cached_us) : "—";
     rows += `<tr>
       <td>${esc(d.domain)}</td>
-      <td class="num">${fmt(d.cache_misses)}</td>
       <td class="num">${fmt(d.cache_hits)}</td>
+      <td class="num">${fmt(d.cache_misses)}</td>
       <td class="num">${rate}</td>
       <td class="num mono">${ms}</td>
     </tr>`;

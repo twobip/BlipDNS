@@ -790,7 +790,7 @@ func (s *Server) handleCacheStats(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
-	refreshed, err := s.fleet.queryLog.CacheRefreshedDomains(r.Context(), instance, since, topLimit)
+	topCached, err := s.fleet.queryLog.TopCachedDomains(r.Context(), instance, since, topLimit)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
@@ -828,7 +828,7 @@ func (s *Server) handleCacheStats(w http.ResponseWriter, r *http.Request) {
 		"per_instance": perInstance,
 		"live":         live,
 		"limit":        limit,
-		"refreshed":    refreshed,
+		"top_cached":   topCached,
 	})
 }
 

@@ -509,7 +509,7 @@ func TestQueryLogStoreCacheStats(t *testing.T) {
 	}
 }
 
-func TestQueryLogStoreCacheRefreshedDomains(t *testing.T) {
+func TestQueryLogStoreTopCachedDomains(t *testing.T) {
 	store, err := NewQueryLogStore(filepath.Join(t.TempDir(), "querylog.db"))
 	if err != nil {
 		t.Fatalf("NewQueryLogStore: %v", err)
@@ -525,7 +525,7 @@ func TestQueryLogStoreCacheRefreshedDomains(t *testing.T) {
 		{Timestamp: now.Add(-4 * time.Minute), Instance: "a", Client: "c", Domain: "foo.test", Action: "PASS", Cached: true, DurationUs: 50},
 		{Timestamp: now.Add(-5 * time.Minute), Instance: "a", Client: "c", Domain: "ads.test", Action: "BLOCK"},
 		{Timestamp: now.Add(-6 * time.Minute), Instance: "a", Client: "c", Domain: "health_check", Action: "PASS"},
-		{Timestamp: now.Add(-7 * time.Minute), Instance: "b", Client: "c", Domain: "foo.test", Action: "PASS", Cached: false, DurationUs: 7000},
+		{Timestamp: now.Add(-7 * time.Minute), Instance: "b", Client: "c", Domain: "foo.test", Action: "PASS", Cached: true, DurationUs: 200},
 	}
 	for _, e := range entries {
 		if err := store.Insert(ctx, e); err != nil {
@@ -533,46 +533,46 @@ func TestQueryLogStoreCacheRefreshedDomains(t *testing.T) {
 		}
 	}
 
-	// example.com: 2 misses + 1 hit = 66.7% refetch rate, sorted #1 by miss count.
-	// foo.test: 1 miss + 1 hit = 50% refetch rate.
+	// example.com: 1 hit + 2 misses = 33.3% hit rate.
+	// foo.test: 2 hits + 0 misses = 100% hit rate, sorted #1 by hit count.
 	// ads.test (BLOCK) and health_check are excluded.
-	doms, err := store.CacheRefreshedDomains(ctx, "", now.Add(-24*time.Hour), 10)
+	doms, err := store.TopCachedDomains(ctx, "", now.Add(-24*time.Hour), 10)
 	if err != nil {
-		t.Fatalf("CacheRefreshedDomains: %v", err)
+		t.Fatalf("TopCachedDomains: %v", err)
 	}
 	if len(doms) != 2 {
 		t.Fatalf("got %d domains, want 2: %+v", len(doms), doms)
 	}
-	if doms[0].Domain != "example.com" {
-		t.Errorf("got %q first, want example.com: %+v", doms[0].Domain, doms)
+	if doms[0].Domain != "foo.test" {
+		t.Errorf("got %q first, want foo.test: %+v", doms[0].Domain, doms)
 	}
-	if doms[1].Domain != "foo.test" {
-		t.Errorf("got %q second, want foo.test: %+v", doms[1].Domain, doms)
+	if doms[1].Domain != "example.com" {
+		t.Errorf("got %q second, want example.com: %+v", doms[1].Domain, doms)
 	}
-	ex := doms[0]
-	if ex.CacheMisses != 2 || ex.CacheHits != 1 {
-		t.Errorf("example.com misses/hits = %d/%d, want 2/1", ex.CacheMisses, ex.CacheHits)
+	ft := doms[0]
+	if ft.CacheHits != 2 || ft.CacheMisses != 0 {
+		t.Errorf("foo.test hits/misses = %d/%d, want 2/0", ft.CacheHits, ft.CacheMisses)
 	}
-	if ex.RefetchRate < 66.6 || ex.RefetchRate > 66.8 {
-		t.Errorf("example.com refetch_rate = %.1f, want ~66.7", ex.RefetchRate)
+	if ft.HitRate < 99.9 || ft.HitRate > 100.1 {
+		t.Errorf("foo.test hit_rate = %.1f, want 100", ft.HitRate)
 	}
-	if ex.AvgFetchedUs != 5500 {
-		t.Errorf("example.com avg_fetched_us = %.0f, want 5500", ex.AvgFetchedUs)
+	if ft.AvgCachedUs != 125 {
+		t.Errorf("foo.test avg_cached_us = %.0f, want 125", ft.AvgCachedUs)
 	}
 
-	// Instance filter narrows to instance b (only foo.test, 1 miss).
-	doms, err = store.CacheRefreshedDomains(ctx, "b", now.Add(-24*time.Hour), 10)
+	// Instance filter narrows to instance a (example.com 1 hit, foo.test 1 hit).
+	doms, err = store.TopCachedDomains(ctx, "a", now.Add(-24*time.Hour), 10)
 	if err != nil {
-		t.Fatalf("CacheRefreshedDomains(b): %v", err)
+		t.Fatalf("TopCachedDomains(a): %v", err)
 	}
-	if len(doms) != 1 || doms[0].Domain != "foo.test" || doms[0].CacheMisses != 1 {
-		t.Errorf("instance b = %+v, want 1 miss for foo.test", doms)
+	if len(doms) != 2 {
+		t.Fatalf("instance a = %d domains, want 2: %+v", len(doms), doms)
 	}
 
 	// Empty window returns nothing.
-	doms, err = store.CacheRefreshedDomains(ctx, "", now.Add(time.Hour), 10)
+	doms, err = store.TopCachedDomains(ctx, "", now.Add(time.Hour), 10)
 	if err != nil {
-		t.Fatalf("CacheRefreshedDomains(since): %v", err)
+		t.Fatalf("TopCachedDomains(since): %v", err)
 	}
 	if len(doms) != 0 {
 		t.Fatalf("got %d domains in empty window, want 0", len(doms))
