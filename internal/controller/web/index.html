@@ -262,6 +262,11 @@
             <button data-a="PASS">Allowed</button>
             <button data-a="BLOCK">Blocked</button>
           </div>
+          <select class="select" id="q-cached" style="max-width:160px">
+            <option value="">All (cached &amp; uncached)</option>
+            <option value="1">Cached only</option>
+            <option value="0">Uncached only</option>
+          </select>
           <div class="search grow" style="max-width:320px">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
             <input class="input" id="q-filter" placeholder="Filter domain / client / instance…"/>

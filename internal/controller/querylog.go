@@ -362,7 +362,8 @@ func (s *QueryLogStore) Insert(ctx context.Context, e QueryLogEntry) error {
 // results backwards in time (newest first); ordering is stable on (timestamp,
 // id) DESC so consecutive pages never duplicate or skip a row. An empty action
 // means "any action"; pass "PASS" or "BLOCK" to narrow by query outcome.
-func (s *QueryLogStore) Query(ctx context.Context, instance, filter, action string, since time.Time, offset, limit int) ([]QueryLogEntry, error) {
+// cached is "" (any), "1" (cached only) or "0" (uncached only).
+func (s *QueryLogStore) Query(ctx context.Context, instance, filter, action, cached string, since time.Time, offset, limit int) ([]QueryLogEntry, error) {
 	query := `SELECT ql.id, ql.timestamp, ql.instance, ql.client, COALESCE(cn.name, ''), ql.domain, ql.action, ql.upstream, ql.q_type, ql.blocklist, ql.ips, ql.answers, ql.duration_us, ql.cached FROM query_log ql LEFT JOIN client_names cn ON cn.client = ql.client WHERE ql.timestamp >= ? AND ql.domain != 'health_check' AND ql.domain != ''`
 	args := []interface{}{since}
 
@@ -373,6 +374,10 @@ func (s *QueryLogStore) Query(ctx context.Context, instance, filter, action stri
 	if action != "" {
 		query += " AND ql.action = ?"
 		args = append(args, action)
+	}
+	if cached != "" {
+		query += " AND ql.cached = ?"
+		args = append(args, cached)
 	}
 
 	filterLower := ""
@@ -421,9 +426,9 @@ func (s *QueryLogStore) Query(ctx context.Context, instance, filter, action stri
 }
 
 // QueryCount returns the total number of query log entries that match the
-// (instance, filter, action, since) constraints, regardless of any
+// (instance, filter, action, cached, since) constraints, regardless of any
 // limit/offset paging.
-func (s *QueryLogStore) QueryCount(ctx context.Context, instance, filter, action string, since time.Time) (int, error) {
+func (s *QueryLogStore) QueryCount(ctx context.Context, instance, filter, action, cached string, since time.Time) (int, error) {
 	query := `SELECT COUNT(*) FROM query_log WHERE timestamp >= ? AND domain != 'health_check' AND domain != ''`
 	args := []interface{}{since}
 	if instance != "" {
@@ -433,6 +438,10 @@ func (s *QueryLogStore) QueryCount(ctx context.Context, instance, filter, action
 	if action != "" {
 		query += " AND action = ?"
 		args = append(args, action)
+	}
+	if cached != "" {
+		query += " AND cached = ?"
+		args = append(args, cached)
 	}
 	if filter != "" {
 		fl := "%" + filter + "%"

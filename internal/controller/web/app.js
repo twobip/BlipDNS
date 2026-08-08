@@ -475,7 +475,7 @@ function confirmRemove(id) {
 }
 
 /* ---------- queries ---------- */
-let qState = { action: "", filter: "", inst: "" };
+let qState = { action: "", filter: "", inst: "", cached: "" };
 // Paginated query-log state. The log is fetched 25 rows at a time, newest
 // first, and appended on scroll. Filtering (text + action + instance) is done
 // server-side so the total and the pages are consistent.
@@ -523,6 +523,7 @@ async function fetchQueryPage(tb) {
   qPage.loading = true;
   const base = "/api/queries?instance=" + encodeURIComponent(qState.inst)
     + "&action=" + encodeURIComponent(qState.action)
+    + "&cached=" + encodeURIComponent(qState.cached)
     + "&filter=" + encodeURIComponent(qState.filter)
     + "&since=24h&offset=" + qPage.offset + "&limit=" + QL_PAGE;
   try {
@@ -1673,6 +1674,7 @@ function setQueryAction(action) {
   renderQueries();
 }
 document.querySelectorAll("#q-action-seg button").forEach((b) => b.onclick = () => setQueryAction(b.dataset.a));
+$("q-cached").addEventListener("change", (e) => { qState.cached = e.target.value; renderQueries(); });
 
 /* clients */
 $("c-instance").addEventListener("change", (e) => { cState.inst = e.target.value; renderClients(); });

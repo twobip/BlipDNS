@@ -29,7 +29,7 @@ func TestQueryLogStoreRoundtrip(t *testing.T) {
 	if err := store.Insert(ctx, want); err != nil {
 		t.Fatalf("Insert: %v", err)
 	}
-	entries, err := store.Query(ctx, "", "", "", time.Time{}, 0, 100)
+	entries, err := store.Query(ctx, "", "", "", "", time.Time{}, 0, 100)
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}
@@ -48,7 +48,7 @@ func TestQueryLogStoreRoundtrip(t *testing.T) {
 	if err := store.Insert(ctx, QueryLogEntry{Timestamp: now.Add(time.Second), Instance: "a", Client: "1.2.3.4", Domain: "ads.test", Action: "BLOCK"}); err != nil {
 		t.Fatalf("Insert block: %v", err)
 	}
-	entries, err = store.Query(ctx, "", "", "", time.Time{}, 0, 100)
+	entries, err = store.Query(ctx, "", "", "", "", time.Time{}, 0, 100)
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}
@@ -86,7 +86,7 @@ func TestQueryLogStoreMaintenance(t *testing.T) {
 	if err := store.ClearQueryLog(ctx); err != nil {
 		t.Fatalf("ClearQueryLog: %v", err)
 	}
-	entries, err := store.Query(ctx, "", "", "", time.Time{}, 0, 100)
+	entries, err := store.Query(ctx, "", "", "", "", time.Time{}, 0, 100)
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}
@@ -281,19 +281,19 @@ func TestQueryLogStoreQueryCountAndPagination(t *testing.T) {
 	}
 
 	// All actions: 4 pass + 2 block = 6 (empty + health_check excluded).
-	if n, err := store.QueryCount(ctx, "", "", "", now.Add(-24*time.Hour)); err != nil {
+	if n, err := store.QueryCount(ctx, "", "", "", "", now.Add(-24*time.Hour)); err != nil {
 		t.Fatalf("QueryCount: %v", err)
 	} else if n != 6 {
 		t.Errorf("QueryCount = %d, want 6", n)
 	}
 
 	// Action filter: pass=4, block=2.
-	if n, err := store.QueryCount(ctx, "", "", "PASS", now.Add(-24*time.Hour)); err != nil {
+	if n, err := store.QueryCount(ctx, "", "", "PASS", "", now.Add(-24*time.Hour)); err != nil {
 		t.Fatalf("QueryCount(PASS): %v", err)
 	} else if n != 4 {
 		t.Errorf("QueryCount(PASS) = %d, want 4", n)
 	}
-	if n, err := store.QueryCount(ctx, "", "", "BLOCK", now.Add(-24*time.Hour)); err != nil {
+	if n, err := store.QueryCount(ctx, "", "", "BLOCK", "", now.Add(-24*time.Hour)); err != nil {
 		t.Fatalf("QueryCount(BLOCK): %v", err)
 	} else if n != 2 {
 		t.Errorf("QueryCount(BLOCK) = %d, want 2", n)
@@ -301,11 +301,11 @@ func TestQueryLogStoreQueryCountAndPagination(t *testing.T) {
 
 	// Pagination: limit 2, offset 0 then 2 yields disjoint, stable pages
 	// (newest first), totaling 6 with no overlap.
-	p0, err := store.Query(ctx, "", "", "", now.Add(-24*time.Hour), 0, 2)
+	p0, err := store.Query(ctx, "", "", "", "", now.Add(-24*time.Hour), 0, 2)
 	if err != nil {
 		t.Fatalf("Query page0: %v", err)
 	}
-	p1, err := store.Query(ctx, "", "", "", now.Add(-24*time.Hour), 2, 2)
+	p1, err := store.Query(ctx, "", "", "", "", now.Add(-24*time.Hour), 2, 2)
 	if err != nil {
 		t.Fatalf("Query page1: %v", err)
 	}
@@ -318,6 +318,59 @@ func TestQueryLogStoreQueryCountAndPagination(t *testing.T) {
 	// Newest page's first row is the most recent overall.
 	if p0[0].Timestamp.Before(p1[0].Timestamp) {
 		t.Errorf("page0 first %v should be >= page1 first %v", p0[0].Timestamp, p1[0].Timestamp)
+	}
+}
+
+func TestQueryLogStoreCachedFilter(t *testing.T) {
+	store, err := NewQueryLogStore(filepath.Join(t.TempDir(), "querylog.db"))
+	if err != nil {
+		t.Fatalf("NewQueryLogStore: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	now := time.Now()
+	for i := 0; i < 3; i++ {
+		if err := store.Insert(ctx, QueryLogEntry{Timestamp: now.Add(-time.Duration(i) * time.Minute), Instance: "a", Client: "c", Domain: "example.com", Action: "PASS", Cached: true, DurationUs: 10}); err != nil {
+			t.Fatalf("Insert cached: %v", err)
+		}
+	}
+	for i := 0; i < 2; i++ {
+		if err := store.Insert(ctx, QueryLogEntry{Timestamp: now.Add(-time.Duration(i) * time.Minute), Instance: "a", Client: "c", Domain: "other.com", Action: "PASS", Cached: false, DurationUs: 5000}); err != nil {
+			t.Fatalf("Insert uncached: %v", err)
+		}
+	}
+
+	// No filter: 5 total.
+	if n, err := store.QueryCount(ctx, "", "", "", "", now.Add(-time.Hour)); err != nil {
+		t.Fatalf("QueryCount: %v", err)
+	} else if n != 5 {
+		t.Errorf("QueryCount = %d, want 5", n)
+	}
+	// Cached only: 3.
+	if n, err := store.QueryCount(ctx, "", "", "", "1", now.Add(-time.Hour)); err != nil {
+		t.Fatalf("QueryCount cached=1: %v", err)
+	} else if n != 3 {
+		t.Errorf("QueryCount cached=1 = %d, want 3", n)
+	}
+	// Uncached only: 2.
+	if n, err := store.QueryCount(ctx, "", "", "", "0", now.Add(-time.Hour)); err != nil {
+		t.Fatalf("QueryCount cached=0: %v", err)
+	} else if n != 2 {
+		t.Errorf("QueryCount cached=0 = %d, want 2", n)
+	}
+	// Query with cached=1 returns only cached entries.
+	entries, err := store.Query(ctx, "", "", "", "1", now.Add(-time.Hour), 0, 100)
+	if err != nil {
+		t.Fatalf("Query cached=1: %v", err)
+	}
+	if len(entries) != 3 {
+		t.Fatalf("Query cached=1 returned %d entries, want 3", len(entries))
+	}
+	for _, e := range entries {
+		if !e.Cached {
+			t.Error("expected all entries to be cached")
+		}
 	}
 }
 
@@ -383,7 +436,7 @@ func TestClientNames(t *testing.T) {
 			t.Errorf("ClientStats unnamed got %q", s.Name)
 		}
 	}
-	entries, err := store.Query(ctx, "", "Gaming Rig", "", now.Add(-time.Hour), 0, 100)
+	entries, err := store.Query(ctx, "", "Gaming Rig", "", "", now.Add(-time.Hour), 0, 100)
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}
@@ -477,7 +530,7 @@ func TestQueryLogStoreRetention(t *testing.T) {
 
 	// Widening the window keeps everything.
 	store.SetRetention(7 * 24 * time.Hour)
-	entries, err := store.Query(ctx, "", "", "", now.Add(-7*24*time.Hour), 0, 100)
+	entries, err := store.Query(ctx, "", "", "", "", now.Add(-7*24*time.Hour), 0, 100)
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}
@@ -490,7 +543,7 @@ func TestQueryLogStoreRetention(t *testing.T) {
 	if st := store.Retention(); st != 24*time.Hour {
 		t.Fatalf("retention after SetRetention = %v, want 24h", st)
 	}
-	entries, err = store.Query(ctx, "", "", "", now.Add(-7*24*time.Hour), 0, 100)
+	entries, err = store.Query(ctx, "", "", "", "", now.Add(-7*24*time.Hour), 0, 100)
 	if err != nil {
 		t.Fatalf("Query after shrink: %v", err)
 	}
@@ -618,7 +671,7 @@ func TestQueryLogStoreBatchWriter(t *testing.T) {
 	// The async writer should flush everything shortly after the last enqueue.
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		entries, err := store.Query(ctx, "", "", "", time.Time{}, 0, 10000)
+		entries, err := store.Query(ctx, "", "", "", "", time.Time{}, 0, 10000)
 		if err != nil {
 			t.Fatalf("Query: %v", err)
 		}

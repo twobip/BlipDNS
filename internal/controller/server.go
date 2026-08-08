@@ -291,6 +291,10 @@ func (s *Server) handleInstance(w http.ResponseWriter, r *http.Request) {
 		if action != "" && action != "PASS" && action != "BLOCK" {
 			action = ""
 		}
+		cached := strings.TrimSpace(r.URL.Query().Get("cached"))
+		if cached != "" && cached != "0" && cached != "1" {
+			cached = ""
+		}
 		limit := 100
 		if l := r.URL.Query().Get("limit"); l != "" {
 			fmt.Sscanf(l, "%d", &limit)
@@ -305,7 +309,7 @@ func (s *Server) handleInstance(w http.ResponseWriter, r *http.Request) {
 				since = time.Now().Add(-d)
 			}
 		}
-		entries, err := s.fleet.queryLog.Query(ctx, instance, filter, action, since, offset, limit)
+		entries, err := s.fleet.queryLog.Query(ctx, instance, filter, action, cached, since, offset, limit)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
@@ -588,6 +592,11 @@ func (s *Server) handleQueries(w http.ResponseWriter, r *http.Request) {
 	if action != "" && action != "PASS" && action != "BLOCK" {
 		action = ""
 	}
+	// cached: "" (any), "1" (cached only), "0" (uncached only)
+	cached := strings.TrimSpace(r.URL.Query().Get("cached"))
+	if cached != "" && cached != "0" && cached != "1" {
+		cached = ""
+	}
 	limit := 100
 	if l := r.URL.Query().Get("limit"); l != "" {
 		fmt.Sscanf(l, "%d", &limit)
@@ -602,12 +611,12 @@ func (s *Server) handleQueries(w http.ResponseWriter, r *http.Request) {
 			since = time.Now().Add(-d)
 		}
 	}
-	entries, err := s.fleet.queryLog.Query(r.Context(), instance, filter, action, since, offset, limit)
+	entries, err := s.fleet.queryLog.Query(r.Context(), instance, filter, action, cached, since, offset, limit)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
-	total, err := s.fleet.queryLog.QueryCount(r.Context(), instance, filter, action, since)
+	total, err := s.fleet.queryLog.QueryCount(r.Context(), instance, filter, action, cached, since)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
