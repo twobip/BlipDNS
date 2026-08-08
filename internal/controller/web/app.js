@@ -615,8 +615,9 @@ function ipsHtml(ips) {
 // resolvedHtml renders the "Resolved IP" cell. Prefers the full answers list
 // (so TXT/CNAME/MX/SRV etc. are visible, not just A/AAAA), but falls back to
 // the legacy ips field for older persisted rows. TTL (seconds) is shown when
-// present (omitted for 0/unknown, and never on blocked answers). Each answer is
-// truncated at RESOLVED_MAX characters; the full value stays on hover.
+// present (omitted for 0/unknown, and never on blocked answers). Only the first
+// answer is shown as a chip; remaining answers are collapsed into a single
+// "+N" badge whose hover tooltip lists all of them.
 function resolvedHtml(r) {
   const ans = r.answers && r.answers.length ? r.answers : [];
   const ips = r.ips || [];
@@ -629,10 +630,13 @@ function resolvedHtml(r) {
       })
     : ips.map((ip) => ip);
   if (!parts.length) return `<span class="q-ips-empty">—</span>`;
-  const shown = parts.slice(0, 2);
-  const rest = parts.slice(2);
-  return shown.map((p) => `<span class="q-chip" title="${esc(p)}">${esc(trunc(p, RESOLVED_MAX))}</span>`).join("") +
-    rest.map((p, i) => `<span class="q-chip-more" title="${esc(p)}">+${i + 1}</span>`).join("");
+  const shown = parts.slice(0, 1);
+  const rest = parts.slice(1);
+  const shownHtml = shown.map((p) => `<span class="q-chip" title="${esc(p)}">${esc(trunc(p, RESOLVED_MAX))}</span>`).join("");
+  const moreHtml = !rest.length
+    ? ""
+    : `<span class="q-chip-more" title="${esc(rest.join(" · "))}">+${rest.length}</span>`;
+  return shownHtml + moreHtml;
 }
 
 async function copyText(s) {
