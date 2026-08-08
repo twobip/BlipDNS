@@ -376,13 +376,29 @@ function renderEvents() {
   }
   el.innerHTML = eventBuffer.map((e) => {
     const kind = e.type === "block" ? { b: 'badge err', ic: IC.block } : e.type === "pass" ? { b: 'badge on', ic: IC.query } : { b: "badge accent", ic: IC.shield };
+    const resp = e.type === "pass" ? respSummary(e) : "";
     return `<li><span class="t">${new Date(e.at).toLocaleTimeString()}</span>
       <span class="badge ${kind.b}">${e.type}</span>
       <div class="grow" style="min-width:0">
         <div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--mono)">${esc(e.domain || e.msg || e.type)}</div>
-        <div class="cell-sub">${esc(e.instance || e.instance_id || "")}${e.client ? " · " + esc(e.client) : ""}</div>
+        ${resp ? `<div class="cell-sub">${resp}</div>` : `<div class="cell-sub">${esc(e.instance || e.instance_id || "")}${e.client ? " · " + esc(e.client) : ""}</div>`}
       </div></li>`;
   }).join("");
+}
+
+// respSummary renders a short answer/cache summary for a pass event, reusing the
+// same truncated chips as the query-log table so TXT/CNAME/MX/SRV are visible.
+function respSummary(e) {
+    const parts = [];
+    if (e.cached) parts.push('cache');
+    const ans = (e.answers && e.answers.length) ? e.answers : [];
+    if (ans.length) {
+        parts.push(ans.map((a) => a.type + ": " + a.data).join(", "));
+    } else if (e.ips && e.ips.length) {
+        parts.push(e.ips.slice(0, 2).join(", "));
+    }
+    const instance = e.instance || e.instance_id || "";
+    return esc(parts.join(" · ") || (e.upstream || "")) + `${instance ? " · " + esc(instance) : ""}${e.client ? " · " + esc(e.client) : ""}`;
 }
 
 /* ---------- instances ---------- */

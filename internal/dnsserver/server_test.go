@@ -26,6 +26,7 @@ type recUp struct {
 	mu     sync.Mutex
 	calls  int
 	answer map[string]string
+	txt    map[string][]string
 }
 
 // Resolve implements upstream.Resolver.
@@ -39,11 +40,21 @@ func (r *recUp) Resolve(_ context.Context, q *dns.Msg) (*dns.Msg, error) {
 		return m, nil
 	}
 	name := q.Question[0].Name
-	if ip, ok := r.answer[name]; ok {
-		m.Answer = []dns.RR{&dns.A{
-			Hdr: dns.RR_Header{Name: name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60},
-			A:   net.ParseIP(ip),
-		}}
+	switch q.Question[0].Qtype {
+	case dns.TypeA:
+		if ip, ok := r.answer[name]; ok {
+			m.Answer = []dns.RR{&dns.A{
+				Hdr: dns.RR_Header{Name: name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60},
+				A:   net.ParseIP(ip),
+			}}
+		}
+	case dns.TypeTXT:
+		if txt, ok := r.txt[name]; ok {
+			m.Answer = []dns.RR{&dns.TXT{
+				Hdr: dns.RR_Header{Name: name, Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: 60},
+				Txt: txt,
+			}}
+		}
 	}
 	return m, nil
 }
@@ -540,5 +551,44 @@ func TestServeRecordsTypeSpecificMatch(t *testing.T) {
 	srv.serve(context.Background(), net.ParseIP("192.168.1.5"), "", q)
 	if up.calls != 1 {
 		t.Errorf("upstream calls for CNAME = %d, want 1", up.calls)
+	}
+}
+
+func TestServeCachedTXTResponse(t *testing.T) {
+	srv, up := newTestServer(t)
+	up.txt = map[string][]string{"_dmarc.test.": {"v=DMARC1; p=none"}}
+
+	q := new(dns.Msg)
+	q.SetQuestion("_dmarc.test.", dns.TypeTXT)
+
+	resp := srv.serve(context.Background(), net.ParseIP("10.0.0.1"), "", q)
+	if resp.Rcode != dns.RcodeSuccess {
+		t.Fatalf("first rc=%d want NOERROR", resp.Rcode)
+	}
+	if len(resp.Answer) != 1 {
+		t.Fatalf("expected 1 answer, got %d", len(resp.Answer))
+	}
+	a, ok := resp.Answer[0].(*dns.TXT)
+	if !ok {
+		t.Fatalf("answer type = %T, want *dns.TXT", resp.Answer[0])
+	}
+	if got := strings.Join(a.Txt, ""); got != "v=DMARC1; p=none" {
+		t.Errorf("TXT data = %q, want %q", got, "v=DMARC1; p=none")
+	}
+	callsAfterFirst := up.calls
+
+	resp = srv.serve(context.Background(), net.ParseIP("10.0.0.1"), "", q)
+	if up.calls != callsAfterFirst {
+		t.Fatalf("expected second serve to hit cache (up.calls=%d, want %d)", up.calls, callsAfterFirst)
+	}
+	if len(resp.Answer) != 1 {
+		t.Fatalf("cached: expected 1 answer, got %d", len(resp.Answer))
+	}
+	a, ok = resp.Answer[0].(*dns.TXT)
+	if !ok {
+		t.Fatalf("cached: answer type = %T, want *dns.TXT", resp.Answer[0])
+	}
+	if got := strings.Join(a.Txt, ""); got != "v=DMARC1; p=none" {
+		t.Errorf("cached: TXT data = %q, want %q", got, "v=DMARC1; p=none")
 	}
 }

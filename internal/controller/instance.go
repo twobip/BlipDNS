@@ -235,6 +235,12 @@ func (i *Instance) watch(ctx context.Context) {
 				Client:     e.Client,
 				Domain:     e.Domain,
 				Msg:        e.Msg,
+				QType:      e.QType,
+				IPs:        e.IPs,
+				Answers:    toAnswers(e.Answers),
+				Cached:     e.Cached,
+				Upstream:   e.Upstream,
+				DurationUs: e.DurationUs,
 			})
 			// Also log block/pass events to query log (async, batched so the
 			// watch stream can't be bottlenecked by per-row SQLite writes).

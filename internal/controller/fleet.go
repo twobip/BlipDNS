@@ -37,6 +37,19 @@ type Event struct {
 	Client     string                  `json:"client,omitempty"`
 	Domain     string                  `json:"domain,omitempty"`
 	Msg        string                  `json:"msg,omitempty"`
+	// QType is the queried RR-type mnemonic for pass/block events.
+	QType string `json:"q_type,omitempty"`
+	// IPs holds A/AAAA rdata for resolved queries (kept for backward compat).
+	IPs []string `json:"ips,omitempty"`
+	// Answers carries every response record so non-IP answers (TXT, CNAME, etc.)
+	// are visible in the live event stream, not just in the persisted query log.
+	Answers []Answer `json:"answers,omitempty"`
+	// Cached reports whether a "pass" event was served from the response cache.
+	Cached bool `json:"cached,omitempty"`
+	// Upstream names the resolver that answered a pass event.
+	Upstream string `json:"upstream,omitempty"`
+	// DurationUs is the query latency in microseconds.
+	DurationUs int64 `json:"duration_us,omitempty"`
 }
 
 // InstanceConfig is one managed blipd entry (from controller config).
