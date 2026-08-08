@@ -267,6 +267,9 @@ body.sidebar-collapsed .main { margin-left: 60px; }
 .panel-head h3 { margin: 0; font-size: 14px; font-weight: 600; }
 .panel-head .spacer { flex: 1; }
 .panel-body { padding: 24px; }
+.panel-foot { display: flex; align-items: center; justify-content: space-between; padding: 12px 24px; border-top: 1px solid var(--border); font-size: 13px; }
+.cs-nav { display: flex; gap: 4px; }
+.btn-sm { padding: 4px 10px; font-size: 12px; }
 
 .grid { display: grid; gap: 20px; }
 .grid-5 { grid-template-columns: repeat(5, 1fr); }

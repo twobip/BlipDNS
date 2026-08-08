@@ -781,16 +781,25 @@ func (s *Server) handleCacheStats(w http.ResponseWriter, r *http.Request) {
 	if d, err := time.ParseDuration(r.URL.Query().Get("since")); err == nil {
 		since = time.Now().Add(-d)
 	}
-	topLimit := 100
+	topLimit := 50
 	if l := r.URL.Query().Get("limit"); l != "" {
 		fmt.Sscanf(l, "%d", &topLimit)
+	}
+	topOffset := 0
+	if o := r.URL.Query().Get("offset"); o != "" {
+		fmt.Sscanf(o, "%d", &topOffset)
 	}
 	perInstance, err := s.fleet.queryLog.CacheStats(r.Context(), instance, since)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
-	topCached, err := s.fleet.queryLog.TopCachedDomains(r.Context(), instance, since, topLimit)
+	topCached, err := s.fleet.queryLog.TopCachedDomains(r.Context(), instance, since, topOffset, topLimit)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	topTotal, err := s.fleet.queryLog.TopCachedDomainsCount(r.Context(), instance, since)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
@@ -824,11 +833,12 @@ func (s *Server) handleCacheStats(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, map[string]interface{}{
-		"total":        total,
-		"per_instance": perInstance,
-		"live":         live,
-		"limit":        limit,
-		"top_cached":   topCached,
+		"total":            total,
+		"per_instance":     perInstance,
+		"live":             live,
+		"limit":            limit,
+		"top_cached":       topCached,
+		"top_cached_total": topTotal,
 	})
 }
 

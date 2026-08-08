@@ -816,10 +816,11 @@ $("r-tbody").addEventListener("click", (e) => {
 });
 
 /* ---------- cache stats ---------- */
-let csState = { since: "24h" };
+let csState = { since: "24h", page: 0 };
+const CS_PAGE = 25;
 async function renderCacheStats() {
   try {
-    const res = await API(`/api/cache-stats?since=${csState.since}`);
+    const res = await API(`/api/cache-stats?since=${csState.since}&limit=${CS_PAGE}&offset=${csState.page * CS_PAGE}`);
     const d = await res.json();
     const total = d.total || { queries: 0, cached_queries: 0, percent_cached: 0, avg_cached_us: 0, avg_fetched_us: 0 };
     const hint = "resolved (non-blocked) queries · last " + csState.since;
@@ -865,32 +866,38 @@ async function renderCacheStats() {
     }
     tb.innerHTML = rows;
     }
-    renderTopCachedDomains(d.top_cached || []);
+    renderTopCachedDomains(d.top_cached || [], d.top_cached_total || 0);
   } catch (e) {
     $("cs-tbody").innerHTML = `<tr class="empty-row"><td colspan="7"><div class="empty"><div class="empty-ic">${IC.warn}</div><h4>Cache stats unavailable</h4><p>${esc(e.message)}</p></div></td></tr>`;
   }
 }
 
 /* ---------- cache stats: top cached domains ---------- */
-function renderTopCachedDomains(list) {
+function renderTopCachedDomains(list, total) {
   const tb = $("cs-top-cached-tbody");
   if (!list.length) {
     tb.innerHTML = `<tr class="empty-row"><td colspan="5"><div class="empty"><div class="empty-ic">${IC.cache}</div><h4>No data yet</h4><p>No resolved queries in this window.</p></div></td></tr>`;
-    return;
+  } else {
+    let rows = "";
+    for (const d of list) {
+      const rate = d.hit_rate.toFixed(0) + "%";
+      const ms = d.avg_cached_us ? fmtLat(d.avg_cached_us) : "—";
+      rows += `<tr>
+        <td>${esc(d.domain)}</td>
+        <td class="num">${fmt(d.cache_hits)}</td>
+        <td class="num">${fmt(d.cache_misses)}</td>
+        <td class="num">${rate}</td>
+        <td class="num mono">${ms}</td>
+      </tr>`;
+    }
+    tb.innerHTML = rows;
   }
-  let rows = "";
-  for (const d of list) {
-    const rate = d.hit_rate.toFixed(0) + "%";
-    const ms = d.avg_cached_us ? fmtLat(d.avg_cached_us) : "—";
-    rows += `<tr>
-      <td>${esc(d.domain)}</td>
-      <td class="num">${fmt(d.cache_hits)}</td>
-      <td class="num">${fmt(d.cache_misses)}</td>
-      <td class="num">${rate}</td>
-      <td class="num mono">${ms}</td>
-    </tr>`;
-  }
-  tb.innerHTML = rows;
+  const totalPages = total > 0 ? Math.ceil(total / CS_PAGE) : 1;
+  const page = csState.page;
+  const info = total > 0 ? `Showing ${page * CS_PAGE + 1}–${Math.min((page + 1) * CS_PAGE, total)} of ${fmt(total)}` : "No domains";
+  $("cs-pages").textContent = info;
+  $("cs-prev").disabled = page === 0;
+  $("cs-next").disabled = page >= totalPages - 1;
 }
 
 let cState = { inst: "" };
@@ -1648,7 +1655,9 @@ $("ue-clear").onclick = () => {
 };
 
 /* cache stats */
-$("cs-range").addEventListener("change", (e) => { csState.since = e.target.value; renderCacheStats(); });
+$("cs-range").addEventListener("change", (e) => { csState.since = e.target.value; csState.page = 0; renderCacheStats(); });
+$("cs-prev").addEventListener("click", () => { if (csState.page > 0) { csState.page--; renderCacheStats(); } });
+$("cs-next").addEventListener("click", () => { csState.page++; renderCacheStats(); });
 $("q-tbody").addEventListener("click", (e) => {
   const c = e.target.closest("[data-copy]"); if (!c) return;
   copyText(c.dataset.copy);

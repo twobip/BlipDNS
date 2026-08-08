@@ -201,15 +201,16 @@ type TopCachedDomain struct {
 // TopCachedDomains returns the domains with the most cache hits (i.e. the
 // domains most frequently served from cache) within the time window, most
 // cached first. Blocked queries and health checks are excluded.
-func (s *QueryLogStore) TopCachedDomains(ctx context.Context, instance string, since time.Time, limit int) ([]TopCachedDomain, error) {
+// offset/limit page through the grouped results.
+func (s *QueryLogStore) TopCachedDomains(ctx context.Context, instance string, since time.Time, offset, limit int) ([]TopCachedDomain, error) {
 	query := `SELECT ql.domain, COALESCE(SUM(CASE WHEN ql.cached = 1 THEN 1 ELSE 0 END), 0), COALESCE(SUM(CASE WHEN ql.cached = 0 THEN 1 ELSE 0 END), 0), COALESCE(AVG(CASE WHEN ql.cached = 1 AND ql.duration_us > 0 THEN ql.duration_us END), 0) FROM query_log ql WHERE ql.timestamp >= ? AND ql.domain != 'health_check' AND ql.domain != '' AND ql.action = 'PASS'`
 	args := []interface{}{since}
 	if instance != "" {
 		query += " AND ql.instance = ?"
 		args = append(args, instance)
 	}
-	query += " GROUP BY ql.domain ORDER BY SUM(CASE WHEN ql.cached = 1 THEN 1 ELSE 0 END) DESC LIMIT ?"
-	args = append(args, limit)
+	query += " GROUP BY ql.domain ORDER BY SUM(CASE WHEN ql.cached = 1 THEN 1 ELSE 0 END) DESC LIMIT ? OFFSET ?"
+	args = append(args, limit, offset)
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -233,6 +234,23 @@ func (s *QueryLogStore) TopCachedDomains(ctx context.Context, instance string, s
 		out = []TopCachedDomain{}
 	}
 	return out, rows.Err()
+}
+
+// TopCachedDomainsCount returns the total number of distinct domains that have
+// at least one cache hit in the time window, for the given instance (or all
+// instances if ""). This backs pagination in the cache stats UI.
+func (s *QueryLogStore) TopCachedDomainsCount(ctx context.Context, instance string, since time.Time) (int, error) {
+	query := `SELECT COUNT(DISTINCT ql.domain) FROM query_log ql WHERE ql.timestamp >= ? AND ql.domain != 'health_check' AND ql.domain != '' AND ql.action = 'PASS' AND ql.cached = 1`
+	args := []interface{}{since}
+	if instance != "" {
+		query += " AND ql.instance = ?"
+		args = append(args, instance)
+	}
+	var n int
+	if err := s.db.QueryRowContext(ctx, query, args...).Scan(&n); err != nil {
+		return 0, err
+	}
+	return n, nil
 }
 
 // CacheStats returns per-instance cache hit/miss tallies for "pass" (resolved)

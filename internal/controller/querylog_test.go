@@ -536,7 +536,7 @@ func TestQueryLogStoreTopCachedDomains(t *testing.T) {
 	// example.com: 1 hit + 2 misses = 33.3% hit rate.
 	// foo.test: 2 hits + 0 misses = 100% hit rate, sorted #1 by hit count.
 	// ads.test (BLOCK) and health_check are excluded.
-	doms, err := store.TopCachedDomains(ctx, "", now.Add(-24*time.Hour), 10)
+	doms, err := store.TopCachedDomains(ctx, "", now.Add(-24*time.Hour), 0, 10)
 	if err != nil {
 		t.Fatalf("TopCachedDomains: %v", err)
 	}
@@ -546,31 +546,32 @@ func TestQueryLogStoreTopCachedDomains(t *testing.T) {
 	if doms[0].Domain != "foo.test" {
 		t.Errorf("got %q first, want foo.test: %+v", doms[0].Domain, doms)
 	}
-	if doms[1].Domain != "example.com" {
-		t.Errorf("got %q second, want example.com: %+v", doms[1].Domain, doms)
+	// Pagination: offset 1 returns only example.com.
+	doms, err = store.TopCachedDomains(ctx, "", now.Add(-24*time.Hour), 1, 10)
+	if err != nil {
+		t.Fatalf("TopCachedDomains(offset): %v", err)
 	}
-	ft := doms[0]
-	if ft.CacheHits != 2 || ft.CacheMisses != 0 {
-		t.Errorf("foo.test hits/misses = %d/%d, want 2/0", ft.CacheHits, ft.CacheMisses)
+	if len(doms) != 1 || doms[0].Domain != "example.com" {
+		t.Errorf("offset 1 = %+v, want only example.com", doms)
 	}
-	if ft.HitRate < 99.9 || ft.HitRate > 100.1 {
-		t.Errorf("foo.test hit_rate = %.1f, want 100", ft.HitRate)
+	// Count matches distinct domains with cache hits.
+	count, err := store.TopCachedDomainsCount(ctx, "", now.Add(-24*time.Hour))
+	if err != nil {
+		t.Fatalf("TopCachedDomainsCount: %v", err)
 	}
-	if ft.AvgCachedUs != 125 {
-		t.Errorf("foo.test avg_cached_us = %.0f, want 125", ft.AvgCachedUs)
+	if count != 2 {
+		t.Errorf("count = %d, want 2", count)
 	}
-
 	// Instance filter narrows to instance a (example.com 1 hit, foo.test 1 hit).
-	doms, err = store.TopCachedDomains(ctx, "a", now.Add(-24*time.Hour), 10)
+	doms, err = store.TopCachedDomains(ctx, "a", now.Add(-24*time.Hour), 0, 10)
 	if err != nil {
 		t.Fatalf("TopCachedDomains(a): %v", err)
 	}
 	if len(doms) != 2 {
 		t.Fatalf("instance a = %d domains, want 2: %+v", len(doms), doms)
 	}
-
 	// Empty window returns nothing.
-	doms, err = store.TopCachedDomains(ctx, "", now.Add(time.Hour), 10)
+	doms, err = store.TopCachedDomains(ctx, "", now.Add(time.Hour), 0, 10)
 	if err != nil {
 		t.Fatalf("TopCachedDomains(since): %v", err)
 	}

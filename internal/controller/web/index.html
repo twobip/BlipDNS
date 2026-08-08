@@ -193,15 +193,26 @@
              </table>
            </div>
           </div>
-         <div class="panel">
-           <div class="panel-head"><h3>Top cached domains</h3><span class="muted">domains most frequently served from cache in this window</span></div>
-           <div class="table-wrap">
-             <table class="tbl">
-               <thead><tr><th>Domain</th><th class="num">Cache hits</th><th class="num">Cache misses</th><th class="num">Hit rate</th><th class="num">Avg hit ms</th></tr></thead>
-               <tbody id="cs-top-cached-tbody"></tbody>
-             </table>
-           </div>
-         </div>
+          <div class="panel">
+            <div class="panel-head"><h3>Top cached domains</h3><span class="muted">domains most frequently served from cache in this window</span></div>
+            <div class="table-wrap">
+              <table class="tbl">
+                <thead><tr><th>Domain</th><th class="num">Cache hits</th><th class="num">Cache misses</th><th class="num">Hit rate</th><th class="num">Avg hit ms</th></tr></thead>
+                <tbody id="cs-top-cached-tbody"></tbody>
+              </table>
+            </div>
+            <div class="panel-foot">
+              <div class="cs-pages" id="cs-pages"></div>
+              <div class="cs-nav">
+                <button class="btn btn-sm" id="cs-prev" title="Previous page">
+                  <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15.5 19 9 12 15.5 5"/></svg>
+                </button>
+                <button class="btn btn-sm" id="cs-next" title="Next page">
+                  <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="8.5 5 15 12 8.5 19"/></svg>
+                </button>
+              </div>
+            </div>
+          </div>
        </section>
 
       <!-- ================= UPSTREAM ERRORS ================= -->
