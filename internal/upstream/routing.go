@@ -5,6 +5,7 @@ import (
 	"net"
 	"sort"
 	"strings"
+	"time"
 )
 
 // UpstreamServer is a named upstream endpoint. A server is part of the
@@ -12,9 +13,10 @@ import (
 // server is used *only* when an UpstreamRoute points at it — it is never tried
 // automatically, even when every Priority>0 server is down.
 type UpstreamServer struct {
-	Name     string `json:"name" yaml:"name"`
-	Address  string `json:"address" yaml:"address"` // single endpoint spec: "udp://host:port" or "https://host/dns-query"
-	Priority int    `json:"priority" yaml:"priority"`
+	Name       string `json:"name" yaml:"name"`
+	Address    string `json:"address" yaml:"address"` // single endpoint spec: "udp://host:port" or "https://host/dns-query"
+	Priority   int    `json:"priority" yaml:"priority"`
+	TimeoutSec int    `json:"timeout_sec,omitempty" yaml:"timeout_sec,omitempty"` // seconds to wait before failing over to next server (0 = 5s default)
 }
 
 // UpstreamRoute conditionally forwards a query to a named server when its qname
@@ -63,7 +65,7 @@ func NewPool(servers []UpstreamServer, routes []UpstreamRoute, legacyUp string) 
 		if _, dup := p.named[sv.Name]; dup {
 			return nil, fmt.Errorf("upstream: duplicate server name %q", sv.Name)
 		}
-		r, err := fromServerSpec(sv.Address)
+		r, err := fromServerSpec(sv.Address, timeoutForServer(sv))
 		if err != nil {
 			return nil, fmt.Errorf("upstream: server %q: %w", sv.Name, err)
 		}
@@ -131,10 +133,10 @@ func serverPriority(servers []UpstreamServer, name string) int {
 	return 0
 }
 
-// fromServerSpec builds a single resolver from one endpoint spec. A server
-// address must name exactly one endpoint (the multi-token form belongs to the
-// legacy `upstream:` string, handled by FromSpec).
-func fromServerSpec(spec string) (Resolver, error) {
+// fromServerSpec builds a single resolver from one endpoint spec and timeout.
+// A server address must name exactly one endpoint (the multi-token form belongs
+// to the legacy `upstream:` string, handled by FromSpec).
+func fromServerSpec(spec string, timeout time.Duration) (Resolver, error) {
 	specs, err := ParseSpec(spec)
 	if err != nil {
 		return nil, err
@@ -144,11 +146,20 @@ func fromServerSpec(spec string) (Resolver, error) {
 	}
 	switch specs[0].Type {
 	case "udp":
-		return NewUDP(specs[0].Address), nil
+		return NewUDP(specs[0].Address, timeout), nil
 	case "doh":
-		return NewDoH("https://" + specs[0].Address), nil
+		return NewDoH("https://"+specs[0].Address, timeout), nil
 	}
 	return nil, fmt.Errorf("unknown upstream type %q", specs[0].Type)
+}
+
+// timeoutForServer returns the resolver timeout for an UpstreamServer, defaulting
+// to 5 seconds when TimeoutSec is unset (0).
+func timeoutForServer(s UpstreamServer) time.Duration {
+	if s.TimeoutSec > 0 {
+		return time.Duration(s.TimeoutSec) * time.Second
+	}
+	return 5 * time.Second
 }
 
 func makeRouteRule(rt UpstreamRoute, named map[string]Resolver) (routeRule, error) {

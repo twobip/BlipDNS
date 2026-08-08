@@ -30,9 +30,13 @@ type UDPResolver struct {
 	timeout time.Duration
 }
 
-// NewUDP creates a UDP/TCP upstream resolver for addr (host:port).
-func NewUDP(addr string) *UDPResolver {
-	return &UDPResolver{addr: addr, timeout: 5 * time.Second}
+// NewUDP creates a UDP/TCP upstream resolver for addr (host:port) with the
+// given timeout (0 = 5 second default).
+func NewUDP(addr string, timeout time.Duration) *UDPResolver {
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+	return &UDPResolver{addr: addr, timeout: timeout}
 }
 
 func (r *UDPResolver) Resolve(ctx context.Context, q *dns.Msg) (*dns.Msg, error) {
@@ -73,12 +77,16 @@ type DoHResolver struct {
 }
 
 // NewDoH creates a DoH upstream resolver for endpoint (e.g.
-// https://1.1.1.1/dns-query). The client reuses HTTP/2 connections.
-func NewDoH(endpoint string) *DoHResolver {
+// https://1.1.1.1/dns-query) with the given timeout (0 = 5 second default).
+// The client reuses HTTP/2 connections.
+func NewDoH(endpoint string, timeout time.Duration) *DoHResolver {
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
 	return &DoHResolver{
 		endpoint: endpoint,
 		client: &http.Client{
-			Timeout: 5 * time.Second,
+			Timeout: timeout,
 			Transport: &http.Transport{
 				MaxIdleConns:        64,
 				MaxIdleConnsPerHost: 32,
@@ -283,9 +291,9 @@ func FromSpec(spec string) (Resolver, error) {
 	for i, s := range specs {
 		switch s.Type {
 		case "udp":
-			rs[i] = NewUDP(s.Address)
+			rs[i] = NewUDP(s.Address, 0)
 		case "doh":
-			rs[i] = NewDoH("https://" + s.Address)
+			rs[i] = NewDoH("https://"+s.Address, 0)
 		}
 	}
 	if len(rs) == 1 {

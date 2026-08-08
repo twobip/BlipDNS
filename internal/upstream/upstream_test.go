@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"testing"
+	"time"
 
 	"github.com/miekg/dns"
 )
@@ -277,7 +278,42 @@ func TestPoolLabelFor(t *testing.T) {
 		t.Errorf("LabelFor(auto) = %q, want auto (DoH)", got)
 	}
 	// Resolvers not owned by the pool (e.g. per-policy overrides) get "".
-	if got := p.LabelFor(NewUDP("9.9.9.9:53")); got != "" {
+	if got := p.LabelFor(NewUDP("9.9.9.9:53", 0)); got != "" {
 		t.Errorf("LabelFor(unrelated resolver) = %q, want empty", got)
+	}
+}
+
+func TestPoolServerTimeout(t *testing.T) {
+	servers := []UpstreamServer{
+		{Name: "fast", Address: "udp://1.2.3.4:53", Priority: 1, TimeoutSec: 2},
+		{Name: "slow", Address: "udp://5.6.7.8:53", Priority: 2, TimeoutSec: 0},
+	}
+	p, err := NewPool(servers, nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// fast: explicit 2s
+	fast := p.named["fast"].(*UDPResolver)
+	if fast.timeout != 2*time.Second {
+		t.Errorf("fast timeout = %v, want 2s", fast.timeout)
+	}
+	// slow: TimeoutSec 0 -> 5s default
+	slow := p.named["slow"].(*UDPResolver)
+	if slow.timeout != 5*time.Second {
+		t.Errorf("slow timeout = %v, want 5s default", slow.timeout)
+	}
+}
+
+func TestDoHTimeout(t *testing.T) {
+	servers := []UpstreamServer{
+		{Name: "doh1", Address: "https://dns.example.com/dns-query", Priority: 1, TimeoutSec: 3},
+	}
+	p, err := NewPool(servers, nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := p.named["doh1"].(*DoHResolver)
+	if r.client.Timeout != 3*time.Second {
+		t.Errorf("doh timeout = %v, want 3s", r.client.Timeout)
 	}
 }

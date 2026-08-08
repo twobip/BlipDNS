@@ -1247,6 +1247,7 @@ function serverRow(u) {
     <input class="input up-name" placeholder="name (e.g. quad9)" style="width:120px" value="${esc(u.name || "")}"/>
     <input class="input grow up-addr" placeholder="9.9.9.9 (udp:53) or https://1.1.1.1/dns-query" value="${esc(u.address || "")}"/>
     <input class="input up-prio" type="number" min="0" title="Priority — lower = higher priority; 0 = route-only" style="width:72px" value="${u.priority ?? ""}"/>
+    <input class="input up-timeout" type="number" min="1" title="Seconds to wait before failing over to the next server (default 5)" style="width:72px" placeholder="5" value="${u.timeout_sec ?? ""}"/>
     <button class="icon-btn up-del" title="Remove">${IC.trash}</button>`;
   row.querySelector(".up-del").onclick = () => { row.remove(); refreshRouteServerOptions(); };
   return row;
@@ -1262,6 +1263,7 @@ function collectServers() {
     name: row.querySelector(".up-name").value.trim(),
     address: row.querySelector(".up-addr").value.trim(),
     priority: parseInt(row.querySelector(".up-prio").value, 10) || 0,
+    timeout_sec: parseInt(row.querySelector(".up-timeout").value, 10) || 0,
   })).filter((s) => s.address !== "");
 }
 // A route is {name, qname_suffix, server, client_cidr, disabled}. server
