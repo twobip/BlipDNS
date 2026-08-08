@@ -2,16 +2,18 @@
 // instances over their management API.
 //
 // Usage:
-//   blipctl [--token TOKEN] <instance-url> <command> [args]
+//
+//	blipctl [--token TOKEN] <instance-url> <command> [args]
 //
 // Commands:
-//   health                 show instance health
-//   stats                  show live stats
-//   policies               list filter policies
-//   set-policy <file.yml>  push a policy (YAML)
-//   block <cidr> <domain>  convenience: add a block policy for a client CIDR
-//   del-policy <id>        remove a policy
-//   watch                  stream events (SSE)
+//
+//	health                 show instance health
+//	stats                  show live stats
+//	policies               list filter policies
+//	set-policy <file.yml>  push a policy (YAML)
+//	block <cidr> <domain>  convenience: add a block policy for a client CIDR
+//	del-policy <id>        remove a policy
+//	watch                  stream events (SSE)
 package main
 
 import (

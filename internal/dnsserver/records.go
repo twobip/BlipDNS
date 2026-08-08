@@ -5,8 +5,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/twobip/BlipDNS/internal/control"
 	"github.com/miekg/dns"
+	"github.com/twobip/BlipDNS/internal/control"
 )
 
 // defaultRecordTTL is the TTL used when a record entry omits one (0).
@@ -21,9 +21,9 @@ const defaultRecordTTL = 60
 // suffix/wildcard matching used by the filter policy store. An exact (non-wildcard)
 // record always takes precedence over a wildcard.
 type RecordStore struct {
-	mu         sync.RWMutex
-	records    map[string][]control.RecordEntry // exact: keyed by lowercased domain (no trailing .)
-	wildcards  map[string][]control.RecordEntry // wildcard: keyed by the parent suffix (e.g. "lan.twobip.com" for "*.lan.twobip.com")
+	mu        sync.RWMutex
+	records   map[string][]control.RecordEntry // exact: keyed by lowercased domain (no trailing .)
+	wildcards map[string][]control.RecordEntry // wildcard: keyed by the parent suffix (e.g. "lan.twobip.com" for "*.lan.twobip.com")
 }
 
 func NewRecordStore() *RecordStore {
@@ -144,7 +144,7 @@ func (rs *RecordStore) Lookup(req *dns.Msg) (*dns.Msg, bool) {
 			}
 			resp.Answer = append(resp.Answer, &dns.A{
 				Hdr: dns.RR_Header{Name: q.Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: ttl},
-				A: ip.To4(),
+				A:   ip.To4(),
 			})
 		case dns.TypeAAAA:
 			ip := net.ParseIP(r.Value)
@@ -152,12 +152,12 @@ func (rs *RecordStore) Lookup(req *dns.Msg) (*dns.Msg, bool) {
 				continue
 			}
 			resp.Answer = append(resp.Answer, &dns.AAAA{
-				Hdr: dns.RR_Header{Name: q.Name, Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: ttl},
+				Hdr:  dns.RR_Header{Name: q.Name, Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: ttl},
 				AAAA: ip.To16(),
 			})
 		case dns.TypeCNAME:
 			resp.Answer = append(resp.Answer, &dns.CNAME{
-				Hdr:  dns.RR_Header{Name: q.Name, Rrtype: dns.TypeCNAME, Class: dns.ClassINET, Ttl: ttl},
+				Hdr:    dns.RR_Header{Name: q.Name, Rrtype: dns.TypeCNAME, Class: dns.ClassINET, Ttl: ttl},
 				Target: dns.Fqdn(r.Value),
 			})
 		}

@@ -26,14 +26,14 @@ const DefaultAction = ActionNXDOMAIN
 
 // Policy describes filtering for a set of client networks or DoH client IDs.
 type Policy struct {
-	ID          string   `json:"id" yaml:"id"`
-	Networks    []string `json:"networks" yaml:"networks"`       // CIDR strings
-	Clients     []string `json:"clients" yaml:"clients"`         // DoH client IDs (exact match, e.g. "/dns-query/phone")
-	Allow       []string `json:"allow" yaml:"allow"`             // whitelist (exact/suffix/*.wild)
-	Block       []string `json:"block" yaml:"block"`             // blacklist (exact/suffix/*.wild)
+	ID          string      `json:"id" yaml:"id"`
+	Networks    []string    `json:"networks" yaml:"networks"` // CIDR strings
+	Clients     []string    `json:"clients" yaml:"clients"`   // DoH client IDs (exact match, e.g. "/dns-query/phone")
+	Allow       []string    `json:"allow" yaml:"allow"`       // whitelist (exact/suffix/*.wild)
+	Block       []string    `json:"block" yaml:"block"`       // blacklist (exact/suffix/*.wild)
 	BlockAction BlockAction `json:"block_action" yaml:"block_action"`
-	Log         bool     `json:"log" yaml:"log"`
-	Upstream    string   `json:"upstream" yaml:"upstream"` // optional upstream group id
+	Log         bool        `json:"log" yaml:"log"`
+	Upstream    string      `json:"upstream" yaml:"upstream"` // optional upstream group id
 }
 
 func (p *Policy) action() BlockAction {

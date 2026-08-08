@@ -16,12 +16,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/miekg/dns"
 	"github.com/twobip/BlipDNS/internal/blocklist"
 	"github.com/twobip/BlipDNS/internal/cache"
 	"github.com/twobip/BlipDNS/internal/control"
 	"github.com/twobip/BlipDNS/internal/filter"
 	"github.com/twobip/BlipDNS/internal/upstream"
-	"github.com/miekg/dns"
 )
 
 // maxDNSQueryParam is the maximum base64url length of the DoH GET `dns`

@@ -4,8 +4,8 @@ import (
 	"net"
 	"testing"
 
-	"github.com/twobip/BlipDNS/internal/control"
 	"github.com/miekg/dns"
+	"github.com/twobip/BlipDNS/internal/control"
 )
 
 func q(t *testing.T, name string, qtype uint16) *dns.Msg {

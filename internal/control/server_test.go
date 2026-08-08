@@ -13,11 +13,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/miekg/dns"
 	"github.com/twobip/BlipDNS/internal/blocklist"
 	"github.com/twobip/BlipDNS/internal/cache"
 	"github.com/twobip/BlipDNS/internal/filter"
 	"github.com/twobip/BlipDNS/internal/upstream"
-	"github.com/miekg/dns"
 )
 
 func TestSetBlocklistEndpoint(t *testing.T) {

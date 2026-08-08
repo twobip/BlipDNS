@@ -7,12 +7,12 @@ import (
 
 // Counters tracks server metrics and implements StatsCollector.
 type Counters struct {
-	mu         sync.Mutex
-	queries    uint64
-	blocked    uint64
-	upErr      uint64
+	mu          sync.Mutex
+	queries     uint64
+	blocked     uint64
+	upErr       uint64
 	rateLimited uint64
-	perClient  map[string]uint64
+	perClient   map[string]uint64
 }
 
 // AddQuery records a query from a client.

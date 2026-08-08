@@ -25,11 +25,11 @@ func TestSuffixAndWildcard(t *testing.T) {
 		want bool
 	}{
 		{"10.1.2.3", "ads.example.com", true},
-		{"10.1.2.3", "sub.ads.example.com", true},   // subdomain of blocked root
-		{"10.1.2.3", "tracker.net", false},          // *. only matches subdomains
-		{"10.1.2.3", "a.tracker.net", true},         // wildcard subdomain
-		{"10.1.2.3", "good.tracker.net", false},     // allowlist overrides block
-		{"192.168.1.1", "ads.example.com", false},   // outside policy network -> default (none) = allow
+		{"10.1.2.3", "sub.ads.example.com", true}, // subdomain of blocked root
+		{"10.1.2.3", "tracker.net", false},        // *. only matches subdomains
+		{"10.1.2.3", "a.tracker.net", true},       // wildcard subdomain
+		{"10.1.2.3", "good.tracker.net", false},   // allowlist overrides block
+		{"192.168.1.1", "ads.example.com", false}, // outside policy network -> default (none) = allow
 	}
 	for _, c := range cases {
 		blocked, _, _, _ := s.Classify(mustIP(c.ip), "", c.name)

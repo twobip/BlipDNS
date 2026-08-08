@@ -65,7 +65,7 @@ type Server struct {
 	cacheCtrl CacheController
 	// recCtrl drives the local DNS records at runtime.
 	recCtrl RecordController
-	upCtrl LocalResolverController
+	upCtrl  LocalResolverController
 }
 
 // DoHController is the piece of the DNS server the management API can reconfigure

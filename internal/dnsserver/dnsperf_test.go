@@ -58,10 +58,10 @@ func runDnsperf(t *testing.T, dataPath string, extraArgs ...string) (*dnsperfRes
 
 // dnsperfResult holds key metrics from a dnsperf run.
 type dnsperfResult struct {
-	Sent      int
-	Completed int
-	Lost      int
-	LostPct   float64
+	Sent          int
+	Completed     int
+	Lost          int
+	LostPct       float64
 	RcodeNOERROR  int
 	RcodeNXDOMAIN int
 	RcodeSERVFAIL int
@@ -84,7 +84,7 @@ var (
 )
 
 type rcodeCount struct {
-	code string
+	code  string
 	count int
 	pct   float64
 }
