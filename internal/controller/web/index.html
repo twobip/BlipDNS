@@ -189,11 +189,20 @@
           <div class="table-wrap">
             <table class="tbl">
               <thead><tr><th>Instance</th><th class="num">Domains in cache</th><th class="num">Cached</th><th class="num">Resolved</th><th class="num">% cached</th><th class="num">Cached ms</th><th class="num">Fetched ms</th></tr></thead>
-              <tbody id="cs-tbody"></tbody>
-            </table>
-          </div>
-        </div>
-      </section>
+               <tbody id="cs-tbody"></tbody>
+             </table>
+           </div>
+         </div>
+         <div class="panel">
+           <div class="panel-head"><h3>Most refreshed domains</h3><span class="muted">domains whose cached entries expire most often, triggering upstream refetches</span></div>
+           <div class="table-wrap">
+             <table class="tbl">
+               <thead><tr><th>Domain</th><th class="num">Refetches</th><th class="num">Cache hits</th><th class="num">Refetch rate</th><th class="num">Avg fetch ms</th></tr></thead>
+               <tbody id="cs-refreshed-tbody"></tbody>
+             </table>
+           </div>
+         </div>
+       </section>
 
       <!-- ================= UPSTREAM ERRORS ================= -->
       <section id="view-upstream-errors" class="view hidden">

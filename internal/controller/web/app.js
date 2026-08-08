@@ -868,9 +868,31 @@ async function renderCacheStats() {
   } catch (e) {
     $("cs-tbody").innerHTML = `<tr class="empty-row"><td colspan="7"><div class="empty"><div class="empty-ic">${IC.warn}</div><h4>Cache stats unavailable</h4><p>${esc(e.message)}</p></div></td></tr>`;
   }
+  renderRefreshedDomains(d.refreshed || []);
 }
 
-/* ---------- clients ---------- */
+/* ---------- cache stats: refreshed domains ---------- */
+function renderRefreshedDomains(list) {
+  const tb = $("cs-refreshed-tbody");
+  if (!list.length) {
+    tb.innerHTML = `<tr class="empty-row"><td colspan="5"><div class="empty"><div class="empty-ic">${IC.cache}</div><h4>No data yet</h4><p>No resolved queries in this window.</p></div></td></tr>`;
+    return;
+  }
+  let rows = "";
+  for (const d of list) {
+    const rate = d.refetch_rate.toFixed(0) + "%";
+    const ms = d.avg_fetched_us ? fmtLat(d.avg_fetched_us) : "—";
+    rows += `<tr>
+      <td>${esc(d.domain)}</td>
+      <td class="num">${fmt(d.cache_misses)}</td>
+      <td class="num">${fmt(d.cache_hits)}</td>
+      <td class="num">${rate}</td>
+      <td class="num mono">${ms}</td>
+    </tr>`;
+  }
+  tb.innerHTML = rows;
+}
+
 let cState = { inst: "" };
 let rnState = { client: "", kind: "" };
 function clientCellHtml(r) {

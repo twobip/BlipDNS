@@ -188,6 +188,53 @@ type InstanceCacheStat struct {
 	AvgFetchedUs  float64 `json:"avg_fetched_us"` // avg latency of cache misses (microseconds, 0 if none)
 }
 
+// CacheRefreshedDomain is a domain whose cache entries are frequently expiring
+// and being re-fetched from upstream — the "auto refreshed" workhorse domains.
+type CacheRefreshedDomain struct {
+	Domain       string  `json:"domain"`
+	CacheMisses  int     `json:"cache_misses"`   // uncached (fresh) fetches in the window
+	CacheHits    int     `json:"cache_hits"`     // cached answers in the window
+	RefetchRate  float64 `json:"refetch_rate"`   // cache_misses / (cache_misses + cache_hits)
+	AvgFetchedUs float64 `json:"avg_fetched_us"` // avg latency of the fresh fetches
+}
+
+// CacheRefreshedDomains returns the domains with the most upstream cache misses
+// (i.e. the domains whose cached entries are expiring most often and being
+// "auto refreshed" from upstream) within the time window, most active first.
+func (s *QueryLogStore) CacheRefreshedDomains(ctx context.Context, instance string, since time.Time, limit int) ([]CacheRefreshedDomain, error) {
+	query := `SELECT ql.domain, COALESCE(SUM(CASE WHEN ql.cached = 0 THEN 1 ELSE 0 END), 0), COALESCE(SUM(CASE WHEN ql.cached = 1 THEN 1 ELSE 0 END), 0), COALESCE(AVG(CASE WHEN ql.cached = 0 AND ql.duration_us > 0 THEN ql.duration_us END), 0) FROM query_log ql WHERE ql.timestamp >= ? AND ql.domain != 'health_check' AND ql.domain != '' AND ql.action = 'PASS'`
+	args := []interface{}{since}
+	if instance != "" {
+		query += " AND ql.instance = ?"
+		args = append(args, instance)
+	}
+	query += " GROUP BY ql.domain ORDER BY SUM(CASE WHEN ql.cached = 0 THEN 1 ELSE 0 END) DESC LIMIT ?"
+	args = append(args, limit)
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []CacheRefreshedDomain
+	for rows.Next() {
+		var d CacheRefreshedDomain
+		if err := rows.Scan(&d.Domain, &d.CacheMisses, &d.CacheHits, &d.AvgFetchedUs); err != nil {
+			return nil, err
+		}
+		total := d.CacheMisses + d.CacheHits
+		if total > 0 {
+			d.RefetchRate = float64(d.CacheMisses) / float64(total) * 100
+		}
+		out = append(out, d)
+	}
+	if out == nil {
+		out = []CacheRefreshedDomain{}
+	}
+	return out, rows.Err()
+}
+
 // CacheStats returns per-instance cache hit/miss tallies for "pass" (resolved)
 // queries in the time range. Blocked queries and health checks never pass
 // through the cache and are excluded, so the percentage reflects resolved

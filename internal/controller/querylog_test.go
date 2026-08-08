@@ -509,6 +509,76 @@ func TestQueryLogStoreCacheStats(t *testing.T) {
 	}
 }
 
+func TestQueryLogStoreCacheRefreshedDomains(t *testing.T) {
+	store, err := NewQueryLogStore(filepath.Join(t.TempDir(), "querylog.db"))
+	if err != nil {
+		t.Fatalf("NewQueryLogStore: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	now := time.Now()
+	entries := []QueryLogEntry{
+		{Timestamp: now.Add(-time.Minute), Instance: "a", Client: "c", Domain: "example.com", Action: "PASS", Cached: false, DurationUs: 5000},
+		{Timestamp: now.Add(-2 * time.Minute), Instance: "a", Client: "c", Domain: "example.com", Action: "PASS", Cached: false, DurationUs: 6000},
+		{Timestamp: now.Add(-3 * time.Minute), Instance: "a", Client: "c", Domain: "example.com", Action: "PASS", Cached: true, DurationUs: 100},
+		{Timestamp: now.Add(-4 * time.Minute), Instance: "a", Client: "c", Domain: "foo.test", Action: "PASS", Cached: true, DurationUs: 50},
+		{Timestamp: now.Add(-5 * time.Minute), Instance: "a", Client: "c", Domain: "ads.test", Action: "BLOCK"},
+		{Timestamp: now.Add(-6 * time.Minute), Instance: "a", Client: "c", Domain: "health_check", Action: "PASS"},
+		{Timestamp: now.Add(-7 * time.Minute), Instance: "b", Client: "c", Domain: "foo.test", Action: "PASS", Cached: false, DurationUs: 7000},
+	}
+	for _, e := range entries {
+		if err := store.Insert(ctx, e); err != nil {
+			t.Fatalf("Insert: %v", err)
+		}
+	}
+
+	// example.com: 2 misses + 1 hit = 66.7% refetch rate, sorted #1 by miss count.
+	// foo.test: 1 miss + 1 hit = 50% refetch rate.
+	// ads.test (BLOCK) and health_check are excluded.
+	doms, err := store.CacheRefreshedDomains(ctx, "", now.Add(-24*time.Hour), 10)
+	if err != nil {
+		t.Fatalf("CacheRefreshedDomains: %v", err)
+	}
+	if len(doms) != 2 {
+		t.Fatalf("got %d domains, want 2: %+v", len(doms), doms)
+	}
+	if doms[0].Domain != "example.com" {
+		t.Errorf("got %q first, want example.com: %+v", doms[0].Domain, doms)
+	}
+	if doms[1].Domain != "foo.test" {
+		t.Errorf("got %q second, want foo.test: %+v", doms[1].Domain, doms)
+	}
+	ex := doms[0]
+	if ex.CacheMisses != 2 || ex.CacheHits != 1 {
+		t.Errorf("example.com misses/hits = %d/%d, want 2/1", ex.CacheMisses, ex.CacheHits)
+	}
+	if ex.RefetchRate < 66.6 || ex.RefetchRate > 66.8 {
+		t.Errorf("example.com refetch_rate = %.1f, want ~66.7", ex.RefetchRate)
+	}
+	if ex.AvgFetchedUs != 5500 {
+		t.Errorf("example.com avg_fetched_us = %.0f, want 5500", ex.AvgFetchedUs)
+	}
+
+	// Instance filter narrows to instance b (only foo.test, 1 miss).
+	doms, err = store.CacheRefreshedDomains(ctx, "b", now.Add(-24*time.Hour), 10)
+	if err != nil {
+		t.Fatalf("CacheRefreshedDomains(b): %v", err)
+	}
+	if len(doms) != 1 || doms[0].Domain != "foo.test" || doms[0].CacheMisses != 1 {
+		t.Errorf("instance b = %+v, want 1 miss for foo.test", doms)
+	}
+
+	// Empty window returns nothing.
+	doms, err = store.CacheRefreshedDomains(ctx, "", now.Add(time.Hour), 10)
+	if err != nil {
+		t.Fatalf("CacheRefreshedDomains(since): %v", err)
+	}
+	if len(doms) != 0 {
+		t.Fatalf("got %d domains in empty window, want 0", len(doms))
+	}
+}
+
 func TestQueryLogStoreRetention(t *testing.T) {
 	store, err := NewQueryLogStore(filepath.Join(t.TempDir(), "querylog.db"))
 	if err != nil {

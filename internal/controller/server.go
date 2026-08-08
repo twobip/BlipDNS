@@ -781,7 +781,16 @@ func (s *Server) handleCacheStats(w http.ResponseWriter, r *http.Request) {
 	if d, err := time.ParseDuration(r.URL.Query().Get("since")); err == nil {
 		since = time.Now().Add(-d)
 	}
+	topLimit := 100
+	if l := r.URL.Query().Get("limit"); l != "" {
+		fmt.Sscanf(l, "%d", &topLimit)
+	}
 	perInstance, err := s.fleet.queryLog.CacheStats(r.Context(), instance, since)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	refreshed, err := s.fleet.queryLog.CacheRefreshedDomains(r.Context(), instance, since, topLimit)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
@@ -819,6 +828,7 @@ func (s *Server) handleCacheStats(w http.ResponseWriter, r *http.Request) {
 		"per_instance": perInstance,
 		"live":         live,
 		"limit":        limit,
+		"refreshed":    refreshed,
 	})
 }
 
