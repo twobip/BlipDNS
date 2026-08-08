@@ -3,3 +3,5 @@
 /testing
 .worktrees/
 .playwright-mcp/
+server.log
+*.log
