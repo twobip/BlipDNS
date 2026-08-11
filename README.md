@@ -30,7 +30,7 @@ go build -o bin/blipc ./cmd/blipc
 
 ## Install (one-liner)
 
-The installers require root privileges. By default they use an existing Go 1.25+ installation and automatically install Git if it is missing. Add `--install-deps` to install Git, Go, and CA certificates with the detected system package manager before cloning and building. The installed Go package must provide Go 1.25+; otherwise install Go manually from https://go.dev/dl/:
+The installers require root privileges. By default they use an existing Go 1.25+ installation and automatically install Git if it is missing. Add `--install-deps` to install Git, Go, CA certificates, curl, and jq with the detected system package manager before cloning and building. If the package manager only provides an older Go (such as Debian 13's Go 1.24), the installer downloads the official Go 1.25.0 Linux archive, verifies its SHA-256 checksum, and uses it for the build:
 
 ```bash
 curl -sL https://raw.githubusercontent.com/twobip/BlipDNS/master/scripts/install-blipd.sh | sudo bash -s -- --install-deps

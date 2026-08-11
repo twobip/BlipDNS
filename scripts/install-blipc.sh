@@ -4,7 +4,7 @@
 # and set up a systemd service for blipc.
 #
 # Usage:  curl -sL https://raw.githubusercontent.com/twobip/BlipDNS/master/scripts/install-blipc.sh | sudo bash
-# Optional: append --install-deps to install Git, Go, and CA certificates first.
+# Optional: append --install-deps to install Git, Go, CA certificates, curl, and jq first.
 #
 set -euo pipefail
 
@@ -25,7 +25,7 @@ Usage: install-blipc.sh [VERSION|BRANCH] [--install-deps]
 
 Installs blipc and blipctl from the BlipDNS repository.
   VERSION|BRANCH    Optional release or branch (default: master)
-  --install-deps    Install Git, Go, and CA certificates using the system package manager
+  --install-deps    Install Git, Go, CA certificates, curl, and jq using the system package manager
 EOF
 }
 
@@ -51,32 +51,41 @@ for ARG in "$@"; do
   esac
 done
 
+GO_REQUIRED_VERSION="1.25.0"
+GO_INSTALL_DIR="/usr/local/go-blipdns-${GO_REQUIRED_VERSION}"
+GO_TMPDIR=""
+
+cleanup_go_tmp() {
+  if [ -n "${GO_TMPDIR:-}" ]; then
+    rm -rf "$GO_TMPDIR"
+    GO_TMPDIR=""
+  fi
+}
+
 install_dependencies() {
-  log "installing dependencies: git, go, ca-certificates"
+  log "installing dependencies: git, go, ca-certificates, curl, jq"
   if command -v apt-get >/dev/null 2>&1; then
     apt-get update
-    DEBIAN_FRONTEND=noninteractive apt-get install -y git golang-go ca-certificates
+    DEBIAN_FRONTEND=noninteractive apt-get install -y git golang-go ca-certificates curl jq
   elif command -v dnf >/dev/null 2>&1; then
-    dnf install -y git golang ca-certificates
+    dnf install -y git golang ca-certificates curl jq
   elif command -v yum >/dev/null 2>&1; then
-    yum install -y git golang ca-certificates
+    yum install -y git golang ca-certificates curl jq
   elif command -v apk >/dev/null 2>&1; then
-    apk add --no-cache git go ca-certificates
+    apk add --no-cache git go ca-certificates curl jq
   elif command -v pacman >/dev/null 2>&1; then
-    pacman -S --noconfirm git go ca-certificates
+    pacman -S --noconfirm git go ca-certificates curl jq
   elif command -v zypper >/dev/null 2>&1; then
-    zypper --non-interactive install git go ca-certificates
+    zypper --non-interactive install git go ca-certificates curl jq
   else
     err "--install-deps was requested, but no supported package manager was found"
   fi
 }
 
-# --- sanity ------------------------------------------------------------------
-[ "$(id -u)" -eq 0 ] || err "this script must be run as root (use sudo)"
-[ "$INSTALL_DEPS" -eq 1 ] && install_dependencies
-
-# Git is needed to fetch the source when this script is run remotely.
-if ! command -v git >/dev/null 2>&1; then
+install_git() {
+  if command -v git >/dev/null 2>&1; then
+    return
+  fi
   log "git is not installed — attempting to install it"
   if command -v apt-get >/dev/null 2>&1; then
     apt-get update
@@ -94,23 +103,98 @@ if ! command -v git >/dev/null 2>&1; then
   else
     err "git is not installed and no supported package manager was found; install Git and run this script again"
   fi
-fi
-command -v git >/dev/null 2>&1 || err "Git installation failed; install Git and run this script again"
+  command -v git >/dev/null 2>&1 || err "Git installation failed; install Git and run this script again"
+}
+
+# Return success only when the installed Go version is at least 1.25.
+go_is_supported() {
+  local version major minor
+  version="$(go version 2>/dev/null)" || return 1
+  [[ "$version" =~ go([0-9]+)\.([0-9]+) ]] || return 1
+  major="${BASH_REMATCH[1]}"
+  minor="${BASH_REMATCH[2]}"
+  [ "$major" -gt 1 ] || { [ "$major" -eq 1 ] && [ "$minor" -ge 25 ]; }
+}
+
+install_go_from_archive() {
+  local arch archive archive_name metadata expected actual tmp
+  case "$(uname -m)" in
+    x86_64) arch="amd64" ;;
+    aarch64|arm64) arch="arm64" ;;
+    armv6l|armv7l) arch="armv6l" ;;
+    i386|i686) arch="386" ;;
+    ppc64le) arch="ppc64le" ;;
+    s390x) arch="s390x" ;;
+    riscv64) arch="riscv64" ;;
+    loongarch64) arch="loong64" ;;
+    *) err "cannot install Go ${GO_REQUIRED_VERSION}: unsupported Linux architecture $(uname -m)" ;;
+  esac
+  command -v curl >/dev/null 2>&1 || err "curl is required to install Go ${GO_REQUIRED_VERSION}; install curl and run this script again"
+  command -v sha256sum >/dev/null 2>&1 || err "sha256sum is required to verify Go; install coreutils and run this script again"
+
+  tmp="$(mktemp -d)"
+  GO_TMPDIR="$tmp"
+  trap cleanup_go_tmp EXIT
+  command -v jq >/dev/null 2>&1 || err "jq is required to verify Go metadata; rerun with --install-deps"
+  archive_name="go${GO_REQUIRED_VERSION}.linux-${arch}.tar.gz"
+  archive="$tmp/$archive_name"
+  metadata="$tmp/go.json"
+  log "installing Go ${GO_REQUIRED_VERSION} from the official Go archive"
+  if ! curl -fsSL "https://go.dev/dl/$archive_name" -o "$archive"; then
+    err "failed to download Go ${GO_REQUIRED_VERSION} for Linux/$arch"
+  fi
+  if ! curl -fsSL "https://go.dev/dl/?mode=json&include=all" -o "$metadata"; then
+    err "failed to download Go checksum metadata"
+  fi
+  if ! expected="$(jq -er --arg file "$archive_name" 'first(.[] | .files[]? | select(.filename == $file) | .sha256)' "$metadata")"; then
+    err "Go archive checksum metadata was not found"
+  fi
+  actual="$(sha256sum "$archive" | awk '{print $1}')"
+  if [ "$expected" != "$actual" ]; then
+    err "Go archive checksum verification failed"
+  fi
+
+  if [ -x "$GO_INSTALL_DIR/bin/go" ]; then
+    export PATH="$GO_INSTALL_DIR/bin:$PATH"
+    hash -r
+    if go_is_supported; then
+      cleanup_go_tmp
+      return
+    fi
+  fi
+  rm -rf "$GO_INSTALL_DIR"
+  mkdir -p "$GO_INSTALL_DIR"
+  if ! tar -xzf "$archive" -C "$GO_INSTALL_DIR" --strip-components=1; then
+    rm -rf "$GO_INSTALL_DIR"
+    err "failed to extract Go ${GO_REQUIRED_VERSION}"
+  fi
+  export PATH="$GO_INSTALL_DIR/bin:$PATH"
+  hash -r
+  cleanup_go_tmp
+}
 
 require_go() {
-  command -v go >/dev/null 2>&1 || err "Go is not installed. Install Go 1.25+ first: https://go.dev/dl/"
-  local version major minor
-  version="$(go version 2>/dev/null)" || err "Could not determine the Go version"
-  if [[ "$version" =~ go([0-9]+)\.([0-9]+) ]]; then
-    major="${BASH_REMATCH[1]}"
-    minor="${BASH_REMATCH[2]}"
-    if [ "$major" -lt 1 ] || { [ "$major" -eq 1 ] && [ "$minor" -lt 25 ]; }; then
-      err "Go 1.25+ is required; found $version. Install a newer Go version: https://go.dev/dl/"
+  if ! command -v go >/dev/null 2>&1; then
+    if [ "$INSTALL_DEPS" -eq 1 ]; then
+      install_go_from_archive
+    else
+      err "Go is not installed. Install Go 1.25+ first: https://go.dev/dl/ (or rerun with --install-deps)"
     fi
-  else
-    err "Could not determine the Go version from: $version"
+  elif ! go_is_supported; then
+    if [ "$INSTALL_DEPS" -eq 1 ]; then
+      install_go_from_archive
+    else
+      err "Go 1.25+ is required; found $(go version 2>/dev/null). Install a newer Go version: https://go.dev/dl/ (or rerun with --install-deps)"
+    fi
   fi
+  go_is_supported || err "Go ${GO_REQUIRED_VERSION}+ installation failed"
+  log "using $(go version)"
 }
+
+# --- sanity ------------------------------------------------------------------
+[ "$(id -u)" -eq 0 ] || err "this script must be run as root (use sudo)"
+[ "$INSTALL_DEPS" -eq 1 ] && install_dependencies
+install_git
 require_go
 
 # --- resolve install prefix --------------------------------------------------
