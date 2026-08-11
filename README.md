@@ -25,7 +25,46 @@ testdata/
 ```
 go build -o bin/blipd ./cmd/blipd
 go build -o bin/blipctl ./cmd/blipctl
+go build -o bin/blipc ./cmd/blipc
 ```
+
+## Install (one-liner, requires Go 1.25+)
+
+### Resolver daemon (blipd)
+
+```bash
+curl -sL https://raw.githubusercontent.com/twobip/BlipDNS/master/scripts/install-blipd.sh | sudo bash
+# or: sudo bash -s stable   # pin to the latest tagged release
+```
+
+Installs:
+- `blipd` binary → `/usr/local/bin/blipd`
+- Default config → `/etc/blipd/blipd.yaml` (chmod 600, **edit `admin_token`!**)
+- systemd unit → `/etc/systemd/system/blipd.service`
+
+Then:
+```bash
+sudo systemctl enable --now blipd
+```
+
+### Controller (blipc + blipctl)
+
+```bash
+curl -sL https://raw.githubusercontent.com/twobip/BlipDNS/master/scripts/install-blipc.sh | sudo bash
+# or: sudo bash -s stable
+```
+
+Installs:
+- `blipc` (web dashboard) and `blipctl` (CLI) → `/usr/local/bin/`
+- Default config → `/etc/blipc/blipc.yaml` (chmod 600, add username/password_hash and instances)
+- systemd unit → `/etc/systemd/system/blipc.service`
+
+Then:
+```bash
+sudo systemctl enable --now blipc
+```
+
+Both scripts accept an optional argument: `master` (default), `stable`, or a version tag (e.g. `v1.2.3`). They clone the repo, build from source, and install under `/usr/local/bin` with secure config directories.
 
 ## Run blipd
 
