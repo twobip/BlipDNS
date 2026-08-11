@@ -331,7 +331,14 @@ EOF
   chmod 644 "$SYSTEMD_DIR/$SERVICE_NAME.service"
   log "reloading systemd daemon"
   systemctl daemon-reload || true
-  log "to start:  sudo systemctl enable --now $SERVICE_NAME"
+  if systemctl is-active --quiet "$SERVICE_NAME"; then
+    log "restarting active $SERVICE_NAME service to use the newly installed binary"
+    systemctl restart "$SERVICE_NAME" || err "failed to restart $SERVICE_NAME; run: sudo systemctl restart $SERVICE_NAME"
+  else
+    log "to start:  sudo systemctl enable --now $SERVICE_NAME"
+  fi
+  log "if the service does not start: sudo systemctl status $SERVICE_NAME --no-pager"
+  log "                         sudo journalctl -u $SERVICE_NAME -n 100 --no-pager"
 else
   log "systemd not found — skipping service installation (run 'blipc -config $CONFIG_DIR/blipc.yaml' manually)"
 fi
