@@ -425,7 +425,10 @@ function renderInstances() {
         <div class="cell-main"><span class="dot ${i.online ? "on" : "off"}"></span>${esc(i.label || i.id)}</div>
         <div class="cell-sub mono">${esc(i.id)}</div>
       </td>
-      <td><span class="status-pill ${i.online ? "on" : "off"}">${i.online ? "online" : "offline"}</span></td>
+      <td>
+        <span class="status-pill ${i.online ? "on" : "off"}">${i.online ? "online" : "offline"}</span>
+        ${i.update_available ? '<span class="badge warn" title="A newer build is available on the configured release channel">update available</span>' : (i.online && i.health ? '<span class="badge on" title="Running the current release-channel build">up to date</span>' : '')}
+      </td>
       <td class="num">${fmt(s.queries_total ?? 0)}</td>
       <td class="num"><span style="color:${s.blocked_total ? "var(--red)" : "inherit"}">${fmt(s.blocked_total ?? 0)}</span></td>
       <td class="num">${fmt(s.cached ?? 0)}</td>
@@ -1634,23 +1637,42 @@ window.addEventListener("popstate", () => {
 /* add instance */
 $("add-instance-btn").onclick = openInstanceModal;
 $("update-instances-btn").onclick = () => {
-  confirmDialog("Update all instances?", "Every adopted instance will clone the latest master branch, rebuild blipd, replace its binary, and restart.", async () => {
+  confirmDialog("Update all instances?", "Instances will update one at a time. Each node must return online before the next node is touched; the job stops on failure.", async () => {
     const b = $("update-instances-btn");
     b.disabled = true;
     b.textContent = "Updating…";
     try {
       const r = await API("/api/instances/update", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ channel: savedReleaseChannel }) });
       const d = await r.json();
-      const results = d.results || {};
-      const ids = Object.keys(results);
-      const started = ids.filter((id) => results[id] === "started").length;
-      const failed = ids.filter((id) => results[id] !== "started");
-      toast(`update started on ${started}/${ids.length} instance${ids.length === 1 ? "" : "s"}` + (failed.length ? ` · ${failed.map((id) => id + ": " + results[id]).join(", ")}` : ""), failed.length ? "err" : "ok");
-      refresh();
+      toast(`serialized update started (${d.channel || savedReleaseChannel})`, "ok");
+      pollUpdateJob();
     } catch (e) { toast("update failed: " + e.message, "err"); }
     finally { b.disabled = false; b.textContent = "Update all"; }
   });
 };
+
+let updatePollTimer = null;
+async function pollUpdateJob() {
+  if (updatePollTimer) clearTimeout(updatePollTimer);
+  try {
+    const r = await API("/api/instances/update");
+    const d = await r.json();
+    const b = $("update-instances-btn");
+    if (d.running) {
+      b.disabled = true;
+      b.textContent = d.current ? `Updating ${d.current}…` : "Updating…";
+      updatePollTimer = setTimeout(pollUpdateJob, 3000);
+      return;
+    }
+    if (d.error) toast("serialized update stopped: " + d.error, "err");
+    else if (d.finished_at) toast(`serialized update complete (${d.completed}/${d.total})`, "ok");
+    b.disabled = false;
+    b.textContent = "Update all";
+    refresh();
+  } catch (e) {
+    updatePollTimer = setTimeout(pollUpdateJob, 5000);
+  }
+}
 $("i-save").onclick = saveInstance;
 $("inst-filter").addEventListener("input", renderInstances);
 

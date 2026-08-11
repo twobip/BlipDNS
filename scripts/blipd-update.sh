@@ -20,7 +20,7 @@ trap 'rm -rf "$tmp"' EXIT
 
 git clone --depth 1 --branch "$BRANCH" "$REPO" "$tmp/src"
 cd "$tmp/src"
-go build -trimpath -o "$tmp/blipd.new" ./cmd/blipd
+go build -trimpath -ldflags "-X main.buildSHA=$(git rev-parse HEAD)" -o "$tmp/blipd.new" ./cmd/blipd
 install -o root -g root -m 0755 "$tmp/blipd.new" "$tmp/blipd.installed"
 
 if [[ -x "$BIN" ]]; then

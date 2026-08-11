@@ -136,6 +136,9 @@ type Fleet struct {
 	records          []control.RecordEntry        // fleet-wide local DNS records
 	haCluster        control.HACluster            // LAN two-node VRRP desired state
 	releaseChannel   string                       // stable or dev
+	updateMu         sync.Mutex
+	updateJob        UpdateJobStatus
+	release          *releaseCheck
 }
 
 func (f *Fleet) ReleaseChannel() string {
@@ -155,6 +158,31 @@ func (f *Fleet) SetReleaseChannelDefault(channel string) error {
 	f.releaseChannel = channel
 	f.mu.Unlock()
 	return nil
+}
+
+// StartReleaseCheck begins background polling of the channel's branch head.
+func (f *Fleet) StartReleaseCheck() { f.startReleaseCheck() }
+
+// startReleaseCheck begins background polling of the channel's branch head.
+func (f *Fleet) startReleaseCheck() {
+	f.mu.RLock()
+	r, channel := f.release, f.releaseChannel
+	f.mu.RUnlock()
+	if r != nil {
+		r.start(channel)
+	}
+}
+
+// UpdateAvailable reports whether the instance's running build is behind the
+// current branch head of the configured release channel.
+func (f *Fleet) UpdateAvailable(version string) bool {
+	f.mu.RLock()
+	r, channel := f.release, f.releaseChannel
+	f.mu.RUnlock()
+	if r == nil {
+		return false
+	}
+	return r.available(channel, version)
 }
 
 func (f *Fleet) SetReleaseChannel(channel string) error {
@@ -409,6 +437,7 @@ func NewFleet(configPath string) *Fleet {
 		overrides:     make(map[string]*InstanceOverride),
 		manualDomains: make(map[string]struct{}),
 		manualAllowed: make(map[string]struct{}),
+		release:       newReleaseCheck(),
 	}
 }
 
@@ -473,34 +502,6 @@ func (f *Fleet) List() []*InstanceStatus {
 		out = append(out, inst.status())
 	}
 	return out
-}
-
-// StartUpdates starts an asynchronous update on every adopted instance.
-// Results are per-instance so one unavailable node does not hide the others.
-func (f *Fleet) StartUpdates(ctx context.Context) map[string]string {
-	channel := f.ReleaseChannel()
-	f.mu.RLock()
-	insts := make([]*Instance, 0, len(f.instances))
-	for _, inst := range f.instances {
-		insts = append(insts, inst)
-	}
-	f.mu.RUnlock()
-
-	results := make(map[string]string, len(insts))
-	for _, inst := range insts {
-		id := inst.Config.ID
-		if !inst.hasToken() {
-			results[id] = "not adopted"
-			continue
-		}
-		if err := inst.ctl().StartUpdate(ctx, channel); err != nil {
-			results[id] = err.Error()
-			continue
-		}
-		results[id] = "started"
-		f.bus.Publish(Event{InstanceID: id, Instance: inst.Config.Label, Type: "status", At: f.now(), Msg: "remote update started on " + channel})
-	}
-	return results
 }
 
 // DefaultPolicy returns the fleet-wide default policy (may be nil).

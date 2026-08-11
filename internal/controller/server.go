@@ -268,11 +268,23 @@ func writeJSON(w http.ResponseWriter, v interface{}) {
 }
 
 func (s *Server) handleInstanceUpdate(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, s.fleet.UpdateJob())
+	case http.MethodPost:
+		channel := s.fleet.ReleaseChannel()
+		if requested := r.URL.Query().Get("channel"); requested != "" {
+			channel = requested
+		}
+		job, err := s.fleet.StartUpdates(r.Context(), channel)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
+		writeJSON(w, job)
+	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
 	}
-	writeJSON(w, map[string]interface{}{"ok": true, "results": s.fleet.StartUpdates(r.Context())})
 }
 
 func (s *Server) handleInstances(w http.ResponseWriter, r *http.Request) {

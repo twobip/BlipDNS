@@ -93,6 +93,8 @@ func main() {
 		if err := fleet.SetReleaseChannelDefault(cfg.ReleaseChannel); err != nil {
 			log.Printf("blipc: release channel: %v", err)
 		}
+	} else {
+		fleet.StartReleaseCheck()
 	}
 	if len(cfg.UpstreamServers) > 0 || len(cfg.UpstreamRoutes) > 0 {
 		fleet.SetUpstreamDefault(cfg.UpstreamServers, cfg.UpstreamRoutes)

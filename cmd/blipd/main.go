@@ -24,6 +24,19 @@ import (
 
 const version = "blipd/0.1.0"
 
+// buildSHA is stamped at build time with the source commit so the controller
+// can badge this instance as up-to-date or behind the release channel. Use
+// -ldflags "-X main.buildSHA=$(git rev-parse HEAD)".
+var buildSHA string
+
+// reportedVersion exposes the build identity to the management API.
+func reportedVersion() string {
+	if buildSHA != "" {
+		return version + "+" + buildSHA
+	}
+	return version
+}
+
 // blocklistSources merges the legacy single URL with the new plural list.
 func blocklistSources(cfg *config.Config) []string {
 	if len(cfg.BlocklistURLs) > 0 {
@@ -149,7 +162,7 @@ func main() {
 		CacheWarmInterval: cfg.CacheWarmInterval,
 		CacheRegular:      cfg.CacheRegular,
 		Store:             store,
-		Version:           version,
+		Version:           reportedVersion(),
 		Blocklist:         bl,
 		BlockAction:       blockAction,
 		TrustedProxies:    cfg.TrustedProxies,
