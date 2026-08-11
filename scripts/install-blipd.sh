@@ -112,6 +112,14 @@ install_dependencies() {
   fi
 }
 
+generate_admin_token() {
+  local token
+  command -v od >/dev/null 2>&1 || err "od is required to generate a secure admin token"
+  token="$(od -An -N32 -tx1 /dev/urandom | tr -d '[:space:]')"
+  [ "${#token}" -eq 64 ] || err "failed to generate a secure admin token"
+  printf '%s' "$token"
+}
+
 install_git() {
   if command -v git >/dev/null 2>&1; then
     return
@@ -281,7 +289,8 @@ chmod 700 "$CONFIG_DIR" "$STATE_DIR"
 
 # Create a default config if none exists.
 if [ ! -f "$CONFIG_DIR/blipd.yaml" ]; then
-  log "writing default config to $CONFIG_DIR/blipd.yaml"
+  ADMIN_TOKEN="$(generate_admin_token)"
+  log "writing default config to $CONFIG_DIR/blipd.yaml with a generated admin token"
   cat > "$CONFIG_DIR/blipd.yaml" <<'EOF'
 # BlipDNS resolver configuration
 # See: https://github.com/twobip/BlipDNS
@@ -293,7 +302,7 @@ dns_addr: "0.0.0.0:53"
 doh_addr: "0.0.0.0:443"
 doh_tls: true
 admin_addr: "0.0.0.0:8443"
-admin_token: "replace-me-with-a-secret-token"
+admin_token: "__BLIP_ADMIN_TOKEN__"
 upstream: "udp://1.1.1.1:53 https://1.1.1.1/dns-query"
 cache_size: 10000
 # Per-server upstream timeout (seconds before failing over to next priority server):
@@ -307,9 +316,16 @@ cache_size: 10000
 #     priority: 2
 #     timeout_sec: 5
 EOF
+  sed -i "s/__BLIP_ADMIN_TOKEN__/$ADMIN_TOKEN/" "$CONFIG_DIR/blipd.yaml"
   chmod 600 "$CONFIG_DIR/blipd.yaml"
-  log "IMPORTANT: edit $CONFIG_DIR/blipd.yaml to set a strong admin_token"
+  log "admin token saved in $CONFIG_DIR/blipd.yaml (do not share it)"
+elif grep -Eq '^[[:space:]]*admin_token:[[:space:]]*("replace-me-with-a-secret-token"|replace-me-with-a-secret-token|"__BLIP_ADMIN_TOKEN__"|__BLIP_ADMIN_TOKEN__|""|null|)[[:space:]]*$' "$CONFIG_DIR/blipd.yaml"; then
+  ADMIN_TOKEN="$(generate_admin_token)"
+  sed -i -E "s|^([[:space:]]*admin_token:)[[:space:]].*$|\\1 \\\"$ADMIN_TOKEN\\\"|" "$CONFIG_DIR/blipd.yaml"
+  chmod 600 "$CONFIG_DIR/blipd.yaml"
+  log "replaced the placeholder admin token in $CONFIG_DIR/blipd.yaml (do not share it)"
 fi
+chmod 600 "$CONFIG_DIR/blipd.yaml"
 
 # --- systemd service (if systemd is available) --------------------------------
 if [ -d "$SYSTEMD_DIR" ] && command -v systemctl >/dev/null 2>&1; then
@@ -355,6 +371,8 @@ log "config:    $CONFIG_DIR/blipd.yaml"
 log "state:     $STATE_DIR"
 log ""
 log "Next steps:"
-log "  1. Edit $CONFIG_DIR/blipd.yaml — set a strong admin_token and your upstream servers."
-log "  2. sudo systemctl enable --now blipd"
-log "  3. Point your controller at the blipd admin_addr and token."
+log "  1. Edit $CONFIG_DIR/blipd.yaml to set your upstream servers if needed."
+log "  2. Start blipd: sudo systemctl enable --now blipd"
+log "  3. Copy the admin token from $CONFIG_DIR/blipd.yaml into your controller's instance settings."
+log "     To view it: sudo grep '^admin_token:' $CONFIG_DIR/blipd.yaml"
+log "  4. Keep the admin token private; it controls this blipd management API."

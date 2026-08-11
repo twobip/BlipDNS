@@ -46,12 +46,15 @@ curl -sL https://raw.githubusercontent.com/twobip/BlipDNS/master/scripts/install
 
 Installs:
 - `blipd` binary → `/usr/local/bin/blipd`
-- Default config → `/etc/blipd/blipd.yaml` (chmod 600, **edit `admin_token`!**)
+- Default config → `/etc/blipd/blipd.yaml` (chmod 600, secure `admin_token` generated automatically)
 - systemd unit → `/etc/systemd/system/blipd.service`
+
+The installer generates a secure random `admin_token` in the config automatically. It preserves that token on later installer runs. Keep the token private; it authenticates the blipd management API and is needed when adding the instance to blipc.
 
 Then:
 ```bash
 sudo systemctl enable --now blipd
+sudo grep '^admin_token:' /etc/blipd/blipd.yaml
 ```
 
 ### Controller (blipc + blipctl)
