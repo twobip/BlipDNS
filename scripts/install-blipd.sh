@@ -55,20 +55,50 @@ GO_REQUIRED_VERSION="1.25.0"
 GO_INSTALL_DIR="/usr/local/go-blipdns-${GO_REQUIRED_VERSION}"
 
 install_dependencies() {
-  log "installing dependencies: git, go, ca-certificates, curl, jq"
+  local packages="git ca-certificates curl jq"
+  local go_needed=1
+  if dedicated_go_is_supported || { command -v go >/dev/null 2>&1 && go_is_supported; }; then
+    go_needed=0
+    log "reusing an existing supported Go installation"
+  fi
+  log "installing dependencies: $packages$( [ "$go_needed" -eq 1 ] && echo ' and Go' )"
   if command -v apt-get >/dev/null 2>&1; then
     apt-get update
-    DEBIAN_FRONTEND=noninteractive apt-get install -y git golang-go ca-certificates curl jq
+    if [ "$go_needed" -eq 1 ]; then
+      DEBIAN_FRONTEND=noninteractive apt-get install -y $packages golang-go
+    else
+      DEBIAN_FRONTEND=noninteractive apt-get install -y $packages
+    fi
   elif command -v dnf >/dev/null 2>&1; then
-    dnf install -y git golang ca-certificates curl jq
+    if [ "$go_needed" -eq 1 ]; then
+      dnf install -y $packages golang
+    else
+      dnf install -y $packages
+    fi
   elif command -v yum >/dev/null 2>&1; then
-    yum install -y git golang ca-certificates curl jq
+    if [ "$go_needed" -eq 1 ]; then
+      yum install -y $packages golang
+    else
+      yum install -y $packages
+    fi
   elif command -v apk >/dev/null 2>&1; then
-    apk add --no-cache git go ca-certificates curl jq
+    if [ "$go_needed" -eq 1 ]; then
+      apk add --no-cache $packages go
+    else
+      apk add --no-cache $packages
+    fi
   elif command -v pacman >/dev/null 2>&1; then
-    pacman -S --noconfirm git go ca-certificates curl jq
+    if [ "$go_needed" -eq 1 ]; then
+      pacman -S --noconfirm $packages go
+    else
+      pacman -S --noconfirm $packages
+    fi
   elif command -v zypper >/dev/null 2>&1; then
-    zypper --non-interactive install git go ca-certificates curl jq
+    if [ "$go_needed" -eq 1 ]; then
+      zypper --non-interactive install $packages go
+    else
+      zypper --non-interactive install $packages
+    fi
   else
     err "--install-deps was requested, but no supported package manager was found"
   fi
@@ -99,17 +129,42 @@ install_git() {
 }
 
 # Return success only when the installed Go version is at least 1.25.
-go_is_supported() {
+go_version_is_supported() {
   local version major minor
-  version="$(go version 2>/dev/null)" || return 1
+  version="$1"
   [[ "$version" =~ go([0-9]+)\.([0-9]+) ]] || return 1
   major="${BASH_REMATCH[1]}"
   minor="${BASH_REMATCH[2]}"
   [ "$major" -gt 1 ] || { [ "$major" -eq 1 ] && [ "$minor" -ge 25 ]; }
 }
 
+go_is_supported() {
+  go_version_is_supported "$(go version 2>/dev/null)"
+}
+
+dedicated_go_is_supported() {
+  [ -x "$GO_INSTALL_DIR/bin/go" ] || return 1
+  go_version_is_supported "$($GO_INSTALL_DIR/bin/go version 2>/dev/null)"
+}
+
+use_dedicated_go() {
+  export PATH="$GO_INSTALL_DIR/bin:$PATH"
+  hash -r
+}
+
 install_go_from_archive() {
   local arch archive archive_name metadata expected actual tmp
+
+  # Reuse the dedicated Go installation from a previous run before doing any
+  # network work. This is especially important when the distro Go is too old.
+  if dedicated_go_is_supported; then
+    use_dedicated_go
+    if go_is_supported; then
+      log "reusing Go installation at $GO_INSTALL_DIR"
+      return
+    fi
+  fi
+
   case "$(uname -m)" in
     x86_64) arch="amd64" ;;
     aarch64|arm64) arch="arm64" ;;
@@ -145,13 +200,6 @@ install_go_from_archive() {
     err "Go archive checksum verification failed"
   fi
 
-  if [ -x "$GO_INSTALL_DIR/bin/go" ]; then
-    export PATH="$GO_INSTALL_DIR/bin:$PATH"
-    hash -r
-    if go_is_supported; then
-      return
-    fi
-  fi
   rm -rf "$GO_INSTALL_DIR"
   mkdir -p "$GO_INSTALL_DIR"
   if ! tar -xzf "$archive" -C "$GO_INSTALL_DIR" --strip-components=1; then
@@ -163,7 +211,9 @@ install_go_from_archive() {
 }
 
 require_go() {
-  if ! command -v go >/dev/null 2>&1; then
+  if dedicated_go_is_supported; then
+    use_dedicated_go
+  elif ! command -v go >/dev/null 2>&1; then
     if [ "$INSTALL_DEPS" -eq 1 ]; then
       install_go_from_archive
     else
