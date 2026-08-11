@@ -14,6 +14,7 @@ CONFIG_DIR="${CONFIG_DIR:-/etc/blipc}"
 STATE_DIR="${STATE_DIR:-/var/lib/blipc}"
 SYSTEMD_DIR="${SYSTEMD_DIR:-/etc/systemd/system}"
 SERVICE_NAME="blipc"
+SYSTEMD_AVAILABLE=0
 
 # --- helpers -----------------------------------------------------------------
 log()  { echo "[install-blipc] $*"; }
@@ -302,6 +303,7 @@ fi
 
 # --- systemd service (if systemd is available) --------------------------------
 if [ -d "$SYSTEMD_DIR" ] && command -v systemctl >/dev/null 2>&1; then
+  SYSTEMD_AVAILABLE=1
   log "installing systemd unit: $SYSTEMD_DIR/$SERVICE_NAME.service"
   cat > "$SYSTEMD_DIR/$SERVICE_NAME.service" <<EOF
 [Unit]
@@ -343,5 +345,17 @@ log "config:    $CONFIG_DIR/blipc.yaml"
 log "state:     $STATE_DIR"
 log ""
 log "Next steps:"
-log "  1. Edit $CONFIG_DIR/blipc.yaml to set username/password_hash and add instances."
-log "  2. sudo systemctl enable --now blipc"
+if [ "$SYSTEMD_AVAILABLE" -eq 1 ]; then
+  log "  1. Start blipc: sudo systemctl enable --now blipc"
+  log "  2. Get the one-time setup URL from the service log:"
+  log "     sudo journalctl -u blipc -n 50 --no-pager | grep 'setup'"
+else
+  log "  1. Start blipc manually: $BIN_DIR/blipc -config $CONFIG_DIR/blipc.yaml"
+  log "  2. Copy the one-time setup URL printed by blipc."
+fi
+log "  3. Open the setup URL in a browser, replacing 0.0.0.0 with this server's IP or hostname if needed."
+log "  4. On the setup page, enter a username, an 8–72 character password, and confirm the password."
+log "     Click 'Create account'; you will be signed in automatically."
+log "  5. Setup is disabled after the account is created; add blipd instances from the web dashboard."
+log ""
+log "The setup URL contains a one-time token. Keep it private and use the page on a trusted network or over HTTPS."
