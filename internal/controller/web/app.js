@@ -99,6 +99,7 @@ const NAV = [
   { id: "upstream", label: "Upstream", icon: IC.globe, group: "DNS" },
   { id: "records", label: "Local Records", icon: IC.set, group: "DNS" },
   { id: "settings", label: "Settings", icon: IC.set, group: "System" },
+  { id: "ha", label: "High Availability", icon: IC.shield, group: "System" },
 ];
 const TITLES = {
   dashboard: ["Dashboard", "Fleet throughput &amp; health"],
@@ -112,6 +113,7 @@ const TITLES = {
   upstream: ["Upstream &amp; Conditional Forwarding", "Named resolvers and per-suffix forwarding routes"],
   records: ["Local Records", "Static DNS records answered locally before forwarding"],
   settings: ["Settings", "Controller configuration"],
+  ha: ["High Availability", "LAN keepalived / VRRP failover"],
 };
 let current = "dashboard";
 
@@ -147,6 +149,7 @@ function go(page, push = true) {
   refresh();
   if (page === "instances") renderEvents();
   if (page === "settings" || page === "upstream") refreshSettings();
+  if (page === "ha") loadHighAvailability();
   if (page === "blocklist" || page === "filters") loadBlocklist();
   if (page === "records") loadRecords();
   if (page === "filters") renderPolicies();
@@ -180,9 +183,9 @@ async function refresh() {
   try {
     const res = await API("/api/instances");
     instances = await res.json();
-    updateConn();
-    	if (current === "dashboard") renderDashboard();
+    updateConn();  if (current === "dashboard") renderDashboard();
     	else if (current === "instances") renderInstances();
+
      	else if (current === "queries") refreshQueryTop();
      	else if (current === "records") renderRecords();
      	else if (current === "cache-stats") renderCacheStats();
@@ -2056,6 +2059,7 @@ document.querySelectorAll("[data-goto]").forEach((a) => a.addEventListener("clic
 }));
 
 /* ---------- live polling ---------- */
+initHA();
 loadBlocklist();
 connectSSE();
 refresh();

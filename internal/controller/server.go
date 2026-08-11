@@ -83,6 +83,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/health", api(s.handleHealth))
 	mux.HandleFunc("/api/records", api(s.handleRecords))
 	mux.HandleFunc("/api/settings", api(s.handleSettings)) // fleet-wide default config
+	mux.HandleFunc("/api/high-availability", api(s.handleHighAvailability))
 	mux.HandleFunc("/api/cache/purge", api(s.handleCachePurge))
 
 	// Blocklist (session-gated)
@@ -658,6 +659,63 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		applied := s.fleet.SetDefaultPolicy(r.Context(), req.Policy)
 		writeJSON(w, map[string]interface{}{"ok": true, "applied": applied})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) handleHighAvailability(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		cluster := s.fleet.HACluster()
+		// VRRP passwords are write-only: the UI keeps any value already typed
+		// locally, while API reads never disclose credentials.
+		cluster.Primary.AuthPass = ""
+		cluster.Secondary.AuthPass = ""
+		writeJSON(w, map[string]interface{}{"cluster": cluster, "statuses": s.fleet.HAStatuses(r.Context())})
+	case http.MethodPut:
+		var req struct {
+			Cluster control.HACluster `json:"cluster"`
+		}
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 128<<10)).Decode(&req); err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		// VRRP authentication is write-only. An empty password on an update
+		// means "keep the existing password"; clearing it is intentionally not
+		// exposed through the general save path.
+		current := s.fleet.HACluster()
+		if req.Cluster.Primary.AuthPass == "" && req.Cluster.Secondary.AuthPass == "" {
+			req.Cluster.Primary.AuthPass = current.Primary.AuthPass
+			req.Cluster.Secondary.AuthPass = current.Secondary.AuthPass
+		}
+		if err := s.fleet.SetHACluster(r.Context(), req.Cluster); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, map[string]bool{"ok": true})
+	case http.MethodPost:
+		action := r.URL.Query().Get("action")
+		cluster := s.fleet.HACluster()
+		var err error
+		switch action {
+		case "install":
+			err = s.fleet.InstallHA(r.Context(), cluster)
+		case "validate":
+			err = s.fleet.ValidateHA(r.Context(), cluster)
+		case "apply":
+			err = s.fleet.ApplyHA(r.Context(), cluster)
+		case "disable":
+			err = s.fleet.DisableHA(r.Context(), cluster)
+		default:
+			http.Error(w, "unknown high availability action", http.StatusBadRequest)
+			return
+		}
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, map[string]bool{"ok": true})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}

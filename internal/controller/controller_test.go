@@ -185,7 +185,7 @@ func fakeBlipdWithRec(t *testing.T, token, claimCode string, health *control.Hea
 	t.Helper()
 	var (
 		mu        sync.Mutex
-		adopted   bool
+		adopted   = token != "" && claimCode == ""
 		curCode   = claimCode
 		appliedRL []int
 	)
@@ -747,6 +747,73 @@ func TestFleetInstanceOverride(t *testing.T) {
 
 // TestFleetConfigSynced verifies the ConfigSynced status flag: false until the
 // first poll pushes the effective config, then true and stable.
+func TestFleetTwoStaticInstancesReportAdoptedAndSynced(t *testing.T) {
+	pollInterval = 100 * time.Millisecond
+	defer func() { pollInterval = 5 * time.Second }()
+
+	srvA := fakeBlipd(t, "token-a", "", &control.HealthResponse{OK: true}, &control.StatsResponse{}, &control.ListResponse{})
+	defer srvA.Close()
+	srvB := fakeBlipd(t, "token-b", "", &control.HealthResponse{OK: true}, &control.StatsResponse{}, &control.ListResponse{})
+	defer srvB.Close()
+
+	fleet := NewFleet("/tmp/blip-test-config.yaml")
+	fleet.SetDefault(&control.Policy{Upstream: "udp://1.1.1.1:53", BlockAction: "nxdomain"})
+	if err := fleet.Add(context.Background(), InstanceConfig{ID: "a", URL: srvA.URL, Token: "token-a"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := fleet.Add(context.Background(), InstanceConfig{ID: "b", URL: srvB.URL, Token: "token-b"}); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.After(3 * time.Second)
+	for {
+		statuses := fleet.List()
+		if len(statuses) == 2 {
+			allReady := true
+			for _, st := range statuses {
+				if !st.Online || !st.Adopted || !st.ConfigSynced {
+					allReady = false
+					break
+				}
+			}
+			if allReady {
+				return
+			}
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("two-instance status never converged: %+v", statuses)
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+}
+
+func TestFleetConfigSyncedWithoutFleetPolicy(t *testing.T) {
+	pollInterval = 100 * time.Millisecond
+	defer func() { pollInterval = 5 * time.Second }()
+	srv := fakeBlipd(t, "t", "", &control.HealthResponse{OK: true}, &control.StatsResponse{}, &control.ListResponse{})
+	defer srv.Close()
+
+	fleet := NewFleet("/tmp/blip-test-config.yaml")
+	if err := fleet.Add(context.Background(), InstanceConfig{ID: "a", URL: srv.URL, Token: "t"}); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.After(3 * time.Second)
+	for {
+		if st := fleet.List()[0]; st.Online {
+			if !st.ConfigSynced {
+				t.Error("instance without a fleet policy should not show pending sync")
+			}
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatal("instance never came online")
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+}
+
 func TestFleetConfigSynced(t *testing.T) {
 	pollInterval = 100 * time.Millisecond
 	defer func() { pollInterval = 5 * time.Second }()

@@ -197,6 +197,37 @@ func (c *Client) ClearRecords(ctx context.Context) error {
 	return c.do(ctx, http.MethodDelete, "/api/v1/records", nil, nil)
 }
 
+// HAStatus returns the local keepalived/VRRP status.
+func (c *Client) HAStatus(ctx context.Context) (*HAStatus, error) {
+	var out HAStatus
+	if err := c.do(ctx, http.MethodGet, "/api/v1/ha/status", nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// SetHAConfig writes the structured keepalived configuration without enabling
+// the service.
+func (c *Client) SetHAConfig(ctx context.Context, cfg HAConfig) error {
+	return c.do(ctx, http.MethodPut, "/api/v1/ha", &cfg, nil)
+}
+
+func (c *Client) InstallHA(ctx context.Context) error {
+	return c.do(ctx, http.MethodPost, "/api/v1/ha/install", nil, nil)
+}
+
+func (c *Client) ValidateHA(ctx context.Context) error {
+	return c.do(ctx, http.MethodPost, "/api/v1/ha/validate", nil, nil)
+}
+
+func (c *Client) ApplyHA(ctx context.Context) error {
+	return c.do(ctx, http.MethodPost, "/api/v1/ha/apply", nil, nil)
+}
+
+func (c *Client) DisableHA(ctx context.Context) error {
+	return c.do(ctx, http.MethodPost, "/api/v1/ha/disable", nil, nil)
+}
+
 // Watch opens the SSE stream and invokes fn for each event until ctx is
 // cancelled. It deliberately uses a client without an overall timeout: the
 // stream is long-lived and an absolute deadline would kill it (and silently

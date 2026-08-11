@@ -66,6 +66,7 @@ type Server struct {
 	// recCtrl drives the local DNS records at runtime.
 	recCtrl RecordController
 	upCtrl  LocalResolverController
+	haCtrl  HAController
 }
 
 // DoHController is the piece of the DNS server the management API can reconfigure
@@ -175,6 +176,20 @@ func (s *Server) localResolverController() LocalResolverController {
 	return c
 }
 
+// SetHAController wires the local keepalived/VRRP manager into the API.
+func (s *Server) SetHAController(c HAController) {
+	s.mu.Lock()
+	s.haCtrl = c
+	s.mu.Unlock()
+}
+
+func (s *Server) haController() HAController {
+	s.mu.RLock()
+	c := s.haCtrl
+	s.mu.RUnlock()
+	return c
+}
+
 // NewServer builds a management API server guarded by token.
 func NewServer(token string, store *filter.Store, c *cache.Cache, stats StatsCollector, version string) *Server {
 	return NewServerWithBlocklist(token, store, c, stats, version, nil)
@@ -229,10 +244,20 @@ func (s *Server) ConfigureAdoption(stateFile, instanceID string) {
 		}
 	}
 
-	if s.token == "" {
-		s.token = genToken()
-		log.Printf("blipd: WARNING no admin_token configured; generated ephemeral token (set admin_token in config to persist)")
+	// A token explicitly configured by the operator is already an established
+	// trust relationship. Do not require the claim-code bootstrap in that case;
+	// otherwise instances added with their admin_token remain misleadingly
+	// "pending" forever in the controller.
+	if s.token != "" {
+		s.adopted = true
+		s.claimCode = ""
+		s.persistAdopted(true)
+		log.Printf("blipd: management token configured statically; claim-code adoption not required")
+		return
 	}
+
+	s.token = genToken()
+	log.Printf("blipd: WARNING no admin_token configured; generated ephemeral token (set admin_token in config to persist)")
 	s.genClaim()
 }
 
@@ -294,6 +319,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/cache", s.auth(s.handleCache))         // cache size + auto-refresh
 	mux.HandleFunc("/api/v1/cache/purge", s.auth(s.handleCachePurge))
 	mux.HandleFunc("/api/v1/records", s.auth(s.handleRecords)) // local DNS records
+	mux.HandleFunc("/api/v1/ha/status", s.auth(s.handleHAStatus))
+	mux.HandleFunc("/api/v1/ha", s.auth(s.handleHAConfig))
+	mux.HandleFunc("/api/v1/ha/install", s.auth(s.handleHAInstall))
+	mux.HandleFunc("/api/v1/ha/validate", s.auth(s.handleHAValidate))
+	mux.HandleFunc("/api/v1/ha/apply", s.auth(s.handleHAApply))
+	mux.HandleFunc("/api/v1/ha/disable", s.auth(s.handleHADisable))
 	mux.HandleFunc("/api/v1/watch", s.auth(s.handleWatch))
 	// unauthenticated adoption handshake
 	mux.HandleFunc("/api/v1/adopt/status", s.handleAdoptStatus)
@@ -624,6 +655,109 @@ func (s *Server) handleRecords(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+func (s *Server) handleHAStatus(w http.ResponseWriter, r *http.Request) {
+	ctrl := s.haController()
+	if ctrl == nil {
+		http.Error(w, "high availability is not available", http.StatusServiceUnavailable)
+		return
+	}
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	writeJSON(w, ctrl.HAStatus())
+}
+
+func (s *Server) handleHAConfig(w http.ResponseWriter, r *http.Request) {
+	ctrl := s.haController()
+	if ctrl == nil {
+		http.Error(w, "high availability is not available", http.StatusServiceUnavailable)
+		return
+	}
+	if r.Method != http.MethodPut {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var cfg HAConfig
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&cfg); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if err := ctrl.SetHAConfig(cfg); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, AckResponse{OK: true, Msg: "high availability configuration saved"})
+}
+
+func (s *Server) handleHAInstall(w http.ResponseWriter, r *http.Request) {
+	ctrl := s.haController()
+	if ctrl == nil {
+		http.Error(w, "high availability is not available", http.StatusServiceUnavailable)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := ctrl.InstallHA(); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, AckResponse{OK: true, Msg: "keepalived installed"})
+}
+
+func (s *Server) handleHAValidate(w http.ResponseWriter, r *http.Request) {
+	ctrl := s.haController()
+	if ctrl == nil {
+		http.Error(w, "high availability is not available", http.StatusServiceUnavailable)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := ctrl.ValidateHA(); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, AckResponse{OK: true, Msg: "high availability configuration is valid"})
+}
+
+func (s *Server) handleHAApply(w http.ResponseWriter, r *http.Request) {
+	ctrl := s.haController()
+	if ctrl == nil {
+		http.Error(w, "high availability is not available", http.StatusServiceUnavailable)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := ctrl.ApplyHA(); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, AckResponse{OK: true, Msg: "high availability applied"})
+}
+
+func (s *Server) handleHADisable(w http.ResponseWriter, r *http.Request) {
+	ctrl := s.haController()
+	if ctrl == nil {
+		http.Error(w, "high availability is not available", http.StatusServiceUnavailable)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := ctrl.DisableHA(); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, AckResponse{OK: true, Msg: "high availability disabled"})
 }
 
 func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request) {

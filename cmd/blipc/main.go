@@ -40,6 +40,7 @@ type config struct {
 	BlocklistUpdateHours   int                                     `yaml:"blocklist_update_hours"`
 	Instances              []controller.InstanceConfig             `yaml:"instances"`
 	Records                []control.RecordEntry                   `yaml:"records"`
+	HACluster              control.HACluster                       `yaml:"high_availability"`
 }
 
 func main() {
@@ -82,6 +83,11 @@ func main() {
 	}
 	fleet.SetQueryLogRetentionDefault(cfg.QueryLogRetentionHours)
 	fleet.SetRecords(context.Background(), cfg.Records)
+	if cfg.HACluster.Enabled {
+		if err := fleet.SetHAClusterDefault(cfg.HACluster); err != nil {
+			log.Printf("blipc: high availability config: %v", err)
+		}
+	}
 	if len(cfg.UpstreamServers) > 0 || len(cfg.UpstreamRoutes) > 0 {
 		fleet.SetUpstreamDefault(cfg.UpstreamServers, cfg.UpstreamRoutes)
 		if len(cfg.UpstreamServers) > 0 {

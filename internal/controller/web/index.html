@@ -638,6 +638,47 @@
         </div>
       </section>
 
+      <!-- ================= HIGH AVAILABILITY ================= -->
+      <section id="view-ha" class="view hidden">
+        <div class="view-head"><div><h2>LAN High Availability</h2><p class="muted">Two-node keepalived/VRRP failover for a shared DNS address.</p></div><span class="badge off" id="ha-status">disabled</span></div>
+        <div class="grid grid-2">
+          <div class="panel">
+            <div class="panel-head"><h3>VRRP pair</h3><span class="spacer"></span><span class="hint">LAN only</span></div>
+            <div class="panel-body form-grid">
+              <label class="field"><span>Enable HA</span><input type="checkbox" id="ha-enabled"></label>
+              <label class="field"><span>Primary instance</span><select class="select" id="ha-primary"></select></label>
+              <label class="field"><span>Secondary instance</span><select class="select" id="ha-secondary"></select></label>
+              <label class="field"><span>VRRP mode</span><select class="select" id="ha-mode"><option value="unicast">Unicast (recommended)</option><option value="multicast">LAN multicast</option></select></label>
+              <label class="field"><span>Shared virtual IP (CIDR)</span><input class="input" id="ha-vip" placeholder="192.168.1.100/24"></label>
+              <label class="field"><span>Virtual router ID</span><input class="input" id="ha-router-id" type="number" min="1" max="255" value="51"></label>
+              <label class="field"><span>Primary priority</span><input class="input" id="ha-primary-priority" type="number" min="1" max="254" value="101"></label>
+              <label class="field"><span>Secondary priority</span><input class="input" id="ha-secondary-priority" type="number" min="1" max="254" value="100"></label>
+              <label class="field"><span>Advert interval (seconds)</span><input class="input" id="ha-advert" type="number" min="1" max="60" value="1"></label>
+              <label class="field"><span>LAN auth password (optional, max 8 chars)</span><input class="input" id="ha-auth" type="password" maxlength="8" autocomplete="new-password"></label>
+            </div>
+          </div>
+          <div class="panel">
+            <div class="panel-head"><h3>Node networking</h3><span class="spacer"></span></div>
+            <div class="panel-body form-grid">
+              <label class="field"><span>Primary interface</span><input class="input" id="ha-primary-if" placeholder="eth0"></label>
+              <label class="field"><span>Secondary interface</span><input class="input" id="ha-secondary-if" placeholder="eth0"></label>
+              <label class="field"><span>Primary LAN IP</span><input class="input" id="ha-primary-ip" placeholder="192.168.1.10"></label>
+              <label class="field"><span>Secondary LAN IP</span><input class="input" id="ha-secondary-ip" placeholder="192.168.1.11"></label>
+              <div class="hint" style="grid-column:1/-1">Use unicast on most LANs. Both nodes must be on the same VRRP-capable network, and firewalls must allow VRRP protocol 112 or the selected LAN VRRP traffic.</div>
+              <div class="row" style="grid-column:1/-1; gap:8px; flex-wrap:wrap">
+                <button class="btn btn-primary" id="ha-save">Save configuration</button>
+                <button class="btn" id="ha-install">Install keepalived</button>
+                <button class="btn" id="ha-validate">Validate</button>
+                <button class="btn btn-primary" id="ha-apply">Apply VRRP</button>
+                <button class="btn btn-danger" id="ha-disable">Disable HA</button>
+              </div>
+              <div class="hint" id="ha-error" hidden></div>
+            </div>
+          </div>
+        </div>
+        <div class="panel" style="margin-top:16px"><div class="panel-head"><h3>Node status</h3></div><div class="panel-body" id="ha-node-status"><div class="muted">Loading…</div></div></div>
+      </section>
+
     </div><!-- /stack -->
   </main>
 </div>
@@ -762,6 +803,7 @@
 <div class="toasts" id="toasts"></div>
 
 <script src="/vendor/chart.umd.min.js"></script>
+<script src="high-availability.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

@@ -325,6 +325,10 @@ func (i *Instance) status() *InstanceStatus {
 			synced = false
 		}
 		st.ConfigSynced = synced
+	} else {
+		// No fleet policy means the controller has nothing to reconcile. This
+		// is a healthy, unmanaged state—not a perpetually pending sync.
+		st.ConfigSynced = true
 	}
 	// Blocklist is synced when the checksum the instance reports matches the
 	// fleet's (trust what the instance actually has, not what we pushed).

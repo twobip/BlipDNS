@@ -376,6 +376,31 @@ func TestAdoptStatusMasking(t *testing.T) {
 
 // TestClaimCodeEntropy verifies the claim code is wide enough (~80 bits) and
 // one-time use is still gated by rate limiting.
+func TestConfiguredTokenSkipsClaimCodeAdoption(t *testing.T) {
+	tmp := filepath.Join(t.TempDir(), "adopted.json")
+	store := filter.NewStore(nil)
+	srv := NewServerWithBlocklist("configured-token", store, cache.New(0, 0), &Counters{}, "blipd/test", blocklist.New())
+	srv.ConfigureAdoption(tmp, "node-1")
+
+	srv.adoptMu.Lock()
+	adopted := srv.adopted
+	claim := srv.claimCode
+	srv.adoptMu.Unlock()
+	if !adopted {
+		t.Fatal("configured admin token should mark the instance adopted")
+	}
+	if claim != "" {
+		t.Fatalf("configured admin token should not create a claim code, got %q", claim)
+	}
+	b, err := os.ReadFile(tmp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(b, []byte(`"adopted":true`)) {
+		t.Fatalf("adopted state was not persisted: %s", b)
+	}
+}
+
 func TestClaimCodeEntropy(t *testing.T) {
 	c := genClaimCode()
 	// 16 symbols from a 32-symbol alphabet, grouped as 8-8.

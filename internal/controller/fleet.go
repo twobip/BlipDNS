@@ -134,6 +134,203 @@ type Fleet struct {
 	upstreamRoutes   []upstream.UpstreamRoute     // fleet-wide default upstream routes
 	qlRetentionHours int                          // how long query log entries are kept (0 = 24h default)
 	records          []control.RecordEntry        // fleet-wide local DNS records
+	haCluster        control.HACluster            // LAN two-node VRRP desired state
+}
+
+// HACluster returns the desired LAN VRRP pair configuration.
+func (f *Fleet) HACluster() control.HACluster {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return f.haCluster
+}
+
+// SetHAClusterDefault loads the desired LAN VRRP configuration without
+// persisting it. Used while blipc is starting from controller.yaml.
+func (f *Fleet) SetHAClusterDefault(cluster control.HACluster) error {
+	if err := validateHACluster(cluster); err != nil {
+		return err
+	}
+	f.mu.Lock()
+	f.haCluster = cluster
+	f.mu.Unlock()
+	return nil
+}
+
+func validateHACluster(c control.HACluster) error {
+	if !c.Enabled {
+		return nil
+	}
+	if c.Primary.AuthPass != c.Secondary.AuthPass {
+		return fmt.Errorf("both nodes must use the same VRRP authentication password")
+	}
+	if c.PrimaryInstance == "" || c.SecondaryInstance == "" || c.PrimaryInstance == c.SecondaryInstance {
+		return fmt.Errorf("high availability requires two different instances")
+	}
+	if c.Primary.VirtualIP == "" || c.Primary.VirtualIP != c.Secondary.VirtualIP {
+		return fmt.Errorf("both nodes must use the same virtual IP")
+	}
+	if c.Primary.VirtualRouterID < 1 || c.Primary.VirtualRouterID > 255 || c.Primary.VirtualRouterID != c.Secondary.VirtualRouterID {
+		return fmt.Errorf("both nodes must use the same virtual router ID from 1 to 255")
+	}
+	if c.Primary.NodeRole != "primary" || c.Secondary.NodeRole != "secondary" {
+		return fmt.Errorf("node roles must be primary and secondary")
+	}
+	if c.Primary.Priority <= c.Secondary.Priority {
+		return fmt.Errorf("primary priority must be higher than secondary priority")
+	}
+	if c.Primary.Mode != c.Secondary.Mode {
+		return fmt.Errorf("both nodes must use the same VRRP mode")
+	}
+	return nil
+}
+
+// HAStatuses reads the local keepalived status from every managed node.
+func (f *Fleet) HAStatuses(ctx context.Context) map[string]*control.HAStatus {
+	f.mu.RLock()
+	insts := make([]*Instance, 0, len(f.instances))
+	for _, inst := range f.instances {
+		insts = append(insts, inst)
+	}
+	f.mu.RUnlock()
+	out := make(map[string]*control.HAStatus, len(insts))
+	for _, inst := range insts {
+		st, err := inst.ctl().HAStatus(ctx)
+		if err != nil {
+			out[inst.Config.ID] = &control.HAStatus{State: "UNAVAILABLE", LastError: err.Error()}
+			continue
+		}
+		out[inst.Config.ID] = st
+	}
+	return out
+}
+
+func (f *Fleet) haNode(id string) (*Instance, error) {
+	inst := f.get(id)
+	if inst == nil {
+		return nil, fmt.Errorf("controller: unknown instance %s", id)
+	}
+	if !inst.hasToken() {
+		return nil, fmt.Errorf("controller: instance %s is not adopted", id)
+	}
+	return inst, nil
+}
+
+// SetHACluster sends the structured node-local configs to both members and
+// persists the desired cluster only after both writes succeed.
+func (f *Fleet) SetHACluster(ctx context.Context, cluster control.HACluster) error {
+	if err := validateHACluster(cluster); err != nil {
+		return err
+	}
+	if !cluster.Enabled {
+		// Unchecking HA is a real lifecycle operation: stop both services and
+		// persist the disabled desired state rather than leaving keepalived
+		// running with a stale configuration.
+		current := f.HACluster()
+		if cluster.PrimaryInstance == "" {
+			cluster.PrimaryInstance = current.PrimaryInstance
+		}
+		if cluster.SecondaryInstance == "" {
+			cluster.SecondaryInstance = current.SecondaryInstance
+		}
+		return f.DisableHA(ctx, cluster)
+	}
+	primary, err := f.haNode(cluster.PrimaryInstance)
+	if err != nil {
+		return err
+	}
+	secondary, err := f.haNode(cluster.SecondaryInstance)
+	if err != nil {
+		return err
+	}
+	if err := primary.ctl().SetHAConfig(ctx, cluster.Primary); err != nil {
+		return fmt.Errorf("primary: %w", err)
+	}
+	if err := secondary.ctl().SetHAConfig(ctx, cluster.Secondary); err != nil {
+		return fmt.Errorf("secondary: %w", err)
+	}
+	return f.setHAClusterPersisted(cluster)
+}
+
+func (f *Fleet) setHAClusterPersisted(cluster control.HACluster) error {
+	if err := validateHACluster(cluster); err != nil {
+		return err
+	}
+	f.mu.Lock()
+	f.haCluster = cluster
+	f.mu.Unlock()
+	if f.configPath != "" {
+		return f.saveConfig()
+	}
+	return nil
+}
+
+func (f *Fleet) InstallHA(ctx context.Context, cluster control.HACluster) error {
+	if err := validateHACluster(cluster); err != nil {
+		return err
+	}
+	for _, id := range []string{cluster.PrimaryInstance, cluster.SecondaryInstance} {
+		inst, err := f.haNode(id)
+		if err != nil {
+			return err
+		}
+		if err := inst.ctl().InstallHA(ctx); err != nil {
+			return fmt.Errorf("%s: %w", id, err)
+		}
+	}
+	return nil
+}
+
+func (f *Fleet) ValidateHA(ctx context.Context, cluster control.HACluster) error {
+	if err := validateHACluster(cluster); err != nil {
+		return err
+	}
+	for _, id := range []string{cluster.PrimaryInstance, cluster.SecondaryInstance} {
+		inst, err := f.haNode(id)
+		if err != nil {
+			return err
+		}
+		if err := inst.ctl().ValidateHA(ctx); err != nil {
+			return fmt.Errorf("%s: %w", id, err)
+		}
+	}
+	return nil
+}
+
+func (f *Fleet) ApplyHA(ctx context.Context, cluster control.HACluster) error {
+	if err := f.ValidateHA(ctx, cluster); err != nil {
+		return err
+	}
+	for _, id := range []string{cluster.PrimaryInstance, cluster.SecondaryInstance} {
+		inst, err := f.haNode(id)
+		if err != nil {
+			return err
+		}
+		if err := inst.ctl().ApplyHA(ctx); err != nil {
+			return fmt.Errorf("%s apply failed after earlier node(s) may have applied: %w", id, err)
+		}
+	}
+	return nil
+}
+
+func (f *Fleet) DisableHA(ctx context.Context, cluster control.HACluster) error {
+	if cluster.PrimaryInstance == "" && cluster.SecondaryInstance == "" {
+		cluster.Enabled = false
+		return f.setHAClusterPersisted(cluster)
+	}
+	for _, id := range []string{cluster.PrimaryInstance, cluster.SecondaryInstance} {
+		if id == "" {
+			continue
+		}
+		inst, err := f.haNode(id)
+		if err != nil {
+			return err
+		}
+		if err := inst.ctl().DisableHA(ctx); err != nil {
+			return fmt.Errorf("%s: %w", id, err)
+		}
+	}
+	cluster.Enabled = false
+	return f.setHAClusterPersisted(cluster)
 }
 
 // BlocklistStatus is a point-in-time view of the controller's blocklist
@@ -2084,6 +2281,7 @@ func (f *Fleet) saveConfig() error {
 		BlocklistUpdateHours   int                          `yaml:"blocklist_update_hours"`
 		Instances              []InstanceConfig             `yaml:"instances"`
 		Records                []control.RecordEntry        `yaml:"records"`
+		HACluster              control.HACluster            `yaml:"high_availability"`
 	}
 
 	var cfg fullConfig
@@ -2118,6 +2316,7 @@ func (f *Fleet) saveConfig() error {
 	cfg.BlocklistSources = blSources
 	cfg.BlocklistUpdateHours = autoHours
 	cfg.Records = f.Records()
+	cfg.HACluster = f.HACluster()
 
 	out, err := yaml.Marshal(cfg)
 	if err != nil {

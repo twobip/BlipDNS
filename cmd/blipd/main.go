@@ -18,6 +18,7 @@ import (
 	"github.com/twobip/BlipDNS/internal/config"
 	"github.com/twobip/BlipDNS/internal/dnsserver"
 	"github.com/twobip/BlipDNS/internal/filter"
+	"github.com/twobip/BlipDNS/internal/ha"
 )
 
 const version = "blipd/0.1.0"
@@ -158,6 +159,9 @@ func main() {
 	srv.SetBlockLogger(func(client, domain string) {
 		log.Printf("[block] %s -> %s", client, domain)
 	})
+	// The HA manager owns only the local keepalived configuration and is
+	// reachable through the authenticated management API.
+	srv.ControlServer().SetHAController(ha.NewManagerWithState("", cfg.StateFile))
 
 	// Admin / management API.
 	if cfg.AdminToken != "" || cfg.StateFile != "" {

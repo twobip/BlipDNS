@@ -122,6 +122,8 @@ func New(cfg Config) (*Server, error) {
 	ctrl.SetLocalResolverController(s)
 	ctrl.SetCacheController(s)
 	ctrl.SetRecordController(s)
+	// Keepalived/VRRP is wired by cmd/blipd after the server is constructed,
+	// because the manager belongs to the host rather than the DNS query path.
 	// Seed the rate limit from config (controller can override later).
 	if cfg.RateLimitQPS > 0 {
 		_ = s.SetRateLimit(cfg.RateLimitQPS, cfg.RateLimitBurst)
