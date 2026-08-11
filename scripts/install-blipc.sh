@@ -4,6 +4,7 @@
 # and set up a systemd service for blipc.
 #
 # Usage:  curl -sL https://raw.githubusercontent.com/twobip/BlipDNS/master/scripts/install-blipc.sh | sudo bash
+# Optional: append --install-deps to install Git, Go, and CA certificates first.
 #
 set -euo pipefail
 
@@ -18,12 +19,101 @@ SERVICE_NAME="blipc"
 log()  { echo "[install-blipc] $*"; }
 err()  { echo "[install-blipc] ERROR: $*" >&2; exit 1; }
 
+usage() {
+  cat <<'EOF'
+Usage: install-blipc.sh [VERSION|BRANCH] [--install-deps]
+
+Installs blipc and blipctl from the BlipDNS repository.
+  VERSION|BRANCH    Optional release or branch (default: master)
+  --install-deps    Install Git, Go, and CA certificates using the system package manager
+EOF
+}
+
+# --- arguments ---------------------------------------------------------------
+INSTALL_DEPS=0
+INSTALL=""
+for ARG in "$@"; do
+  case "$ARG" in
+    --install-deps)
+      INSTALL_DEPS=1
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    -* )
+      err "unknown option: $ARG (use --help for usage)"
+      ;;
+    *)
+      [ -z "$INSTALL" ] || err "only one version or branch may be specified"
+      INSTALL="$ARG"
+      ;;
+  esac
+done
+
+install_dependencies() {
+  log "installing dependencies: git, go, ca-certificates"
+  if command -v apt-get >/dev/null 2>&1; then
+    apt-get update
+    DEBIAN_FRONTEND=noninteractive apt-get install -y git golang-go ca-certificates
+  elif command -v dnf >/dev/null 2>&1; then
+    dnf install -y git golang ca-certificates
+  elif command -v yum >/dev/null 2>&1; then
+    yum install -y git golang ca-certificates
+  elif command -v apk >/dev/null 2>&1; then
+    apk add --no-cache git go ca-certificates
+  elif command -v pacman >/dev/null 2>&1; then
+    pacman -S --noconfirm git go ca-certificates
+  elif command -v zypper >/dev/null 2>&1; then
+    zypper --non-interactive install git go ca-certificates
+  else
+    err "--install-deps was requested, but no supported package manager was found"
+  fi
+}
+
 # --- sanity ------------------------------------------------------------------
 [ "$(id -u)" -eq 0 ] || err "this script must be run as root (use sudo)"
-command -v go >/dev/null 2>&1 || err "Go is not installed. Install Go 1.25+ first: https://go.dev/dl/"
+[ "$INSTALL_DEPS" -eq 1 ] && install_dependencies
+
+# Git is needed to fetch the source when this script is run remotely.
+if ! command -v git >/dev/null 2>&1; then
+  log "git is not installed — attempting to install it"
+  if command -v apt-get >/dev/null 2>&1; then
+    apt-get update
+    DEBIAN_FRONTEND=noninteractive apt-get install -y git
+  elif command -v dnf >/dev/null 2>&1; then
+    dnf install -y git
+  elif command -v yum >/dev/null 2>&1; then
+    yum install -y git
+  elif command -v apk >/dev/null 2>&1; then
+    apk add --no-cache git
+  elif command -v pacman >/dev/null 2>&1; then
+    pacman -S --noconfirm git
+  elif command -v zypper >/dev/null 2>&1; then
+    zypper --non-interactive install git
+  else
+    err "git is not installed and no supported package manager was found; install Git and run this script again"
+  fi
+fi
+command -v git >/dev/null 2>&1 || err "Git installation failed; install Git and run this script again"
+
+require_go() {
+  command -v go >/dev/null 2>&1 || err "Go is not installed. Install Go 1.25+ first: https://go.dev/dl/"
+  local version major minor
+  version="$(go version 2>/dev/null)" || err "Could not determine the Go version"
+  if [[ "$version" =~ go([0-9]+)\.([0-9]+) ]]; then
+    major="${BASH_REMATCH[1]}"
+    minor="${BASH_REMATCH[2]}"
+    if [ "$major" -lt 1 ] || { [ "$major" -eq 1 ] && [ "$minor" -lt 25 ]; }; then
+      err "Go 1.25+ is required; found $version. Install a newer Go version: https://go.dev/dl/"
+    fi
+  else
+    err "Could not determine the Go version from: $version"
+  fi
+}
+require_go
 
 # --- resolve install prefix --------------------------------------------------
-INSTALL="${1:-}"
 if [ -n "$INSTALL" ]; then
   case "$INSTALL" in
     stable|master)
@@ -114,7 +204,7 @@ fi
 log ""
 log "blipc installed successfully."
 log ""
-bin/blipctl 2>/dev/null || true
+"$BIN_DIR/blipctl" 2>/dev/null || true
 log "binaries:  $BIN_DIR/blipc      $BIN_DIR/blipctl"
 log "config:    $CONFIG_DIR/blipc.yaml"
 log "state:     $STATE_DIR"

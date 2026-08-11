@@ -28,7 +28,14 @@ go build -o bin/blipctl ./cmd/blipctl
 go build -o bin/blipc ./cmd/blipc
 ```
 
-## Install (one-liner, requires Go 1.25+)
+## Install (one-liner)
+
+The installers require root privileges. By default they use an existing Go 1.25+ installation and automatically install Git if it is missing. Add `--install-deps` to install Git, Go, and CA certificates with the detected system package manager before cloning and building. The installed Go package must provide Go 1.25+; otherwise install Go manually from https://go.dev/dl/:
+
+```bash
+curl -sL https://raw.githubusercontent.com/twobip/BlipDNS/master/scripts/install-blipd.sh | sudo bash -s -- --install-deps
+curl -sL https://raw.githubusercontent.com/twobip/BlipDNS/master/scripts/install-blipc.sh | sudo bash -s -- --install-deps
+```
 
 ### Resolver daemon (blipd)
 
@@ -64,7 +71,7 @@ Then:
 sudo systemctl enable --now blipc
 ```
 
-Both scripts accept an optional argument: `master` (default), `stable`, or a version tag (e.g. `v1.2.3`). They clone the repo, build from source, and install under `/usr/local/bin` with secure config directories.
+Both scripts accept an optional argument: `master` (default), `stable`, or a version tag (e.g. `v1.2.3`), plus the `--install-deps` option. They clone the repo, build from source, and install under `/usr/local/bin` with secure config directories.
 
 ## Run blipd
 
