@@ -1,14 +1,23 @@
 package controller
 
 import (
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io/fs"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
+
+	"golang.org/x/crypto/bcrypt"
+	"gopkg.in/yaml.v3"
 
 	"github.com/twobip/BlipDNS/internal/control"
 	"github.com/twobip/BlipDNS/internal/upstream"
@@ -16,23 +25,44 @@ import (
 
 // Server is the blipc controller HTTP + UI server.
 type Server struct {
-	auth  *Auth
-	fleet *Fleet
-	ui    fs.FS // embedded web assets (index.html etc.)
+	auth       *Auth
+	fleet      *Fleet
+	ui         fs.FS // embedded web assets (index.html etc.)
+	configPath string
+	setupToken string
+	setupMu    sync.Mutex
 }
 
 // NewServer builds the controller HTTP server. ui may be nil (API-only).
 // username/password configure the login gate; empty password => closed auth.
+// It is intended for tests and API-only callers; first-run setup is disabled.
 func NewServer(username, password string, fleet *Fleet, ui fs.FS) *Server {
-	return &Server{auth: NewAuth(username, password), fleet: fleet, ui: ui}
+	return NewServerWithConfig(username, password, fleet, ui, "", "")
+}
+
+// NewServerWithConfig is NewServer plus the config path and one-time setup
+// token used by first-run setup.
+func NewServerWithConfig(username, password string, fleet *Fleet, ui fs.FS, configPath, setupToken string) *Server {
+	return &Server{auth: NewAuth(username, password), fleet: fleet, ui: ui, configPath: configPath, setupToken: setupToken}
+}
+
+// NewSetupToken returns a cryptographically random token for first-run setup.
+func NewSetupToken() (string, error) {
+	b := make([]byte, 24)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
 }
 
 // Handler returns the controller's HTTP handler (API + UI).
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
-	// Login / logout are unauthenticated (login obviously; logout is idempotent).
+	// Login / setup / logout are unauthenticated. Setup is only accepted while
+	// the server remains unconfigured; Auth.Configure makes it one-time.
 	mux.HandleFunc("/api/login", s.handleLogin)
+	mux.HandleFunc("/api/setup", s.handleSetup)
 	mux.HandleFunc("/api/logout", s.handleLogout)
 
 	// API (session-gated)
@@ -133,6 +163,73 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		http.Error(w, "invalid credentials", http.StatusUnauthorized)
+		return
+	}
+	s.auth.MintCookie(w, r, id)
+	writeJSON(w, map[string]bool{"ok": true})
+}
+
+// handleSetup creates the first controller credentials and immediately signs
+// the operator in. It is deliberately unavailable after the first success.
+func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	s.setupMu.Lock()
+	defer s.setupMu.Unlock()
+	if s.auth.Configured() {
+		http.Error(w, "setup already completed", http.StatusForbidden)
+		return
+	}
+	var req struct {
+		Token    string `json:"token"`
+		Username string `json:"username"`
+		Password string `json:"password"`
+		Confirm  string `json:"confirm"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if s.setupToken == "" || len(req.Token) != len(s.setupToken) || subtle.ConstantTimeCompare([]byte(req.Token), []byte(s.setupToken)) != 1 {
+		http.Error(w, "invalid setup token", http.StatusForbidden)
+		return
+	}
+	req.Username = strings.TrimSpace(req.Username)
+	if len(req.Username) < 1 || len(req.Username) > 64 {
+		http.Error(w, "username must be between 1 and 64 characters", http.StatusBadRequest)
+		return
+	}
+	if len(req.Password) < 8 || len(req.Password) > 72 {
+		http.Error(w, "password must be between 8 and 72 characters", http.StatusBadRequest)
+		return
+	}
+	if req.Password != req.Confirm {
+		http.Error(w, "passwords do not match", http.StatusBadRequest)
+		return
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	if err != nil {
+		http.Error(w, "could not secure password", http.StatusInternalServerError)
+		return
+	}
+	if s.configPath == "" {
+		http.Error(w, "setup persistence is unavailable", http.StatusInternalServerError)
+		return
+	}
+	if err := persistCredentials(s.configPath, req.Username, string(hash)); err != nil {
+		http.Error(w, "could not save credentials", http.StatusInternalServerError)
+		return
+	}
+	if !s.auth.Configure(req.Username, string(hash)) {
+		http.Error(w, "setup already completed", http.StatusForbidden)
+		return
+	}
+	id, err := s.auth.Login(req.Username, req.Password, ClientIP(r))
+	if err != nil {
+		http.Error(w, "could not start session", http.StatusInternalServerError)
 		return
 	}
 	s.auth.MintCookie(w, r, id)
@@ -1111,6 +1208,16 @@ func (s *Server) handleBlocklistClearLog(w http.ResponseWriter, r *http.Request)
 // serveUI dispatches inbound HTTP to embedded assets (public) or the SPA
 // (session-gated) or the login page (public).
 func (s *Server) serveUI(w http.ResponseWriter, r *http.Request) {
+	if !s.auth.Configured() && (r.URL.Path == "/" || r.URL.Path == "/setup" || r.URL.Path == "/setup.html" || r.URL.Path == "/login" || r.URL.Path == "/login.html") {
+		b, err := fs.ReadFile(s.ui, "setup.html")
+		if err != nil {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write(b)
+		return
+	}
 	// Public static assets: js/css/svg/ico/png embed token-free, served without
 	// a session so browsers can load them as relative sub-resources.
 	if isUIAsset(r.URL.Path) {
@@ -1175,6 +1282,72 @@ func contentType(name string) string {
 		return "image/x-icon"
 	}
 	return "application/octet-stream"
+}
+
+// persistCredentials updates only the auth keys in the existing YAML document,
+// preserving fleet settings and comments written by the operator.
+func persistCredentials(path, username, passwordHash string) error {
+	b, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	var doc yaml.Node
+	if len(b) == 0 {
+		doc = yaml.Node{Kind: yaml.DocumentNode, Content: []*yaml.Node{{Kind: yaml.MappingNode}}}
+	} else if err := yaml.Unmarshal(b, &doc); err != nil {
+		return err
+	}
+	if len(doc.Content) == 0 || doc.Content[0].Kind != yaml.MappingNode {
+		return fmt.Errorf("config root must be a YAML mapping")
+	}
+	root := doc.Content[0]
+	set := func(key, value string) {
+		for i := 0; i+1 < len(root.Content); i += 2 {
+			if root.Content[i].Value == key {
+				root.Content[i+1].Kind = yaml.ScalarNode
+				root.Content[i+1].Tag = "!!str"
+				root.Content[i+1].Value = value
+				return
+			}
+		}
+		root.Content = append(root.Content,
+			&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key},
+			&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: value},
+		)
+	}
+	set("username", username)
+	set("password_hash", passwordHash)
+	for i := 0; i+1 < len(root.Content); i += 2 {
+		if root.Content[i].Value == "password" {
+			root.Content = append(root.Content[:i], root.Content[i+2:]...)
+			break
+		}
+	}
+	out, err := yaml.Marshal(&doc)
+	if err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".blipc-setup-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if err := tmp.Chmod(0600); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(out); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0600)
 }
 
 func mustJSON(v interface{}) string {

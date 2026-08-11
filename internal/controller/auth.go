@@ -101,13 +101,37 @@ func looksLikeBcryptHash(s string) bool {
 	return strings.HasPrefix(s, "$2a$") || strings.HasPrefix(s, "$2b$") || strings.HasPrefix(s, "$2y$")
 }
 
-// Configured reports whether valid credentials were provided at startup.
-func (a *Auth) Configured() bool { return a.configured }
+// Configured reports whether valid credentials are configured.
+func (a *Auth) Configured() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.configured
+}
+
+// Configure installs credentials exactly once. It is used by the first-run
+// setup flow after the new bcrypt hash has been persisted successfully.
+func (a *Auth) Configure(username, passwordHash string) bool {
+	if username == "" || passwordHash == "" {
+		return false
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.configured {
+		return false
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte("")); err != nil && !errors.Is(err, bcrypt.ErrMismatchedHashAndPassword) {
+		return false
+	}
+	a.username = username
+	a.passHash = []byte(passwordHash)
+	a.configured = true
+	return true
+}
 
 // Login validates credentials for an authenticated-less request and, on
 // success, creates a session. It enforces a per-IP brute-force lockout.
 func (a *Auth) Login(username, password, clientIP string) (string, error) {
-	if !a.configured {
+	if !a.Configured() {
 		return "", errNoAuthCfg
 	}
 	if !a.allowLogin(clientIP) {
@@ -131,10 +155,14 @@ func (a *Auth) Login(username, password, clientIP string) (string, error) {
 }
 
 func (a *Auth) verify(user, pass string) bool {
-	if !constantTimeEq(user, a.username) {
+	a.mu.Lock()
+	username := a.username
+	hash := append([]byte(nil), a.passHash...)
+	a.mu.Unlock()
+	if !constantTimeEq(user, username) {
 		return false
 	}
-	return bcrypt.CompareHashAndPassword(a.passHash, []byte(pass)) == nil
+	return bcrypt.CompareHashAndPassword(hash, []byte(pass)) == nil
 }
 
 func constantTimeEq(a, b string) bool {

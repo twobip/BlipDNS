@@ -17,6 +17,7 @@ import (
 	"github.com/twobip/BlipDNS/internal/control"
 	"github.com/twobip/BlipDNS/internal/upstream"
 	"golang.org/x/crypto/bcrypt"
+	"gopkg.in/yaml.v3"
 )
 
 // policyRec records every policy pushed to a fake blipd.
@@ -987,6 +988,85 @@ func TestServerOpenAuthClosed(t *testing.T) {
 	srv.Handler().ServeHTTP(rec2, httptest.NewRequest("GET", "/api/instances", nil))
 	if rec2.Code != http.StatusUnauthorized {
 		t.Errorf("expected 401, got %d", rec2.Code)
+	}
+}
+
+func TestServerFirstRunUI(t *testing.T) {
+	fleet := NewFleet("")
+	unconfigured := NewServerWithConfig("", "", fleet, UI(), "", "ui-setup-token")
+	rec := httptest.NewRecorder()
+	unconfigured.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	if rec.Code != http.StatusOK || !bytes.Contains(rec.Body.Bytes(), []byte("Set up your BlipDNS console")) {
+		t.Fatalf("unconfigured root: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	asset := httptest.NewRecorder()
+	unconfigured.Handler().ServeHTTP(asset, httptest.NewRequest(http.MethodGet, "/setup.js", nil))
+	if asset.Code != http.StatusOK || !bytes.Contains(asset.Body.Bytes(), []byte("/api/setup")) {
+		t.Fatalf("setup asset: status=%d body=%s", asset.Code, asset.Body.String())
+	}
+	configured := NewServerWithConfig("admin", "correct horse", fleet, UI(), "", "")
+	redirect := httptest.NewRecorder()
+	configured.Handler().ServeHTTP(redirect, httptest.NewRequest(http.MethodGet, "/", nil))
+	if redirect.Code != http.StatusFound || redirect.Header().Get("Location") != "/login" {
+		t.Fatalf("configured root: status=%d location=%q", redirect.Code, redirect.Header().Get("Location"))
+	}
+}
+
+func TestServerFirstRunSetup(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "blipc.yaml")
+	initial := []byte("listen: \"127.0.0.1:8500\"\ndefault_policy:\n  id: default\n  block_action: nxdomain\n")
+	if err := os.WriteFile(cfgPath, initial, 0600); err != nil {
+		t.Fatal(err)
+	}
+	fleet := NewFleet(cfgPath)
+	setupToken := "test-setup-token"
+	srv := NewServerWithConfig("", "", fleet, nil, cfgPath, setupToken)
+	body, _ := json.Marshal(map[string]string{
+		"token":    setupToken,
+		"username": "admin",
+		"password": "correct horse",
+		"confirm":  "correct horse",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/setup", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("setup status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	cookie := rec.Result().Cookies()[0]
+	if cookie.Name != sessionCookie || cookie.Value == "" {
+		t.Fatalf("expected setup session cookie, got %+v", cookie)
+	}
+	protected := httptest.NewRequest(http.MethodGet, "/api/instances", nil)
+	protected.AddCookie(cookie)
+	protectedRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(protectedRec, protected)
+	if protectedRec.Code != http.StatusOK {
+		t.Fatalf("setup session status = %d", protectedRec.Code)
+	}
+	again := httptest.NewRequest(http.MethodPost, "/api/setup", bytes.NewReader(body))
+	againRec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(againRec, again)
+	if againRec.Code != http.StatusForbidden {
+		t.Fatalf("second setup status = %d, want 403", againRec.Code)
+	}
+	b, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saved struct {
+		Username     string `yaml:"username"`
+		Password     string `yaml:"password"`
+		PasswordHash string `yaml:"password_hash"`
+	}
+	if err := yaml.Unmarshal(b, &saved); err != nil {
+		t.Fatal(err)
+	}
+	if saved.Username != "admin" || saved.Password != "" || saved.PasswordHash == "" {
+		t.Fatalf("saved credentials = %+v", saved)
+	}
+	if bcrypt.CompareHashAndPassword([]byte(saved.PasswordHash), []byte("correct horse")) != nil {
+		t.Fatal("saved password hash does not validate")
 	}
 }
 

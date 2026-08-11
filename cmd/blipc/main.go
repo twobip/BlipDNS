@@ -118,7 +118,17 @@ func main() {
 	if authPass == "" {
 		authPass = cfg.Password
 	}
-	srv := controller.NewServer(cfg.Username, authPass, fleet, controller.UI())
+	setupToken := ""
+	if cfg.Username == "" || authPass == "" || !controller.NewAuth(cfg.Username, authPass).Configured() {
+		var tokenErr error
+		setupToken, tokenErr = controller.NewSetupToken()
+		if tokenErr != nil {
+			log.Fatalf("blipc: generate setup token: %v", tokenErr)
+		}
+		log.Printf("blipc: first-run setup token: %s", setupToken)
+		log.Printf("blipc: open http://%s/setup#token=%s to create the administrator account", cfg.Listen, setupToken)
+	}
+	srv := controller.NewServerWithConfig(cfg.Username, authPass, fleet, controller.UI(), *cfgPath, setupToken)
 	httpSrv := &http.Server{
 		Addr:    cfg.Listen,
 		Handler: srv.Handler(),

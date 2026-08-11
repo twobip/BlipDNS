@@ -2069,6 +2069,7 @@ func (f *Fleet) saveConfig() error {
 		Listen                 string                       `yaml:"listen"`
 		Username               string                       `yaml:"username"`
 		Password               string                       `yaml:"password"`
+		PasswordHash           string                       `yaml:"password_hash"`
 		DefaultPolicy          *control.Policy              `yaml:"default_policy"`
 		InstancePolicies       map[string]*InstanceOverride `yaml:"instance_overrides"`
 		DoHHTTPAddr            string                       `yaml:"doh_http_addr"`
