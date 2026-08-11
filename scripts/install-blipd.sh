@@ -53,6 +53,14 @@ done
 
 GO_REQUIRED_VERSION="1.25.0"
 GO_INSTALL_DIR="/usr/local/go-blipdns-${GO_REQUIRED_VERSION}"
+GO_TMPDIR=""
+
+cleanup_go_tmp() {
+  if [ -n "${GO_TMPDIR:-}" ]; then
+    rm -rf "$GO_TMPDIR"
+    GO_TMPDIR=""
+  fi
+}
 
 install_dependencies() {
   local packages="git ca-certificates curl jq"
@@ -153,7 +161,7 @@ use_dedicated_go() {
 }
 
 install_go_from_archive() {
-  local arch archive archive_name metadata expected actual tmp
+  local arch archive archive_name metadata expected actual
 
   # Reuse the dedicated Go installation from a previous run before doing any
   # network work. This is especially important when the distro Go is too old.
@@ -179,12 +187,12 @@ install_go_from_archive() {
   command -v curl >/dev/null 2>&1 || err "curl is required to install Go ${GO_REQUIRED_VERSION}; install curl and run this script again"
   command -v sha256sum >/dev/null 2>&1 || err "sha256sum is required to verify Go; install coreutils and run this script again"
 
-  tmp="$(mktemp -d)"
-  trap 'rm -rf "$tmp"' RETURN
+  GO_TMPDIR="$(mktemp -d)"
+  trap cleanup_go_tmp EXIT
   command -v jq >/dev/null 2>&1 || err "jq is required to verify Go metadata; rerun with --install-deps"
   archive_name="go${GO_REQUIRED_VERSION}.linux-${arch}.tar.gz"
-  archive="$tmp/$archive_name"
-  metadata="$tmp/go.json"
+  archive="$GO_TMPDIR/$archive_name"
+  metadata="$GO_TMPDIR/go.json"
   log "installing Go ${GO_REQUIRED_VERSION} from the official Go archive"
   if ! curl -fsSL "https://go.dev/dl/$archive_name" -o "$archive"; then
     err "failed to download Go ${GO_REQUIRED_VERSION} for Linux/$arch"
@@ -208,6 +216,7 @@ install_go_from_archive() {
   fi
   export PATH="$GO_INSTALL_DIR/bin:$PATH"
   hash -r
+  cleanup_go_tmp
 }
 
 require_go() {
