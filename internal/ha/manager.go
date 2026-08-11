@@ -109,34 +109,7 @@ func (m *Manager) HAStatus() control.HAStatus {
 }
 
 func (m *Manager) InstallHA() error {
-	m.opMu.Lock()
-	defer m.opMu.Unlock()
-	if commandAvailable("keepalived") {
-		return nil
-	}
-	var args []string
-	switch {
-	case commandAvailable("apt-get"):
-		if err := runCommand("apt-get", "update"); err != nil {
-			return err
-		}
-		args = []string{"apt-get", "install", "-y", "keepalived"}
-	case commandAvailable("dnf"):
-		args = []string{"dnf", "install", "-y", "keepalived"}
-	case commandAvailable("yum"):
-		args = []string{"yum", "install", "-y", "keepalived"}
-	case commandAvailable("apk"):
-		args = []string{"apk", "add", "--no-cache", "keepalived"}
-	default:
-		return fmt.Errorf("no supported package manager found; install keepalived manually")
-	}
-	if err := runCommand(args[0], args[1:]...); err != nil {
-		return err
-	}
-	if !commandAvailable("keepalived") {
-		return fmt.Errorf("keepalived installation completed but the command is unavailable")
-	}
-	return nil
+	return fmt.Errorf("keepalived installation is intentionally not performed through the API; install it with the host package manager")
 }
 
 // ValidateHA validates fields, the selected local interface/address, and the
@@ -170,7 +143,7 @@ func (m *Manager) ApplyHA() error {
 		return err
 	}
 	if !cfg.Enabled {
-		return m.disableHA()
+		return fmt.Errorf("disabling keepalived is intentionally not performed through the API; stop it with the host service manager")
 	}
 	if !commandAvailable("keepalived") {
 		return fmt.Errorf("keepalived is not installed; install it first")
@@ -207,31 +180,15 @@ func (m *Manager) ApplyHA() error {
 	if err := os.Chmod(path, 0600); err != nil {
 		return err
 	}
-	if err := runCommand("systemctl", "enable", "keepalived"); err != nil {
-		m.recordError(err)
-		return err
-	}
-	if err := runCommand("systemctl", "restart", "keepalived"); err != nil {
-		m.recordError(err)
-		return err
-	}
 	m.clearError()
 	return nil
 }
 
 func (m *Manager) DisableHA() error {
-	m.opMu.Lock()
-	defer m.opMu.Unlock()
-	return m.disableHA()
+	return fmt.Errorf("disabling keepalived is intentionally not performed through the API; stop it with the host service manager")
 }
 
 func (m *Manager) disableHA() error {
-	if commandAvailable("systemctl") {
-		if err := runCommand("systemctl", "disable", "--now", "keepalived"); err != nil {
-			m.recordError(err)
-			return err
-		}
-	}
 	m.mu.RLock()
 	cfg := m.cfg
 	m.mu.RUnlock()

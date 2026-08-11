@@ -135,6 +135,33 @@ type Fleet struct {
 	qlRetentionHours int                          // how long query log entries are kept (0 = 24h default)
 	records          []control.RecordEntry        // fleet-wide local DNS records
 	haCluster        control.HACluster            // LAN two-node VRRP desired state
+	releaseChannel   string                       // stable or dev
+}
+
+func (f *Fleet) ReleaseChannel() string {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	if control.ValidUpdateChannel(f.releaseChannel) {
+		return f.releaseChannel
+	}
+	return string(control.ChannelStable)
+}
+
+func (f *Fleet) SetReleaseChannelDefault(channel string) error {
+	if !control.ValidUpdateChannel(channel) {
+		return fmt.Errorf("release channel must be stable or dev")
+	}
+	f.mu.Lock()
+	f.releaseChannel = channel
+	f.mu.Unlock()
+	return nil
+}
+
+func (f *Fleet) SetReleaseChannel(channel string) error {
+	if err := f.SetReleaseChannelDefault(channel); err != nil {
+		return err
+	}
+	return f.saveConfig()
 }
 
 // HACluster returns the desired LAN VRRP pair configuration.
@@ -362,8 +389,14 @@ type SourceStat struct {
 
 // NewFleet creates an empty fleet with a default event buffer.
 func NewFleet(configPath string) *Fleet {
-	queryLog, _ := NewQueryLogStore("/var/lib/blipc/querylog.db")
-	blocklistDB, _ := NewBlocklistStore("/var/lib/blipc/blocklist.db")
+	queryLog, err := NewQueryLogStore("/var/lib/blipc/querylog.db")
+	if err != nil {
+		log.Printf("blipc: query log unavailable: %v", err)
+	}
+	blocklistDB, err := NewBlocklistStore("/var/lib/blipc/blocklist.db")
+	if err != nil {
+		log.Printf("blipc: blocklist database unavailable: %v", err)
+	}
 	return &Fleet{
 		instances:     make(map[string]*Instance),
 		bus:           NewBus(500),
@@ -440,6 +473,34 @@ func (f *Fleet) List() []*InstanceStatus {
 		out = append(out, inst.status())
 	}
 	return out
+}
+
+// StartUpdates starts an asynchronous update on every adopted instance.
+// Results are per-instance so one unavailable node does not hide the others.
+func (f *Fleet) StartUpdates(ctx context.Context) map[string]string {
+	channel := f.ReleaseChannel()
+	f.mu.RLock()
+	insts := make([]*Instance, 0, len(f.instances))
+	for _, inst := range f.instances {
+		insts = append(insts, inst)
+	}
+	f.mu.RUnlock()
+
+	results := make(map[string]string, len(insts))
+	for _, inst := range insts {
+		id := inst.Config.ID
+		if !inst.hasToken() {
+			results[id] = "not adopted"
+			continue
+		}
+		if err := inst.ctl().StartUpdate(ctx, channel); err != nil {
+			results[id] = err.Error()
+			continue
+		}
+		results[id] = "started"
+		f.bus.Publish(Event{InstanceID: id, Instance: inst.Config.Label, Type: "status", At: f.now(), Msg: "remote update started on " + channel})
+	}
+	return results
 }
 
 // DefaultPolicy returns the fleet-wide default policy (may be nil).
@@ -2282,6 +2343,7 @@ func (f *Fleet) saveConfig() error {
 		Instances              []InstanceConfig             `yaml:"instances"`
 		Records                []control.RecordEntry        `yaml:"records"`
 		HACluster              control.HACluster            `yaml:"high_availability"`
+		ReleaseChannel         string                       `yaml:"release_channel"`
 	}
 
 	var cfg fullConfig
@@ -2317,6 +2379,7 @@ func (f *Fleet) saveConfig() error {
 	cfg.BlocklistUpdateHours = autoHours
 	cfg.Records = f.Records()
 	cfg.HACluster = f.HACluster()
+	cfg.ReleaseChannel = f.ReleaseChannel()
 
 	out, err := yaml.Marshal(cfg)
 	if err != nil {

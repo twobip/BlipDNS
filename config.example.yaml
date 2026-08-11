@@ -2,6 +2,9 @@ dns_addr: "127.0.0.1:5353"
 doh_addr: "127.0.0.1:8443"
 admin_addr: "127.0.0.1:8444"
 admin_token: "test-token"
+# Only trust X-Forwarded-For from explicitly listed reverse proxies. Empty/off
+# means use the direct peer address (recommended unless behind a proxy).
+# trusted_proxies: ["127.0.0.1/32"]
 # Upstream DNS resolvers - space/comma-separated specs for failover.
 # Supported formats:
 #   udp://host:port         - classic UDP/TCP DNS (e.g. udp://1.1.1.1:53)

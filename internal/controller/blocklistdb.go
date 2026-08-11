@@ -56,6 +56,9 @@ CREATE TABLE IF NOT EXISTS blocklist_manual_allow (
 );`); err != nil {
 		return nil, fmt.Errorf("create blocklist source schema: %w", err)
 	}
+	if err := os.Chmod(dbPath, 0600); err != nil {
+		return nil, fmt.Errorf("chmod blocklist db: %w", err)
+	}
 	return &BlocklistStore{db: db}, nil
 }
 

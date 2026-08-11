@@ -113,9 +113,13 @@ func (r *DoHResolver) Resolve(ctx context.Context, q *dns.Msg) (*dns.Msg, error)
 		return nil, err
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
+	const maxDNSResponseBytes = 65535
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxDNSResponseBytes+1))
 	if err != nil {
 		return nil, err
+	}
+	if len(body) > maxDNSResponseBytes {
+		return nil, fmt.Errorf("doh: upstream response too large")
 	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("doh: upstream returned %d", resp.StatusCode)

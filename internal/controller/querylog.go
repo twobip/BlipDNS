@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -329,6 +331,14 @@ type StatsAggregate struct {
 
 // NewQueryLogStore creates a new query log store backed by SQLite
 func NewQueryLogStore(dbPath string) (*QueryLogStore, error) {
+	if dir := filepath.Dir(dbPath); dir != "" {
+		if err := os.MkdirAll(dir, 0750); err != nil {
+			return nil, fmt.Errorf("create query log db dir: %w", err)
+		}
+		if err := os.Chmod(dir, 0750); err != nil {
+			return nil, fmt.Errorf("chmod query log db dir: %w", err)
+		}
+	}
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
@@ -382,6 +392,9 @@ func NewQueryLogStore(dbPath string) (*QueryLogStore, error) {
 	`
 	if _, err := db.Exec(schema); err != nil {
 		return nil, fmt.Errorf("create schema: %w", err)
+	}
+	if err := os.Chmod(dbPath, 0600); err != nil {
+		return nil, fmt.Errorf("chmod query log db: %w", err)
 	}
 	// Add columns to existing databases (no-ops if already present)
 	for _, col := range []string{

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"time"
 )
 
@@ -226,6 +227,20 @@ func (c *Client) ApplyHA(ctx context.Context) error {
 
 func (c *Client) DisableHA(ctx context.Context) error {
 	return c.do(ctx, http.MethodPost, "/api/v1/ha/disable", nil, nil)
+}
+
+// StartUpdate starts the managed node's asynchronous self-update.
+func (c *Client) StartUpdate(ctx context.Context, channel string) error {
+	return c.do(ctx, http.MethodPost, "/api/v1/update?channel="+url.QueryEscape(channel), nil, nil)
+}
+
+// UpdateStatus returns the managed node's current update state.
+func (c *Client) UpdateStatus(ctx context.Context) (*UpdateStatus, error) {
+	var out UpdateStatus
+	if err := c.do(ctx, http.MethodGet, "/api/v1/update", nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
 }
 
 // Watch opens the SSE stream and invokes fn for each event until ctx is

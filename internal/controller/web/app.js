@@ -471,7 +471,7 @@ async function editLabel(id) {
 }
 
 function confirmRemove(id) {
-  confirmDialog(`Remove instance <b>${esc(id)}</b>?`, "This removes it from the fleet. Its blipd process is not stopped.", async () => {
+  confirmDialog(`Remove instance ${id}?`, "This removes it from the fleet. Its blipd process is not stopped.", async () => {
     try { await API("/api/instances/" + encodeURIComponent(id), { method: "DELETE" }); toast("removed " + id); refresh(); }
     catch (e) { toast("remove failed: " + e.message, "err"); }
   });
@@ -814,7 +814,7 @@ $("r-tbody").addEventListener("click", (e) => {
   const i = parseInt(b.dataset.rI, 10);
   if (b.dataset.rAct === "edit") openRecordModal(i);
   else if (b.dataset.rAct === "del") {
-    confirmDialog("Delete record?", `Remove <span class="mono">${esc(savedRecords[i].domain)}</span> (${savedRecords[i].type})?`, () => {
+    confirmDialog("Delete record?", `Remove ${savedRecords[i].domain} (${savedRecords[i].type})?`, () => {
       savedRecords = savedRecords.filter((_, k) => k !== i);
       renderRecords();
       saveRecords();
@@ -1416,6 +1416,7 @@ let savedCacheSize = 0;          // fleet-wide max cached responses (0 = unlimit
 let savedCacheWarm = 0;          // fleet-wide auto-refresh count (0 = off)
 let savedCacheRegular = 0;       // fleet-wide regular-hold seconds for non-top entries (0 = record TTL)
 let savedQLRetention = 24;       // how long query log entries are kept (hours)
+let savedReleaseChannel = "stable";
 let cacheScopeState = "default"; // "default" or an instance id
 function renderCacheScopeSelect() {
   const sel = $("s-cache-scope");
@@ -1573,6 +1574,8 @@ async function refreshSettings() {
     savedCacheWarm = (d.cache_warm != null && d.cache_warm !== undefined) ? Number(d.cache_warm || 0) : 0;
     savedCacheRegular = (d.cache_regular != null && d.cache_regular !== undefined) ? Number(d.cache_regular || 0) : 0;
     savedQLRetention = (d.query_log_retention_hours != null && d.query_log_retention_hours !== undefined) ? Number(d.query_log_retention_hours || 24) : 24;
+    savedReleaseChannel = d.release_channel === "dev" ? "dev" : "stable";
+    loadReleaseEditor();
     // fleet-wide local DNS records
     savedRecords = (d.records || []).map((r) => ({ ...r, _instance: "" }));
     // fleet-wide default upstream pool + conditional-forwarding routes
@@ -1592,7 +1595,7 @@ async function refreshSettings() {
 let _cfOk = null;
 function confirmDialog(title, msg, onOk) {
   $("cf-title").textContent = title;
-  $("cf-msg").innerHTML = msg;
+  $("cf-msg").textContent = msg;
   _cfOk = onOk;
   show("modal-confirm");
 }
@@ -1630,6 +1633,24 @@ window.addEventListener("popstate", () => {
 
 /* add instance */
 $("add-instance-btn").onclick = openInstanceModal;
+$("update-instances-btn").onclick = () => {
+  confirmDialog("Update all instances?", "Every adopted instance will clone the latest master branch, rebuild blipd, replace its binary, and restart.", async () => {
+    const b = $("update-instances-btn");
+    b.disabled = true;
+    b.textContent = "Updating…";
+    try {
+      const r = await API("/api/instances/update", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ channel: savedReleaseChannel }) });
+      const d = await r.json();
+      const results = d.results || {};
+      const ids = Object.keys(results);
+      const started = ids.filter((id) => results[id] === "started").length;
+      const failed = ids.filter((id) => results[id] !== "started");
+      toast(`update started on ${started}/${ids.length} instance${ids.length === 1 ? "" : "s"}` + (failed.length ? ` · ${failed.map((id) => id + ": " + results[id]).join(", ")}` : ""), failed.length ? "err" : "ok");
+      refresh();
+    } catch (e) { toast("update failed: " + e.message, "err"); }
+    finally { b.disabled = false; b.textContent = "Update all"; }
+  });
+};
 $("i-save").onclick = saveInstance;
 $("inst-filter").addEventListener("input", renderInstances);
 
@@ -1783,6 +1804,28 @@ $("bl-clear").onclick = () => {
       toast("cleared blocklist"); loadBlocklist();
     } catch (e) { toast("clear failed", "err"); }
   });
+};
+
+function loadReleaseEditor() {
+  const sel = $("s-release-channel");
+  const badge = $("s-release-badge");
+  if (!sel) return;
+  sel.value = savedReleaseChannel;
+  if (badge) badge.textContent = savedReleaseChannel === "dev" ? "dev" : "stable";
+}
+
+$("s-save-release").onclick = async () => {
+  const channel = $("s-release-channel").value;
+  const st = $("s-release-status");
+  st.textContent = "saving…";
+  try {
+    const r = await API("/api/settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ release_channel: channel }) });
+    const d = await r.json();
+    savedReleaseChannel = d.release_channel === "dev" ? "dev" : "stable";
+    loadReleaseEditor();
+    st.textContent = "saved";
+    toast("release channel set to " + savedReleaseChannel);
+  } catch (e) { st.textContent = ""; toast("release channel save failed: " + e.message, "err"); }
 };
 
 /* policies modal */

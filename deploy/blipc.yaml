@@ -1,9 +1,8 @@
 listen: "0.0.0.0:8500"
 # Auth for the web UI / API. blipc uses username/password session auth: you log
 # in once via the web UI (or /api/login) and receive an HttpOnly + SameSite=Strict
-# cookie. Empty username/password = OPEN (no auth) — convenient for testing or
-# a trusted management VLAN. Set a username + one of the password options below
-# for production.
+# Empty credentials keep the controller CLOSED until the one-time setup flow
+# creates the administrator account. Do not deploy an open controller.
 username: "admin"
 # Password may be either a BCRYPT HASH (recommended — keeps the plaintext out of
 # the config file) or a plaintext password (hashed in-memory at startup).

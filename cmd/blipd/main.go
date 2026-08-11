@@ -19,6 +19,7 @@ import (
 	"github.com/twobip/BlipDNS/internal/dnsserver"
 	"github.com/twobip/BlipDNS/internal/filter"
 	"github.com/twobip/BlipDNS/internal/ha"
+	"github.com/twobip/BlipDNS/internal/update"
 )
 
 const version = "blipd/0.1.0"
@@ -151,6 +152,7 @@ func main() {
 		Version:           version,
 		Blocklist:         bl,
 		BlockAction:       blockAction,
+		TrustedProxies:    cfg.TrustedProxies,
 	})
 	if err != nil {
 		log.Fatalf("blipd: %v", err)
@@ -162,6 +164,7 @@ func main() {
 	// The HA manager owns only the local keepalived configuration and is
 	// reachable through the authenticated management API.
 	srv.ControlServer().SetHAController(ha.NewManagerWithState("", cfg.StateFile))
+	srv.ControlServer().SetUpdateController(update.NewManager())
 
 	// Admin / management API.
 	if cfg.AdminToken != "" || cfg.StateFile != "" {
@@ -174,7 +177,15 @@ func main() {
 			srv.ControlServer().SetBlocklistCache(cfg.BlocklistCacheFile)
 		}
 		go func() {
-			admin := &http.Server{Addr: cfg.AdminAddr, Handler: srv.ControlServer().Handler()}
+			admin := &http.Server{
+				Addr:              cfg.AdminAddr,
+				Handler:           srv.ControlServer().Handler(),
+				ReadHeaderTimeout: 10 * time.Second,
+				ReadTimeout:       30 * time.Second,
+				WriteTimeout:      30 * time.Second,
+				IdleTimeout:       60 * time.Second,
+				MaxHeaderBytes:    1 << 20,
+			}
 			log.Printf("blipd: management API on %s", cfg.AdminAddr)
 			if err := admin.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 				log.Printf("blipd: admin server: %v", err)

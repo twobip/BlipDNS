@@ -31,6 +31,7 @@ type Server struct {
 	configPath string
 	setupToken string
 	setupMu    sync.Mutex
+	sweepOnce  sync.Once
 }
 
 // NewServer builds the controller HTTP server. ui may be nil (API-only).
@@ -58,6 +59,15 @@ func NewSetupToken() (string, error) {
 // Handler returns the controller's HTTP handler (API + UI).
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	s.sweepOnce.Do(func() {
+		go func() {
+			t := time.NewTicker(10 * time.Minute)
+			defer t.Stop()
+			for range t.C {
+				s.auth.Sweep()
+			}
+		}()
+	})
 
 	// Login / setup / logout are unauthenticated. Setup is only accepted while
 	// the server remains unconfigured; Auth.Configure makes it one-time.
@@ -70,6 +80,7 @@ func (s *Server) Handler() http.Handler {
 		return s.requireAuth(h)
 	}
 	mux.HandleFunc("/api/instances", api(s.handleInstances))
+	mux.HandleFunc("/api/instances/update", api(s.handleInstanceUpdate))
 	mux.HandleFunc("/api/instances/", api(s.handleInstance))            // /add /delete /policies /policy /adopt /adopt/status /adopt/reset /label /query-log
 	mux.HandleFunc("/api/queries", api(s.handleQueries))                // query log
 	mux.HandleFunc("/api/upstream-errors", api(s.handleUpstreamErrors)) // upstream failure details
@@ -121,7 +132,10 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
 		w.Header().Set("Content-Security-Policy",
 			"default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; "+
-				"script-src 'self' https://unpkg.com; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'")
+				"script-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'")
+		if r.Body != nil && r.Method != http.MethodGet && r.Method != http.MethodHead {
+			r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
+		}
 		next.ServeHTTP(w, r)
 	})
 }
@@ -251,6 +265,14 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 func writeJSON(w http.ResponseWriter, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+func (s *Server) handleInstanceUpdate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	writeJSON(w, map[string]interface{}{"ok": true, "results": s.fleet.StartUpdates(r.Context())})
 }
 
 func (s *Server) handleInstances(w http.ResponseWriter, r *http.Request) {
@@ -393,20 +415,9 @@ func (s *Server) handleInstance(w http.ResponseWriter, r *http.Request) {
 		if cached != "" && cached != "0" && cached != "1" {
 			cached = ""
 		}
-		limit := 100
-		if l := r.URL.Query().Get("limit"); l != "" {
-			fmt.Sscanf(l, "%d", &limit)
-		}
-		offset := 0
-		if o := r.URL.Query().Get("offset"); o != "" {
-			fmt.Sscanf(o, "%d", &offset)
-		}
-		since := time.Now().Add(-24 * time.Hour)
-		if s := r.URL.Query().Get("since"); s != "" {
-			if d, err := time.ParseDuration(s); err == nil {
-				since = time.Now().Add(-d)
-			}
-		}
+		limit := boundedLimit(r, 100, 500)
+		offset := boundedOffset(r)
+		since := time.Now().Add(-boundedDuration(r, "since", 24*time.Hour, time.Minute, 30*24*time.Hour))
 		entries, err := s.fleet.queryLog.Query(ctx, instance, filter, action, cached, since, offset, limit)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
@@ -471,6 +482,7 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			"cache_regular":             cacheRegular,
 			"query_log_retention_hours": s.fleet.QueryLogRetentionHours(),
 			"records":                   s.fleet.Records(),
+			"release_channel":           s.fleet.ReleaseChannel(),
 		})
 	case http.MethodPut:
 		var req struct {
@@ -486,9 +498,18 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			QueryLogRetentionHours *int                       `json:"query_log_retention_hours"`
 			UpstreamServers        *[]upstream.UpstreamServer `json:"upstream_servers"`
 			UpstreamRoutes         *[]upstream.UpstreamRoute  `json:"upstream_routes"`
+			ReleaseChannel         *string                    `json:"release_channel"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if req.ReleaseChannel != nil {
+			if err := s.fleet.SetReleaseChannel(*req.ReleaseChannel); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			writeJSON(w, map[string]interface{}{"ok": true, "release_channel": s.fleet.ReleaseChannel()})
 			return
 		}
 		// Plain-HTTP DoH toggle (fleet-wide or per-instance), applied on its
@@ -752,20 +773,9 @@ func (s *Server) handleQueries(w http.ResponseWriter, r *http.Request) {
 	if cached != "" && cached != "0" && cached != "1" {
 		cached = ""
 	}
-	limit := 100
-	if l := r.URL.Query().Get("limit"); l != "" {
-		fmt.Sscanf(l, "%d", &limit)
-	}
-	offset := 0
-	if o := r.URL.Query().Get("offset"); o != "" {
-		fmt.Sscanf(o, "%d", &offset)
-	}
-	since := time.Now().Add(-24 * time.Hour)
-	if s := r.URL.Query().Get("since"); s != "" {
-		if d, err := time.ParseDuration(s); err == nil {
-			since = time.Now().Add(-d)
-		}
-	}
+	limit := boundedLimit(r, 100, 500)
+	offset := boundedOffset(r)
+	since := time.Now().Add(-boundedDuration(r, "since", 24*time.Hour, time.Minute, 30*24*time.Hour))
 	entries, err := s.fleet.queryLog.Query(r.Context(), instance, filter, action, cached, since, offset, limit)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
@@ -794,16 +804,8 @@ func (s *Server) handleClients(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	instance := r.URL.Query().Get("instance")
-	limit := 250
-	if l := r.URL.Query().Get("limit"); l != "" {
-		fmt.Sscanf(l, "%d", &limit)
-	}
-	since := time.Now().Add(-24 * time.Hour)
-	if s := r.URL.Query().Get("since"); s != "" {
-		if d, err := time.ParseDuration(s); err == nil {
-			since = time.Now().Add(-d)
-		}
-	}
+	limit := boundedLimit(r, 250, 500)
+	since := time.Now().Add(-boundedDuration(r, "since", 24*time.Hour, time.Minute, 30*24*time.Hour))
 	stats, err := s.fleet.queryLog.ClientStats(r.Context(), instance, since, limit)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
@@ -860,18 +862,8 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	instance := r.URL.Query().Get("instance")
-	bucketSize := 5 * time.Minute
-	if b := r.URL.Query().Get("bucket"); b != "" {
-		if d, err := time.ParseDuration(b); err == nil {
-			bucketSize = d
-		}
-	}
-	since := time.Now().Add(-24 * time.Hour)
-	if s := r.URL.Query().Get("since"); s != "" {
-		if d, err := time.ParseDuration(s); err == nil {
-			since = time.Now().Add(-d)
-		}
-	}
+	bucketSize := boundedDuration(r, "bucket", 5*time.Minute, time.Second, 24*time.Hour)
+	since := time.Now().Add(-boundedDuration(r, "since", 24*time.Hour, time.Minute, 30*24*time.Hour))
 	agg, err := s.fleet.queryLog.AggregateStats(r.Context(), instance, bucketSize, since)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
@@ -901,16 +893,8 @@ func (s *Server) handleTopDomains(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	instance := r.URL.Query().Get("instance")
-	limit := 10
-	if l := r.URL.Query().Get("limit"); l != "" {
-		fmt.Sscanf(l, "%d", &limit)
-	}
-	since := time.Now().Add(-24 * time.Hour)
-	if s := r.URL.Query().Get("since"); s != "" {
-		if d, err := time.ParseDuration(s); err == nil {
-			since = time.Now().Add(-d)
-		}
-	}
+	limit := boundedLimit(r, 10, 100)
+	since := time.Now().Add(-boundedDuration(r, "since", 24*time.Hour, time.Minute, 30*24*time.Hour))
 	domains, err := s.fleet.queryLog.TopDomains(r.Context(), instance, since, limit)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
@@ -932,18 +916,9 @@ func (s *Server) handleCacheStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	instance := r.URL.Query().Get("instance")
-	since := time.Now().Add(-24 * time.Hour)
-	if d, err := time.ParseDuration(r.URL.Query().Get("since")); err == nil {
-		since = time.Now().Add(-d)
-	}
-	topLimit := 50
-	if l := r.URL.Query().Get("limit"); l != "" {
-		fmt.Sscanf(l, "%d", &topLimit)
-	}
-	topOffset := 0
-	if o := r.URL.Query().Get("offset"); o != "" {
-		fmt.Sscanf(o, "%d", &topOffset)
-	}
+	since := time.Now().Add(-boundedDuration(r, "since", 24*time.Hour, time.Minute, 30*24*time.Hour))
+	topLimit := boundedLimit(r, 50, 200)
+	topOffset := boundedOffset(r)
 	perInstance, err := s.fleet.queryLog.CacheStats(r.Context(), instance, since)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
@@ -1009,16 +984,8 @@ func (s *Server) handleUpstreamErrors(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	instance := r.URL.Query().Get("instance")
-	limit := 100
-	if l := r.URL.Query().Get("limit"); l != "" {
-		fmt.Sscanf(l, "%d", &limit)
-	}
-	since := time.Now().Add(-24 * time.Hour)
-	if s := r.URL.Query().Get("since"); s != "" {
-		if d, err := time.ParseDuration(s); err == nil {
-			since = time.Now().Add(-d)
-		}
-	}
+	limit := boundedLimit(r, 100, 500)
+	since := time.Now().Add(-boundedDuration(r, "since", 24*time.Hour, time.Minute, 30*24*time.Hour))
 	stats, err := s.fleet.queryLog.UpstreamErrorStats(r.Context(), instance, since, limit)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
@@ -1105,6 +1072,9 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 			return
 		case e := <-ch:
 			fmt.Fprintf(w, "data: %s\n\n", mustJSON(e))
+			flusher.Flush()
+		case <-time.After(15 * time.Second):
+			fmt.Fprint(w, ": keepalive\n\n")
 			flusher.Flush()
 		}
 	}
@@ -1280,6 +1250,11 @@ func (s *Server) serveUI(w http.ResponseWriter, r *http.Request) {
 	// a session so browsers can load them as relative sub-resources.
 	if isUIAsset(r.URL.Path) {
 		name := strings.TrimPrefix(r.URL.Path, "/")
+		name = filepath.Clean(name)
+		if name == "." || strings.HasPrefix(name, ".."+string(filepath.Separator)) || name == ".." {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
 		b, err := fs.ReadFile(s.ui, name)
 		if err != nil {
 			http.Error(w, "not found", http.StatusNotFound)

@@ -253,6 +253,9 @@
           </div>
           <span class="muted" id="inst-count"></span>
           <span class="right"></span>
+          <button class="btn" id="update-instances-btn" title="Clone the latest repository, rebuild blipd, and restart every adopted instance">
+            Update all
+          </button>
           <button class="btn btn-primary" id="add-instance-btn">
             <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
             Add Instance
@@ -537,6 +540,24 @@
               <div class="row mt">
                 <button class="btn btn-primary" id="s-save-ql">Save</button>
                 <span class="hint" id="s-ql-status"></span>
+              </div>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-head"><h3>Release Channel</h3><span class="spacer"></span><span class="badge accent" id="s-release-badge">stable</span></div>
+            <div class="panel-body">
+              <div class="field">
+                <label>Channel used by “Update all”</label>
+                <select class="select" id="s-release-channel" style="max-width:340px">
+                  <option value="stable">Stable (master)</option>
+                  <option value="dev">Development (dev)</option>
+                </select>
+                <span class="hint">Stable follows master. Development follows dev. Only these two branches are allowed.</span>
+              </div>
+              <div class="row mt">
+                <button class="btn btn-primary" id="s-save-release">Save</button>
+                <span class="hint" id="s-release-status"></span>
               </div>
             </div>
           </div>

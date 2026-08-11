@@ -28,20 +28,20 @@ mkdir -p "$CFG_DIR"
 if [[ -f "$CFG_DST" ]]; then
   echo "   (existing config preserved — not overwriting; edit $CFG_DST to change)"
 else
-  # Default config ships with token: "" (OPEN, no auth) for convenient
-  # testing on a trusted management VLAN. To require a token on a fresh
-  # install, run with BLIPC_SETUP_TOKEN=1 (a random token is generated).
+  # Fresh installs remain closed until the one-time web setup creates
+  # credentials. BLIPC_SETUP_TOKEN=1 is retained for operators who want the
+  # bootstrap URL/token printed explicitly.
   if [[ "${BLIPC_SETUP_TOKEN:-0}" == "1" ]]; then
     TOKEN="$(openssl rand -hex 16)"
     sed "s/__BLIPC_TOKEN__/$TOKEN/" "$TPL" > "$CFG_DST"
-    chmod 0640 "$CFG_DST"
+    chmod 0600 "$CFG_DST"
     chown root:"$SVC_USER" "$CFG_DST"
-    echo "   web UI token: $TOKEN   (open http://<host>:8500/?token=$TOKEN)"
+    echo "   setup token: $TOKEN   (open http://<host>:8500/setup#token=$TOKEN)"
   else
     sed 's/token: "__BLIPC_TOKEN__"/token: ""/' "$TPL" > "$CFG_DST"
-    chmod 0640 "$CFG_DST"
+    chmod 0600 "$CFG_DST"
     chown root:"$SVC_USER" "$CFG_DST"
-    echo "   auth: OPEN (no token). Set 'token:' in $CFG_DST to enable."
+    echo "   auth: CLOSED until first-run setup at http://<host>:8500/setup"
   fi
 fi
 
@@ -55,7 +55,7 @@ systemctl status --no-pager blipc
 echo
 echo "BlipDNS Controller is running. Open the web UI:"
 if [[ "${BLIPC_SETUP_TOKEN:-0}" == "1" ]]; then
-  echo "  http://localhost:8500/?token=$TOKEN"
+  echo "  http://localhost:8500/setup#token=$TOKEN"
 else
-  echo "  http://localhost:8500/   (auth: OPEN)"
+  echo "  http://localhost:8500/setup   (create the administrator account)"
 fi

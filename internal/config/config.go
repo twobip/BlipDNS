@@ -22,8 +22,9 @@ type Config struct {
 	TLSDir               string                    `yaml:"tls_dir"`       // where a generated self-signed DoH cert/key are persisted
 	AdminAddr            string                    `yaml:"admin_addr"`
 	AdminToken           string                    `yaml:"admin_token"`
-	StateFile            string                    `yaml:"state_file"`  // persists "adopted" so the claim code isn't regenerated
-	InstanceID           string                    `yaml:"instance_id"` // stable id shown to the controller
+	TrustedProxies       []string                  `yaml:"trusted_proxies"` // CIDRs/IPs allowed to supply X-Forwarded-For to DoH
+	StateFile            string                    `yaml:"state_file"`      // persists "adopted" so the claim code isn't regenerated
+	InstanceID           string                    `yaml:"instance_id"`     // stable id shown to the controller
 	Upstream             string                    `yaml:"upstream"`
 	UpstreamServers      []upstream.UpstreamServer `yaml:"upstream_servers"`       // named upstream pool (priority 0 = route-only)
 	UpstreamRoutes       []upstream.UpstreamRoute  `yaml:"upstream_routes"`        // conditional forwarding (qname/client -> server)

@@ -2,6 +2,7 @@ package control
 
 import (
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
@@ -64,9 +65,10 @@ type Server struct {
 	// cacheCtrl tunes the response cache at runtime.
 	cacheCtrl CacheController
 	// recCtrl drives the local DNS records at runtime.
-	recCtrl RecordController
-	upCtrl  LocalResolverController
-	haCtrl  HAController
+	recCtrl    RecordController
+	upCtrl     LocalResolverController
+	haCtrl     HAController
+	updateCtrl UpdateController
 }
 
 // DoHController is the piece of the DNS server the management API can reconfigure
@@ -186,6 +188,20 @@ func (s *Server) SetHAController(c HAController) {
 func (s *Server) haController() HAController {
 	s.mu.RLock()
 	c := s.haCtrl
+	s.mu.RUnlock()
+	return c
+}
+
+// SetUpdateController wires the local updater into the management API.
+func (s *Server) SetUpdateController(c UpdateController) {
+	s.mu.Lock()
+	s.updateCtrl = c
+	s.mu.Unlock()
+}
+
+func (s *Server) updateController() UpdateController {
+	s.mu.RLock()
+	c := s.updateCtrl
 	s.mu.RUnlock()
 	return c
 }
@@ -325,6 +341,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/ha/validate", s.auth(s.handleHAValidate))
 	mux.HandleFunc("/api/v1/ha/apply", s.auth(s.handleHAApply))
 	mux.HandleFunc("/api/v1/ha/disable", s.auth(s.handleHADisable))
+	mux.HandleFunc("/api/v1/update", s.auth(s.handleUpdate))
 	mux.HandleFunc("/api/v1/watch", s.auth(s.handleWatch))
 	// unauthenticated adoption handshake
 	mux.HandleFunc("/api/v1/adopt/status", s.handleAdoptStatus)
@@ -345,6 +362,9 @@ func (s *Server) withSecurityHeaders(next http.Handler) http.Handler {
 		// Defense-in-depth: these are JSON/text API responses (never HTML), so a
 		// restrictive CSP makes any future HTML-rendering mistake inert.
 		h.Set("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'")
+		if r.Body != nil && r.Method != http.MethodGet && r.Method != http.MethodHead && r.URL.Path != "/api/v1/blocklist" {
+			r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
+		}
 		next.ServeHTTP(w, r)
 	})
 }
@@ -359,7 +379,7 @@ func (s *Server) auth(h http.HandlerFunc) http.HandlerFunc {
 		if len(tok) > 7 && tok[:7] == "Bearer " {
 			tok = tok[7:]
 		}
-		if tok != s.token {
+		if len(tok) != len(s.token) || subtle.ConstantTimeCompare([]byte(tok), []byte(s.token)) != 1 {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -760,6 +780,31 @@ func (s *Server) handleHADisable(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, AckResponse{OK: true, Msg: "high availability disabled"})
 }
 
+func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
+	ctrl := s.updateController()
+	if ctrl == nil {
+		http.Error(w, "remote update is not available", http.StatusServiceUnavailable)
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, ctrl.UpdateStatus())
+	case http.MethodPost:
+		channel := r.URL.Query().Get("channel")
+		if !ValidUpdateChannel(channel) {
+			http.Error(w, "channel must be stable or dev", http.StatusBadRequest)
+			return
+		}
+		if err := ctrl.StartUpdate(channel); err != nil {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
+		writeJSON(w, AckResponse{OK: true, Msg: "update started"})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
 func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -836,7 +881,7 @@ func (s *Server) authenticated(r *http.Request) bool {
 	if len(tok) > 7 && tok[:7] == "Bearer " {
 		tok = tok[7:]
 	}
-	return tok != "" && tok == s.token
+	return tok != "" && len(tok) == len(s.token) && subtle.ConstantTimeCompare([]byte(tok), []byte(s.token)) == 1
 }
 
 func (s *Server) handleAdopt(w http.ResponseWriter, r *http.Request) {
@@ -930,9 +975,7 @@ func genClaimCode() string {
 	const alpha = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {
-		for i := range b {
-			b[i] = alpha[(int(time.Now().UnixNano())+i)%len(alpha)]
-		}
+		panic(fmt.Sprintf("secure claim-code generation failed: %v", err))
 	}
 	for i := range b {
 		b[i] = alpha[int(b[i])%len(alpha)]
@@ -944,7 +987,7 @@ func genClaimCode() string {
 func genToken() string {
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
-		return fmt.Sprintf("%x", time.Now().UnixNano())
+		panic(fmt.Sprintf("secure token generation failed: %v", err))
 	}
 	return fmt.Sprintf("%x", b)
 }

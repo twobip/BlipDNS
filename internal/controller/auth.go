@@ -54,6 +54,25 @@ type Auth struct {
 	fl   map[string]*loginFails // client IP -> failure state
 }
 
+// Sweep removes expired sessions and stale login-failure records.
+func (a *Auth) Sweep() {
+	now := time.Now()
+	a.mu.Lock()
+	for id, expiry := range a.sessions {
+		if now.After(expiry) {
+			delete(a.sessions, id)
+		}
+	}
+	a.mu.Unlock()
+	a.flMu.Lock()
+	for ip, f := range a.fl {
+		if now.After(f.windowStart.Add(loginLockWindow)) {
+			delete(a.fl, ip)
+		}
+	}
+	a.flMu.Unlock()
+}
+
 // NewAuth builds an Auth from a username + password. The password may be either
 // plaintext (it is bcrypt-hashed at startup) or a pre-computed bcrypt hash
 // (string starting with "$2"), which lets operators keep a plaintext password

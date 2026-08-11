@@ -281,6 +281,12 @@ go build -o "$TMPDIR/blipd" ./cmd/blipd
 # --- install binary ----------------------------------------------------------
 log "installing binary to $BIN_DIR"
 install -m 0755 "$TMPDIR/blipd" "$BIN_DIR/blipd"
+install -m 0755 "$TMPDIR/src/scripts/blipd-update.sh" /usr/local/sbin/blipd-update
+cat > /etc/sudoers.d/blipd-update <<'EOF'
+blip ALL=(root) NOPASSWD: /usr/local/sbin/blipd-update
+EOF
+chmod 0440 /etc/sudoers.d/blipd-update
+visudo -cf /etc/sudoers.d/blipd-update
 
 # --- config / state dirs -----------------------------------------------------
 log "creating config and state directories"

@@ -41,6 +41,7 @@ type config struct {
 	Instances              []controller.InstanceConfig             `yaml:"instances"`
 	Records                []control.RecordEntry                   `yaml:"records"`
 	HACluster              control.HACluster                       `yaml:"high_availability"`
+	ReleaseChannel         string                                  `yaml:"release_channel"`
 }
 
 func main() {
@@ -86,6 +87,11 @@ func main() {
 	if cfg.HACluster.Enabled {
 		if err := fleet.SetHAClusterDefault(cfg.HACluster); err != nil {
 			log.Printf("blipc: high availability config: %v", err)
+		}
+	}
+	if cfg.ReleaseChannel != "" {
+		if err := fleet.SetReleaseChannelDefault(cfg.ReleaseChannel); err != nil {
+			log.Printf("blipc: release channel: %v", err)
 		}
 	}
 	if len(cfg.UpstreamServers) > 0 || len(cfg.UpstreamRoutes) > 0 {
@@ -136,8 +142,13 @@ func main() {
 	}
 	srv := controller.NewServerWithConfig(cfg.Username, authPass, fleet, controller.UI(), *cfgPath, setupToken)
 	httpSrv := &http.Server{
-		Addr:    cfg.Listen,
-		Handler: srv.Handler(),
+		Addr:              cfg.Listen,
+		Handler:           srv.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    1 << 20,
 	}
 	log.Printf("blipc %s listening on %s (%d instances)", version, cfg.Listen, len(cfg.Instances))
 	go func() {

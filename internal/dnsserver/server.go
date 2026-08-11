@@ -53,6 +53,7 @@ type Config struct {
 	Version           string
 	Blocklist         *blocklist.Blocklist // global blocklist applied before per-client policy
 	BlockAction       filter.BlockAction   // response for global-blocklist hits ("" = nxdomain)
+	TrustedProxies    []string             // CIDRs/IPs trusted for X-Forwarded-For
 }
 
 // Server is the DNS + DoH resolver.
@@ -82,10 +83,11 @@ type Server struct {
 	rec *RecordStore
 	// cacheMu guards the runtime cache configuration; both fields are seeded
 	// from cfg and can be overridden live by the controller (settings page).
-	cacheMu      sync.RWMutex
-	cacheSize    int           // max cached responses (0 = unlimited)
-	cacheWarm    int           // most-popular entries auto-refreshed before expiry (0 = off)
-	cacheRegular time.Duration // how long non-most-popular entries stay cached (0 = use record TTL)
+	cacheMu        sync.RWMutex
+	cacheSize      int           // max cached responses (0 = unlimited)
+	cacheWarm      int           // most-popular entries auto-refreshed before expiry (0 = off)
+	cacheRegular   time.Duration // how long non-most-popular entries stay cached (0 = use record TTL)
+	trustedProxies []*net.IPNet
 }
 
 // New builds a Server. If cfg.Store is nil a permissive default is used.
@@ -97,21 +99,26 @@ func New(cfg Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	trusted, err := parseTrustedProxies(cfg.TrustedProxies)
+	if err != nil {
+		return nil, err
+	}
 	c := cache.New(cfg.CacheCap, cfg.CacheSize)
 	cnt := &control.Counters{}
 	ctrl := control.NewServerWithBlocklist("", cfg.Store, c, cnt, cfg.Version, cfg.Blocklist)
 	s := &Server{
-		cfg:          cfg,
-		cache:        c,
-		pool:         up,
-		ctrl:         ctrl,
-		cnt:          cnt,
-		rl:           newRateLimiter(),
-		rec:          NewRecordStore(),
-		cacheSize:    cfg.CacheSize,
-		cacheWarm:    cfg.CacheWarmCount,
-		cacheRegular: cfg.CacheRegular,
-		close:        make(chan struct{}),
+		cfg:            cfg,
+		cache:          c,
+		pool:           up,
+		ctrl:           ctrl,
+		cnt:            cnt,
+		rl:             newRateLimiter(),
+		rec:            NewRecordStore(),
+		cacheSize:      cfg.CacheSize,
+		cacheWarm:      cfg.CacheWarmCount,
+		cacheRegular:   cfg.CacheRegular,
+		trustedProxies: trusted,
+		close:          make(chan struct{}),
 	}
 	c.SetHold(cfg.CacheWarmCount, cfg.CacheRegular)
 	// Let the management API toggle the optional plain-HTTP DoH listener, the
@@ -212,7 +219,7 @@ func (s *Server) handleDoH(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	clientIP := clientIPFromReq(r)
+	clientIP := clientIPFromReq(r, s.trustedProxies)
 	clientID := clientIDFromPath(r.URL.Path)
 	resp := s.serve(ctx, clientIP, clientID, req)
 	buf, err := resp.Pack()
@@ -541,7 +548,7 @@ func (s *Server) cacheWarmCount() int {
 func (s *Server) Start() error {
 	s.startWarmLoop()
 	dh := s.Handler()
-	s.doch = &http.Server{Addr: s.cfg.DoHAddr, Handler: dh, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second}
+	s.doch = &http.Server{Addr: s.cfg.DoHAddr, Handler: dh, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 1 << 20}
 
 	udpH := dns.NewServeMux()
 	udpH.Handle(".", s)
@@ -605,7 +612,7 @@ func (s *Server) SetDoHHTTPAddr(addr string) error {
 	if err != nil {
 		return fmt.Errorf("doh http listen %s: %w", addr, err)
 	}
-	srv := &http.Server{Addr: addr, Handler: s.Handler(), ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second}
+	srv := &http.Server{Addr: addr, Handler: s.Handler(), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 1 << 20}
 	s.dohPlain = srv
 	s.dohPlainAddr = addr
 	go func() {
