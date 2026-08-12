@@ -294,10 +294,15 @@ blip ALL=(root) NOPASSWD: /usr/local/sbin/blipd-update
 EOF
 chmod 0440 /etc/sudoers.d/blipd-update
 visudo -cf /etc/sudoers.d/blipd-update
+cat > /etc/sudoers.d/blipd-restart <<'EOF'
+blip ALL=(root) NOPASSWD: /usr/bin/systemctl restart blipd.service
+EOF
+chmod 0440 /etc/sudoers.d/blipd-restart
+visudo -cf /etc/sudoers.d/blipd-restart
 
 # --- config / state dirs -----------------------------------------------------
 log "creating config and state directories"
-mkdir -p "$CONFIG_DIR" "$STATE_DIR"
+mkdir -p "$CONFIG_DIR" "$STATE_DIR" /etc/keepalived
 chmod 700 "$CONFIG_DIR" "$STATE_DIR"
 
 # Create a default config if none exists.
@@ -354,15 +359,15 @@ Type=simple
 ExecStart=$BIN_DIR/blipd -config $CONFIG_DIR/blipd.yaml
 Restart=on-failure
 RestartSec=5
-# blipd binds to port 53 / 443 — root is required unless you use AmbientCapabilities:
-#   AmbientCapabilities=CAP_NET_BIND_SERVICE
+# blipd binds to port 53 / 443 — run unprivileged with AmbientCapabilities:
 #   User=blip
 #   Group=blip
-ReadWritePaths=$STATE_DIR $CONFIG_DIR
+#   AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_RAW
+# NoNewPrivileges and a restricted CapabilityBoundingSet must stay OFF: the
+# service elevates to the pinned /usr/local/sbin/blipd-update helper via sudo.
+ReadWritePaths=$STATE_DIR $CONFIG_DIR /var/cache/blipd-update /usr/local/bin /etc/keepalived
 StateDirectory=blipd
 ProtectSystem=strict
-NoNewPrivileges=true
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_RAW
 AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_RAW
 
 [Install]

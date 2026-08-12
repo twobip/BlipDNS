@@ -229,6 +229,11 @@ func (c *Client) DisableHA(ctx context.Context) error {
 	return c.do(ctx, http.MethodPost, "/api/v1/ha/disable", nil, nil)
 }
 
+// Restart asks the node to restart its blipd service (root helper via sudo).
+func (c *Client) Restart(ctx context.Context) error {
+	return c.do(ctx, http.MethodPost, "/api/v1/restart", nil, nil)
+}
+
 // StartUpdate starts the managed node's asynchronous self-update.
 func (c *Client) StartUpdate(ctx context.Context, channel string) error {
 	return c.do(ctx, http.MethodPost, "/api/v1/update?channel="+url.QueryEscape(channel), nil, nil)

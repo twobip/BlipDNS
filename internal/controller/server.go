@@ -82,6 +82,7 @@ func (s *Server) Handler() http.Handler {
 	}
 	mux.HandleFunc("/api/instances", api(s.handleInstances))
 	mux.HandleFunc("/api/instances/update", api(s.handleInstanceUpdate))
+	mux.HandleFunc("/api/instances/restart", api(s.handleInstanceRestart))
 	mux.HandleFunc("/api/instances/", api(s.handleInstance))            // /add /delete /policies /policy /adopt /adopt/status /adopt/reset /label /query-log
 	mux.HandleFunc("/api/queries", api(s.handleQueries))                // query log
 	mux.HandleFunc("/api/upstream-errors", api(s.handleUpstreamErrors)) // upstream failure details
@@ -332,6 +333,30 @@ func (s *Server) handleInstances(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+// handleInstanceRestart asks one adopted node to restart its blipd service.
+func (s *Server) handleInstanceRestart(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.ID == "" {
+		http.Error(w, "id required", http.StatusBadRequest)
+		return
+	}
+	if err := s.fleet.RestartInstance(req.ID); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true, "msg": "restarting " + req.ID})
 }
 
 // handleInstance serves /api/instances/<id>[/policies|/policy].

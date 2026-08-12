@@ -1,5 +1,6 @@
 /* High Availability / LAN VRRP view. */
 let haData = { cluster: {}, statuses: {} };
+let haAutoIPBound = false;
 
 async function loadHighAvailability() {
   try {
@@ -14,6 +15,13 @@ async function loadHighAvailability() {
 
 function haInstanceOptions(selected) {
   return instances.map((i) => `<option value="${esc(i.id)}" ${i.id === selected ? "selected" : ""}>${esc(i.label || i.id)}</option>`).join("");
+}
+
+/* Best-effort node IP: parse the host out of the instance management URL. */
+function haNodeIP(instId) {
+  const inst = instances.find((i) => i.id === instId);
+  if (!inst || !inst.url) return "";
+  try { return new URL(inst.url).hostname; } catch (e) { return ""; }
 }
 
 function renderHighAvailability() {
@@ -44,6 +52,15 @@ function renderHighAvailability() {
   const psel = $("ha-primary"), ssel = $("ha-secondary");
   if (psel) psel.innerHTML = `<option value="">Select primary…</option>${haInstanceOptions(c.primary_instance)}`;
   if (ssel) ssel.innerHTML = `<option value="">Select secondary…</option>${haInstanceOptions(c.secondary_instance)}`;
+  /* Auto-fill the node IP when an instance is picked; fill blank fields on load. */
+  if (!haAutoIPBound) {
+    haAutoIPBound = true;
+    if (psel) psel.addEventListener("change", () => { const ip = $("ha-primary-ip"); if (ip) ip.value = haNodeIP(psel.value); });
+    if (ssel) ssel.addEventListener("change", () => { const ip = $("ha-secondary-ip"); if (ip) ip.value = haNodeIP(ssel.value); });
+  }
+  const pip = $("ha-primary-ip"), sip = $("ha-secondary-ip");
+  if (pip && !pip.value && psel && psel.value) pip.value = haNodeIP(psel.value);
+  if (sip && !sip.value && ssel && ssel.value) sip.value = haNodeIP(ssel.value);
   const rows = $("ha-node-status");
   if (rows) rows.innerHTML = instances.map((i) => {
     const st = statuses[i.id] || {};

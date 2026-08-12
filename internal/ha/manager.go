@@ -16,7 +16,11 @@ import (
 )
 
 const (
-	defaultConfigPath = "/etc/keepalived/keepalived.conf"
+	// Keepalived reads the config via a one-time symlink:
+	//   ln -s /var/lib/blipd/keepalived.conf /etc/keepalived/keepalived.conf
+	// This keeps the API writing only inside blipd's own state dir, which the
+	// service user can always write regardless of ProtectSystem settings.
+	defaultConfigPath = "/var/lib/blipd/keepalived.conf"
 	defaultStatePath  = "/var/lib/blipd/ha.json"
 )
 

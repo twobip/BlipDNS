@@ -1489,6 +1489,18 @@ func (f *Fleet) get(id string) *Instance {
 	return f.instances[id]
 }
 
+// RestartInstance asks one adopted node to restart its blipd service.
+func (f *Fleet) RestartInstance(id string) error {
+	inst := f.get(id)
+	if inst == nil {
+		return fmt.Errorf("instance %q not found", id)
+	}
+	if err := inst.ctl().Restart(context.Background()); err != nil {
+		return fmt.Errorf("restart %s: %w", id, err)
+	}
+	return nil
+}
+
 // SetPolicy pushes a policy to a managed instance via the controller client.
 func (f *Fleet) SetPolicy(ctx context.Context, id string, p *control.Policy) error {
 	inst := f.get(id)

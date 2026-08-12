@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -342,6 +343,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/ha/apply", s.auth(s.handleHAApply))
 	mux.HandleFunc("/api/v1/ha/disable", s.auth(s.handleHADisable))
 	mux.HandleFunc("/api/v1/update", s.auth(s.handleUpdate))
+	mux.HandleFunc("/api/v1/restart", s.auth(s.handleRestart))
 	mux.HandleFunc("/api/v1/watch", s.auth(s.handleWatch))
 	// unauthenticated adoption handshake
 	mux.HandleFunc("/api/v1/adopt/status", s.handleAdoptStatus)
@@ -803,6 +805,21 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+// handleRestart restarts this node's blipd service. The response is written
+// first: systemd continues the restart job even when this process is killed
+// mid-flight by its own cgroup teardown (same pattern as the updater's final
+// restart).
+func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	writeJSON(w, AckResponse{OK: true, Msg: "restarting blipd"})
+	go func() {
+		_ = exec.Command("sudo", "-n", "/usr/bin/systemctl", "restart", "blipd.service").Run()
+	}()
 }
 
 func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request) {
