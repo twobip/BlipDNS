@@ -305,6 +305,21 @@ body.sidebar-collapsed .main { margin-left: 60px; }
 .stat-sub .up { color: var(--green); } .stat-sub .down { color: var(--red); }
 
 /* ============================================================
+   SETTINGS TABS
+   ============================================================ */
+.settings-tabs { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 14px; padding-bottom: 10px; border-bottom: 1px solid var(--border); }
+.settings-tab {
+  background: transparent; border: 1px solid transparent; color: var(--text-2);
+  padding: 7px 15px; border-radius: var(--radius-sm); font-size: 13px; cursor: pointer;
+  transition: background .15s, color .15s;
+}
+.settings-tab:hover { background: var(--surface); color: var(--text); }
+.settings-tab.active {
+  background: linear-gradient(90deg, rgba(79,140,255,.12), rgba(79,140,255,.03));
+  color: #fff; border-color: var(--border);
+}
+
+/* ============================================================
    TABLE
    ============================================================ */
 .table-wrap { overflow-x: auto; border-radius: var(--radius); border: 1px solid var(--border); background: var(--surface); box-shadow: var(--shadow-1); }

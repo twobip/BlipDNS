@@ -508,21 +508,12 @@
 
       <!-- ================= SETTINGS ================= -->
       <section id="view-settings" class="view hidden">
+        <div class="settings-tabs" id="settings-tabs">
+          <button class="settings-tab active" data-settings-tab="ql">Query Log</button>
+          <button class="settings-tab" data-settings-tab="dns">DNS</button>
+          <button class="settings-tab" data-settings-tab="about">About</button>
+        </div>
         <div class="grid grid-2">
-          <div class="panel">
-            <div class="panel-head"><h3>Blocklist Sync</h3><span class="spacer"></span><span class="badge" id="s-blsync">—</span></div>
-            <div class="panel-body">
-              <div class="field">
-                <label>Sources</label>
-                <div id="s-bl-sources"></div>
-                <span class="hint">Edit sources on the <a href="/blocklist">Blocklists</a> page.</span>
-                <div class="row mt">
-                  <button class="btn" id="s-fetch">Fetch now</button>
-                </div>
-              </div>
-            </div>
-          </div>
-
           <div class="panel">
             <div class="panel-head"><h3>Query Log</h3></div>
             <div class="panel-body">
@@ -663,7 +654,6 @@
               <div style="display:flex; flex-direction:column; gap:8px; align-items:flex-start">
                 <button class="btn" id="s-reset-stats">Reset statistics</button>
                 <button class="btn" id="s-clear-querylog">Clear query logs</button>
-                <button class="btn btn-danger" id="s-reset-demo" disabled>Manage via Instances page</button>
               </div>
             </div>
           </div>

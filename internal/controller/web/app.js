@@ -1837,6 +1837,31 @@ function loadReleaseEditor() {
   loadControllerUpdate();
 }
 
+/* ---------- settings tabs (Query Log / DNS / About) ---------- */
+(function () {
+  const paneOf = {
+    "Query Log": "ql", "Reset & destroy": "ql",
+    "DoH (DNS over HTTPS)": "dns", "Rate Limit": "dns", "Cache": "dns",
+    "Release Channel": "about", "Controller Update": "about", "About": "about"
+  };
+  const tabs = Array.from(document.querySelectorAll("#settings-tabs .settings-tab"));
+  const panels = Array.from(document.querySelectorAll("#view-settings .panel"));
+  panels.forEach((p) => {
+    const h = p.querySelector("h3");
+    if (h) p.dataset.pane = paneOf[h.textContent.trim()] || "dns";
+  });
+  function apply() {
+    const active = document.querySelector("#settings-tabs .settings-tab.active");
+    const cur = (active && active.dataset.settingsTab) || "ql";
+    panels.forEach((p) => { p.style.display = p.dataset.pane === cur ? "" : "none"; });
+  }
+  tabs.forEach((b) => b.addEventListener("click", () => {
+    tabs.forEach((x) => x.classList.toggle("active", x === b));
+    apply();
+  }));
+  apply();
+})();
+
 let ctrlUpdateTimer = null;
 async function loadControllerUpdate() {
   if (ctrlUpdateTimer) clearTimeout(ctrlUpdateTimer);
@@ -2144,7 +2169,7 @@ $("s-save-doh").onclick = async () => {
     loadDoHEditor();
   } catch (e) { st.textContent = ""; toast("save failed: " + e.message, "err"); }
 };
-$("s-fetch").onclick = async () => {
+if ($("s-fetch")) $("s-fetch").onclick = async () => {
   const urls = blSources.filter((u) => u.trim());
   if (!urls.length) return toast("no blocklist sources configured", "err");
   try { await API("/api/blocklist/sources", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ urls }) }); toast("fetching blocklist sources"); startBlStatusPoll(); }
