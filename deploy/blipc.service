@@ -14,13 +14,15 @@ Restart=on-failure
 RestartSec=3
 
 AmbientCapabilities=CAP_NET_BIND_SERVICE
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE
-NoNewPrivileges=true
+# No CapabilityBoundingSet restriction: the blipc user elevates to the pinned
+# /usr/local/sbin/blipc-update helper via sudo (narrow sudoers rule), which
+# needs CAP_SETGID/CAP_SETUID available.
+# NoNewPrivileges must stay OFF for the same reason.
 UMask=0077
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
-ReadWritePaths=/etc/blipc /var/lib/blipc
+ReadWritePaths=/etc/blipc /var/lib/blipc /var/cache/blipc-update /usr/local/bin
 LimitNOFILE=65536
 
 StandardOutput=journal

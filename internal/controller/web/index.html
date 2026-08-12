@@ -637,6 +637,17 @@
         </div>
 
           <div class="panel">
+            <div class="panel-head"><h3>Controller Update</h3><span class="spacer"></span><span class="badge" id="s-ctrl-up-badge">—</span></div>
+            <div class="panel-body">
+              <div class="row" style="gap:8px; align-items:center">
+                <button class="btn" id="s-update-ctrl" title="Clone the configured release channel, rebuild blipc, and restart the controller">Update controller</button>
+                <span class="hint" id="s-ctrl-up-status"></span>
+              </div>
+              <span class="hint">Updates the controller itself from the release channel selected above. The dashboard is briefly unavailable while it restarts.</span>
+            </div>
+          </div>
+
+          <div class="panel">
             <div class="panel-head"><h3>About</h3></div>
             <div class="panel-body">
               <div class="row"><span class="muted" style="width:120px">Controller</span><span class="mono" id="s-ctrl-ver">—</span></div>

@@ -1562,7 +1562,7 @@ function loadScopeEditor() {
 }
 
 async function refreshSettings() {
-  $("s-ctrl-ver").textContent = "blipc";
+  loadControllerUpdate();
   $("s-inst-count").textContent = instances.length + (instances.some((i) => i.online) ? " (" + instances.filter((i) => i.online).length + " online)" : "");
   // The fleet config lives on blipc (default policy + sparse per-instance
   // overrides) and is distributed to the instances.
@@ -1834,7 +1834,60 @@ function loadReleaseEditor() {
   if (!sel) return;
   sel.value = savedReleaseChannel;
   if (badge) badge.textContent = savedReleaseChannel === "dev" ? "dev" : "stable";
+  loadControllerUpdate();
 }
+
+let ctrlUpdateTimer = null;
+async function loadControllerUpdate() {
+  if (ctrlUpdateTimer) clearTimeout(ctrlUpdateTimer);
+  const badge = $("s-ctrl-up-badge");
+  const status = $("s-ctrl-up-status");
+  const btn = $("s-update-ctrl");
+  try {
+    const r = await API("/api/update");
+    const d = await r.json();
+    const st = d.status || {};
+    const v = (d.version || "");
+    if (st.running) {
+      badge.textContent = "updating";
+      badge.className = "badge warn";
+      btn.disabled = true;
+      status.textContent = st.message || "building…";
+      ctrlUpdateTimer = setTimeout(loadControllerUpdate, 3000);
+      return;
+    }
+    if (st.last_error) {
+      badge.textContent = "update failed";
+      badge.className = "badge err";
+      status.textContent = st.last_error;
+    } else {
+      const sha = (v.match(/\+([0-9a-f]{7,})/) || [])[1];
+      badge.textContent = sha ? "up to date" : "unknown build";
+      badge.className = "badge on";
+      status.textContent = "";
+      $("s-ctrl-ver").textContent = sha ? v : "blipc";
+    }
+    btn.disabled = false;
+  } catch (e) {
+    ctrlUpdateTimer = setTimeout(loadControllerUpdate, 5000);
+  }
+}
+
+$("s-update-ctrl").onclick = async () => {
+  const btn = $("s-update-ctrl");
+  const status = $("s-ctrl-up-status");
+  btn.disabled = true;
+  status.textContent = "starting…";
+  try {
+    await API("/api/update?channel=" + encodeURIComponent(savedReleaseChannel), { method: "POST" });
+    status.textContent = "";
+    loadControllerUpdate();
+  } catch (e) {
+    status.textContent = e.message;
+    btn.disabled = false;
+  }
+};
+
 
 $("s-save-release").onclick = async () => {
   const channel = $("s-release-channel").value;

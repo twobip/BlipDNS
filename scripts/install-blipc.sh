@@ -263,6 +263,13 @@ fi
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
 
+# /root may be read-only (containers/LXC); keep Go caches somewhere writable.
+CACHE_DIR="/var/cache/blipc-update"
+mkdir -p "$CACHE_DIR/gomod" "$CACHE_DIR/gocache" "$CACHE_DIR/gopath"
+export GOMODCACHE="$CACHE_DIR/gomod"
+export GOCACHE="$CACHE_DIR/gocache"
+export GOPATH="$CACHE_DIR/gopath"
+
 log "cloning $REPO @ $RELEASE"
 git clone --depth 1 --branch "$(echo "$RELEASE" | sed 's#refs/heads/##')" \
   "https://${REPO}.git" "$TMPDIR/src" 2>/dev/null || \
@@ -270,13 +277,20 @@ git clone --depth 1 --branch "$(echo "$RELEASE" | sed 's#refs/heads/##')" \
 
 cd "$TMPDIR/src"
 log "building blipc and blipctl"
-go build -o "$TMPDIR/blipc" ./cmd/blipc
+go build -ldflags "-X main.buildSHA=$(git -C "$TMPDIR/src" rev-parse HEAD)" -o "$TMPDIR/blipc" ./cmd/blipc
 go build -o "$TMPDIR/blipctl" ./cmd/blipctl
 
 # --- install binaries --------------------------------------------------------
 log "installing binaries to $BIN_DIR"
 install -m 0755 "$TMPDIR/blipc"   "$BIN_DIR/blipc"
 install -m 0755 "$TMPDIR/blipctl" "$BIN_DIR/blipctl"
+
+log "installing controller updater"
+install -m 0755 "$TMPDIR/src/scripts/blipc-update.sh" /usr/local/sbin/blipc-update
+cat > /etc/sudoers.d/blipc-update <<'EOF'
+blipc ALL=(root) NOPASSWD: /usr/local/sbin/blipc-update
+EOF
+chmod 0440 /etc/sudoers.d/blipc-update
 
 # --- config / state dirs -----------------------------------------------------
 log "creating config and state directories"

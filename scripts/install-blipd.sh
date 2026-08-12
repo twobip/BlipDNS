@@ -269,6 +269,13 @@ fi
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
 
+# /root may be read-only (containers/LXC); keep Go caches somewhere writable.
+CACHE_DIR="/var/cache/blipd-update"
+mkdir -p "$CACHE_DIR/gomod" "$CACHE_DIR/gocache" "$CACHE_DIR/gopath"
+export GOMODCACHE="$CACHE_DIR/gomod"
+export GOCACHE="$CACHE_DIR/gocache"
+export GOPATH="$CACHE_DIR/gopath"
+
 log "cloning $REPO @ $RELEASE"
 git clone --depth 1 --branch "$(echo "$RELEASE" | sed 's#refs/heads/##')" \
   "https://${REPO}.git" "$TMPDIR/src" 2>/dev/null || \

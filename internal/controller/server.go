@@ -32,6 +32,7 @@ type Server struct {
 	setupToken string
 	setupMu    sync.Mutex
 	sweepOnce  sync.Once
+	selfUpdate *SelfUpdater
 }
 
 // NewServer builds the controller HTTP server. ui may be nil (API-only).
@@ -44,7 +45,7 @@ func NewServer(username, password string, fleet *Fleet, ui fs.FS) *Server {
 // NewServerWithConfig is NewServer plus the config path and one-time setup
 // token used by first-run setup.
 func NewServerWithConfig(username, password string, fleet *Fleet, ui fs.FS, configPath, setupToken string) *Server {
-	return &Server{auth: NewAuth(username, password), fleet: fleet, ui: ui, configPath: configPath, setupToken: setupToken}
+	return &Server{auth: NewAuth(username, password), fleet: fleet, ui: ui, configPath: configPath, setupToken: setupToken, selfUpdate: NewSelfUpdater()}
 }
 
 // NewSetupToken returns a cryptographically random token for first-run setup.
@@ -94,6 +95,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/health", api(s.handleHealth))
 	mux.HandleFunc("/api/records", api(s.handleRecords))
 	mux.HandleFunc("/api/settings", api(s.handleSettings)) // fleet-wide default config
+	mux.HandleFunc("/api/update", api(s.handleSelfUpdate)) // controller self-update
 	mux.HandleFunc("/api/high-availability", api(s.handleHighAvailability))
 	mux.HandleFunc("/api/cache/purge", api(s.handleCachePurge))
 
@@ -265,6 +267,30 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 func writeJSON(w http.ResponseWriter, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// handleSelfUpdate starts (POST) or reports (GET) the controller's own update.
+func (s *Server) handleSelfUpdate(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, map[string]interface{}{
+			"version": ControllerVersion(),
+			"status":  s.selfUpdate.UpdateStatus(),
+		})
+	case http.MethodPost:
+		channel := r.URL.Query().Get("channel")
+		if !control.ValidUpdateChannel(channel) {
+			http.Error(w, "channel must be stable or dev", http.StatusBadRequest)
+			return
+		}
+		if err := s.selfUpdate.StartUpdate(channel); err != nil {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
+		writeJSON(w, map[string]interface{}{"ok": true, "status": s.selfUpdate.UpdateStatus()})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
 func (s *Server) handleInstanceUpdate(w http.ResponseWriter, r *http.Request) {

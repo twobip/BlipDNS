@@ -13,10 +13,20 @@ UNIT_DST="/etc/systemd/system/blipc.service"
 SVC_USER="blipc"
 
 echo ">> building blipc"
-( cd "$HERE" && go build -o bin/blipc ./cmd/blipc )
+CACHE_DIR="/var/cache/blipc-update"
+mkdir -p "$CACHE_DIR/gomod" "$CACHE_DIR/gocache" "$CACHE_DIR/gopath"
+export GOMODCACHE="$CACHE_DIR/gomod" GOCACHE="$CACHE_DIR/gocache" GOPATH="$CACHE_DIR/gopath"
+( cd "$HERE" && go build -ldflags "-X main.buildSHA=$(git -C "$HERE" rev-parse HEAD)" -o bin/blipc ./cmd/blipc )
 
 echo ">> installing binary -> $BIN_DST"
 install -Dm 0755 "$BIN_SRC" "$BIN_DST"
+
+echo ">> installing controller updater"
+install -Dm 0755 "$HERE/scripts/blipc-update.sh" /usr/local/sbin/blipc-update
+cat > /etc/sudoers.d/blipc-update <<'EOF'
+blipc ALL=(root) NOPASSWD: /usr/local/sbin/blipc-update
+EOF
+chmod 0440 /etc/sudoers.d/blipc-update
 
 echo ">> ensuring system user '$SVC_USER'"
 if ! id "$SVC_USER" &>/dev/null; then

@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Stable-channel updater. Keep production changes on master; use another branch
-# (for example dev) for development. Only stable/dev are accepted; the branch
-# cannot be supplied as arbitrary shell input by the browser or API request.
+# Root-owned controller (blipc) updater. Only stable/dev are accepted; the
+# branch cannot be supplied as arbitrary shell input by the browser or API.
 readonly REPO="https://github.com/twobip/BlipDNS.git"
 BRANCH="${1:-stable}"
 case "$BRANCH" in
@@ -11,17 +10,17 @@ case "$BRANCH" in
   dev) BRANCH="dev" ;;
   *) echo "channel must be stable or dev" >&2; exit 1 ;;
 esac
-readonly BIN="/usr/local/bin/blipd"
-readonly PREVIOUS="/usr/local/bin/blipd.previous"
+readonly BIN="/usr/local/bin/blipc"
+readonly PREVIOUS="/usr/local/bin/blipc.previous"
 
 [[ "$(id -u)" -eq 0 ]] || { echo "must run as root" >&2; exit 1; }
 # /root may be read-only (containers/LXC); keep Go caches somewhere writable.
-CACHE_DIR="/var/cache/blipd-update"
+CACHE_DIR="/var/cache/blipc-update"
 mkdir -p "$CACHE_DIR/gomod" "$CACHE_DIR/gocache" "$CACHE_DIR/gopath"
 export GOMODCACHE="$CACHE_DIR/gomod"
 export GOCACHE="$CACHE_DIR/gocache"
 export GOPATH="$CACHE_DIR/gopath"
-tmp="$(mktemp -d /tmp/blipd-update.XXXXXX)"
+tmp="$(mktemp -d /tmp/blipc-update.XXXXXX)"
 trap 'rm -rf "$tmp"' EXIT
 
 # Persistent clone: clone once, fetch+reset on later runs.
@@ -35,22 +34,22 @@ else
 fi
 cd "$SRC_DIR"
 echo "phase: cloning"
-go build -trimpath -ldflags "-X main.buildSHA=$(git rev-parse HEAD)" -o "$tmp/blipd.new" ./cmd/blipd
+go build -trimpath -ldflags "-X main.buildSHA=$(git rev-parse HEAD)" -o "$tmp/blipc.new" ./cmd/blipc
 echo "phase: built"
-install -o root -g root -m 0755 "$tmp/blipd.new" "$tmp/blipd.installed"
+install -o root -g root -m 0755 "$tmp/blipc.new" "$tmp/blipc.installed"
 
 if [[ -x "$BIN" ]]; then
   cp -p "$BIN" "$PREVIOUS"
 fi
 echo "phase: installing"
-install -o root -g root -m 0755 "$tmp/blipd.installed" "$BIN"
+install -o root -g root -m 0755 "$tmp/blipc.installed" "$BIN"
 echo "phase: restarting"
-if ! systemctl restart blipd || ! systemctl is-active --quiet blipd; then
+if ! systemctl restart blipc || ! systemctl is-active --quiet blipc; then
   if [[ -x "$PREVIOUS" ]]; then
     install -o root -g root -m 0755 "$PREVIOUS" "$BIN"
-    systemctl restart blipd || true
+    systemctl restart blipc || true
   fi
-  echo "blipd restart/health check failed; previous binary restored" >&2
+  echo "blipc restart/health check failed; previous binary restored" >&2
   exit 1
 fi
-printf '%s\n' "blipd updated from $BRANCH ($(git rev-parse HEAD))"
+printf '%s\n' "blipc updated from $BRANCH ($(git rev-parse HEAD))"

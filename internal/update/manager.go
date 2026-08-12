@@ -2,6 +2,7 @@
 package update
 
 import (
+	"bufio"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -42,15 +43,38 @@ func (m *Manager) UpdateStatus() control.UpdateStatus {
 
 func (m *Manager) run() {
 	cmd := exec.Command("sudo", "-n", "/usr/local/sbin/blipd-update", m.UpdateStatus().Channel)
-	out, err := cmd.CombinedOutput()
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		m.finish(fmt.Errorf("open updater output: %w", err))
+		return
+	}
+	if err := cmd.Start(); err != nil {
+		m.finish(fmt.Errorf("start updater: %w", err))
+		return
+	}
+	// Stream phase markers so the status shows live progress.
+	scanner := bufio.NewScanner(stdout)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if strings.HasPrefix(line, "phase: ") {
+			m.setMessage(strings.TrimPrefix(line, "phase: ") + "…")
+		}
+	}
+	m.finish(cmd.Wait())
+}
+
+func (m *Manager) setMessage(msg string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.status.Message = msg
+}
+
+func (m *Manager) finish(err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.status.Running = false
 	if err != nil {
-		m.status.LastError = strings.TrimSpace(string(out))
-		if m.status.LastError == "" {
-			m.status.LastError = err.Error()
-		}
+		m.status.LastError = err.Error()
 		m.status.Message = "update failed"
 		return
 	}
