@@ -77,6 +77,10 @@ func (u *SelfUpdater) run(channel string) {
 			u.setMessage(strings.TrimPrefix(line, "phase: ") + "…")
 		}
 	}
+	if err := scanner.Err(); err != nil {
+		u.finishRun(fmt.Errorf("read updater output: %w", err))
+		return
+	}
 	u.finishRun(cmd.Wait())
 }
 

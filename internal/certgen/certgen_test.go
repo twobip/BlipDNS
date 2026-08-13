@@ -114,9 +114,6 @@ func TestEnsureFilesRegeneratesExpired(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err != nil {
-		t.Fatal(err)
-	}
 	if _, err := tls.X509KeyPair(c3, k3); err != nil {
 		t.Fatalf("regenerated pair invalid: %v", err)
 	}

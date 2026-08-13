@@ -62,6 +62,10 @@ func (m *Manager) run() {
 			m.setMessage(strings.TrimPrefix(line, "phase: ") + "…")
 		}
 	}
+	if err := scanner.Err(); err != nil {
+		m.finish(fmt.Errorf("read updater output: %w", err))
+		return
+	}
 	m.finish(cmd.Wait())
 }
 
