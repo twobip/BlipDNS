@@ -289,11 +289,14 @@ go build -ldflags "-X main.buildSHA=$(git -C "$TMPDIR/src" rev-parse HEAD)" -o "
 log "installing binary to $BIN_DIR"
 install -m 0755 "$TMPDIR/blipd" "$BIN_DIR/blipd"
 install -m 0755 "$TMPDIR/src/scripts/blipd-update.sh" /usr/local/sbin/blipd-update
-cat > /etc/sudoers.d/blipd-update <<'EOF'
-blip ALL=(root) NOPASSWD: /usr/local/sbin/blipd-update
+install -m 0755 "$TMPDIR/src/scripts/blipd-install.sh" /usr/local/sbin/blipd-install
+# Only the install helper is allowed to run as root; the build (blipd-update)
+# runs unprivileged as the blip service user.
+cat > /etc/sudoers.d/blipd-install <<'EOF'
+blip ALL=(root) NOPASSWD: /usr/local/sbin/blipd-install
 EOF
-chmod 0440 /etc/sudoers.d/blipd-update
-visudo -cf /etc/sudoers.d/blipd-update
+chmod 0440 /etc/sudoers.d/blipd-install
+visudo -cf /etc/sudoers.d/blipd-install
 cat > /etc/sudoers.d/blipd-restart <<'EOF'
 blip ALL=(root) NOPASSWD: /usr/bin/systemctl restart blipd.service
 EOF

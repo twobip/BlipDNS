@@ -1,4 +1,6 @@
-// Package update runs the narrowly scoped, root-owned blipd updater.
+// Package update runs the blipd self-updater: an unprivileged build (clone +
+// compile) followed by a minimal root install/restart helper. The build and
+// network run as the 'blip' service user; only the final install elevates.
 package update
 
 import (
@@ -11,8 +13,8 @@ import (
 	"github.com/twobip/BlipDNS/internal/control"
 )
 
-// Manager starts the installed helper. The helper owns all privileged work;
-// blipd only asks sudo for this single fixed command.
+// Manager runs the installed build script as the blip service user; the script
+// itself escalates for exactly one fixed root helper (install + restart).
 type Manager struct {
 	mu     sync.RWMutex
 	status control.UpdateStatus
@@ -42,7 +44,7 @@ func (m *Manager) UpdateStatus() control.UpdateStatus {
 }
 
 func (m *Manager) run() {
-	cmd := exec.Command("sudo", "-n", "/usr/local/sbin/blipd-update", m.UpdateStatus().Channel)
+	cmd := exec.Command("/usr/local/sbin/blipd-update", m.UpdateStatus().Channel)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		m.finish(fmt.Errorf("open updater output: %w", err))

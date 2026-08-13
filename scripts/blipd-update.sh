@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Stable-channel updater. Keep production changes on master; use another branch
-# (for example dev) for development. Only stable/dev are accepted; the branch
-# cannot be supplied as arbitrary shell input by the browser or API request.
+# Unprivileged half of the blipd self-updater. Runs as the 'blip' service user
+# (never root): clones the repo and builds blipd, then asks root — via the
+# minimal /usr/local/sbin/blipd-install helper — to install and restart. The
+# compiler and the network never run with root privileges.
 readonly REPO="https://github.com/twobip/BlipDNS.git"
 BRANCH="${1:-stable}"
 case "$BRANCH" in
@@ -11,21 +12,21 @@ case "$BRANCH" in
   dev) BRANCH="dev" ;;
   *) echo "channel must be stable or dev" >&2; exit 1 ;;
 esac
-readonly BIN="/usr/local/bin/blipd"
-readonly PREVIOUS="/usr/local/bin/blipd.previous"
 
-[[ "$(id -u)" -eq 0 ]] || { echo "must run as root" >&2; exit 1; }
-# /root may be read-only (containers/LXC); keep Go caches somewhere writable.
-CACHE_DIR="/var/cache/blipd-update"
-mkdir -p "$CACHE_DIR/gomod" "$CACHE_DIR/gocache" "$CACHE_DIR/gopath"
-export GOMODCACHE="$CACHE_DIR/gomod"
-export GOCACHE="$CACHE_DIR/gocache"
-export GOPATH="$CACHE_DIR/gopath"
-tmp="$(mktemp -d /tmp/blipd-update.XXXXXX)"
-trap 'rm -rf "$tmp"' EXIT
+# All build state lives under /var/lib/blipd — the only path the blip service
+# may write. The root-owned /var/cache/blipd-update is deliberately avoided.
+# GOTOOLCHAIN is left at its default (auto): the system Go may be older than
+# the repo's required version, in which case the matching toolchain is fetched
+# into GOMODCACHE (still as blip).
+WORK="/var/lib/blipd/update"
+mkdir -p "$WORK/gomod" "$WORK/gocache" "$WORK/gopath"
+export HOME="$WORK"
+export GOMODCACHE="$WORK/gomod"
+export GOCACHE="$WORK/gocache"
+export GOPATH="$WORK/gopath"
 
 # Persistent clone: clone once, fetch+reset on later runs.
-SRC_DIR="$CACHE_DIR/src"
+SRC_DIR="$WORK/src"
 if [ -d "$SRC_DIR/.git" ]; then
   git -C "$SRC_DIR" fetch --depth 1 --quiet origin "$BRANCH"
   git -C "$SRC_DIR" checkout --quiet --detach FETCH_HEAD
@@ -35,22 +36,8 @@ else
 fi
 cd "$SRC_DIR"
 echo "phase: cloning"
-go build -trimpath -ldflags "-X main.buildSHA=$(git rev-parse HEAD)" -o "$tmp/blipd.new" ./cmd/blipd
+go build -trimpath -ldflags "-X main.buildSHA=$(git rev-parse HEAD)" -o "$WORK/blipd.new" ./cmd/blipd
 echo "phase: built"
-install -o root -g root -m 0755 "$tmp/blipd.new" "$tmp/blipd.installed"
-
-if [[ -x "$BIN" ]]; then
-  cp -p "$BIN" "$PREVIOUS"
-fi
-echo "phase: installing"
-install -o root -g root -m 0755 "$tmp/blipd.installed" "$BIN"
-echo "phase: restarting"
-if ! systemctl restart blipd || ! systemctl is-active --quiet blipd; then
-  if [[ -x "$PREVIOUS" ]]; then
-    install -o root -g root -m 0755 "$PREVIOUS" "$BIN"
-    systemctl restart blipd || true
-  fi
-  echo "blipd restart/health check failed; previous binary restored" >&2
-  exit 1
-fi
-printf '%s\n' "blipd updated from $BRANCH ($(git rev-parse HEAD))"
+# Hand the freshly built (unprivileged) binary to the root install helper.
+sudo -n /usr/local/sbin/blipd-install "$WORK/blipd.new"
+echo "phase: done"
