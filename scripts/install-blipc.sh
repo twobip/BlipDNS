@@ -287,10 +287,13 @@ install -m 0755 "$TMPDIR/blipctl" "$BIN_DIR/blipctl"
 
 log "installing controller updater"
 install -m 0755 "$TMPDIR/src/scripts/blipc-update.sh" /usr/local/sbin/blipc-update
-cat > /etc/sudoers.d/blipc-update <<'EOF'
-blipc ALL=(root) NOPASSWD: /usr/local/sbin/blipc-update
+install -m 0755 "$TMPDIR/src/scripts/blipc-install.sh" /usr/local/sbin/blipc-install
+# Only the install helper runs as root; the build (blipc-update) runs as blipc.
+cat > /etc/sudoers.d/blipc-install <<'EOF'
+blipc ALL=(root) NOPASSWD: /usr/local/sbin/blipc-install
 EOF
-chmod 0440 /etc/sudoers.d/blipc-update
+chmod 0440 /etc/sudoers.d/blipc-install
+visudo -cf /etc/sudoers.d/blipc-install
 
 # --- config / state dirs -----------------------------------------------------
 log "creating config and state directories"

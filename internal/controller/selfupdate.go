@@ -25,8 +25,8 @@ func ControllerVersion() string {
 }
 
 // SelfUpdater starts the controller's own update. It is deliberately minimal:
-// the actual work is delegated to the root-owned /usr/local/sbin/blipc-update
-// via sudo, with only the allowlisted channel forwarded.
+// the build runs as the blipc service user via /usr/local/sbin/blipc-update,
+// which escalates for a single fixed root install/restart helper.
 type SelfUpdater struct {
 	mu     sync.Mutex
 	status control.UpdateStatus
@@ -58,7 +58,7 @@ func (u *SelfUpdater) UpdateStatus() control.UpdateStatus {
 }
 
 func (u *SelfUpdater) run(channel string) {
-	cmd := exec.Command("sudo", "-n", "/usr/local/sbin/blipc-update", channel)
+	cmd := exec.Command("/usr/local/sbin/blipc-update", channel)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		u.finishRun(fmt.Errorf("open updater output: %w", err))
