@@ -428,7 +428,7 @@ function renderInstances() {
       </td>
       <td>
         <span class="status-pill ${i.online ? "on" : "off"}">${i.online ? "online" : "offline"}</span>
-        ${i.update_available ? '<span class="badge warn" title="A newer build is available on the configured release channel">update available</span>' : (i.online && i.health ? '<span class="badge on" title="Running the current release-channel build">up to date</span>' : '')}
+        ${fleetUpdateJob.running && i.id === fleetUpdateJob.current ? '<span class="badge accent" title="This node is being updated by the serialized update job">updating…</span>' : (i.update_available ? '<span class="badge warn" title="A newer build is available on the configured release channel">update available</span>' : (i.online && i.health ? '<span class="badge on" title="Running the current release-channel build">up to date</span>' : ''))}
       </td>
       <td class="num">${fmt(s.queries_total ?? 0)}</td>
       <td class="num"><span style="color:${s.blocked_total ? "var(--red)" : "inherit"}">${fmt(s.blocked_total ?? 0)}</span></td>
@@ -1646,7 +1646,9 @@ $("update-instances-btn").onclick = () => {
     try {
       const r = await API("/api/instances/update", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ channel: savedReleaseChannel }) });
       const d = await r.json();
+      fleetUpdateJob = d;
       toast(`serialized update started (${d.channel || savedReleaseChannel})`, "ok");
+      if (current === "instances") renderInstances();
       pollUpdateJob();
     } catch (e) { toast("update failed: " + e.message, "err"); }
     finally { b.disabled = false; b.textContent = "Update all"; }
@@ -1654,15 +1656,18 @@ $("update-instances-btn").onclick = () => {
 };
 
 let updatePollTimer = null;
+let fleetUpdateJob = { running: false, current: "" };
 async function pollUpdateJob() {
   if (updatePollTimer) clearTimeout(updatePollTimer);
   try {
     const r = await API("/api/instances/update");
     const d = await r.json();
+    fleetUpdateJob = d;
     const b = $("update-instances-btn");
     if (d.running) {
       b.disabled = true;
       b.textContent = d.current ? `Updating ${d.current}…` : "Updating…";
+      if (current === "instances") renderInstances();
       updatePollTimer = setTimeout(pollUpdateJob, 3000);
       return;
     }

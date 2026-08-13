@@ -1,6 +1,7 @@
 package dnsserver
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"fmt"
@@ -590,5 +591,43 @@ func TestServeCachedTXTResponse(t *testing.T) {
 	}
 	if got := strings.Join(a.Txt, ""); got != "v=DMARC1; p=none" {
 		t.Errorf("cached: TXT data = %q, want %q", got, "v=DMARC1; p=none")
+	}
+}
+
+// The per-client rate limiter keys on the source IP, so rotating the DoH
+// /dns-query/{client-id} path segment cannot mint fresh buckets.
+func TestServeRateLimitKeyedByIP(t *testing.T) {
+	srv, _ := newTestServer(t)
+	srv.rl = newRateLimiter()
+	srv.rl.set(1, 1) // 1 QPS, burst 1
+	q := new(dns.Msg)
+	q.SetQuestion("allowed.test.", dns.TypeA)
+	ip := net.ParseIP("198.51.100.7")
+
+	// First query consumes the single token.
+	if resp := srv.serve(context.Background(), ip, "client-a", q); resp.Rcode == dns.RcodeRefused {
+		t.Fatalf("first query should be allowed")
+	}
+	// Same IP, different client-id -> still rate-limited (bucket keyed by IP).
+	if resp := srv.serve(context.Background(), ip, "client-b", q); resp.Rcode != dns.RcodeRefused {
+		t.Fatalf("second query from same IP must be refused regardless of client-id")
+	}
+	// Different IP -> its own bucket.
+	if resp := srv.serve(context.Background(), net.ParseIP("198.51.100.8"), "client-a", q); resp.Rcode == dns.RcodeRefused {
+		t.Fatalf("different IP should have its own bucket")
+	}
+}
+
+// An oversized POST body must be rejected (413), not silently truncated.
+func TestDoHHandlerPostTooLarge(t *testing.T) {
+	srv, _ := newTestServer(t)
+	h := srv.Handler()
+	body := make([]byte, maxDoHMessage+1)
+	req := httptest.NewRequest(http.MethodPost, "/dns-query", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/dns-message")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("oversized POST status = %d, want %d", w.Code, http.StatusRequestEntityTooLarge)
 	}
 }

@@ -23,8 +23,8 @@ func TestGenerate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !leaf.IsCA {
-		t.Error("expected self-signed (IsCA) cert")
+	if leaf.IsCA {
+		t.Error("expected a leaf (non-CA) server certificate")
 	}
 	if leaf.NotAfter.Before(time.Now().AddDate(9, 0, 0)) {
 		t.Errorf("cert validity too short: %s", leaf.NotAfter)

@@ -29,6 +29,10 @@ import (
 // leaves comfortable headroom while bounding the per-request allocation.
 const maxDNSQueryParam = 8192
 
+// maxDoHMessage is the maximum size (octets) of a POSTed DNS message body,
+// per RFC 8484 §4.1 (a DNS message is at most 2^16 - 1 octets).
+const maxDoHMessage = 65535
+
 // Config configures a Server.
 type Config struct {
 	DNSAddr           string           // "127.0.0.1:53"
@@ -171,6 +175,11 @@ func (s *Server) withSecurityHeaders(next http.Handler) http.Handler {
 		// Defense-in-depth: DoH is binary (application/dns-message), never
 		// HTML, so a restrictive CSP makes any future error-page mistake inert.
 		h.Set("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'")
+		// HSTS is only meaningful (and RFC 6797 permits it) over TLS, so skip it
+		// on the optional plain-HTTP DoH listener.
+		if r.TLS != nil {
+			h.Set("Strict-Transport-Security", "max-age=31536000")
+		}
 		next.ServeHTTP(w, r)
 	})
 }
@@ -204,9 +213,15 @@ func (s *Server) handleDoH(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "unsupported content type", http.StatusUnsupportedMediaType)
 			return
 		}
-		b, err := io.ReadAll(io.LimitReader(r.Body, 65535))
+		// Bound the body to the RFC 8484 max DNS message size and reject (413)
+		// anything larger rather than silently truncate it.
+		b, err := io.ReadAll(io.LimitReader(r.Body, maxDoHMessage+1))
 		if err != nil {
 			http.Error(w, "read error", http.StatusBadRequest)
+			return
+		}
+		if len(b) > maxDoHMessage {
+			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
 			return
 		}
 		req = new(dns.Msg)
@@ -249,12 +264,14 @@ func (s *Server) serve(ctx context.Context, clientIP net.IP, clientID string, re
 	if client == "" {
 		client = clientIP.String()
 	}
-	// Per-client rate limit (DoH client-id or source IP). Excess queries are
+	// Per-client rate limit is keyed by the SOURCE IP (post trusted-proxy
+	// resolution), never the DoH client-id path segment, so an attacker can't
+	// rotate /dns-query/{client-id} to get a fresh bucket. Excess queries are
 	// dropped with REFUSED so abusive clients can't exhaust upstream. REFUSED
 	// queries are tracked separately (AddRateLimited) and excluded from the
 	// query totals / query log: only queries that actually get resolved count
 	// toward throughput, cache and top-domain stats.
-	if s.rl != nil && !s.rl.allow(client) {
+	if s.rl != nil && !s.rl.allow(clientIP.String()) {
 		s.cnt.AddRateLimited()
 		resp := new(dns.Msg)
 		resp.SetReply(req)
