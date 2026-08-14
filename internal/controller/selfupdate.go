@@ -23,7 +23,7 @@ func ControllerVersion() string {
 }
 
 // SelfUpdater starts the controller's own update. It is deliberately minimal:
-// the build runs as the blipc service user via /usr/local/sbin/blipc-update,
+// the download runs as the blipc service user via /usr/local/sbin/blipc-update,
 // which escalates for a single fixed root install/restart helper.
 type SelfUpdater struct {
 	mu     sync.Mutex
@@ -43,7 +43,7 @@ func (u *SelfUpdater) StartUpdate(channel string) error {
 		u.mu.Unlock()
 		return fmt.Errorf("update already running")
 	}
-	u.status = control.UpdateStatus{Running: true, Channel: channel, Message: "cloning and building blipc"}
+	u.status = control.UpdateStatus{Running: true, Channel: channel, Message: "downloading blipc"}
 	u.mu.Unlock()
 	go u.run(channel)
 	return nil

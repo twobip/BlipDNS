@@ -2,42 +2,45 @@
 set -euo pipefail
 
 # Unprivileged half of the blipd self-updater. Runs as the 'blip' service user
-# (never root): clones the repo and builds blipd, then asks root — via the
-# minimal /usr/local/sbin/blipd-install helper — to install and restart. The
-# compiler and the network never run with root privileges.
-readonly REPO="https://github.com/twobip/BlipDNS.git"
-BRANCH="${1:-stable}"
-case "$BRANCH" in
-  stable) BRANCH="master" ;;
-  dev) BRANCH="dev" ;;
-  *) echo "channel must be stable or dev" >&2; exit 1 ;;
+# (never root): downloads the pre-built static binary for the chosen release
+# channel, verifies its SHA256 checksum, then asks root — via the minimal
+# /usr/local/sbin/blipd-install helper — to install and restart. The network
+# never runs with root privileges, and no Go toolchain or git is required.
+
+readonly BASE="https://github.com/twobip/BlipDNS/releases/download"
+readonly RAW="https://raw.githubusercontent.com/twobip/BlipDNS"
+
+CHANNEL="${1:-stable}"
+case "$CHANNEL" in
+  stable|master)
+    VER="$(curl -fsSL "$RAW/master/VERSION")" \
+      || { echo "error: could not read stable VERSION from GitHub" >&2; exit 1; }
+    TAG="v$VER" ;;
+  dev)
+    TAG="dev" ;;
+  v*)
+    TAG="$CHANNEL" ;;
+  *)
+    echo "channel must be stable or dev" >&2; exit 1 ;;
 esac
 
-# All build state lives under /var/lib/blipd — the only path the blip service
-# may write. The root-owned /var/cache/blipd-update is deliberately avoided.
-# GOTOOLCHAIN is left at its default (auto): the system Go may be older than
-# the repo's required version, in which case the matching toolchain is fetched
-# into GOMODCACHE (still as blip).
 WORK="/var/lib/blipd/update"
-mkdir -p "$WORK/gomod" "$WORK/gocache" "$WORK/gopath"
-export HOME="$WORK"
-export GOMODCACHE="$WORK/gomod"
-export GOCACHE="$WORK/gocache"
-export GOPATH="$WORK/gopath"
+mkdir -p "$WORK"
 
-# Persistent clone: clone once, fetch+reset on later runs.
-SRC_DIR="$WORK/src"
-if [ -d "$SRC_DIR/.git" ]; then
-  git -C "$SRC_DIR" fetch --depth 1 --quiet origin "$BRANCH"
-  git -C "$SRC_DIR" checkout --quiet --detach FETCH_HEAD
-  git -C "$SRC_DIR" reset --hard --quiet FETCH_HEAD
-else
-  git clone --depth 1 --branch "$BRANCH" --quiet "$REPO" "$SRC_DIR"
-fi
-cd "$SRC_DIR"
-echo "phase: cloning"
-go build -v -trimpath -ldflags "-X main.version=$(cat VERSION)" -o "$WORK/blipd.new" ./cmd/blipd
-echo "phase: built"
-# Hand the freshly built (unprivileged) binary to the root install helper.
+echo "phase: downloading ($TAG)"
+DL="$(mktemp -d "$WORK/dl.XXXXXX")"
+trap 'rm -rf "$DL"' EXIT
+curl -fL "$BASE/$TAG/blipd-linux-amd64" -o "$DL/blipd-linux-amd64"
+curl -fsSL "$BASE/$TAG/SHA256SUMS" -o "$DL/SHA256SUMS"
+
+echo "phase: verifying"
+expected="$(awk '$2=="blipd-linux-amd64" {print $1; exit}' "$DL/SHA256SUMS")"
+[ -n "$expected" ] || { echo "error: no checksum entry for blipd-linux-amd64" >&2; exit 1; }
+actual="$(sha256sum "$DL/blipd-linux-amd64" | awk '{print $1}')"
+[ "$expected" = "$actual" ] || { echo "error: checksum verification failed — refusing to install" >&2; exit 1; }
+
+install -m 0755 "$DL/blipd-linux-amd64" "$WORK/blipd.new"
+
+# Hand the verified (unprivileged) binary to the root install helper.
 sudo -n /usr/local/sbin/blipd-install "$WORK/blipd.new"
 echo "phase: done"

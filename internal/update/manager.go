@@ -1,6 +1,7 @@
-// Package update runs the blipd self-updater: an unprivileged build (clone +
-// compile) followed by a minimal root install/restart helper. The build and
-// network run as the 'blip' service user; only the final install elevates.
+// Package update runs the blipd self-updater: an unprivileged download of a
+// pre-built static binary followed by a minimal root install/restart helper.
+// The download and network run as the 'blip' service user; only the final
+// install elevates.
 package update
 
 import (
@@ -13,8 +14,8 @@ import (
 	"github.com/twobip/BlipDNS/internal/control"
 )
 
-// Manager runs the installed build script as the blip service user; the script
-// itself escalates for exactly one fixed root helper (install + restart).
+// Manager runs the installed download script as the blip service user; the
+// script itself escalates for exactly one fixed root helper (install + restart).
 type Manager struct {
 	mu     sync.RWMutex
 	status control.UpdateStatus
@@ -31,7 +32,7 @@ func (m *Manager) StartUpdate(channel string) error {
 		m.mu.Unlock()
 		return fmt.Errorf("update already running")
 	}
-	m.status = control.UpdateStatus{Running: true, Channel: channel, Message: "cloning and building blipd"}
+	m.status = control.UpdateStatus{Running: true, Channel: channel, Message: "downloading blipd"}
 	m.mu.Unlock()
 	go m.run()
 	return nil

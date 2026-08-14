@@ -4,7 +4,8 @@
 # and set up a systemd service for blipd.
 #
 # Usage:  curl -sL https://raw.githubusercontent.com/twobip/BlipDNS/master/scripts/install-blipd.sh | sudo bash
-# Optional: append --install-deps to install Git, Go, CA certificates, curl, and jq first.
+# Optional: append --install-deps to install prerequisites (curl, CA certs) first.
+#           append --build-from-source to clone + build instead of downloading a release binary.
 #
 set -euo pipefail
 
@@ -14,6 +15,8 @@ CONFIG_DIR="${CONFIG_DIR:-/etc/blipd}"
 STATE_DIR="${STATE_DIR:-/var/lib/blipd}"
 SYSTEMD_DIR="${SYSTEMD_DIR:-/etc/systemd/system}"
 SERVICE_NAME="blipd"
+BASE_URL="https://github.com/twobip/BlipDNS/releases/download"
+RAW_BASE="https://raw.githubusercontent.com/twobip/BlipDNS"
 
 # --- helpers -----------------------------------------------------------------
 log()  { echo "[install-blipd] $*"; }
@@ -21,21 +24,26 @@ err()  { echo "[install-blipd] ERROR: $*" >&2; exit 1; }
 
 usage() {
   cat <<'EOF'
-Usage: install-blipd.sh [VERSION|BRANCH] [--install-deps]
+Usage: install-blipd.sh [stable|dev|vX.Y.Z] [--install-deps] [--build-from-source]
 
-Installs blipd from the BlipDNS repository.
-  VERSION|BRANCH    Optional release or branch (default: master)
-  --install-deps    Install Git, Go, CA certificates, curl, and jq using the system package manager
+Installs blipd from a pre-built GitHub release binary (default) or from source.
+  stable|dev|vX.Y.Z  Release channel or explicit version (default: stable)
+  --install-deps      Install prerequisites (curl, CA certs; plus Git/Go when building)
+  --build-from-source Clone and build from source instead of downloading a release binary
 EOF
 }
 
 # --- arguments ---------------------------------------------------------------
 INSTALL_DEPS=0
+BUILD_FROM_SOURCE=0
 INSTALL=""
 for ARG in "$@"; do
   case "$ARG" in
     --install-deps)
       INSTALL_DEPS=1
+      ;;
+    --build-from-source)
+      BUILD_FROM_SOURCE=1
       ;;
     -h|--help)
       usage
@@ -63,11 +71,15 @@ cleanup_go_tmp() {
 }
 
 install_dependencies() {
-  local packages="git ca-certificates curl jq"
-  local go_needed=1
-  if dedicated_go_is_supported || { command -v go >/dev/null 2>&1 && go_is_supported; }; then
-    go_needed=0
-    log "reusing an existing supported Go installation"
+  local packages="ca-certificates curl"
+  local go_needed=0
+  if [ "$BUILD_FROM_SOURCE" -eq 1 ]; then
+    packages="git ca-certificates curl jq"
+    go_needed=1
+    if dedicated_go_is_supported || { command -v go >/dev/null 2>&1 && go_is_supported; }; then
+      go_needed=0
+      log "reusing an existing supported Go installation"
+    fi
   fi
   log "installing dependencies: $packages$( [ "$go_needed" -eq 1 ] && echo ' and Go' )"
   if command -v apt-get >/dev/null 2>&1; then
@@ -249,48 +261,95 @@ require_go() {
 
 # --- sanity ------------------------------------------------------------------
 [ "$(id -u)" -eq 0 ] || err "this script must be run as root (use sudo)"
-[ "$INSTALL_DEPS" -eq 1 ] && install_dependencies
-install_git
-require_go
 
-# --- resolve install prefix --------------------------------------------------
-if [ -n "$INSTALL" ]; then
-  case "$INSTALL" in
-    stable|master)
-      INSTALL="$INSTALL" ;;
-    *) INSTALL="${INSTALL#v}" ;;
-  esac
-  RELEASE="refs/heads/${INSTALL}"
+if [ "$BUILD_FROM_SOURCE" -eq 1 ]; then
+  [ "$INSTALL_DEPS" -eq 1 ] && install_dependencies
+  install_git
+  require_go
 else
-  RELEASE="refs/heads/master"
+  # Download path needs only curl and sha256sum (coreutils) — no Go, no git.
+  command -v sha256sum >/dev/null 2>&1 || err "sha256sum (coreutils) is required; install coreutils and rerun"
+  if ! command -v curl >/dev/null 2>&1; then
+    if [ "$INSTALL_DEPS" -eq 1 ]; then
+      install_dependencies
+    else
+      err "curl is required to download the release binary; install curl or rerun with --install-deps"
+    fi
+  fi
 fi
 
-# --- clone & build -----------------------------------------------------------
+# --- resolve release channel / tag ------------------------------------------
+if [ -z "$INSTALL" ]; then
+  CHANNEL="stable"
+else
+  CHANNEL="$INSTALL"
+fi
+
+case "$CHANNEL" in
+  stable|master)
+    REF="master"
+    TAG="v$(curl -fsSL "$RAW_BASE/master/VERSION" || err "could not read the current stable version from GitHub")" ;;
+  dev)
+    REF="dev"
+    TAG="dev" ;;
+  v*)
+    REF="$CHANNEL"
+    TAG="$CHANNEL" ;;
+  *)
+    err "unknown release: $CHANNEL (use stable, dev, or vX.Y.Z)" ;;
+esac
+
+# --- obtain the binary (download, or clone + build) -------------------------
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
 
-# /root may be read-only (containers/LXC); keep Go caches somewhere writable.
-CACHE_DIR="/var/cache/blipd-update"
-mkdir -p "$CACHE_DIR/gomod" "$CACHE_DIR/gocache" "$CACHE_DIR/gopath"
-export GOMODCACHE="$CACHE_DIR/gomod"
-export GOCACHE="$CACHE_DIR/gocache"
-export GOPATH="$CACHE_DIR/gopath"
+if [ "$BUILD_FROM_SOURCE" -eq 1 ]; then
+  # /root may be read-only (containers/LXC); keep Go caches somewhere writable.
+  CACHE_DIR="/var/cache/blipd-update"
+  mkdir -p "$CACHE_DIR/gomod" "$CACHE_DIR/gocache" "$CACHE_DIR/gopath"
+  export GOMODCACHE="$CACHE_DIR/gomod"
+  export GOCACHE="$CACHE_DIR/gocache"
+  export GOPATH="$CACHE_DIR/gopath"
 
-log "cloning $REPO @ $RELEASE"
-git clone --depth 1 --branch "$(echo "$RELEASE" | sed 's#refs/heads/##')" \
-  "https://${REPO}.git" "$TMPDIR/src" || \
-  git clone "https://${REPO}.git" "$TMPDIR/src"
+  log "cloning $REPO @ $REF"
+  git clone --depth 1 --branch "$REF" \
+    "https://${REPO}.git" "$TMPDIR/src" || \
+    git clone "https://${REPO}.git" "$TMPDIR/src"
 
-cd "$TMPDIR/src"
-log "building blipd (first build can take a few minutes — package list below shows progress)"
-go build -v -ldflags "-X main.version=$(cat VERSION)" -o "$TMPDIR/blipd" ./cmd/blipd
+  cd "$TMPDIR/src"
+  log "building blipd (first build can take a few minutes — package list below shows progress)"
+  go build -v -ldflags "-X main.version=$(cat VERSION)" -o "$TMPDIR/blipd" ./cmd/blipd
+else
+  log "downloading blipd-linux-amd64 from release $TAG"
+  curl -fL "$BASE_URL/$TAG/blipd-linux-amd64" -o "$TMPDIR/blipd" \
+    || err "download failed: $BASE_URL/$TAG/blipd-linux-amd64"
+  curl -fsSL "$BASE_URL/$TAG/SHA256SUMS" -o "$TMPDIR/SHA256SUMS" \
+    || err "download failed: SHA256SUMS"
+  log "verifying checksum"
+  expected="$(awk '$2=="blipd-linux-amd64" {print $1; exit}' "$TMPDIR/SHA256SUMS")"
+  [ -n "$expected" ] || err "no checksum entry for blipd-linux-amd64 in SHA256SUMS"
+  actual="$(sha256sum "$TMPDIR/blipd" | awk '{print $1}')"
+  [ "$expected" = "$actual" ] || err "checksum verification FAILED for blipd-linux-amd64 — refusing to install"
+  log "checksum verified"
+fi
 
 # --- install binary ----------------------------------------------------------
 log "installing binary to $BIN_DIR"
 install -m 0755 "$TMPDIR/blipd" "$BIN_DIR/blipd"
-install -m 0755 "$TMPDIR/src/scripts/blipd-update.sh" /usr/local/sbin/blipd-update
-install -m 0755 "$TMPDIR/src/scripts/blipd-install.sh" /usr/local/sbin/blipd-install
-# Only the install helper is allowed to run as root; the build (blipd-update)
+
+# Install the self-updater helpers. From a source build they come out of the
+# clone; from a release they are fetched from the pinned ref over HTTPS.
+if [ "$BUILD_FROM_SOURCE" -eq 1 ]; then
+  install -m 0755 "$TMPDIR/src/scripts/blipd-update.sh" /usr/local/sbin/blipd-update
+  install -m 0755 "$TMPDIR/src/scripts/blipd-install.sh" /usr/local/sbin/blipd-install
+else
+  curl -fsSL "$RAW_BASE/$REF/scripts/blipd-update.sh" -o /usr/local/sbin/blipd-update \
+    || err "failed to fetch blipd-update.sh"
+  curl -fsSL "$RAW_BASE/$REF/scripts/blipd-install.sh" -o /usr/local/sbin/blipd-install \
+    || err "failed to fetch blipd-install.sh"
+  chmod 0755 /usr/local/sbin/blipd-update /usr/local/sbin/blipd-install
+fi
+# Only the install helper is allowed to run as root; the download (blipd-update)
 # runs unprivileged as the blip service user.
 
 log "ensuring system user 'blip'"
@@ -384,7 +443,7 @@ Type=simple
 User=blip
 Group=blip
 ExecStart=$BIN_DIR/blipd -config $CONFIG_DIR/blipd.yaml
-ExecReload=/bin/kill -HUP \$MAINPID
+ExecReload=/bin/kill -HUP \\$MAINPID
 Restart=on-failure
 RestartSec=3
 
@@ -410,7 +469,12 @@ EOF
   chmod 644 "$SYSTEMD_DIR/$SERVICE_NAME.service"
   log "reloading systemd daemon"
   systemctl daemon-reload || true
-  log "to start:  sudo systemctl enable --now $SERVICE_NAME"
+  if systemctl is-active --quiet "$SERVICE_NAME"; then
+    log "restarting active $SERVICE_NAME service to use the newly installed binary"
+    systemctl restart "$SERVICE_NAME" || err "failed to restart $SERVICE_NAME; run: sudo systemctl restart $SERVICE_NAME"
+  else
+    log "to start:  sudo systemctl enable --now $SERVICE_NAME"
+  fi
 else
   log "systemd not found — skipping service installation (run 'blipd -config $CONFIG_DIR/blipd.yaml' manually)"
 fi
