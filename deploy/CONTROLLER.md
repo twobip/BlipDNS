@@ -102,7 +102,7 @@ Token may be passed as `Authorization: Bearer <token>` or `?token=<token>`.
 ## Install as a service
 
 ```
-sudo ./deploy/install-blipc.sh        # builds, installs, enables blipc
+sudo ./scripts/install-blipc.sh --local   # builds from checkout, installs, enables blipc
 sudo systemctl status blipc
 ```
 

@@ -283,7 +283,7 @@ git clone --depth 1 --branch "$(echo "$RELEASE" | sed 's#refs/heads/##')" \
 
 cd "$TMPDIR/src"
 log "building blipd"
-go build -ldflags "-X main.buildSHA=$(git -C "$TMPDIR/src" rev-parse HEAD)" -o "$TMPDIR/blipd" ./cmd/blipd
+go build -ldflags "-X main.version=$(cat VERSION)" -o "$TMPDIR/blipd" ./cmd/blipd
 
 # --- install binary ----------------------------------------------------------
 log "installing binary to $BIN_DIR"

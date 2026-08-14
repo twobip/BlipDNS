@@ -35,7 +35,7 @@ else
 fi
 cd "$SRC_DIR"
 echo "phase: cloning"
-go build -trimpath -ldflags "-X main.buildSHA=$(git rev-parse HEAD)" -o "$WORK/blipc.new" ./cmd/blipc
+go build -trimpath -ldflags "-X github.com/twobip/BlipDNS/internal/controller.version=$(cat VERSION)" -o "$WORK/blipc.new" ./cmd/blipc
 echo "phase: built"
 # Hand the freshly built (unprivileged) binary to the root install helper.
 sudo -n /usr/local/sbin/blipc-install "$WORK/blipc.new"

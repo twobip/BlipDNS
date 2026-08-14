@@ -36,7 +36,7 @@ else
 fi
 cd "$SRC_DIR"
 echo "phase: cloning"
-go build -trimpath -ldflags "-X main.buildSHA=$(git rev-parse HEAD)" -o "$WORK/blipd.new" ./cmd/blipd
+go build -trimpath -ldflags "-X main.version=$(cat VERSION)" -o "$WORK/blipd.new" ./cmd/blipd
 echo "phase: built"
 # Hand the freshly built (unprivileged) binary to the root install helper.
 sudo -n /usr/local/sbin/blipd-install "$WORK/blipd.new"

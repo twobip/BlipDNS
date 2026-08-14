@@ -22,19 +22,14 @@ import (
 	"github.com/twobip/BlipDNS/internal/update"
 )
 
-const version = "blipd/0.1.0"
+// version is the blipd release version, stamped at build time from the repo's
+// VERSION file: -ldflags "-X main.version=$(cat VERSION)". It defaults to
+// "0.0.0" for local, unstamped builds.
+var version = "0.0.0"
 
-// buildSHA is stamped at build time with the source commit so the controller
-// can badge this instance as up-to-date or behind the release channel. Use
-// -ldflags "-X main.buildSHA=$(git rev-parse HEAD)".
-var buildSHA string
-
-// reportedVersion exposes the build identity to the management API.
+// reportedVersion exposes the release version to the management API.
 func reportedVersion() string {
-	if buildSHA != "" {
-		return version + "+" + buildSHA
-	}
-	return version
+	return "blipd/" + version
 }
 
 // blocklistSources merges the legacy single URL with the new plural list.

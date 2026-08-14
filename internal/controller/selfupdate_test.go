@@ -70,7 +70,7 @@ func TestSelfUpdateEndpointAuthAndChannel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(buf), "blipc/0.1.0") {
+	if !strings.Contains(string(buf), "blipc/") {
 		t.Fatalf("GET body missing controller version: %s", string(buf))
 	}
 }

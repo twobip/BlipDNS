@@ -1,9 +1,10 @@
 package controller
 
 import (
-	"encoding/json"
+	"io"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -11,18 +12,18 @@ import (
 	"github.com/twobip/BlipDNS/internal/control"
 )
 
-// releaseCheck polls the repository branch head for the configured release
+// releaseCheck polls the repository's VERSION file for the configured release
 // channel so instances can be badged "update available" without asking each
 // node or the browser to reach GitHub.
 type releaseCheck struct {
 	mu          sync.Mutex
-	heads       map[string]string // channel -> head commit SHA (short)
+	versions    map[string]string // channel -> latest release version
 	lastOK      time.Time
 	lastChannel string
 }
 
 func newReleaseCheck() *releaseCheck {
-	return &releaseCheck{heads: make(map[string]string)}
+	return &releaseCheck{versions: make(map[string]string)}
 }
 
 func branchForChannel(channel string) string {
@@ -32,29 +33,19 @@ func branchForChannel(channel string) string {
 	return "master"
 }
 
-func shortSHA(s string) string {
-	if s == "" {
-		return ""
-	}
-	if len(s) >= 12 {
-		return s[:12]
-	}
-	return s
-}
-
-// head returns the cached branch head for a channel ("" = unknown yet).
-func (r *releaseCheck) head(channel string) string {
+// version returns the cached latest release version for a channel ("" = unknown yet).
+func (r *releaseCheck) version(channel string) string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.heads[channel]
+	return r.versions[channel]
 }
 
-// refresh fetches the head commit of the channel's branch from the GitHub API
-// and caches it. Failures are logged and keep the previous value, so a
-// transient network issue never flips badges.
+// refresh fetches the VERSION file from the channel's branch on GitHub and
+// caches it. Failures are logged and keep the previous value, so a transient
+// network issue never flips badges.
 func (r *releaseCheck) refresh(channel string) {
 	branch := branchForChannel(channel)
-	url := "https://api.github.com/repos/twobip/BlipDNS/commits/" + branch
+	url := "https://raw.githubusercontent.com/twobip/BlipDNS/" + branch + "/VERSION"
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Get(url)
 	if err != nil {
@@ -66,15 +57,18 @@ func (r *releaseCheck) refresh(channel string) {
 		log.Printf("blipc: release check (%s): status %d", branch, resp.StatusCode)
 		return
 	}
-	var out struct {
-		SHA string `json:"sha"`
+	b, err := io.ReadAll(io.LimitReader(resp.Body, 64))
+	if err != nil {
+		log.Printf("blipc: release check (%s): read: %v", branch, err)
+		return
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		log.Printf("blipc: release check (%s): decode: %v", branch, err)
+	latest := strings.TrimSpace(string(b))
+	if !validVersion(latest) {
+		log.Printf("blipc: release check (%s): malformed VERSION %q", branch, latest)
 		return
 	}
 	r.mu.Lock()
-	r.heads[channel] = shortSHA(out.SHA)
+	r.versions[channel] = latest
 	r.lastOK = time.Now()
 	r.mu.Unlock()
 }
@@ -109,37 +103,68 @@ func (r *releaseCheck) currentChannel() string {
 	return r.lastChannel
 }
 
-// available reports whether the given running version is behind the channel
-// head. An unknown instance version or an unknown branch head yields no badge.
+// available reports whether the given running version is behind the channel's
+// latest release. An unknown instance version or an unknown latest version
+// yields no badge.
 func (r *releaseCheck) available(channel, runningVersion string) bool {
-	running := extractSHA(runningVersion)
+	running := extractVersion(runningVersion)
 	if running == "" {
 		return false
 	}
-	head := r.head(channel)
-	if head == "" {
+	latest := r.version(channel)
+	if latest == "" {
 		return false
 	}
-	return running != head
+	return semverLess(running, latest)
 }
 
-// extractSHA pulls a commit SHA out of a version string such as
-// "blipd/0.1.0+abcdef12" or a bare SHA.
-func extractSHA(version string) string {
-	if version == "" {
+// extractVersion pulls a "major.minor.patch" version out of a version string
+// such as "blipd/0.2.0" or a bare "0.2.0".
+func extractVersion(v string) string {
+	if i := strings.LastIndex(v, "/"); i >= 0 {
+		v = v[i+1:]
+	}
+	v = strings.TrimSpace(v)
+	if !validVersion(v) {
 		return ""
 	}
-	if i := strings.LastIndex(version, "+"); i >= 0 {
-		version = version[i+1:]
+	return v
+}
+
+// validVersion reports whether v is a well-formed "major.minor.patch" string.
+func validVersion(v string) bool {
+	parts := strings.Split(v, ".")
+	if len(parts) != 3 {
+		return false
 	}
-	version = strings.TrimSpace(version)
-	if len(version) < 7 || len(version) > 40 {
-		return ""
-	}
-	for _, c := range version {
-		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
-			return ""
+	for _, p := range parts {
+		if p == "" {
+			return false
+		}
+		for _, c := range p {
+			if c < '0' || c > '9' {
+				return false
+			}
 		}
 	}
-	return shortSHA(strings.ToLower(version))
+	return true
+}
+
+// semverLess reports whether version a is strictly older than b, comparing
+// numeric major.minor.patch components (missing components are treated as 0).
+func semverLess(a, b string) bool {
+	pa, pb := strings.Split(a, "."), strings.Split(b, ".")
+	for i := 0; i < 3; i++ {
+		na, nb := 0, 0
+		if i < len(pa) {
+			na, _ = strconv.Atoi(pa[i])
+		}
+		if i < len(pb) {
+			nb, _ = strconv.Atoi(pb[i])
+		}
+		if na != nb {
+			return na < nb
+		}
+	}
+	return false
 }

@@ -5,6 +5,7 @@
 #
 # Usage:  curl -sL https://raw.githubusercontent.com/twobip/BlipDNS/master/scripts/install-blipc.sh | sudo bash
 # Optional: append --install-deps to install Git, Go, CA certificates, curl, and jq first.
+#           append --local to build from the current checkout instead of cloning from GitHub.
 #
 set -euo pipefail
 
@@ -22,21 +23,26 @@ err()  { echo "[install-blipc] ERROR: $*" >&2; exit 1; }
 
 usage() {
   cat <<'EOF'
-Usage: install-blipc.sh [VERSION|BRANCH] [--install-deps]
+Usage: install-blipc.sh [VERSION|BRANCH] [--install-deps] [--local]
 
 Installs blipc and blipctl from the BlipDNS repository.
   VERSION|BRANCH    Optional release or branch (default: master)
   --install-deps    Install Git, Go, CA certificates, curl, and jq using the system package manager
+  --local           Build from the current checkout instead of cloning from GitHub
 EOF
 }
 
 # --- arguments ---------------------------------------------------------------
 INSTALL_DEPS=0
+LOCAL=0
 INSTALL=""
 for ARG in "$@"; do
   case "$ARG" in
     --install-deps)
       INSTALL_DEPS=1
+      ;;
+    --local)
+      LOCAL=1
       ;;
     -h|--help)
       usage
@@ -259,10 +265,7 @@ else
   RELEASE="refs/heads/master"
 fi
 
-# --- clone & build -----------------------------------------------------------
-TMPDIR="$(mktemp -d)"
-trap 'rm -rf "$TMPDIR"' EXIT
-
+# --- build (clone from GitHub, or use the local checkout with --local) --------
 # /root may be read-only (containers/LXC); keep Go caches somewhere writable.
 CACHE_DIR="/var/cache/blipc-update"
 mkdir -p "$CACHE_DIR/gomod" "$CACHE_DIR/gocache" "$CACHE_DIR/gopath"
@@ -270,24 +273,41 @@ export GOMODCACHE="$CACHE_DIR/gomod"
 export GOCACHE="$CACHE_DIR/gocache"
 export GOPATH="$CACHE_DIR/gopath"
 
-log "cloning $REPO @ $RELEASE"
-git clone --depth 1 --branch "$(echo "$RELEASE" | sed 's#refs/heads/##')" \
-  "https://${REPO}.git" "$TMPDIR/src" 2>/dev/null || \
-  git clone "https://${REPO}.git" "$TMPDIR/src"
+CLONE_DIR=""
+if [ "$LOCAL" -eq 1 ]; then
+  SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+  [ -f "$SRC_DIR/go.mod" ] || err "--local requires running from inside the BlipDNS repository"
+  log "building from local checkout: $SRC_DIR"
+else
+  CLONE_DIR="$(mktemp -d)"
+  log "cloning $REPO @ $RELEASE"
+  git clone --depth 1 --branch "$(echo "$RELEASE" | sed 's#refs/heads/##')" \
+    "https://${REPO}.git" "$CLONE_DIR/src" 2>/dev/null || \
+    git clone "https://${REPO}.git" "$CLONE_DIR/src"
+  SRC_DIR="$CLONE_DIR/src"
+fi
 
-cd "$TMPDIR/src"
+OUT_DIR="$(mktemp -d)"
+trap 'rm -rf ${CLONE_DIR:+"$CLONE_DIR"} ${OUT_DIR:+"$OUT_DIR"}' EXIT
+
+cd "$SRC_DIR"
 log "building blipc and blipctl"
-go build -ldflags "-X main.buildSHA=$(git -C "$TMPDIR/src" rev-parse HEAD)" -o "$TMPDIR/blipc" ./cmd/blipc
-go build -o "$TMPDIR/blipctl" ./cmd/blipctl
+go build -ldflags "-X github.com/twobip/BlipDNS/internal/controller.version=$(cat VERSION)" -o "$OUT_DIR/blipc" ./cmd/blipc
+go build -o "$OUT_DIR/blipctl" ./cmd/blipctl
 
 # --- install binaries --------------------------------------------------------
 log "installing binaries to $BIN_DIR"
-install -m 0755 "$TMPDIR/blipc"   "$BIN_DIR/blipc"
-install -m 0755 "$TMPDIR/blipctl" "$BIN_DIR/blipctl"
+install -m 0755 "$OUT_DIR/blipc"   "$BIN_DIR/blipc"
+install -m 0755 "$OUT_DIR/blipctl" "$BIN_DIR/blipctl"
+
+log "ensuring system user 'blipc'"
+if ! id blipc >/dev/null 2>&1; then
+  useradd --system --no-create-home --shell /usr/sbin/nologin blipc
+fi
 
 log "installing controller updater"
-install -m 0755 "$TMPDIR/src/scripts/blipc-update.sh" /usr/local/sbin/blipc-update
-install -m 0755 "$TMPDIR/src/scripts/blipc-install.sh" /usr/local/sbin/blipc-install
+install -m 0755 "$SRC_DIR/scripts/blipc-update.sh" /usr/local/sbin/blipc-update
+install -m 0755 "$SRC_DIR/scripts/blipc-install.sh" /usr/local/sbin/blipc-install
 # Only the install helper runs as root; the build (blipc-update) runs as blipc.
 cat > /etc/sudoers.d/blipc-install <<'EOF'
 blipc ALL=(root) NOPASSWD: /usr/local/sbin/blipc-install

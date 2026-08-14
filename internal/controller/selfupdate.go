@@ -10,18 +10,16 @@ import (
 	"github.com/twobip/BlipDNS/internal/control"
 )
 
-// buildSHA is stamped at build time with the source commit so the controller
-// can report its own build. Use -ldflags "-X github.com/twobip/BlipDNS/
-// internal/controller.buildSHA=$(git rev-parse HEAD)".
-var buildSHA string
+// version is the controller release version, stamped at build time from the
+// repo's VERSION file: -ldflags "-X github.com/twobip/BlipDNS/internal/
+// controller.version=$(cat VERSION)". It defaults to "0.0.0" for local,
+// unstamped builds.
+var version = "0.0.0"
 
-// ControllerVersion returns the controller's own build identity, used by the
+// ControllerVersion returns the controller's release version, used by the
 // Settings page to badge the controller's update state.
 func ControllerVersion() string {
-	if buildSHA != "" {
-		return "blipc/0.1.0+" + buildSHA
-	}
-	return "blipc/0.1.0"
+	return "blipc/" + version
 }
 
 // SelfUpdater starts the controller's own update. It is deliberately minimal:
