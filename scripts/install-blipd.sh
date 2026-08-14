@@ -314,6 +314,13 @@ log "creating config and state directories"
 mkdir -p "$CONFIG_DIR" "$STATE_DIR" /etc/keepalived
 chmod 700 "$CONFIG_DIR" "$STATE_DIR"
 
+# Point keepalived at blipd's rendered config. Debian's keepalived.service ships
+# with "ConditionFileNotEmpty=/etc/keepalived/keepalived.conf", so without this
+# symlink keepalived refuses to start and the VRRP VIP never comes up. The target
+# won't exist until HA is first applied in the controller; a dangling symlink is
+# fine (keepalived simply won't start until then, which is correct).
+ln -sfn "$STATE_DIR/keepalived.conf" /etc/keepalived/keepalived.conf
+
 # Create a default config if none exists.
 if [ ! -f "$CONFIG_DIR/blipd.yaml" ]; then
   ADMIN_TOKEN="$(generate_admin_token)"
