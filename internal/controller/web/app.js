@@ -428,7 +428,7 @@ function renderInstances() {
       </td>
       <td>
         <span class="status-pill ${i.online ? "on" : "off"}">${i.online ? "online" : "offline"}</span>
-        ${fleetUpdateJob.running && i.id === fleetUpdateJob.current ? '<span class="badge accent" title="This node is being updated by the serialized update job">updating…</span>' : (i.update_available ? '<span class="badge warn" title="A newer build is available on the configured release channel">update available</span>' : (i.online && i.health ? '<span class="badge on" title="Running the current release-channel build">up to date</span>' : ''))}
+        ${fleetUpdateJob.running && i.id === fleetUpdateJob.current ? '<span class="badge accent" title="This node is being updated by the serialized update job">updating…</span>' : (i.update_available ? '<span class="badge warn" title="A newer build is available on the configured release channel">update available</span>' : (i.online && i.health ? '<span class="badge on" title="Running ' + esc(i.health.version || 'unknown version') + '">up to date</span>' : ''))}
       </td>
       <td class="num">${fmt(s.queries_total ?? 0)}</td>
       <td class="num"><span style="color:${s.blocked_total ? "var(--red)" : "inherit"}">${fmt(s.blocked_total ?? 0)}</span></td>
