@@ -22,6 +22,22 @@ RAW_BASE="https://raw.githubusercontent.com/twobip/BlipDNS"
 log()  { echo "[install-blipd] $*"; }
 err()  { echo "[install-blipd] ERROR: $*" >&2; exit 1; }
 
+# Remove leftovers from the old clone+build install method (Go caches + the
+# persistent clone + telemetry). The download-based updater still stages
+# downloads under $STATE_DIR/update, so only that dir's build subdirs are
+# removed — never the dir itself, and never the runtime state or config.
+cleanup_old_build() {
+  log "cleaning up build leftovers from the old install method"
+  rm -rf /var/cache/blipd-update
+  rm -rf "$STATE_DIR/update/src" \
+         "$STATE_DIR/update/gomod" \
+         "$STATE_DIR/update/gocache" \
+         "$STATE_DIR/update/gopath" \
+         "$STATE_DIR/update/.config" \
+         "$STATE_DIR/update/blipd.new"
+  rm -rf "$STATE_DIR/.config/go"
+}
+
 usage() {
   cat <<'EOF'
 Usage: install-blipd.sh [stable|dev|vX.Y.Z] [--install-deps] [--build-from-source]
@@ -320,6 +336,7 @@ if [ "$BUILD_FROM_SOURCE" -eq 1 ]; then
   log "building blipd (first build can take a few minutes — package list below shows progress)"
   go build -v -ldflags "-X main.version=$(cat VERSION)" -o "$TMPDIR/blipd" ./cmd/blipd
 else
+  cleanup_old_build
   log "downloading blipd-linux-amd64 from release $TAG"
   curl -fL "$BASE_URL/$TAG/blipd-linux-amd64" -o "$TMPDIR/blipd" \
     || err "download failed: $BASE_URL/$TAG/blipd-linux-amd64"
@@ -443,7 +460,7 @@ Type=simple
 User=blip
 Group=blip
 ExecStart=$BIN_DIR/blipd -config $CONFIG_DIR/blipd.yaml
-ExecReload=/bin/kill -HUP \\$MAINPID
+ExecReload=/bin/kill -HUP \$MAINPID
 Restart=on-failure
 RestartSec=3
 
