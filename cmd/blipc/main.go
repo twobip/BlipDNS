@@ -101,14 +101,11 @@ func main() {
 		}
 	}
 	ctx := context.Background()
-	// Restore the blocklist (merged + manual + allowed) from the local DB into
-	// RAM BEFORE adding instances, so the first poll reconcile sees the full
-	// list and skips nodes that already have it cached instead of pushing an
-	// empty list at them (which would clear their local cache). Distribution is
-	// checksum-driven: a node is only re-pushed when its reported hash differs.
-	if err := fleet.LoadBlocklistCache(ctx); err != nil {
-		log.Printf("blipc: blocklist cache: %v", err)
-	}
+	// Kick off the blocklist restore in the background (multi-million domains;
+	// the SQLite read + set rebuild are slow). The per-instance reconcile holds
+	// off via f.blLoading until it finishes, so a node with its own cached list
+	// is never cleared by a transient empty in-memory list.
+	fleet.LoadBlocklistCache(ctx)
 	fleet.LoadManualDomains(ctx)
 	fleet.LoadAllowedDomains(ctx)
 	fleet.LoadSourceStats(ctx)

@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -116,6 +117,7 @@ type Fleet struct {
 	blGen            int
 	blCancel         context.CancelFunc
 	blStatus         BlocklistStatus
+	blLoading        atomic.Bool                  // true while the startup cache load is in flight
 	sourceStats      []SourceStat                 // per-source download stats, refreshed on import
 	importLog        []string                     // recent import output lines (capped ring buffer)
 	manualDomains    map[string]struct{}          // hand-added domains, kept apart from sources
@@ -1974,32 +1976,34 @@ func (f *Fleet) persistAllowed() {
 	}()
 }
 
-// LoadBlocklistCache restores the last persisted merged list into RAM at
-// startup, so a restart blocks immediately without re-fetching sources, and
-// pushes it to instances so they are covered even before a fresh import.
-func (f *Fleet) LoadBlocklistCache(ctx context.Context) error {
+// LoadBlocklistCache asynchronously restores the last persisted merged list
+// into RAM. The slow SQLite read + set rebuild run in the background so the
+// HTTP listener binds immediately. f.blLoading holds off the per-instance
+// reconcile until the load finishes, so a node with its own cached list is
+// never cleared by a transient empty in-memory list.
+func (f *Fleet) LoadBlocklistCache(ctx context.Context) {
 	if f.blocklistDB == nil {
-		return nil
+		return
 	}
-	set, err := f.blocklistDB.LoadSet(ctx)
-	if err != nil {
-		return err
-	}
-	if len(set) == 0 {
-		return nil
-	}
-	f.blocklist.FromDomainsMap(set)
-	f.blMu.Lock()
-	f.blStatus.Domains = f.blocklist.Count()
-	f.blMu.Unlock()
-	log.Printf("blipc: restored %d blocklist domains from local cache", len(set))
-	// Do NOT push here. blipd persists its own blocklist to a local cache and
-	// reports its checksum in /api/v1/stats, so the per-instance poll reconcile
-	// (maybePushBlocklist) only re-pushes when a node's reported checksum
-	// differs — i.e. when the list actually changed or the node is fresh. A
-	// startup full-push would re-send the multi-MB list to every node on every
-	// controller restart for no reason (the slow restart this fixes).
-	return nil
+	f.blLoading.Store(true)
+	go func() {
+		defer f.blLoading.Store(false)
+		set, err := f.blocklistDB.LoadSet(ctx)
+		if err != nil {
+			log.Printf("blipc: blocklist cache: %v", err)
+			return
+		}
+		// Apply only if the in-memory list is still empty: a fresh source import
+		// may have already populated it while we were reading SQLite, and the
+		// cached snapshot is stale by definition — don't clobber fresh data.
+		if len(set) > 0 && f.blocklist.Count() == 0 {
+			f.blocklist.FromDomainsMap(set)
+			log.Printf("blipc: restored %d blocklist domains from local cache", len(set))
+		}
+		f.blMu.Lock()
+		f.blStatus.Domains = f.blocklist.Count()
+		f.blMu.Unlock()
+	}()
 }
 
 // persistBlocklist snapshots the current in-memory list to the local DB in the
@@ -2290,6 +2294,11 @@ func (f *Fleet) pushBlocklist(ctx context.Context) map[string]string {
 // must be distributed to un-block on the instance).
 func (f *Fleet) maybePushBlocklist(ctx context.Context, i *Instance, reported *control.StatsResponse) {
 	if !i.hasToken() {
+		return
+	}
+	// Hold off until the startup cache load finishes; otherwise an empty
+	// in-memory list would be pushed at a node that already has its cache.
+	if f.blLoading.Load() {
 		return
 	}
 	f.syncAllowed()
