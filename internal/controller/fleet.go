@@ -185,6 +185,18 @@ func (f *Fleet) UpdateAvailable(version string) bool {
 	return r.available(channel, version)
 }
 
+// LatestVersion returns the latest release version for the configured release
+// channel ("" when unknown, e.g. before the first refresh completes).
+func (f *Fleet) LatestVersion() string {
+	f.mu.RLock()
+	r, channel := f.release, f.releaseChannel
+	f.mu.RUnlock()
+	if r == nil {
+		return ""
+	}
+	return r.version(channel)
+}
+
 func (f *Fleet) SetReleaseChannel(channel string) error {
 	if err := f.SetReleaseChannelDefault(channel); err != nil {
 		return err

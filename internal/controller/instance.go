@@ -26,7 +26,7 @@ type InstanceStatus struct {
 	PingLastMs      float64                 `json:"ping_last_ms"`
 	PingSamples     int                     `json:"ping_samples"`
 	UpdateAvailable bool                    `json:"update_available"`
-	UpdateInfo      string                  `json:"update_info,omitempty"`
+	LatestVersion   string                  `json:"latest_version,omitempty"`
 }
 
 // Instance is a managed blipd with background poll + watch loops.
@@ -316,12 +316,10 @@ func (i *Instance) status() *InstanceStatus {
 		PingSamples: i.pingSamples,
 	}
 	// Compare the node's reported build against the release-channel head so
-	// the Instances page can badge it "update available".
+	// the Instances page can badge it "update available" (and show the target).
 	if i.health != nil {
 		st.UpdateAvailable = i.fleet.UpdateAvailable(i.health.Version)
-		if st.UpdateAvailable {
-			st.UpdateInfo = "update available"
-		}
+		st.LatestVersion = i.fleet.LatestVersion()
 	}
 	applied := i.appliedHash
 	reportedUpstream := i.lastUpstr
