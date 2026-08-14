@@ -341,8 +341,10 @@ func (i *Instance) status() *InstanceStatus {
 	// Blocklist is synced when the checksum the instance reports matches the
 	// fleet's (trust what the instance actually has, not what we pushed).
 	st.BlocklistSynced = i.fleet.Blocklist().Checksum() != 0 && i.fleet.Blocklist().Checksum() == repBlHash
-	if ad, err := i.ctl().AdoptStatus(context.Background()); err == nil {
-		st.Adopted = ad.Adopted
-	}
+	// Adoption state is local (hasToken): reading it here avoids a blocking
+	// per-instance network call (10s timeout) that would stall the instances
+	// list whenever a node is unreachable. The remote status is fetched
+	// separately by the adopt flow (GetAdoptStatus).
+	st.Adopted = i.hasToken()
 	return st
 }
