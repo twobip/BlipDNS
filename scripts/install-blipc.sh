@@ -202,7 +202,7 @@ install_go_from_archive() {
   archive="$tmp/$archive_name"
   metadata="$tmp/go.json"
   log "installing Go ${GO_REQUIRED_VERSION} from the official Go archive"
-  if ! curl -fsSL "https://go.dev/dl/$archive_name" -o "$archive"; then
+  if ! curl -fL "https://go.dev/dl/$archive_name" -o "$archive"; then
     err "failed to download Go ${GO_REQUIRED_VERSION} for Linux/$arch"
   fi
   if ! curl -fsSL "https://go.dev/dl/?mode=json&include=all" -o "$metadata"; then
@@ -282,7 +282,7 @@ else
   CLONE_DIR="$(mktemp -d)"
   log "cloning $REPO @ $RELEASE"
   git clone --depth 1 --branch "$(echo "$RELEASE" | sed 's#refs/heads/##')" \
-    "https://${REPO}.git" "$CLONE_DIR/src" 2>/dev/null || \
+    "https://${REPO}.git" "$CLONE_DIR/src" || \
     git clone "https://${REPO}.git" "$CLONE_DIR/src"
   SRC_DIR="$CLONE_DIR/src"
 fi
@@ -291,9 +291,9 @@ OUT_DIR="$(mktemp -d)"
 trap 'rm -rf ${CLONE_DIR:+"$CLONE_DIR"} ${OUT_DIR:+"$OUT_DIR"}' EXIT
 
 cd "$SRC_DIR"
-log "building blipc and blipctl"
-go build -ldflags "-X github.com/twobip/BlipDNS/internal/controller.version=$(cat VERSION)" -o "$OUT_DIR/blipc" ./cmd/blipc
-go build -o "$OUT_DIR/blipctl" ./cmd/blipctl
+log "building blipc and blipctl (first build can take a few minutes — package list below shows progress)"
+go build -v -ldflags "-X github.com/twobip/BlipDNS/internal/controller.version=$(cat VERSION)" -o "$OUT_DIR/blipc" ./cmd/blipc
+go build -v -o "$OUT_DIR/blipctl" ./cmd/blipctl
 
 # --- install binaries --------------------------------------------------------
 log "installing binaries to $BIN_DIR"

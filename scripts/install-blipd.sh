@@ -202,7 +202,7 @@ install_go_from_archive() {
   archive="$GO_TMPDIR/$archive_name"
   metadata="$GO_TMPDIR/go.json"
   log "installing Go ${GO_REQUIRED_VERSION} from the official Go archive"
-  if ! curl -fsSL "https://go.dev/dl/$archive_name" -o "$archive"; then
+  if ! curl -fL "https://go.dev/dl/$archive_name" -o "$archive"; then
     err "failed to download Go ${GO_REQUIRED_VERSION} for Linux/$arch"
   fi
   if ! curl -fsSL "https://go.dev/dl/?mode=json&include=all" -o "$metadata"; then
@@ -278,12 +278,12 @@ export GOPATH="$CACHE_DIR/gopath"
 
 log "cloning $REPO @ $RELEASE"
 git clone --depth 1 --branch "$(echo "$RELEASE" | sed 's#refs/heads/##')" \
-  "https://${REPO}.git" "$TMPDIR/src" 2>/dev/null || \
+  "https://${REPO}.git" "$TMPDIR/src" || \
   git clone "https://${REPO}.git" "$TMPDIR/src"
 
 cd "$TMPDIR/src"
-log "building blipd"
-go build -ldflags "-X main.version=$(cat VERSION)" -o "$TMPDIR/blipd" ./cmd/blipd
+log "building blipd (first build can take a few minutes — package list below shows progress)"
+go build -v -ldflags "-X main.version=$(cat VERSION)" -o "$TMPDIR/blipd" ./cmd/blipd
 
 # --- install binary ----------------------------------------------------------
 log "installing binary to $BIN_DIR"
