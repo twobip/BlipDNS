@@ -1993,13 +1993,12 @@ func (f *Fleet) LoadBlocklistCache(ctx context.Context) error {
 	f.blStatus.Domains = f.blocklist.Count()
 	f.blMu.Unlock()
 	log.Printf("blipc: restored %d blocklist domains from local cache", len(set))
-	// Push in the background: pushing a multi-MB list to each instance uses a
-	// 10-minute client timeout (control.Client.SetBlocklist), so doing it
-	// synchronously here can block the HTTP listener from binding for minutes
-	// when an instance is unreachable. The per-instance poll reconcile
-	// (maybePushBlocklist) also covers instances, so this is a best-effort
-	// early push rather than a startup correctness requirement.
-	go f.pushBlocklist(ctx)
+	// Do NOT push here. blipd persists its own blocklist to a local cache and
+	// reports its checksum in /api/v1/stats, so the per-instance poll reconcile
+	// (maybePushBlocklist) only re-pushes when a node's reported checksum
+	// differs — i.e. when the list actually changed or the node is fresh. A
+	// startup full-push would re-send the multi-MB list to every node on every
+	// controller restart for no reason (the slow restart this fixes).
 	return nil
 }
 

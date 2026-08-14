@@ -101,21 +101,23 @@ func main() {
 		}
 	}
 	ctx := context.Background()
-	for _, ic := range cfg.Instances {
-		ic = controller.ResolveTokenFile(ic)
-		if err := fleet.Add(ctx, ic); err != nil {
-			log.Printf("blipc: instance %s: %v", ic.ID, err)
-		}
-	}
-	// Restore the last merged blocklist into RAM from the local DB so a restart
-	// blocks immediately, then seed the sources and fetch fresh data in the
-	// background; instances pick the list up via the poll reconcile / push.
+	// Restore the blocklist (merged + manual + allowed) from the local DB into
+	// RAM BEFORE adding instances, so the first poll reconcile sees the full
+	// list and skips nodes that already have it cached instead of pushing an
+	// empty list at them (which would clear their local cache). Distribution is
+	// checksum-driven: a node is only re-pushed when its reported hash differs.
 	if err := fleet.LoadBlocklistCache(ctx); err != nil {
 		log.Printf("blipc: blocklist cache: %v", err)
 	}
 	fleet.LoadManualDomains(ctx)
 	fleet.LoadAllowedDomains(ctx)
 	fleet.LoadSourceStats(ctx)
+	for _, ic := range cfg.Instances {
+		ic = controller.ResolveTokenFile(ic)
+		if err := fleet.Add(ctx, ic); err != nil {
+			log.Printf("blipc: instance %s: %v", ic.ID, err)
+		}
+	}
 	if cfg.BlocklistUpdateHours > 0 {
 		fleet.SetAutoUpdateHours(cfg.BlocklistUpdateHours)
 	}
