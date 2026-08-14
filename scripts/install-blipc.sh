@@ -396,6 +396,7 @@ visudo -cf /etc/sudoers.d/blipc-install
 # --- config / state dirs -----------------------------------------------------
 log "creating config and state directories"
 mkdir -p "$CONFIG_DIR" "$STATE_DIR"
+chown blipc:blipc "$CONFIG_DIR" "$STATE_DIR"
 chmod 700 "$CONFIG_DIR" "$STATE_DIR"
 
 # Create a default config if none exists.
@@ -413,6 +414,13 @@ listen: "0.0.0.0:8500"
 #     label: "living-room"
 #     token: "secret-token"
 EOF
+  chown blipc:blipc "$CONFIG_DIR/blipc.yaml"
+  chmod 600 "$CONFIG_DIR/blipc.yaml"
+else
+  # An existing config may still be root-owned from an older install; the
+  # blipc service cannot read that, so it silently starts unconfigured and
+  # the setup page appears. Restore ownership so upgrades keep working.
+  chown blipc:blipc "$CONFIG_DIR/blipc.yaml"
   chmod 600 "$CONFIG_DIR/blipc.yaml"
 fi
 
