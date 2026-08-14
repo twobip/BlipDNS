@@ -292,6 +292,12 @@ install -m 0755 "$TMPDIR/src/scripts/blipd-update.sh" /usr/local/sbin/blipd-upda
 install -m 0755 "$TMPDIR/src/scripts/blipd-install.sh" /usr/local/sbin/blipd-install
 # Only the install helper is allowed to run as root; the build (blipd-update)
 # runs unprivileged as the blip service user.
+
+log "ensuring system user 'blip'"
+if ! id blip >/dev/null 2>&1; then
+  useradd --system --no-create-home --shell /usr/sbin/nologin blip
+fi
+
 cat > /etc/sudoers.d/blipd-install <<'EOF'
 blip ALL=(root) NOPASSWD: /usr/local/sbin/blipd-install
 EOF
