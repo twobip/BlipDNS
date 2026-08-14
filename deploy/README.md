@@ -48,9 +48,9 @@ sudo systemctl restart blipd       # re-reads /etc/blipd/blipd.yaml
 
 - The unit binds `dns_addr: 0.0.0.0:53` and `doh_addr: 0.0.0.0:8443`.
   Change ports in `/etc/blipd/blipd.yaml` and `systemctl restart blipd`.
-- `ProtectSystem=strict` + `NoNewPrivileges=true` are set, so the binary
+- `ProtectSystem=strict` + `ProtectHome` + `PrivateTmp` are set, so the binary
   can only write where the unit allows (the service itself is stateless
-  apart from the cache in memory). The config dir is owned `root:blip`,
-  mode 0640.
+  apart from the cache in memory). `NoNewPrivileges` stays OFF so the
+  self-updater can elevate to the root install helper via sudo.
 - To remove: `sudo ./deploy/uninstall.sh` (keeps config) or
   `sudo ./deploy/uninstall.sh -c` (removes config too).

@@ -107,7 +107,9 @@ sudo systemctl status blipc
 ```
 
 The unit runs as an unprivileged `blipc` user, hardened
-(`ProtectSystem=strict`, `NoNewPrivileges`, `CAP_NET_BIND_SERVICE`).
+(`ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`, `CAP_NET_BIND_SERVICE`).
+`NoNewPrivileges` is deliberately left OFF so the self-updater can elevate to
+the root install helper via sudo.
 
 ## Architecture
 

@@ -353,25 +353,35 @@ if [ -d "$SYSTEMD_DIR" ] && command -v systemctl >/dev/null 2>&1; then
   log "installing systemd unit: $SYSTEMD_DIR/$SERVICE_NAME.service"
   cat > "$SYSTEMD_DIR/$SERVICE_NAME.service" <<EOF
 [Unit]
-Description=BlipDNS resolver (blipd)
+Description=BlipDNS - fast per-client filtering DNS server with DoH
+Documentation=https://github.com/twobip/BlipDNS
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
+User=blip
+Group=blip
 ExecStart=$BIN_DIR/blipd -config $CONFIG_DIR/blipd.yaml
+ExecReload=/bin/kill -HUP \$MAINPID
 Restart=on-failure
-RestartSec=5
-# blipd binds to port 53 / 443 — run unprivileged with AmbientCapabilities:
-#   User=blip
-#   Group=blip
-#   AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_RAW
-# NoNewPrivileges and a restricted CapabilityBoundingSet must stay OFF: the
-# service elevates to the pinned /usr/local/sbin/blipd-update helper via sudo.
-ReadWritePaths=$STATE_DIR $CONFIG_DIR /var/cache/blipd-update /usr/local/bin /etc/keepalived
-StateDirectory=blipd
+RestartSec=3
+
+# Allow binding privileged ports (e.g. 53) as the unprivileged 'blip' user.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+# No CapabilityBoundingSet restriction: blipd elevates to the pinned
+# /usr/local/sbin/blipd-install helper via sudo (narrow sudoers rule), which
+# needs CAP_SETGID/CAP_SETUID available.
+# NoNewPrivileges must stay OFF for the same reason.
+UMask=0077
 ProtectSystem=strict
-AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_RAW
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=$STATE_DIR $CONFIG_DIR /var/cache/blipd-update /usr/local/bin
+LimitNOFILE=65536
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=blipd
 
 [Install]
 WantedBy=multi-user.target

@@ -324,23 +324,34 @@ if [ -d "$SYSTEMD_DIR" ] && command -v systemctl >/dev/null 2>&1; then
   log "installing systemd unit: $SYSTEMD_DIR/$SERVICE_NAME.service"
   cat > "$SYSTEMD_DIR/$SERVICE_NAME.service" <<EOF
 [Unit]
-Description=BlipDNS controller (blipc)
+Description=BlipDNS Controller - Unifi-style fleet management console
+Documentation=https://github.com/twobip/BlipDNS
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
+User=blipc
+Group=blipc
 ExecStart=$BIN_DIR/blipc -config $CONFIG_DIR/blipc.yaml
+ExecReload=/bin/kill -HUP \$MAINPID
 Restart=on-failure
-RestartSec=5
-# Uncomment the next line to run as a non-root user (recommended).
-# User=blip
-# Group=blip
-ReadWritePaths=$STATE_DIR $CONFIG_DIR
-StateDirectory=blipc
-ReadWritePaths=$STATE_DIR
+RestartSec=3
+
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+# No CapabilityBoundingSet restriction: blipc elevates to the pinned
+# /usr/local/sbin/blipc-install helper via sudo (narrow sudoers rule), which
+# needs CAP_SETGID/CAP_SETUID available.
+# NoNewPrivileges must stay OFF for the same reason.
+UMask=0077
 ProtectSystem=strict
-NoNewPrivileges=true
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=$STATE_DIR $CONFIG_DIR /var/cache/blipc-update /usr/local/bin
+LimitNOFILE=65536
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=blipc
 
 [Install]
 WantedBy=multi-user.target
