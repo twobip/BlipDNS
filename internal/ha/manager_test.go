@@ -68,3 +68,25 @@ func TestRenderDoesNotContainRawUnsafeAuth(t *testing.T) {
 		t.Fatalf("render() did not include safe auth password: %q", got)
 	}
 }
+
+func TestRenderSpecifiesScriptUser(t *testing.T) {
+	// enable_script_security makes keepalived run scripts as a non-root user;
+	// without an explicit `user` directive keepalived falls back to the
+	// keepalived_script user, which does not exist on BlipDNS hosts, so it
+	// drops the check script and the track_script reference fails validation.
+	cfg := control.HAConfig{
+		Enabled:           true,
+		Mode:              "unicast",
+		NodeRole:          "primary",
+		Interface:         "eth0",
+		SourceIP:          "192.0.2.10",
+		PeerIP:            "192.0.2.11",
+		VirtualIP:         "192.0.2.1/24",
+		VirtualRouterID:   51,
+		Priority:          101,
+		AdvertIntervalSec: 1,
+	}
+	if got := render(cfg); !strings.Contains(got, "user blip") {
+		t.Fatalf("render() missing script user directive; keepalived would drop chk_blipd:\n%s", got)
+	}
+}

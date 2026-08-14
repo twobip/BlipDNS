@@ -331,7 +331,7 @@ func render(cfg control.HAConfig) string {
 	}
 	var b strings.Builder
 	b.WriteString("global_defs {\n    router_id blipd-ha\n    enable_script_security\n}\n\n")
-	b.WriteString("vrrp_script chk_blipd {\n    script \"/bin/systemctl is-active --quiet blipd\"\n    interval 2\n    fall 2\n    rise 2\n    weight -20\n}\n\n")
+	b.WriteString("vrrp_script chk_blipd {\n    script \"/bin/systemctl is-active --quiet blipd\"\n    user blip\n    interval 2\n    fall 2\n    rise 2\n    weight -20\n}\n\n")
 	fmt.Fprintf(&b, "vrrp_instance BLIPDNS {\n    state %s\n    interface %s\n    virtual_router_id %d\n    priority %d\n    advert_int %d\n", state, cfg.Interface, cfg.VirtualRouterID, cfg.Priority, cfg.AdvertIntervalSec)
 	if cfg.Mode == "unicast" {
 		fmt.Fprintf(&b, "    unicast_src_ip %s\n    unicast_peer {\n        %s\n    }\n", cfg.SourceIP, cfg.PeerIP)
