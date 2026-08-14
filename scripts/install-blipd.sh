@@ -354,6 +354,14 @@ elif grep -Eq '^[[:space:]]*admin_token:[[:space:]]*("replace-me-with-a-secret-t
 fi
 chmod 600 "$CONFIG_DIR/blipd.yaml"
 
+# The service runs as the unprivileged 'blip' user; give it write access to its
+# state directory and read access to the config (which holds the admin token).
+log "setting ownership for the blip service user"
+chown -R blip:blip "$STATE_DIR"
+chown -R root:blip "$CONFIG_DIR"
+chmod 750 "$CONFIG_DIR"
+chmod 640 "$CONFIG_DIR/blipd.yaml"
+
 # --- systemd service (if systemd is available) --------------------------------
 if [ -d "$SYSTEMD_DIR" ] && command -v systemctl >/dev/null 2>&1; then
   log "installing systemd unit: $SYSTEMD_DIR/$SERVICE_NAME.service"
