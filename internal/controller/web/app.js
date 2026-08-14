@@ -409,7 +409,7 @@ function respSummary(e) {
 function renderInstances() {
   const tb = $("inst-tbody");
   const f = ($("inst-filter")?.value || "").toLowerCase();
-  const list = instances.filter((i) => !f || (i.id + " " + (i.label || "") + " " + (i.url || "")).toLowerCase().includes(f));
+  const list = instances.filter((i) => !f || (i.id + " " + (i.label || "") + " " + (i.url || "")).toLowerCase().includes(f)).sort((a, b) => (a.id || "").localeCompare(b.id || ""));
   $("inst-count").textContent = list.length + " of " + instances.length;
   if (!list.length) {
     tb.innerHTML = instances.length
