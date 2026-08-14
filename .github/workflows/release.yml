@@ -1,0 +1,75 @@
+name: release
+
+# Cut a GitHub release with pre-built static binaries whenever the VERSION file
+# changes on master. The blipc release-check already reads the VERSION file from
+# the branch; matching that bump to a tagged release ("v0.3.0") lets install and
+# self-update download binaries instead of building from source on every node.
+#
+# Fast-forward merges carry the VERSION change through, so this fires on them.
+# (If a --no-ff merge ever misses the trigger, use the manual dispatch below.)
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - 'VERSION'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+
+      - name: Read version
+        id: version
+        run: |
+          V="$(tr -d '[:space:]' < VERSION)"
+          echo "value=$V" >> "$GITHUB_OUTPUT"
+          echo "release version: $V"
+
+      - name: Check if release already exists
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "v${{ steps.version.outputs.value }}" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "release v${{ steps.version.outputs.value }} already exists — skipping"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build static amd64 binaries
+        if: steps.check.outputs.exists == 'false'
+        env:
+          VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          set -euo pipefail
+          export CGO_ENABLED=0 GOOS=linux GOARCH=amd64
+          go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o blipd-linux-amd64 ./cmd/blipd
+          go build -trimpath -ldflags "-s -w -X github.com/twobip/BlipDNS/internal/controller.version=${VERSION}" -o blipc-linux-amd64 ./cmd/blipc
+          go build -trimpath -ldflags "-s -w" -o blipctl-linux-amd64 ./cmd/blipctl
+          sha256sum blipd-linux-amd64 blipc-linux-amd64 blipctl-linux-amd64 > SHA256SUMS
+          echo "--- built artifacts ---"
+          ls -la blipd-linux-amd64 blipc-linux-amd64 blipctl-linux-amd64 SHA256SUMS
+
+      - name: Create GitHub release
+        if: steps.check.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          gh release create "v${VERSION}" \
+            blipd-linux-amd64 blipc-linux-amd64 blipctl-linux-amd64 SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "v${VERSION}" \
+            --generate-notes

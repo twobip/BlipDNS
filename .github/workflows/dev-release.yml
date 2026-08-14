@@ -1,0 +1,66 @@
+name: dev-release
+
+# Rolling pre-built binaries for the dev channel. Fires on every push to dev
+# (plus a manual dispatch), so nodes pointed at the dev channel can fetch the
+# latest build as a small download instead of cloning + building from source.
+#
+# The release uses a moving "dev" tag: each run deletes the old release+tag and
+# recreates it at the current commit, so the download URL stays fixed:
+#   https://github.com/twobip/BlipDNS/releases/download/dev/blipd-linux-amd64
+#
+# The VERSION stamp inside stays whatever VERSION says at build time (bumped
+# only on promotion to master), matching the blipc release-check which reads
+# dev/VERSION. The "dev" tag — not the version — is what marks this a dev build.
+
+on:
+  push:
+    branches:
+      - dev
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+
+      - name: Read version
+        id: version
+        run: |
+          V="$(tr -d '[:space:]' < VERSION)"
+          echo "value=$V" >> "$GITHUB_OUTPUT"
+          echo "stamping dev build with VERSION=$V"
+
+      - name: Build static amd64 binaries
+        env:
+          VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          set -euo pipefail
+          export CGO_ENABLED=0 GOOS=linux GOARCH=amd64
+          go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o blipd-linux-amd64 ./cmd/blipd
+          go build -trimpath -ldflags "-s -w -X github.com/twobip/BlipDNS/internal/controller.version=${VERSION}" -o blipc-linux-amd64 ./cmd/blipc
+          go build -trimpath -ldflags "-s -w" -o blipctl-linux-amd64 ./cmd/blipctl
+          sha256sum blipd-linux-amd64 blipc-linux-amd64 blipctl-linux-amd64 > SHA256SUMS
+          echo "--- built artifacts ---"
+          ls -la blipd-linux-amd64 blipc-linux-amd64 blipctl-linux-amd64 SHA256SUMS
+
+      - name: Publish rolling dev prerelease
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Move the "dev" tag to this commit and (re)create the prerelease.
+          gh release delete dev --cleanup-tag --yes --repo "$GITHUB_REPOSITORY" 2>/dev/null || true
+          gh release create dev \
+            blipd-linux-amd64 blipc-linux-amd64 blipctl-linux-amd64 SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --prerelease \
+            --title "dev (rolling)" \
+            --notes "Rolling dev build (commit ${GITHUB_SHA}, VERSION $(cat VERSION))"
