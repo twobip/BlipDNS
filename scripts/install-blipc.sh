@@ -278,6 +278,31 @@ require_go() {
 # --- sanity ------------------------------------------------------------------
 [ "$(id -u)" -eq 0 ] || err "this script must be run as root (use sudo)"
 
+# --- resolve release channel / tag ------------------------------------------
+if [ -z "$INSTALL" ]; then
+  CHANNEL="stable"
+else
+  CHANNEL="$INSTALL"
+fi
+
+case "$CHANNEL" in
+  stable|master)
+    REF="master"
+    TAG="v$(curl -fsSL "$RAW_BASE/master/VERSION" || err "could not read the current stable version from GitHub")" ;;
+  dev)
+    # No pre-built dev release exists on GitHub — always build from the
+    # dev branch. Force BUILD_FROM_SOURCE so the download path (which
+    # 404s on the non-existent "dev" tag) is never attempted.
+    REF="dev"
+    TAG="dev"
+    BUILD_FROM_SOURCE=1 ;;
+  v*)
+    REF="$CHANNEL"
+    TAG="$CHANNEL" ;;
+  *)
+    err "unknown release: $CHANNEL (use stable, dev, or vX.Y.Z)" ;;
+esac
+
 if [ "$BUILD_FROM_SOURCE" -eq 1 ] || [ "$LOCAL" -eq 1 ]; then
   [ "$INSTALL_DEPS" -eq 1 ] && install_dependencies
   install_git
@@ -293,27 +318,6 @@ else
     fi
   fi
 fi
-
-# --- resolve release channel / tag ------------------------------------------
-if [ -z "$INSTALL" ]; then
-  CHANNEL="stable"
-else
-  CHANNEL="$INSTALL"
-fi
-
-case "$CHANNEL" in
-  stable|master)
-    REF="master"
-    TAG="v$(curl -fsSL "$RAW_BASE/master/VERSION" || err "could not read the current stable version from GitHub")" ;;
-  dev)
-    REF="dev"
-    TAG="dev" ;;
-  v*)
-    REF="$CHANNEL"
-    TAG="$CHANNEL" ;;
-  *)
-    err "unknown release: $CHANNEL (use stable, dev, or vX.Y.Z)" ;;
-esac
 
 # --- obtain the binaries (download, clone + build, or local build) -----------
 # /root may be read-only (containers/LXC); keep Go caches somewhere writable.
