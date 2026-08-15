@@ -28,7 +28,12 @@ err()  { echo "[install-blipd] ERROR: $*" >&2; exit 1; }
 # removed — never the dir itself, and never the runtime state or config.
 cleanup_old_build() {
   log "cleaning up build leftovers from the old install method"
-  rm -rf /var/cache/blipd-update
+  # Don't rm -rf the directory itself — it may still be referenced by
+  # an existing systemd unit's ReadWritePaths (ProtectSystem=strict
+  # makes systemd fail to start the service if a ReadWritePaths path
+  # doesn't exist). Clean its contents instead.
+  mkdir -p /var/cache/blipd-update
+  rm -rf /var/cache/blipd-update/*
   rm -rf "$STATE_DIR/update/src" \
          "$STATE_DIR/update/gomod" \
          "$STATE_DIR/update/gocache" \
