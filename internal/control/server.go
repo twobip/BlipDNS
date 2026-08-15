@@ -843,7 +843,7 @@ func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
 
-	ticker := time.NewTicker(5 * time.Second)
+	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
 	for {
 		select {
@@ -853,9 +853,16 @@ func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintf(w, "data: %s\n\n", mustJSON(e))
 			flusher.Flush()
 		case <-ticker.C:
+			// Keepalive: a lightweight stats ping so the controller can
+			// detect liveness. PerClient (which can grow to thousands of
+			// entries) is intentionally omitted — it's only needed by the
+			// /api/v1/stats HTTP endpoint, not the live event stream.
 			st := &StatsResponse{}
 			if s.stats != nil {
 				st = s.stats.Stats()
+				st.PerClient = nil
+				st.UpstreamServers = nil
+				st.UpstreamRoutes = nil
 			}
 			fmt.Fprintf(w, "data: %s\n\n", mustJSON(WatchEvent{Type: "stats", At: time.Now(), Stats: st}))
 			flusher.Flush()

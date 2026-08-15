@@ -352,6 +352,7 @@ function cgrad(ctx, rgb) {
 }
 
 /* ---------- live events (SSE) ---------- */
+let eventsRenderTimer = null;
 function connectSSE() {
   if (sse) return;
   try {
@@ -368,9 +369,21 @@ function connectSSE() {
 
 let eventBuffer = [];
 function pushEvent(e) {
+  // Drop the bulky fields the event list never renders — the full
+  // StatsResponse (with PerClient) and HealthResponse can each be
+  // hundreds of KB on a busy resolver and would otherwise accumulate
+  // in eventBuffer for the lifetime of the tab.
+  e.stats = null;
+  e.health = null;
   eventBuffer.unshift(e);
   eventBuffer = eventBuffer.slice(0, 60);
-  if (current === "instances") renderEvents();
+  // Throttle renders to at most once per 2 seconds: the SSE stream can
+  // deliver many events per second (health polls + live queries), and
+  // rebuilding innerHTML on every event causes GC pressure and retains
+  // large DOM node graphs between renders.
+  if (current !== "instances") return;
+  if (eventsRenderTimer) clearTimeout(eventsRenderTimer);
+  eventsRenderTimer = setTimeout(() => { renderEvents(); }, 2000);
 }
 function renderEvents() {
   const el = $("d-events");
@@ -2229,3 +2242,18 @@ startClock();
 refreshSettings();
 pollTimer = setInterval(() => { if (current === "dashboard" || current === "instances" || current === "cache-stats" || current === "upstream-errors") refresh(); }, 5000);
 setInterval(() => { if (current === "dashboard") fetchStats(); }, 60000); // refresh chart/stats periodically
+
+/* ---------- cleanup on unload ---------- */
+// Close the SSE stream and clear timers when the page is unloaded or the
+// user navigates away — otherwise the EventSource can outlive the page
+// in some browsers (especially bfcache) and retain references to large
+// event objects and closures.
+window.addEventListener("beforeunload", () => {
+  if (pollTimer) clearInterval(pollTimer);
+  if (clockTimer) clearInterval(clockTimer);
+  if (eventsRenderTimer) clearTimeout(eventsRenderTimer);
+  if (updatePollTimer) clearTimeout(updatePollTimer);
+  if (ctrlUpdateTimer) clearTimeout(ctrlUpdateTimer);
+  if (blStatusTimer) clearInterval(blStatusTimer);
+  if (sse) sse.close();
+});
