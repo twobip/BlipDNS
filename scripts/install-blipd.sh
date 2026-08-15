@@ -306,12 +306,8 @@ case "$CHANNEL" in
     REF="master"
     TAG="v$(curl -fsSL "$RAW_BASE/master/VERSION" || err "could not read the current stable version from GitHub")" ;;
   dev)
-    # No pre-built dev release exists on GitHub — always build from the
-    # dev branch. Force BUILD_FROM_SOURCE so the download path (which
-    # 404s on the non-existent "dev" tag) is never attempted.
     REF="dev"
-    TAG="dev"
-    BUILD_FROM_SOURCE=1 ;;
+    TAG="dev" ;;
   v*)
     REF="$CHANNEL"
     TAG="$CHANNEL" ;;
