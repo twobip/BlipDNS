@@ -443,7 +443,7 @@ log "setting ownership for the blip service user"
 chown -R blip:blip "$STATE_DIR"
 chown -R root:blip "$CONFIG_DIR"
 chmod 750 "$CONFIG_DIR"
-chmod 640 "$CONFIG_DIR/blipd.yaml"
+# chmod 600 already set above (line 438); 640 would warn in blipd.
 
 # --- systemd service (if systemd is available) --------------------------------
 if [ -d "$SYSTEMD_DIR" ] && command -v systemctl >/dev/null 2>&1; then
