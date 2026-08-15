@@ -24,27 +24,6 @@ RAW_BASE="https://raw.githubusercontent.com/twobip/BlipDNS"
 log()  { echo "[install-blipc] $*"; }
 err()  { echo "[install-blipc] ERROR: $*" >&2; exit 1; }
 
-# Remove leftovers from the old clone+build install method (Go caches + the
-# persistent clone + telemetry). The download-based updater still stages
-# downloads under $STATE_DIR/update, so only that dir's build subdirs are
-# removed — never the dir itself, and never the runtime databases or config.
-cleanup_old_build() {
-  log "cleaning up build leftovers from the old install method"
-  # Don't rm -rf the directory itself — it may still be referenced by
-  # an existing systemd unit's ReadWritePaths (ProtectSystem=strict
-  # makes systemd fail to start the service if a ReadWritePaths path
-  # doesn't exist). Clean its contents instead.
-  mkdir -p /var/cache/blipc-update
-  rm -rf /var/cache/blipc-update/*
-  rm -rf "$STATE_DIR/update/src" \
-         "$STATE_DIR/update/gomod" \
-         "$STATE_DIR/update/gocache" \
-         "$STATE_DIR/update/gopath" \
-         "$STATE_DIR/update/.config" \
-         "$STATE_DIR/update/blipc.new"
-  rm -rf "$STATE_DIR/.config/go"
-}
-
 usage() {
   cat <<'EOF'
 Usage: install-blipc.sh [stable|dev|vX.Y.Z] [--install-deps] [--build-from-source] [--local]
@@ -363,7 +342,6 @@ elif [ "$BUILD_FROM_SOURCE" -eq 1 ]; then
   go build -v -ldflags "-X github.com/twobip/BlipDNS/internal/controller.version=$(cat VERSION)" -o "$TMPDIR/blipc" ./cmd/blipc
   go build -v -o "$TMPDIR/blipctl" ./cmd/blipctl
 else
-  cleanup_old_build
   log "downloading blipc and blipctl from release $TAG"
   fetch_verified "$TAG" blipc-linux-amd64 "$TMPDIR/blipc"
   fetch_verified "$TAG" blipctl-linux-amd64 "$TMPDIR/blipctl"
