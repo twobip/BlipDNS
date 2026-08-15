@@ -442,6 +442,7 @@ chmod 600 "$CONFIG_DIR/blipd.yaml"
 log "setting ownership for the blip service user"
 chown -R blip:blip "$STATE_DIR"
 chown -R root:blip "$CONFIG_DIR"
+chown blip:blip "$CONFIG_DIR/blipd.yaml"
 chmod 750 "$CONFIG_DIR"
 # chmod 600 already set above (line 438); 640 would warn in blipd.
 
