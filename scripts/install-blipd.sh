@@ -368,6 +368,14 @@ EOF
 chmod 0440 /etc/sudoers.d/blipd-restart
 visudo -cf /etc/sudoers.d/blipd-restart
 
+# Allow the 'blip' user to reload keepalived (needed for HA priority changes
+# during fleet updates — blipd sends SIGHUP to re-read the rendered config).
+cat > /etc/sudoers.d/blipd-keepalived <<'EOF'
+blip ALL=(root) NOPASSWD: /usr/bin/systemctl reload keepalived
+EOF
+chmod 0440 /etc/sudoers.d/blipd-keepalived
+visudo -cf /etc/sudoers.d/blipd-keepalived
+
 # --- config / state dirs -----------------------------------------------------
 log "creating config and state directories"
 mkdir -p "$CONFIG_DIR" "$STATE_DIR" /etc/keepalived

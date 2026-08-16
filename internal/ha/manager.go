@@ -215,9 +215,10 @@ func (m *Manager) ApplyHA() error {
 	}
 	// Reload keepalived so it picks up the new config. keepalived handles
 	// SIGHUP by re-reading its config and doing a graceful restart of VRRP
-	// advertisements. We use systemctl reload when available (so the service
-	// manager tracks the operation) and fall back to pkill -HUP.
-	if commandSucceeds("systemctl", "reload", "keepalived") {
+	// advertisements. blipd runs as the unprivileged 'blip' user, so we
+	// escalate via sudo (with a narrow NOPASSWD sudoers rule installed by
+	// the install script) to reload the root-owned keepalived service.
+	if commandSucceeds("sudo", "systemctl", "reload", "keepalived") {
 		m.clearError()
 		return nil
 	}
