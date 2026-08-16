@@ -35,6 +35,7 @@ type config struct {
 	UpstreamServers        []upstream.UpstreamServer               `yaml:"upstream_servers"`
 	UpstreamRoutes         []upstream.UpstreamRoute                `yaml:"upstream_routes"`
 	BlocklistSources       []string                                `yaml:"blocklist_sources"`
+	BlocklistDisabled      []string                                `yaml:"blocklist_disabled"`
 	BlocklistUpdateHours   int                                     `yaml:"blocklist_update_hours"`
 	Instances              []controller.InstanceConfig             `yaml:"instances"`
 	Records                []control.RecordEntry                   `yaml:"records"`
@@ -119,6 +120,9 @@ func main() {
 		fleet.SetAutoUpdateHours(cfg.BlocklistUpdateHours)
 	}
 	if len(cfg.BlocklistSources) > 0 {
+		// Restore the disabled set first so the initial import (triggered by
+		// SetBlocklistSources) skips sources the operator turned off.
+		fleet.SetBlocklistDisabled(cfg.BlocklistDisabled)
 		fleet.SetBlocklistSources(ctx, cfg.BlocklistSources)
 	}
 	fleet.StartAutoUpdater()

@@ -85,6 +85,7 @@ const IC = {
   device: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg>',
   refresh: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 3v6h-6"/></svg>',
   x: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12"/></svg>',
+  power: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18.4 6.6a9 9 0 1 1-12.8 0"/><path d="M12 2v10"/></svg>',
   cache: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.7 4 3 9 3s9-1.3 9-3V5"/><path d="M3 12c0 1.7 4 3 9 3s9-1.3 9-3"/></svg>',
 };
 
@@ -1006,6 +1007,7 @@ async function saveRename() {
 /* ---------- blocklist ---------- */
 let polCache = {};
 let blSources = [];
+let blDisabled = new Set();
 let blStatus = { running: false, domains: 0 };
 let blStatusTimer = null;
 async function loadBlocklist() {
@@ -1016,6 +1018,7 @@ async function loadBlocklist() {
     blAllowed = d.allowed || [];
     if (Array.isArray(d.sources)) blSources = d.sources.slice();
     if (d.status) blStatus = d.status;
+    blDisabled = new Set((d.status && d.status.disabled) || []);
     blSourceStats = (d.status && d.status.source_stats) || [];
     blAutoHours = (d.status && d.status.auto_update_hours) || 0;
     blNextUpdate = (d.status && d.status.next_update) || null;
@@ -1071,15 +1074,17 @@ function renderSources() {
         const n = s.domains || 0;
         const err = s.error || "";
         const upd = s.last_update ? relTime(s.last_update) : "—";
-        return `<tr>
+        const off = blDisabled.has(u);
+        return `<tr${off ? ` style="opacity:.5"` : ""}>
           <td class="mono" style="font-size:12px">${esc(u)}</td>
           <td>${n ? fmt(n) : "—"}</td>
           <td class="cell-sub">${upd}</td>
-          <td>${err ? `<span class="badge err" title="${esc(err)}">error</span>` : n ? `<span class="badge on">ok</span>` : `<span class="badge">new</span>`}</td>
-          <td style="text-align:right"><button class="icon-btn" data-rm-src="${esc(u)}" title="Remove source">${IC.x}</button></td>
+          <td>${off ? `<span class="badge">disabled</span>` : err ? `<span class="badge err" title="${esc(err)}">error</span>` : n ? `<span class="badge on">ok</span>` : `<span class="badge">new</span>`}</td>
+          <td style="text-align:right"><button class="icon-btn" data-tgl-src="${esc(u)}" title="${off ? "Enable source" : "Disable source"}">${IC.power}</button><button class="icon-btn" data-rm-src="${esc(u)}" title="Remove source">${IC.x}</button></td>
         </tr>`;
       }).join("");
     }
+    tb.querySelectorAll("[data-tgl-src]").forEach((b) => b.onclick = () => toggleSource(b.dataset.tglSrc));
     tb.querySelectorAll("[data-rm-src]").forEach((b) => b.onclick = () => removeSource(b.dataset.rmSrc));
   }
   const sel = $("s-bl-sources");
@@ -1135,7 +1140,18 @@ function renderBlLog() {
 }
 function removeSource(u) {
   blSources = blSources.filter((s) => s !== u);
+  blDisabled.delete(u);
   renderSources();
+}
+async function toggleSource(u) {
+  const enable = blDisabled.has(u);
+  try {
+    await API("/api/blocklist/source", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: u, enabled: enable }) });
+    if (enable) blDisabled.delete(u); else blDisabled.add(u);
+    toast(enable ? "source enabled — re-importing" : "source disabled — re-importing");
+    renderSources();
+    startBlStatusPoll();
+  } catch (e) { toast("failed to toggle source: " + e.message, "err"); }
 }
 function startBlStatusPoll() {
   if (blStatusTimer) return;

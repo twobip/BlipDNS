@@ -102,45 +102,46 @@ func (o *InstanceOverride) IsEmpty() bool {
 
 // Fleet holds all instances, the event bus, and the global blocklist.
 type Fleet struct {
-	mu               sync.RWMutex
-	instances        map[string]*Instance
-	bus              *Bus
-	http             *http.Client
-	now              func() time.Time
-	logfn            func(Event)
-	queryLog         *QueryLogStore       // persistent query log
-	blocklistDB      *BlocklistStore      // persisted copy of the merged blocklist
-	blocklist        *blocklist.Blocklist // global DNS blocklist
-	blocklistSources []string             // Pi-hole style source URLs (AdBlock Plus / hosts)
-	blMu             sync.Mutex           // guards blocklist status + import job
-	blRunning        bool
-	blGen            int
-	blCancel         context.CancelFunc
-	blStatus         BlocklistStatus
-	blLoading        atomic.Bool                  // true while the startup cache load is in flight
-	sourceStats      []SourceStat                 // per-source download stats, refreshed on import
-	importLog        []string                     // recent import output lines (capped ring buffer)
-	manualDomains    map[string]struct{}          // hand-added domains, kept apart from sources
-	manualAllowed    map[string]struct{}          // hand-added whitelist domains
-	autoUpdateHours  int                          // hours between automatic refreshes; 0 = manual only
-	configPath       string                       // path to controller config YAML (for persisting tokens)
-	defaultPolicy    *control.Policy              // fleet-wide default policy (source of truth)
-	overrides        map[string]*InstanceOverride // per-instance partial configs (diff vs default)
-	dohHTTPAddr      string                       // fleet-wide plain-HTTP DoH address ("", off)
-	rateLimitQPS     int                          // fleet-wide DNS per-client QPS limit (0 = disabled)
-	cacheSize        int                          // fleet-wide max cached responses (0 = unlimited)
-	cacheWarm        int                          // fleet-wide auto-refresh count (0 = off)
-	cacheRegular     int                          // fleet-wide regular-hold seconds for non-top entries (0 = use record TTL)
-	cacheConfigured  bool                         // true once the operator explicitly set a fleet-wide cache value
-	upstreamServers  []upstream.UpstreamServer    // fleet-wide default upstream pool
-	upstreamRoutes   []upstream.UpstreamRoute     // fleet-wide default upstream routes
-	qlRetentionHours int                          // how long query log entries are kept (0 = 24h default)
-	records          []control.RecordEntry        // fleet-wide local DNS records
-	haCluster        control.HACluster            // LAN two-node VRRP desired state
-	releaseChannel   string                       // stable or dev
-	updateMu         sync.Mutex
-	updateJob        UpdateJobStatus
-	release          *releaseCheck
+	mu                sync.RWMutex
+	instances         map[string]*Instance
+	bus               *Bus
+	http              *http.Client
+	now               func() time.Time
+	logfn             func(Event)
+	queryLog          *QueryLogStore       // persistent query log
+	blocklistDB       *BlocklistStore      // persisted copy of the merged blocklist
+	blocklist         *blocklist.Blocklist // global DNS blocklist
+	blocklistSources  []string             // Pi-hole style source URLs (AdBlock Plus / hosts)
+	blocklistDisabled map[string]bool      // source URLs the operator has disabled (skipped on import)
+	blMu              sync.Mutex           // guards blocklist status + import job
+	blRunning         bool
+	blGen             int
+	blCancel          context.CancelFunc
+	blStatus          BlocklistStatus
+	blLoading         atomic.Bool                  // true while the startup cache load is in flight
+	sourceStats       []SourceStat                 // per-source download stats, refreshed on import
+	importLog         []string                     // recent import output lines (capped ring buffer)
+	manualDomains     map[string]struct{}          // hand-added domains, kept apart from sources
+	manualAllowed     map[string]struct{}          // hand-added whitelist domains
+	autoUpdateHours   int                          // hours between automatic refreshes; 0 = manual only
+	configPath        string                       // path to controller config YAML (for persisting tokens)
+	defaultPolicy     *control.Policy              // fleet-wide default policy (source of truth)
+	overrides         map[string]*InstanceOverride // per-instance partial configs (diff vs default)
+	dohHTTPAddr       string                       // fleet-wide plain-HTTP DoH address ("", off)
+	rateLimitQPS      int                          // fleet-wide DNS per-client QPS limit (0 = disabled)
+	cacheSize         int                          // fleet-wide max cached responses (0 = unlimited)
+	cacheWarm         int                          // fleet-wide auto-refresh count (0 = off)
+	cacheRegular      int                          // fleet-wide regular-hold seconds for non-top entries (0 = use record TTL)
+	cacheConfigured   bool                         // true once the operator explicitly set a fleet-wide cache value
+	upstreamServers   []upstream.UpstreamServer    // fleet-wide default upstream pool
+	upstreamRoutes    []upstream.UpstreamRoute     // fleet-wide default upstream routes
+	qlRetentionHours  int                          // how long query log entries are kept (0 = 24h default)
+	records           []control.RecordEntry        // fleet-wide local DNS records
+	haCluster         control.HACluster            // LAN two-node VRRP desired state
+	releaseChannel    string                       // stable or dev
+	updateMu          sync.Mutex
+	updateJob         UpdateJobStatus
+	release           *releaseCheck
 }
 
 func (f *Fleet) ReleaseChannel() string {
@@ -413,6 +414,7 @@ type BlocklistStatus struct {
 	LastUpdate      time.Time    `json:"last_update"`
 	Errors          []string     `json:"errors,omitempty"`
 	Sources         []string     `json:"sources"`
+	Disabled        []string     `json:"disabled,omitempty"`
 	SourceStats     []SourceStat `json:"source_stats,omitempty"`
 	Log             []string     `json:"log,omitempty"`
 	AutoUpdateHours int          `json:"auto_update_hours"`
@@ -440,18 +442,19 @@ func NewFleet(configPath string) *Fleet {
 		log.Printf("blipc: blocklist database unavailable: %v", err)
 	}
 	return &Fleet{
-		instances:     make(map[string]*Instance),
-		bus:           NewBus(500),
-		http:          &http.Client{Timeout: 10 * time.Second},
-		now:           time.Now,
-		queryLog:      queryLog,
-		blocklistDB:   blocklistDB,
-		blocklist:     blocklist.New(),
-		configPath:    configPath,
-		overrides:     make(map[string]*InstanceOverride),
-		manualDomains: make(map[string]struct{}),
-		manualAllowed: make(map[string]struct{}),
-		release:       newReleaseCheck(),
+		instances:         make(map[string]*Instance),
+		bus:               NewBus(500),
+		http:              &http.Client{Timeout: 10 * time.Second},
+		now:               time.Now,
+		queryLog:          queryLog,
+		blocklistDB:       blocklistDB,
+		blocklist:         blocklist.New(),
+		configPath:        configPath,
+		overrides:         make(map[string]*InstanceOverride),
+		manualDomains:     make(map[string]struct{}),
+		manualAllowed:     make(map[string]struct{}),
+		blocklistDisabled: make(map[string]bool),
+		release:           newReleaseCheck(),
 	}
 }
 
@@ -1674,6 +1677,12 @@ func (f *Fleet) BlocklistStatus() BlocklistStatus {
 	defer f.blMu.Unlock()
 	st := f.blStatus
 	st.Sources = append([]string(nil), f.blocklistSources...)
+	st.Disabled = make([]string, 0, len(f.blocklistDisabled))
+	for u, d := range f.blocklistDisabled {
+		if d {
+			st.Disabled = append(st.Disabled, u)
+		}
+	}
 	st.SourceStats = append([]SourceStat(nil), f.sourceStats...)
 	st.Log = append([]string(nil), f.importLog...)
 	st.AutoUpdateHours = f.autoUpdateHours
@@ -1691,7 +1700,17 @@ func (f *Fleet) BlocklistStatus() BlocklistStatus {
 // progress is visible via BlocklistStatus.
 func (f *Fleet) SetBlocklistSources(ctx context.Context, urls []string) {
 	f.blMu.Lock()
-	f.blocklistSources = cleanURLs(urls)
+	clean := cleanURLs(urls)
+	f.blocklistSources = clean
+	if len(f.blocklistDisabled) > 0 {
+		kept := make(map[string]bool)
+		for _, u := range clean {
+			if f.blocklistDisabled[u] {
+				kept[u] = true
+			}
+		}
+		f.blocklistDisabled = kept
+	}
 	f.blMu.Unlock()
 	if f.configPath != "" {
 		if err := f.saveConfig(); err != nil {
@@ -1699,6 +1718,71 @@ func (f *Fleet) SetBlocklistSources(ctx context.Context, urls []string) {
 		}
 	}
 	f.startBlocklistImport()
+}
+
+// BlocklistSourceEnabled reports whether the given source URL is enabled.
+// Unknown URLs are treated as enabled (they are not in the disabled set).
+func (f *Fleet) BlocklistSourceEnabled(url string) bool {
+	f.blMu.Lock()
+	defer f.blMu.Unlock()
+	return !f.blocklistDisabled[url]
+}
+
+// EnabledBlocklistSources returns the configured source URLs that are not in
+// the disabled set.
+func (f *Fleet) EnabledBlocklistSources() []string {
+	f.blMu.Lock()
+	defer f.blMu.Unlock()
+	out := make([]string, 0, len(f.blocklistSources))
+	for _, u := range f.blocklistSources {
+		if !f.blocklistDisabled[u] {
+			out = append(out, u)
+		}
+	}
+	return out
+}
+
+// DisabledBlocklistSources returns the source URLs that are currently disabled.
+func (f *Fleet) DisabledBlocklistSources() []string {
+	f.blMu.Lock()
+	defer f.blMu.Unlock()
+	out := make([]string, 0, len(f.blocklistDisabled))
+	for u := range f.blocklistDisabled {
+		out = append(out, u)
+	}
+	return out
+}
+
+// SetBlocklistSourceEnabled toggles a single source on/off, persists the
+// change, and starts a background import so the merged list (and every
+// instance) reflects the new state. Disabling a source removes its domains
+// from the active blocklist; re-enabling restores them on the next import.
+func (f *Fleet) SetBlocklistSourceEnabled(ctx context.Context, url string, enabled bool) {
+	f.blMu.Lock()
+	if enabled {
+		delete(f.blocklistDisabled, url)
+	} else {
+		f.blocklistDisabled[url] = true
+	}
+	f.blMu.Unlock()
+	if f.configPath != "" {
+		if err := f.saveConfig(); err != nil {
+			log.Printf("blipc: warning: failed to persist blocklist source state: %v", err)
+		}
+	}
+	f.startBlocklistImport()
+}
+
+// SetBlocklistDisabled records which source URLs are disabled. Used at startup
+// to restore the disabled set before the first import runs; does not itself
+// trigger an import.
+func (f *Fleet) SetBlocklistDisabled(urls []string) {
+	f.blMu.Lock()
+	f.blocklistDisabled = make(map[string]bool, len(urls))
+	for _, u := range cleanURLs(urls) {
+		f.blocklistDisabled[u] = true
+	}
+	f.blMu.Unlock()
 }
 
 // ImportBlocklist starts a background import of the current sources. No-op if
@@ -2039,10 +2123,20 @@ func (f *Fleet) startBlocklistImport() {
 	ctx, cancel := context.WithCancel(context.Background())
 	f.blCancel = cancel
 	f.blRunning = true
-	f.blStatus = BlocklistStatus{Running: true, SourceTotal: len(f.blocklistSources)}
+	enabled := 0
+	for _, u := range f.blocklistSources {
+		if !f.blocklistDisabled[u] {
+			enabled++
+		}
+	}
+	f.blStatus = BlocklistStatus{Running: true, SourceTotal: enabled}
 	f.importLog = nil
 	f.blMu.Unlock()
-	f.logImport("starting import of %d source(s)", len(f.blocklistSources))
+	if enabled < len(f.blocklistSources) {
+		f.logImport("starting import of %d enabled source(s) (%d disabled)", enabled, len(f.blocklistSources)-enabled)
+	} else {
+		f.logImport("starting import of %d source(s)", len(f.blocklistSources))
+	}
 	go f.runBlocklistImport(ctx, gen)
 }
 
@@ -2100,8 +2194,8 @@ func (f *Fleet) runBlocklistImport(ctx context.Context, gen int) {
 		f.bus.Publish(Event{Type: "status", At: f.now(), Msg: "blocklist update finished"})
 	}()
 
-	urls := f.BlocklistSources()
-	if len(urls) == 0 {
+	allURLs := f.BlocklistSources()
+	if len(allURLs) == 0 {
 		f.blMu.Lock()
 		f.blStatus.Errors = []string{"no blocklist sources configured"}
 		f.sourceStats = nil
@@ -2113,6 +2207,20 @@ func (f *Fleet) runBlocklistImport(ctx context.Context, gen int) {
 		}
 		f.pushBlocklist(context.Background())
 		f.persistBlocklist()
+		return
+	}
+
+	// Sources may be individually disabled; only enabled sources contribute to
+	// the merged list. If every source is disabled, keep only the manually
+	// added domains (snapshots are preserved so a later re-enable can restore
+	// the source from its last good state).
+	urls := f.EnabledBlocklistSources()
+	if len(urls) == 0 {
+		f.logImport("all %d configured source(s) are disabled — keeping only manual domains", len(allURLs))
+		merged := f.manualDomainSet()
+		f.blocklist.FromDomainsMap(merged)
+		f.persistBlocklist()
+		f.pushBlocklist(context.Background())
 		return
 	}
 
@@ -2218,8 +2326,10 @@ func (f *Fleet) runBlocklistImport(ctx context.Context, gen int) {
 	f.blocklist.FromDomainsMap(merged)
 	applied = true
 	// Drop snapshots/metadata for sources that are no longer configured.
+	// Disabled sources stay in allURLs so their snapshots survive, letting a
+	// later re-enable restore the source from its last good state.
 	if f.blocklistDB != nil {
-		if err := f.blocklistDB.PruneSources(ctx, urls); err != nil {
+		if err := f.blocklistDB.PruneSources(ctx, allURLs); err != nil {
 			log.Printf("blipc: warning: prune blocklist source data: %v", err)
 		}
 	}
@@ -2378,6 +2488,7 @@ func (f *Fleet) saveConfig() error {
 		CacheRegular           int                          `yaml:"cache_regular"`
 		QueryLogRetentionHours int                          `yaml:"query_log_retention_hours"`
 		BlocklistSources       []string                     `yaml:"blocklist_sources"`
+		BlocklistDisabled      []string                     `yaml:"blocklist_disabled"`
 		BlocklistUpdateHours   int                          `yaml:"blocklist_update_hours"`
 		Instances              []InstanceConfig             `yaml:"instances"`
 		Records                []control.RecordEntry        `yaml:"records"`
@@ -2415,6 +2526,7 @@ func (f *Fleet) saveConfig() error {
 	cfg.CacheSize, cfg.CacheWarm, cfg.CacheRegular = f.CacheConfig()
 	cfg.QueryLogRetentionHours = f.QueryLogRetentionHours()
 	cfg.BlocklistSources = blSources
+	cfg.BlocklistDisabled = f.DisabledBlocklistSources()
 	cfg.BlocklistUpdateHours = autoHours
 	cfg.Records = f.Records()
 	cfg.HACluster = f.HACluster()

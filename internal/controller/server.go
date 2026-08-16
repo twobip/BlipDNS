@@ -104,6 +104,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/blocklist", api(s.handleBlocklist))                     // GET list / POST add / DELETE remove
 	mux.HandleFunc("/api/blocklist/export", api(s.handleBlocklistExport))        // GET text
 	mux.HandleFunc("/api/blocklist/sources", api(s.handleBlocklistSources))      // PUT sources + import / GET status
+	mux.HandleFunc("/api/blocklist/source", api(s.handleBlocklistSource))        // POST enable/disable one source
 	mux.HandleFunc("/api/blocklist/status", api(s.handleBlocklistStatus))        // GET import progress
 	mux.HandleFunc("/api/blocklist/clear-log", api(s.handleBlocklistClearLog))   // POST clear import output
 	mux.HandleFunc("/api/blocklist/import-url", api(s.handleBlocklistImportURL)) // POST fetch from URL (legacy)
@@ -1284,6 +1285,31 @@ func (s *Server) handleBlocklistStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, s.fleet.BlocklistStatus())
+}
+
+// handleBlocklistSource toggles a single source URL on/off. Disabling a source
+// removes its domains from the active blocklist (and every instance); enabling
+// restores them on the next import.
+func (s *Server) handleBlocklistSource(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		URL     string `json:"url"`
+		Enabled bool   `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	url := strings.TrimSpace(req.URL)
+	if url == "" {
+		http.Error(w, "url required", http.StatusBadRequest)
+		return
+	}
+	s.fleet.SetBlocklistSourceEnabled(r.Context(), url, req.Enabled)
+	writeJSON(w, map[string]interface{}{"ok": true, "enabled": req.Enabled})
 }
 
 // handleBlocklistClearLog drops the buffered import output shown in the UI.
