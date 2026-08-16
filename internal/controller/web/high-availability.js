@@ -96,5 +96,5 @@ async function haAction(action) {
 
 function initHA() {
   $("ha-save")?.addEventListener("click", () => saveHA().catch((e) => toast(e.message, "err")));
-  ["validate", "apply", "disable"].forEach((action) => $("ha-" + action)?.addEventListener("click", () => haAction(action).catch((e) => toast(e.message, "err")));
+  ["validate", "apply", "disable"].forEach((action) => $("ha-" + action)?.addEventListener("click", () => haAction(action).catch((e) => toast(e.message, "err"))));
 }
