@@ -216,12 +216,12 @@ func (m *Manager) ApplyHA() error {
 	// Reload keepalived so it picks up the new config. keepalived handles
 	// SIGHUP by re-reading its config and doing a graceful restart of VRRP
 	// advertisements. We use systemctl reload when available (so the service
-	// manager tracks the operation) and fall back to kill -HUP.
+	// manager tracks the operation) and fall back to pkill -HUP.
 	if commandSucceeds("systemctl", "reload", "keepalived") {
 		m.clearError()
 		return nil
 	}
-	if err := runCommand("killall", "-HUP", "keepalived"); err != nil {
+	if err := runCommand("pkill", "-HUP", "keepalived"); err != nil {
 		m.recordError(err)
 		return err
 	}
