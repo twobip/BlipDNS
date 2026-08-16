@@ -538,6 +538,14 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
 }
 .list li:hover { background: rgba(255,255,255,.02); }
 
+/* pager (blocked / allowed domain lists) */
+.pager { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 10px 16px; border-top: 1px solid var(--hairline); font-size: 12.5px; color: var(--muted); }
+.pager .pager-btns { display: flex; gap: 6px; }
+.pager button { border: 1px solid var(--border); background: var(--surface); color: var(--text); font-size: 12.5px; padding: 4px 10px; border-radius: 7px; cursor: pointer; transition: all .15s; }
+.pager button:hover:not(:disabled) { background: var(--surface-3); }
+.pager button:disabled { opacity: .4; cursor: default; }
+.pager .pager-info { font-size: 12px; }
+
 /* seg controls (filter pills) */
 .seg { display: inline-flex; gap: 2px; background: var(--surface); border: 1px solid var(--border); border-radius: 9px; padding: 3px; }
 .seg button { border: none; background: transparent; color: var(--muted); font-size: 12.5px; font-weight: 500; padding: 5px 12px; border-radius: 7px; cursor: pointer; transition: all .15s; }

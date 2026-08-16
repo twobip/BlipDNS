@@ -1010,6 +1010,9 @@ let blSources = [];
 let blDisabled = new Set();
 let blStatus = { running: false, domains: 0 };
 let blStatusTimer = null;
+const BL_PAGE_SIZE = 100;
+let blPage = 0;
+let blAllowPage = 0;
 async function loadBlocklist() {
   try {
     const r = await API("/api/blocklist?limit=2000");
@@ -1036,13 +1039,18 @@ function renderBlocklist() {
   const ul = $("bl-list");
   if (!list.length) {
     ul.innerHTML = `<div class="empty"><div class="empty-ic">${IC.block}</div><h4>No custom blocked domains</h4><p>Domains added as Block are stored separately from the list sources and are never overwritten.</p></div>`;
+    renderPager("bl-pager", list, 0, blPage, (p) => { blPage = p; renderBlocklist(); });
     return;
   }
-  ul.innerHTML = list.map((d) => `<li><span class="mono grow">${esc(d)}</span><button class="icon-btn" data-rm="${esc(d)}" title="Remove">${IC.trash}</button></li>`).join("");
+  const pages = Math.ceil(list.length / BL_PAGE_SIZE);
+  if (blPage >= pages) blPage = pages - 1;
+  const start = blPage * BL_PAGE_SIZE;
+  ul.innerHTML = list.slice(start, start + BL_PAGE_SIZE).map((d) => `<li><span class="mono grow">${esc(d)}</span><button class="icon-btn" data-rm="${esc(d)}" title="Remove">${IC.trash}</button></li>`).join("");
   ul.querySelectorAll("[data-rm]").forEach((b) => b.onclick = async () => {
     try { await API("/api/blocklist", { method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ domain: b.dataset.rm }) }); toast("removed " + b.dataset.rm); loadBlocklist(); }
     catch (e) { toast("remove failed", "err"); }
   });
+  renderPager("bl-pager", list, pages, blPage, (p) => { blPage = p; renderBlocklist(); });
 }
 function renderAllowList() {
   const ul = $("bl-list-allow");
@@ -1053,13 +1061,27 @@ function renderAllowList() {
   if (cnt) cnt.textContent = fmt(blAllowed.length);
   if (!list.length) {
     ul.innerHTML = `<div class="empty"><div class="empty-ic">${IC.shield}</div><h4>No custom allowed domains</h4><p>Domains added as Allow are never blocked, even if a list source contains them.</p></div>`;
+    renderPager("bl-pager-allow", list, 0, blAllowPage, (p) => { blAllowPage = p; renderAllowList(); });
     return;
   }
-  ul.innerHTML = list.map((d) => `<li><span class="mono grow">${esc(d)}</span><button class="icon-btn" data-rm-allow="${esc(d)}" title="Remove">${IC.trash}</button></li>`).join("");
+  const pages = Math.ceil(list.length / BL_PAGE_SIZE);
+  if (blAllowPage >= pages) blAllowPage = pages - 1;
+  const start = blAllowPage * BL_PAGE_SIZE;
+  ul.innerHTML = list.slice(start, start + BL_PAGE_SIZE).map((d) => `<li><span class="mono grow">${esc(d)}</span><button class="icon-btn" data-rm-allow="${esc(d)}" title="Remove">${IC.trash}</button></li>`).join("");
   ul.querySelectorAll("[data-rm-allow]").forEach((b) => b.onclick = async () => {
     try { await API("/api/blocklist", { method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ domain: b.dataset.rmAllow, allow: true }) }); toast("removed " + b.dataset.rmAllow); loadBlocklist(); }
     catch (e) { toast("remove failed", "err"); }
   });
+  renderPager("bl-pager-allow", list, pages, blAllowPage, (p) => { blAllowPage = p; renderAllowList(); });
+}
+function renderPager(elId, list, pages, cur, goto) {
+  const el = $(elId);
+  if (!el) return;
+  if (pages <= 1) { el.style.display = "none"; el.innerHTML = ""; return; }
+  el.style.display = "flex";
+  el.innerHTML = `<span class="pager-info">${fmt(list.length)} domain${list.length === 1 ? "" : "s"} · page ${cur + 1} of ${pages}</span><span class="pager-btns"><button data-pg="prev" ${cur === 0 ? "disabled" : ""}>← Prev</button><button data-pg="next" ${cur >= pages - 1 ? "disabled" : ""}>Next →</button></span>`;
+  el.querySelector("[data-pg='prev']").onclick = () => { if (cur > 0) goto(cur - 1); };
+  el.querySelector("[data-pg='next']").onclick = () => { if (cur < pages - 1) goto(cur + 1); };
 }
 function renderSources() {
   const tb = $("bl-src-tbody");
@@ -1865,8 +1887,8 @@ $("bl-auto-save").onclick = async () => {
     loadBlocklist();
   } catch (e) { toast("save failed: " + e.message, "err"); }
 };
-$("bl-filter").addEventListener("input", renderBlocklist);
-$("bl-filter-allow").addEventListener("input", renderAllowList);
+$("bl-filter").addEventListener("input", () => { blPage = 0; renderBlocklist(); });
+$("bl-filter-allow").addEventListener("input", () => { blAllowPage = 0; renderAllowList(); });
 $("bl-export").onclick = () => window.open("/api/blocklist/export", "_blank");
 $("bl-clear").onclick = () => {
   confirmDialog("Clear entire blocklist?", "This removes every blocked domain, drops all sources, and deletes custom domains. This cannot be undone.", async () => {
