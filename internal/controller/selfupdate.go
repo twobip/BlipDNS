@@ -2,6 +2,7 @@ package controller
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -62,6 +63,10 @@ func (u *SelfUpdater) run(channel string) {
 		u.finishRun(fmt.Errorf("open updater output: %w", err))
 		return
 	}
+	// Capture stderr so a failing update reports the real cause (e.g. "no space
+	// left on device") instead of a bare "exit status 1".
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
 	if err := cmd.Start(); err != nil {
 		u.finishRun(fmt.Errorf("start updater: %w", err))
 		return
@@ -79,7 +84,15 @@ func (u *SelfUpdater) run(channel string) {
 		u.finishRun(fmt.Errorf("read updater output: %w", err))
 		return
 	}
-	u.finishRun(cmd.Wait())
+	if err := cmd.Wait(); err != nil {
+		if msg := strings.TrimSpace(stderr.String()); msg != "" {
+			u.finishRun(fmt.Errorf("%v: %s", err, msg))
+			return
+		}
+		u.finishRun(err)
+		return
+	}
+	u.finishRun(nil)
 }
 
 func (u *SelfUpdater) setMessage(msg string) {
