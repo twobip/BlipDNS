@@ -20,6 +20,7 @@ const API = (path, opts = {}) =>
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 const fmt = (n) => (n ?? 0).toLocaleString();
+const validDate = (t) => t && new Date(t).getFullYear() > 2000;
 // fmtQPS formats an average query rate with a sensible number of decimals so
 // small fleets show a real number (0.05 qps) instead of rounding to 0.
 const fmtQPS = (v) => {
@@ -1097,16 +1098,31 @@ function renderSources() {
         const err = s.error || "";
         const upd = s.last_update ? relTime(s.last_update) : "—";
         const off = blDisabled.has(u);
-        return `<tr${off ? ` style="opacity:.5"` : ""}>
-          <td class="mono" style="font-size:12px">${esc(u)}</td>
-          <td>${n ? fmt(n) : "—"}</td>
+        const status = off ? `<span class="badge">disabled</span>`
+          : err ? `<span class="badge err" title="${esc(err)}">error</span>`
+          : n ? `<span class="badge on"><span class="dot on"></span>active</span>`
+          : `<span class="badge">new</span>`;
+        return `<tr${off ? ` class="bl-src-off"` : ""}>
+          <td>
+            <div class="bl-src-name">
+              <span class="bl-src-fav">${IC.globe}</span>
+              <span class="mono" title="${esc(u)}">${esc(u)}</span>
+            </div>
+            ${err ? `<div class="cell-sub bl-src-err">${esc(err)}</div>` : ""}
+          </td>
+          <td class="num"><span class="bl-src-domains">${n ? fmt(n) : "—"}</span></td>
           <td class="cell-sub">${upd}</td>
-          <td>${off ? `<span class="badge">disabled</span>` : err ? `<span class="badge err" title="${esc(err)}">error</span>` : n ? `<span class="badge on">ok</span>` : `<span class="badge">new</span>`}</td>
-          <td style="text-align:right"><button class="icon-btn" data-tgl-src="${esc(u)}" title="${off ? "Enable source" : "Disable source"}">${IC.power}</button><button class="icon-btn" data-rm-src="${esc(u)}" title="Remove source">${IC.x}</button></td>
+          <td>${status}</td>
+          <td style="text-align:right">
+            <label class="switch" title="${off ? "Enable source" : "Disable source"}">
+              <input type="checkbox" data-tgl-src="${esc(u)}" ${off ? "" : "checked"}/><i></i>
+            </label>
+            <button class="icon-btn" data-rm-src="${esc(u)}" title="Remove source" style="width:28px;height:28px">${IC.x}</button>
+          </td>
         </tr>`;
       }).join("");
     }
-    tb.querySelectorAll("[data-tgl-src]").forEach((b) => b.onclick = () => toggleSource(b.dataset.tglSrc));
+    tb.querySelectorAll("[data-tgl-src]").forEach((b) => b.onchange = () => toggleSource(b.dataset.tglSrc));
     tb.querySelectorAll("[data-rm-src]").forEach((b) => b.onclick = () => removeSource(b.dataset.rmSrc));
   }
   const sel = $("s-bl-sources");
@@ -1123,15 +1139,44 @@ function renderSources() {
 function renderBlStatus() {
   const st = $("bl-import-status");
   const badge = $("s-blsync");
+  const enabled = blSources.length - blDisabled.size;
+
+  const sd = $("bl-stat-domains");
+  if (sd) sd.textContent = fmt(blStatus.domains || 0);
+  const ss = $("bl-stat-sources");
+  if (ss) ss.textContent = blSources.length;
+  const sss = $("bl-stat-sources-sub");
+  if (sss) sss.textContent = `${enabled} enabled${blDisabled.size ? ` · ${blDisabled.size} disabled` : ""}`;
+  const su = $("bl-stat-updated");
+  if (su) su.textContent = validDate(blStatus.last_update) ? relTime(blStatus.last_update) : "—";
+  const sus = $("bl-stat-updated-sub");
+  if (sus) sus.textContent = validDate(blStatus.last_update) ? new Date(blStatus.last_update).toLocaleString() : "no updates yet";
+  const sn = $("bl-stat-next");
+  if (sn) sn.textContent = validDate(blNextUpdate) ? relTime(blNextUpdate) : "—";
+  const sns = $("bl-stat-next-sub");
+  if (sns) sns.textContent = blAutoHours ? `every ${blAutoHours}h` : "auto-update off";
+
+  const bar = $("bl-import-bar-fill");
+  const bwrap = $("bl-import-progress");
+  const btxt = $("bl-import-bar-text");
+  if (blStatus.running) {
+    if (bwrap) bwrap.style.display = "flex";
+    const n = blStatus.source_total || blSources.length || 1;
+    const done = blStatus.source_done || 0;
+    if (bar) bar.style.width = Math.min(100, Math.round((done / n) * 100)) + "%";
+    if (btxt) btxt.textContent = `${done}/${n} sources${blStatus.current_url ? " · " + esc(blStatus.current_url) : ""}`;
+  } else if (bwrap) {
+    bwrap.style.display = "none";
+  }
+
   if (st) {
     if (blStatus.running) {
-      const n = blStatus.source_total || blStatus.sources?.length || 1;
-      st.innerHTML = `<b>Syncing…</b> ${blStatus.source_done || 0}/${n} ${esc(blStatus.current_url || "")} · <b>${fmt(blStatus.domains)}</b> domains`;
-    } else if (blStatus.last_update) {
+      st.innerHTML = `<b>Syncing…</b> ${blStatus.source_done || 0}/${blStatus.source_total || blSources.length || 1} ${esc(blStatus.current_url || "")} · <b>${fmt(blStatus.domains)}</b> domains`;
+    } else if (validDate(blStatus.last_update)) {
       const errs = (blStatus.errors || []).filter(Boolean).length;
-      let txt = `${blSources.length} source${blSources.length === 1 ? "" : "s"} · <b>${fmt(blStatus.domains)}</b> domains · updated ${esc(new Date(blStatus.last_update).toLocaleTimeString())}`;
-      if (blNextUpdate) txt += ` · auto next ${esc(new Date(blNextUpdate).toLocaleString())}`;
-      st.innerHTML = txt + (errs ? ` · <span style="color:var(--danger)">${errs} error${errs > 1 ? "s" : ""}</span>` : "");
+      let txt = `${fmt(blStatus.domains)} domains · updated ${esc(new Date(blStatus.last_update).toLocaleTimeString())}`;
+      if (validDate(blNextUpdate)) txt += ` · auto next ${esc(new Date(blNextUpdate).toLocaleString())}`;
+      st.innerHTML = txt + (errs ? ` · <span style="color:var(--red)">${errs} error${errs > 1 ? "s" : ""}</span>` : "");
     } else {
       st.innerHTML = "No sources yet. Add list URLs (AdBlock Plus or hosts format) and hit Update now.";
     }
