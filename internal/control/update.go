@@ -25,3 +25,10 @@ type UpdateController interface {
 	StartUpdate(channel string) error
 	UpdateStatus() UpdateStatus
 }
+
+// UpdateStatusReporter is a subset of UpdateController: just enough to check
+// whether the local node is mid-update. The HA manager uses it to surface an
+// "updating" flag in HAStatus so the controller can lower VRRP priority.
+type UpdateStatusReporter interface {
+	UpdateStatus() UpdateStatus
+}

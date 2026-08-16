@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/twobip/BlipDNS/internal/control"
@@ -88,5 +89,57 @@ func TestRenderSpecifiesScriptUser(t *testing.T) {
 	}
 	if got := render(cfg); !strings.Contains(got, "user blip") {
 		t.Fatalf("render() missing script user directive; keepalived would drop chk_blipd:\n%s", got)
+	}
+}
+
+// fakeUpdateCtrl implements control.UpdateStatusReporter for testing.
+type fakeUpdateCtrl struct {
+	running bool
+	mu      sync.Mutex
+}
+
+func (f *fakeUpdateCtrl) UpdateStatus() control.UpdateStatus {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return control.UpdateStatus{Running: f.running}
+}
+
+func (f *fakeUpdateCtrl) setRunning(v bool) {
+	f.mu.Lock()
+	f.running = v
+	f.mu.Unlock()
+}
+
+func TestHAStatusReportsUpdating(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "keepalived.conf")
+	mgr := NewManager(configPath)
+
+	// Without an update controller wired, Updating should be false.
+	st := mgr.HAStatus()
+	if st.Updating {
+		t.Fatal("expected Updating=false with no update controller")
+	}
+
+	// Wire a fake update controller that is not updating.
+	fc := &fakeUpdateCtrl{}
+	mgr.SetUpdateController(fc)
+	st = mgr.HAStatus()
+	if st.Updating {
+		t.Fatal("expected Updating=false when update not running")
+	}
+
+	// Simulate an in-flight update.
+	fc.setRunning(true)
+	st = mgr.HAStatus()
+	if !st.Updating {
+		t.Fatal("expected Updating=true when update is running")
+	}
+
+	// Simulate the update completing.
+	fc.setRunning(false)
+	st = mgr.HAStatus()
+	if st.Updating {
+		t.Fatal("expected Updating=false after update completed")
 	}
 }

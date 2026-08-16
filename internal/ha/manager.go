@@ -38,6 +38,9 @@ type Manager struct {
 	path      string
 	statePath string
 	lastError string
+	// updateController is checked by HAStatus() to report whether the local
+	// node is mid-self-update; nil-safe (no update controller wired).
+	updateController control.UpdateStatusReporter
 }
 
 // NewManager creates a manager using the default persistent state path only
@@ -109,11 +112,37 @@ func (m *Manager) HAStatus() control.HAStatus {
 	} else if cfg.Enabled && statErr != nil {
 		msg = "keepalived configuration has not been applied"
 	}
-	return control.HAStatus{Installed: installed, Configured: statErr == nil, Active: active, VIPOwned: vipOwned, State: state, Message: msg, LastError: lastErr}
+	return control.HAStatus{
+		Installed:  installed,
+		Configured: statErr == nil,
+		Active:     active,
+		VIPOwned:   vipOwned,
+		State:      state,
+		Message:    msg,
+		LastError:  lastErr,
+		Updating:   m.isUpdating(),
+	}
+}
+
+// isUpdating reports whether the local node's update controller has a
+// self-update in flight. Returns false if no update controller is wired.
+func (m *Manager) isUpdating() bool {
+	if m.updateController == nil {
+		return false
+	}
+	return m.updateController.UpdateStatus().Running
 }
 
 func (m *Manager) InstallHA() error {
 	return fmt.Errorf("keepalived installation is intentionally not performed through the API; install it with the host package manager")
+}
+
+// SetUpdateController wires the local update manager so HAStatus() can report
+// whether the node is mid-self-update. Safe to call at any time.
+func (m *Manager) SetUpdateController(c control.UpdateStatusReporter) {
+	m.mu.Lock()
+	m.updateController = c
+	m.mu.Unlock()
 }
 
 // ValidateHA validates fields, the selected local interface/address, and the
@@ -182,6 +211,18 @@ func (m *Manager) ApplyHA() error {
 		return err
 	}
 	if err := os.Chmod(path, 0600); err != nil {
+		return err
+	}
+	// Reload keepalived so it picks up the new config. keepalived handles
+	// SIGHUP by re-reading its config and doing a graceful restart of VRRP
+	// advertisements. We use systemctl reload when available (so the service
+	// manager tracks the operation) and fall back to kill -HUP.
+	if commandSucceeds("systemctl", "reload", "keepalived") {
+		m.clearError()
+		return nil
+	}
+	if err := runCommand("killall", "-HUP", "keepalived"); err != nil {
+		m.recordError(err)
 		return err
 	}
 	m.clearError()

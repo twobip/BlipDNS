@@ -100,6 +100,10 @@ func TestSerializedUpdateWaitsForEachNode(t *testing.T) {
 	defer srvB.Close()
 
 	fleet := NewFleet("")
+	// Shorten the failover wait for tests.
+	originalWait := haFailoverWait
+	haFailoverWait = 100 * time.Millisecond
+	defer func() { haFailoverWait = originalWait }()
 	if err := fleet.Add(context.Background(), InstanceConfig{ID: "a", URL: srvA.URL, Token: "tok-a"}); err != nil {
 		t.Fatal(err)
 	}

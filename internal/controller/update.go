@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"log"
 	"sort"
 	"time"
 
@@ -10,6 +11,12 @@ import (
 )
 
 const updateNodeTimeout = 10 * time.Minute
+
+// haFailoverWait is how long the controller pauses after degrading a node's
+// VRRP priority before starting the blipd restart, giving the peer time to
+// converge on the VIP (keepalived reload + 3 VRRP advertisements at 1s).
+// It is a variable (not const) so tests can shorten it.
+var haFailoverWait = 10 * time.Second
 
 type UpdateJobStatus struct {
 	Running    bool              `json:"running"`
@@ -81,12 +88,43 @@ func (f *Fleet) StartUpdates(ctx context.Context, channel string) (UpdateJobStat
 
 func (f *Fleet) runUpdateJob(nodes []updateNode, channel string) {
 	for _, node := range nodes {
+		// Lower the VRRP priority on this node so its HA peer takes over the
+		// VIP while blipd is restarting. Errors are non-fatal: the HA config
+		// may simply be absent, or the node may not be part of a cluster.
+		if err := f.degradeHAPriority(context.Background(), node.id); err != nil {
+			log.Printf("blipc: HA priority degrade for %s: %v", node.id, err)
+		}
+
+		// Give keepalived time to reload and the peer time to converge on
+		// the VIP before we kill the service. Without this the blipd
+		// restart could complete before the peer has taken over, causing a
+		// brief traffic blackhole.
+		time.Sleep(haFailoverWait)
+
 		f.setUpdateCurrent(node.id)
 		if err := f.updateOne(node.inst, channel); err != nil {
 			f.finishUpdate(node.id, "failed: "+err.Error(), err.Error())
+			// Restore priority even on failure so the peer can hand back the
+			// VIP once this node is back online.
+			if err := f.restoreHAPriority(context.Background(), node.id); err != nil {
+				log.Printf("blipc: HA priority restore for %s: %v", node.id, err)
+			}
 			return
 		}
 		f.finishUpdate(node.id, "updated", "")
+
+		// Restore the original priority now that the node has restarted and
+		// recovered. We tolerate failure: if keepalived or the peer is
+		// briefly unreachable, the poll loop's HA status poll will show the
+		// degraded state and the operator can intervene or the periodic
+		// convergence will correct it on the next successful push.
+		if err := f.restoreHAPriority(context.Background(), node.id); err != nil {
+			log.Printf("blipc: HA priority restore for %s: %v", node.id, err)
+		}
+
+		// Give keepalived time to reload and the restored node time to
+		// re-claim the VIP before the next node's update begins.
+		time.Sleep(haFailoverWait)
 	}
 	f.updateMu.Lock()
 	f.updateJob.Running = false

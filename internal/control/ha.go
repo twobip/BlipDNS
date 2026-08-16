@@ -37,6 +37,7 @@ type HAStatus struct {
 	State      string `json:"state"`
 	Message    string `json:"message,omitempty"`
 	LastError  string `json:"last_error,omitempty"`
+	Updating   bool   `json:"updating,omitempty"` // true while blipd is mid-self-update
 }
 
 // HAController is implemented by the local blipd host. Operations are

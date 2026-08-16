@@ -64,7 +64,8 @@ function renderHighAvailability() {
   const rows = $("ha-node-status");
   if (rows) rows.innerHTML = instances.map((i) => {
     const st = statuses[i.id] || {};
-    return `<div class="ha-status-row"><span class="dot ${st.active ? "on" : st.state === "FAULT" ? "err" : "off"}"></span><strong>${esc(i.label || i.id)}</strong><span class="muted">${esc(st.state || "unknown")}</span><span class="cell-sub">${esc(st.message || st.last_error || "")}</span></div>`;
+    const updating = st.updating ? ' <span class="cell-sub">updating…</span>' : "";
+    return `<div class="ha-status-row"><span class="dot ${st.active ? "on" : st.state === "FAULT" ? "err" : "off"}"></span><strong>${esc(i.label || i.id)}</strong><span class="muted">${esc(st.state || "unknown")}</span><span class="cell-sub">${esc(st.message || st.last_error || "")}${updating}</span></div>`;
   }).join("") || `<div class="muted">Add and adopt two blipd instances first.</div>`;
 }
 

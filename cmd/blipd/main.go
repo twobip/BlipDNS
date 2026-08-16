@@ -171,8 +171,11 @@ func main() {
 	})
 	// The HA manager owns only the local keepalived configuration and is
 	// reachable through the authenticated management API.
-	srv.ControlServer().SetHAController(ha.NewManagerWithState("", cfg.StateFile))
-	srv.ControlServer().SetUpdateController(update.NewManager())
+	haMgr := ha.NewManagerWithState("", cfg.StateFile)
+	srv.ControlServer().SetHAController(haMgr)
+	upMgr := update.NewManager()
+	srv.ControlServer().SetUpdateController(upMgr)
+	haMgr.SetUpdateController(upMgr)
 
 	// Admin / management API.
 	if cfg.AdminToken != "" || cfg.StateFile != "" {

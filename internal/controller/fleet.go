@@ -304,6 +304,20 @@ func (f *Fleet) SetHACluster(ctx context.Context, cluster control.HACluster) err
 		}
 		return f.DisableHA(ctx, cluster)
 	}
+	if err := f.pushHAConfigToCluster(ctx, cluster); err != nil {
+		return err
+	}
+	return f.setHAClusterPersisted(cluster)
+}
+
+// haPriorityDelta is subtracted from the updating node's VRRP priority when it
+// is mid-self-update, so its peer (which keeps full priority) takes over the
+// VIP and traffic stays served while blipd restarts.
+const haPriorityDelta = 20
+
+// pushHAConfigToCluster pushes the given HA cluster config to both member nodes
+// without persisting it (used for transient priority changes during updates).
+func (f *Fleet) pushHAConfigToCluster(ctx context.Context, cluster control.HACluster) error {
 	primary, err := f.haNode(cluster.PrimaryInstance)
 	if err != nil {
 		return err
@@ -318,7 +332,99 @@ func (f *Fleet) SetHACluster(ctx context.Context, cluster control.HACluster) err
 	if err := secondary.ctl().SetHAConfig(ctx, cluster.Secondary); err != nil {
 		return fmt.Errorf("secondary: %w", err)
 	}
-	return f.setHAClusterPersisted(cluster)
+	return nil
+}
+
+// setAndApplyHA pushes a config to the given instance and applies it (writes
+// keepalived.conf + reloads keepalived so the new priority takes effect).
+func (f *Fleet) setAndApplyHA(ctx context.Context, inst *Instance, cfg control.HAConfig) error {
+	if err := inst.ctl().SetHAConfig(ctx, cfg); err != nil {
+		return err
+	}
+	return inst.ctl().ApplyHA(ctx)
+}
+
+// degradeHAPriority lowers the VRRP priority of the given instance so its
+// HA peer takes over the VIP while the node is restarting. It pushes and
+// applies the modified config to the updating node only; the peer is
+// untouched. The desired cluster config in f.haCluster is left unchanged
+// so it can be restored after the update.
+func (f *Fleet) degradeHAPriority(ctx context.Context, instanceID string) error {
+	cluster := f.HACluster()
+	if !cluster.Enabled || instanceID == "" {
+		return nil
+	}
+	if cluster.PrimaryInstance == instanceID {
+		cluster.Primary.Priority = reducePriority(cluster.Primary.Priority)
+		inst, err := f.haNode(cluster.PrimaryInstance)
+		if err != nil {
+			return err
+		}
+		if err := f.setAndApplyHA(ctx, inst, cluster.Primary); err != nil {
+			return fmt.Errorf("degrade HA priority: %w", err)
+		}
+		f.bus.Publish(Event{InstanceID: instanceID, Type: "status", At: f.now(), Msg: "HA priority degraded for update"})
+		return nil
+	}
+	if cluster.SecondaryInstance == instanceID {
+		cluster.Secondary.Priority = reducePriority(cluster.Secondary.Priority)
+		inst, err := f.haNode(cluster.SecondaryInstance)
+		if err != nil {
+			return err
+		}
+		if err := f.setAndApplyHA(ctx, inst, cluster.Secondary); err != nil {
+			return fmt.Errorf("degrade HA priority: %w", err)
+		}
+		f.bus.Publish(Event{InstanceID: instanceID, Type: "status", At: f.now(), Msg: "HA priority degraded for update"})
+		return nil
+	}
+	return nil
+}
+
+// restoreHAPriority pushes the full desired HA config (with original
+// priority) back to the named node and applies it, undoing a prior
+// degradeHAPriority call.
+func (f *Fleet) restoreHAPriority(ctx context.Context, instanceID string) error {
+	cluster := f.HACluster()
+	if !cluster.Enabled || instanceID == "" {
+		return nil
+	}
+	if cluster.PrimaryInstance == instanceID {
+		inst, err := f.haNode(cluster.PrimaryInstance)
+		if err != nil {
+			return err
+		}
+		if err := f.setAndApplyHA(ctx, inst, cluster.Primary); err != nil {
+			return fmt.Errorf("restore HA priority: %w", err)
+		}
+		f.bus.Publish(Event{InstanceID: instanceID, Type: "status", At: f.now(), Msg: "HA priority restored"})
+		return nil
+	}
+	if cluster.SecondaryInstance == instanceID {
+		inst, err := f.haNode(cluster.SecondaryInstance)
+		if err != nil {
+			return err
+		}
+		if err := f.setAndApplyHA(ctx, inst, cluster.Secondary); err != nil {
+			return fmt.Errorf("restore HA priority: %w", err)
+		}
+		f.bus.Publish(Event{InstanceID: instanceID, Type: "status", At: f.now(), Msg: "HA priority restored"})
+		return nil
+	}
+	return nil
+}
+
+// reducePriority lowers a VRRP priority by haPriorityDelta, clamped to a
+// minimum of 1.
+func reducePriority(p int) int {
+	if p <= 0 {
+		return p
+	}
+	p -= haPriorityDelta
+	if p < 1 {
+		p = 1
+	}
+	return p
 }
 
 func (f *Fleet) setHAClusterPersisted(cluster control.HACluster) error {
