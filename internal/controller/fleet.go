@@ -363,6 +363,7 @@ func (f *Fleet) degradeHAPriority(ctx context.Context, instanceID string) error 
 		if err := f.setAndApplyHA(ctx, inst, cluster.Primary); err != nil {
 			return fmt.Errorf("degrade HA priority: %w", err)
 		}
+		inst.markHAApplied(haConfigHash(&cluster.Primary))
 		f.bus.Publish(Event{InstanceID: instanceID, Type: "status", At: f.now(), Msg: "HA priority degraded for update"})
 		return nil
 	}
@@ -375,6 +376,7 @@ func (f *Fleet) degradeHAPriority(ctx context.Context, instanceID string) error 
 		if err := f.setAndApplyHA(ctx, inst, cluster.Secondary); err != nil {
 			return fmt.Errorf("degrade HA priority: %w", err)
 		}
+		inst.markHAApplied(haConfigHash(&cluster.Secondary))
 		f.bus.Publish(Event{InstanceID: instanceID, Type: "status", At: f.now(), Msg: "HA priority degraded for update"})
 		return nil
 	}
@@ -397,6 +399,7 @@ func (f *Fleet) restoreHAPriority(ctx context.Context, instanceID string) error 
 		if err := f.setAndApplyHA(ctx, inst, cluster.Primary); err != nil {
 			return fmt.Errorf("restore HA priority: %w", err)
 		}
+		inst.markHAApplied(haConfigHash(&cluster.Primary))
 		f.bus.Publish(Event{InstanceID: instanceID, Type: "status", At: f.now(), Msg: "HA priority restored"})
 		return nil
 	}
@@ -408,6 +411,7 @@ func (f *Fleet) restoreHAPriority(ctx context.Context, instanceID string) error 
 		if err := f.setAndApplyHA(ctx, inst, cluster.Secondary); err != nil {
 			return fmt.Errorf("restore HA priority: %w", err)
 		}
+		inst.markHAApplied(haConfigHash(&cluster.Secondary))
 		f.bus.Publish(Event{InstanceID: instanceID, Type: "status", At: f.now(), Msg: "HA priority restored"})
 		return nil
 	}
@@ -481,9 +485,16 @@ func (f *Fleet) ApplyHA(ctx context.Context, cluster control.HACluster) error {
 		if err != nil {
 			return err
 		}
+		var nodeCfg control.HAConfig
+		if id == cluster.PrimaryInstance {
+			nodeCfg = cluster.Primary
+		} else {
+			nodeCfg = cluster.Secondary
+		}
 		if err := inst.ctl().ApplyHA(ctx); err != nil {
 			return fmt.Errorf("%s apply failed after earlier node(s) may have applied: %w", id, err)
 		}
+		inst.markHAApplied(haConfigHash(&nodeCfg))
 	}
 	return nil
 }
@@ -504,6 +515,7 @@ func (f *Fleet) DisableHA(ctx context.Context, cluster control.HACluster) error 
 		if err := inst.ctl().DisableHA(ctx); err != nil {
 			return fmt.Errorf("%s: %w", id, err)
 		}
+		inst.markHAApplied("")
 	}
 	cluster.Enabled = false
 	return f.setHAClusterPersisted(cluster)
@@ -1216,6 +1228,74 @@ func (f *Fleet) maybePushRateLimit(ctx context.Context, i *Instance, reported *c
 	if err := i.ctl().SetRateLimit(ctx, want, 0); err != nil {
 		log.Printf("blipc: reconcile rate limit for %s: %v", i.Config.ID, err)
 	}
+}
+
+// effectiveHABConfig returns the desired HAConfig for the given instance, or
+// nil if the instance is not a member of an HA cluster. ok is false when there
+// is no HA cluster configured at all.
+func (f *Fleet) effectiveHABConfig(instID string) (cfg *control.HAConfig, ok bool) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	if !f.haCluster.Enabled {
+		return nil, false
+	}
+	if f.haCluster.PrimaryInstance == instID {
+		c := f.haCluster.Primary
+		return &c, true
+	}
+	if f.haCluster.SecondaryInstance == instID {
+		c := f.haCluster.Secondary
+		return &c, true
+	}
+	return nil, false
+}
+
+// haHashFor returns a stable fingerprint of the desired HA config for the
+// given instance ("" when the instance is not HA-enabled). Used by the poll
+// loop to detect drift and retry a failed keepalived reload.
+func (f *Fleet) haHashFor(instID string) string {
+	cfg, ok := f.effectiveHABConfig(instID)
+	if !ok {
+		return ""
+	}
+	return haConfigHash(cfg)
+}
+
+// haConfigHash returns a stable SHA-256 fingerprint of an HA config.
+func haConfigHash(cfg *control.HAConfig) string {
+	b, _ := json.Marshal(cfg)
+	return fmt.Sprintf("%x", sha256.Sum256(b))
+}
+
+// maybePushHA converges an instance's HA/keepalived configuration to the
+// controller's desired cluster config. It is the HA equivalent of the other
+// maybePush* reconcilers: when ApplyHA failed to reload keepalived (e.g. a
+// sudoers misconfiguration), the live keepalived process still runs with a
+// stale priority and there is no other mechanism to retry. The periodic poll
+// calls this so a transient reload failure is corrected on the next tick.
+func (f *Fleet) maybePushHA(ctx context.Context, i *Instance) {
+	cfg, ok := f.effectiveHABConfig(i.Config.ID)
+	if !ok || !i.hasToken() {
+		return
+	}
+	// Skip reconciliation for the node currently being self-updated: the
+	// update job deliberately degrades and restores its VRRP priority. If the
+	// poll loop re-applied the desired config mid-update, it would undo the
+	// degradation and the peer wouldn't take over the VIP.
+	f.updateMu.Lock()
+	updating := f.updateJob.Running && f.updateJob.Current == i.Config.ID
+	f.updateMu.Unlock()
+	if updating {
+		return
+	}
+	if i.haConfigApplied(f.haHashFor(i.Config.ID)) {
+		return
+	}
+	if err := f.setAndApplyHA(ctx, i, *cfg); err != nil {
+		log.Printf("blipc: reconcile HA for %s: %v", i.Config.ID, err)
+		return
+	}
+	i.markHAApplied(f.haHashFor(i.Config.ID))
 }
 
 // QueryLogRetentionHours returns how long query log entries are kept on blipc.

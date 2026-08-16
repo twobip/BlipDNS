@@ -51,6 +51,7 @@ type Instance struct {
 	appliedHash string // hash of the effective config last successfully applied
 	lastUpstr   string // default upstream the instance last reported (for drift detection)
 	blHash      uint64 // checksum of the blocklist last successfully pushed
+	haHash      string // hash of the HA config last successfully applied
 }
 
 // pollInterval is how often the controller polls an instance's health/stats.
@@ -121,6 +122,18 @@ func (i *Instance) markConfigAppliedWith(hash, upstr string) {
 	i.mu.Lock()
 	i.appliedHash = hash
 	i.lastUpstr = upstr
+	i.mu.Unlock()
+}
+
+func (i *Instance) haConfigApplied(hash string) bool {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.haHash == hash
+}
+
+func (i *Instance) markHAApplied(hash string) {
+	i.mu.Lock()
+	i.haHash = hash
 	i.mu.Unlock()
 }
 
@@ -217,6 +230,10 @@ func (i *Instance) poll(ctx context.Context) {
 		i.fleet.maybePushBlocklist(ctx, i, s)
 		// Converge the instance's local DNS records the same way.
 		i.fleet.maybePushRecords(ctx, i, s)
+		// Converge the HA/keepalived config the same way: retry a previously
+		// failed keepalived reload so a transient sudoers issue or update-
+		// time priority degradation is corrected automatically.
+		i.fleet.maybePushHA(ctx, i)
 		// Also log to query log
 		if i.fleet.queryLog != nil && s != nil {
 			_ = i.fleet.queryLog.Insert(ctx, QueryLogEntry{

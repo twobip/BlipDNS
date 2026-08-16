@@ -88,6 +88,13 @@ func (f *Fleet) StartUpdates(ctx context.Context, channel string) (UpdateJobStat
 
 func (f *Fleet) runUpdateJob(nodes []updateNode, channel string) {
 	for _, node := range nodes {
+		// Mark this node as the one being updated BEFORE degrading its
+		// priority. This prevents the poll loop's maybePushHA from racing
+		// in and re-applying the desired (full) config mid-degradation,
+		// which would undo the priority reduction and prevent the peer
+		// from taking over the VIP.
+		f.setUpdateCurrent(node.id)
+
 		// Lower the VRRP priority on this node so its HA peer takes over the
 		// VIP while blipd is restarting. Errors are non-fatal: the HA config
 		// may simply be absent, or the node may not be part of a cluster.
@@ -101,7 +108,6 @@ func (f *Fleet) runUpdateJob(nodes []updateNode, channel string) {
 		// brief traffic blackhole.
 		time.Sleep(haFailoverWait)
 
-		f.setUpdateCurrent(node.id)
 		if err := f.updateOne(node.inst, channel); err != nil {
 			f.finishUpdate(node.id, "failed: "+err.Error(), err.Error())
 			// Restore priority even on failure so the peer can hand back the
