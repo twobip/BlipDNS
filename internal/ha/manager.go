@@ -218,19 +218,40 @@ func (m *Manager) ApplyHA() error {
 	// advertisements. blipd runs as the unprivileged 'blip' user, so we
 	// escalate via sudo (with a narrow NOPASSWD sudoers rule installed by
 	// the install script) to reload the root-owned keepalived service.
-	// Try full paths first (PATH may be restricted under systemd), then
-	// bare names.
-	for _, args := range [][]string{
-		{"/usr/bin/sudo", "/usr/bin/systemctl", "reload", "keepalived"},
-		{"sudo", "systemctl", "reload", "keepalived"},
-	} {
+	//
+	// Two reload strategies are tried, both via sudo -n (non-interactive):
+	//   1. systemctl reload — preferred but only works if the keepalived
+	//      systemd unit defines ExecReload.
+	//   2. pkill -HUP — sends SIGHUP directly; used when the systemd unit
+	//      has no reload handler. Requires a sudoers rule for pkill too.
+	//
+	// Both the systemctl and pkill sudoers rules are installed by
+	// install-blipd.sh. Absolute paths are tried first (PATH may be
+	// restricted under systemd), then bare names.
+	reloadCmds := [][]string{
+		{"/usr/bin/sudo", "-n", "/usr/bin/systemctl", "reload", "keepalived"},
+		{"sudo", "-n", "systemctl", "reload", "keepalived"},
+	}
+	for _, args := range reloadCmds {
 		if commandSucceeds(args[0], args[1:]...) {
 			m.clearError()
 			return nil
 		}
 	}
-	// Fallback: send SIGHUP directly to keepalived. This works if blipd
-	// has permission to signal the process (e.g. running as root).
+	// Fallback: send SIGHUP directly to keepalived via sudo. This works
+	// when blipd runs as the unprivileged 'blip' user with a matching
+	// NOPASSWD sudoers rule for pkill.
+	hupCmds := [][]string{
+		{"/usr/bin/sudo", "-n", "/usr/bin/pkill", "-HUP", "keepalived"},
+		{"sudo", "-n", "pkill", "-HUP", "keepalived"},
+	}
+	for _, args := range hupCmds {
+		if commandSucceeds(args[0], args[1:]...) {
+			m.clearError()
+			return nil
+		}
+	}
+	// Last resort without sudo: works only if blipd is already root.
 	if err := runCommand("pkill", "-HUP", "keepalived"); err != nil {
 		m.recordError(err)
 		return err

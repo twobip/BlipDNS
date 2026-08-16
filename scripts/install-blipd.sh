@@ -369,9 +369,13 @@ chmod 0440 /etc/sudoers.d/blipd-restart
 visudo -cf /etc/sudoers.d/blipd-restart
 
 # Allow the 'blip' user to reload keepalived (needed for HA priority changes
-# during fleet updates — blipd sends SIGHUP to re-read the rendered config).
+# during fleet updates — blipd reloads keepalived to re-read the rendered
+# config). Both `systemctl reload` and `pkill -HUP` are permitted: the
+# former is preferred, the latter is the SIGHUP fallback when the systemd
+# unit lacks an ExecReload handler.
 cat > /etc/sudoers.d/blipd-keepalived <<'EOF'
 blip ALL=(root) NOPASSWD: /usr/bin/systemctl reload keepalived
+blip ALL=(root) NOPASSWD: /usr/bin/pkill -HUP keepalived
 EOF
 chmod 0440 /etc/sudoers.d/blipd-keepalived
 visudo -cf /etc/sudoers.d/blipd-keepalived
