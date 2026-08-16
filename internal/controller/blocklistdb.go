@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -56,8 +57,12 @@ CREATE TABLE IF NOT EXISTS blocklist_manual_allow (
 );`); err != nil {
 		return nil, fmt.Errorf("create blocklist source schema: %w", err)
 	}
+	// Best-effort hardening: if the file is not owned by the current user
+	// (e.g. it was created by root during install), chmod fails with EPERM but
+	// the database is still fully usable. Do not take the blocklist DB down
+	// over a defensive chmod.
 	if err := os.Chmod(dbPath, 0600); err != nil {
-		return nil, fmt.Errorf("chmod blocklist db: %w", err)
+		log.Printf("blipc: warning: chmod blocklist db: %v", err)
 	}
 	return &BlocklistStore{db: db}, nil
 }

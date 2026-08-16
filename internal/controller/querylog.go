@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net"
 	"os"
 	"path/filepath"
@@ -393,8 +394,12 @@ func NewQueryLogStore(dbPath string) (*QueryLogStore, error) {
 	if _, err := db.Exec(schema); err != nil {
 		return nil, fmt.Errorf("create schema: %w", err)
 	}
+	// Best-effort hardening: if the file is not owned by the current user
+	// (e.g. it was created by root during install), chmod fails with EPERM but
+	// the database is still fully usable. Do not take the query log down over a
+	// defensive chmod.
 	if err := os.Chmod(dbPath, 0600); err != nil {
-		return nil, fmt.Errorf("chmod query log db: %w", err)
+		log.Printf("blipc: warning: chmod query log db: %v", err)
 	}
 	// Add columns to existing databases (no-ops if already present)
 	for _, col := range []string{
