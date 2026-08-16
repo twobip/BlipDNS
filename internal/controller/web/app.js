@@ -147,6 +147,7 @@ function go(page, push = true) {
   const t = TITLES[page] || ["", ""];
   $("page-title").innerHTML = t[0];
   $("page-sub").textContent = t[1];
+  if (page !== "blocklist" && blStatusTimer) { clearInterval(blStatusTimer); blStatusTimer = null; }
   refresh();
   if (page === "instances") renderEvents();
   if (page === "settings" || page === "upstream") refreshSettings();
@@ -1139,6 +1140,7 @@ function removeSource(u) {
 function startBlStatusPoll() {
   if (blStatusTimer) return;
   blStatusTimer = setInterval(async () => {
+    if (current !== "blocklist") return;
     try {
       const r = await API("/api/blocklist/status");
       const d = await r.json();
