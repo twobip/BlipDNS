@@ -218,10 +218,19 @@ func (m *Manager) ApplyHA() error {
 	// advertisements. blipd runs as the unprivileged 'blip' user, so we
 	// escalate via sudo (with a narrow NOPASSWD sudoers rule installed by
 	// the install script) to reload the root-owned keepalived service.
-	if commandSucceeds("sudo", "systemctl", "reload", "keepalived") {
-		m.clearError()
-		return nil
+	// Try full paths first (PATH may be restricted under systemd), then
+	// bare names.
+	for _, args := range [][]string{
+		{"/usr/bin/sudo", "/usr/bin/systemctl", "reload", "keepalived"},
+		{"sudo", "systemctl", "reload", "keepalived"},
+	} {
+		if commandSucceeds(args[0], args[1:]...) {
+			m.clearError()
+			return nil
+		}
 	}
+	// Fallback: send SIGHUP directly to keepalived. This works if blipd
+	// has permission to signal the process (e.g. running as root).
 	if err := runCommand("pkill", "-HUP", "keepalived"); err != nil {
 		m.recordError(err)
 		return err
