@@ -153,6 +153,66 @@ func TestServeBlocklistDefaultIsNXDOMAIN(t *testing.T) {
 	}
 }
 
+// TestServePolicyAllowlistBeatsGlobalBlocklist verifies a domain whitelisted by
+// the client's policy is never blocked by the global blocklist: it falls
+// through to the upstream instead.
+func TestServePolicyAllowlistBeatsGlobalBlocklist(t *testing.T) {
+	srv := blSrv(t, "nxdomain")
+	// Policy p (10.0.0.0/8) allowlists ads.example.net even though the global
+	// blocklist blocks it.
+	if err := srv.cfg.Store.SetPolicy(&filter.Policy{
+		ID:       "p",
+		Networks: []string{"10.0.0.0/8"},
+		Allow:    []string{"ads.example.net"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	up := srv.pool.Auto().(*recUp)
+
+	// Same global-blocklisted domain, allowed by the policy -> resolved.
+	q := new(dns.Msg)
+	q.SetQuestion("ads.example.net.", dns.TypeA)
+	resp := srv.serve(context.Background(), net.ParseIP("10.0.0.9"), "", q)
+	if resp.Rcode != dns.RcodeSuccess {
+		t.Fatalf("allowlisted query rc=%d want NOERROR (blocked=%v)", resp.Rcode, resp.Rcode == dns.RcodeNameError)
+	}
+	if up.calls == 0 {
+		t.Error("allowlisted query did not reach the upstream")
+	}
+
+	// Same domain, client outside the policy network -> still global-blocked.
+	up.calls = 0
+	resp = srv.serve(context.Background(), net.ParseIP("192.168.1.5"), "", q)
+	if resp.Rcode != dns.RcodeNameError {
+		t.Errorf("non-allowlisted query rc=%d want NXDOMAIN", resp.Rcode)
+	}
+	if up.calls != 0 {
+		t.Error("non-allowlisted query reached the upstream")
+	}
+}
+
+// TestServePolicyAllowlistBeatsGlobalBlocklistByClientID is the DoH client-ID
+// variant of the above: an allowlist keyed to a client ID overrides the global
+// blocklist for that client only.
+func TestServePolicyAllowlistBeatsGlobalBlocklistByClientID(t *testing.T) {
+	srv := blSrv(t, "")
+	if err := srv.cfg.Store.SetPolicy(&filter.Policy{
+		ID:      "phone",
+		Clients: []string{"phone"},
+		Allow:   []string{"ads.example.net"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	up := srv.pool.Auto().(*recUp)
+
+	q := new(dns.Msg)
+	q.SetQuestion("ads.example.net.", dns.TypeA)
+	resp := srv.serve(context.Background(), net.ParseIP("192.168.1.5"), "phone", q)
+	if resp.Rcode != dns.RcodeSuccess || up.calls == 0 {
+		t.Fatalf("client-ID allowlisted query rc=%d upstream=%d, want NOERROR+resolved", resp.Rcode, up.calls)
+	}
+}
+
 // The store (per-client policy) path shares the same zero-action answer.
 func TestServeStoreZeroActionSynthesizesZero(t *testing.T) {
 	srv, _ := newTestServer(t)

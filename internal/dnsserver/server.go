@@ -291,8 +291,10 @@ func (s *Server) serve(ctx context.Context, clientIP net.IP, clientID string, re
 	// so logs and the query log show the bare domain name.
 	domain := strings.TrimSuffix(q.Name, ".")
 
-	// Check global blocklist first (applied to all clients)
-	if s.cfg.Blocklist != nil && s.cfg.Blocklist.IsBlocked(domain) {
+	// Check global blocklist first (applied to all clients). A per-client
+	// allowlist always wins: a domain the client's policy whitelists is never
+	// blocked by the global blocklist (or any policy block list).
+	if s.cfg.Blocklist != nil && s.cfg.Blocklist.IsBlocked(domain) && !s.cfg.Store.Allowed(clientIP, clientID, domain) {
 		s.cnt.AddBlocked()
 		s.ctrl.Notify(control.WatchEvent{
 			Type: "block", At: time.Now(),

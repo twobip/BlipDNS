@@ -277,6 +277,18 @@ func (s *Store) Classify(clientIP net.IP, clientID, name string) (blocked bool, 
 	return false, p.action(), p.Upstream, p.Log
 }
 
+// Allowed reports whether name is allowlisted by the policy for this client (or
+// the default policy), regardless of any block rules. A whitelisted domain
+// ignores every blocklist — the global one included. Returns false when no
+// policy applies or the name is not allowlisted.
+func (s *Store) Allowed(clientIP net.IP, clientID, name string) bool {
+	p := s.lookup(clientIP, clientID)
+	if p == nil {
+		return false
+	}
+	return p.allowM.match(name)
+}
+
 // BlockSource returns a short label identifying the rule that would block
 // name from clientIP (or DoH clientID), or "" when the name is not blocked —
 // e.g. it is allowed by an allowlist or no policy applies. Labels look like

@@ -39,6 +39,55 @@ func TestSuffixAndWildcard(t *testing.T) {
 	}
 }
 
+func TestAllowed(t *testing.T) {
+	p := &Policy{
+		ID:       "p",
+		Networks: []string{"10.0.0.0/8"},
+		Allow:    []string{"good.example.com", "*.trusted.net", "sub.allow.com"},
+		Block:    []string{"bad.example.com"},
+	}
+	s := NewStore(nil)
+	if err := s.SetPolicy(p); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		ip     string
+		client string
+		name   string
+		want   bool
+	}{
+		{"10.1.2.3", "", "good.example.com", true},
+		{"10.1.2.3", "", "sub.good.example.com", true}, // suffix match
+		{"10.1.2.3", "", "a.trusted.net", true},        // wildcard subdomain
+		{"10.1.2.3", "", "trusted.net", false},         // *. doesn't match the root itself
+		{"10.1.2.3", "", "sub.allow.com", true},
+		{"10.1.2.3", "", "bad.example.com", false},           // blocked, not allowed
+		{"192.168.1.1", "", "good.example.com", false},       // outside the policy network
+		{"10.1.2.3", "any-client", "good.example.com", true}, // network-only policy applies regardless of client ID
+	}
+	for _, c := range cases {
+		if got := s.Allowed(mustIP(c.ip), c.client, c.name); got != c.want {
+			t.Errorf("Allowed(%s,%q,%s)=%v want %v", c.ip, c.client, c.name, got, c.want)
+		}
+	}
+
+	// A client-ID-scoped policy's allowlist applies only to its clients.
+	cp := &Policy{
+		ID:      "phone",
+		Clients: []string{"phone", "tablet"},
+		Allow:   []string{"time.nist.gov"},
+	}
+	if err := s.SetPolicy(cp); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.Allowed(mustIP("10.1.2.3"), "phone", "time.nist.gov"); !got {
+		t.Errorf("Allowed(client=phone, time.nist.gov)=false, want true")
+	}
+	if got := s.Allowed(mustIP("10.1.2.3"), "other", "time.nist.gov"); got {
+		t.Errorf("Allowed(client=other, time.nist.gov)=true, want false")
+	}
+}
+
 func TestClientIDPolicy(t *testing.T) {
 	p := &Policy{
 		ID:      "phone",
