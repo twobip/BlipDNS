@@ -541,6 +541,7 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			"rate_limit_qps":            s.fleet.RateLimitQPS(),
 			"upstream_servers":          upServers,
 			"upstream_routes":           upRoutes,
+			"upstream_bootstrap":        s.fleet.UpstreamBootstrap(),
 			"cache_size":                cacheSize,
 			"cache_warm":                cacheWarm,
 			"cache_regular":             cacheRegular,
@@ -562,6 +563,7 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			QueryLogRetentionHours *int                       `json:"query_log_retention_hours"`
 			UpstreamServers        *[]upstream.UpstreamServer `json:"upstream_servers"`
 			UpstreamRoutes         *[]upstream.UpstreamRoute  `json:"upstream_routes"`
+			UpstreamBootstrap      *[]upstream.UpstreamServer `json:"upstream_bootstrap"`
 			ReleaseChannel         *string                    `json:"release_channel"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -674,12 +676,13 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, map[string]interface{}{"ok": true, "applied": applied})
 			return
 		}
-		// Upstream server pool + conditional-forwarding routes (fleet-wide or
-		// per-instance). The arrays are sent whole from the upstream editor;
-		// an empty array clears the value (per-instance: falls through to the
-		// fleet-wide default) while an absent field is left untouched so a
-		// servers-only save does not wipe the fleet routes (and vice-versa).
-		if req.UpstreamServers != nil || req.UpstreamRoutes != nil {
+		// Upstream server pool + conditional-forwarding routes + bootstrap DNS
+		// (fleet-wide or per-instance). The arrays are sent whole from the
+		// upstream editor; an empty array clears the value (per-instance: falls
+		// through to the fleet-wide default) while an absent field is left
+		// untouched so a servers-only save does not wipe the fleet routes (and
+		// vice-versa).
+		if req.UpstreamServers != nil || req.UpstreamRoutes != nil || req.UpstreamBootstrap != nil {
 			// An absent field keeps the current value (fleet default or an
 			// existing per-instance override); an explicitly-empty array clears
 			// it (per-instance: falls through to the fleet-wide default). The
@@ -687,11 +690,13 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			// spec or a route to an unknown server is rejected up front instead
 			// of being saved and failing every push to the instances.
 			fleetServers, fleetRoutes := s.fleet.Upstream()
+			fleetBootstrap := s.fleet.UpstreamBootstrap()
 			if req.Scope == "instance" && req.Instance != "" {
 				existing := s.fleet.InstanceOverrideOf(req.Instance)
 				merged := mergeOverride(existing, &InstanceOverride{
-					UpstreamServers: req.UpstreamServers,
-					UpstreamRoutes:  req.UpstreamRoutes,
+					UpstreamServers:   req.UpstreamServers,
+					UpstreamRoutes:    req.UpstreamRoutes,
+					UpstreamBootstrap: req.UpstreamBootstrap,
 				})
 				if req.UpstreamServers != nil && len(*req.UpstreamServers) == 0 {
 					merged.UpstreamServers = nil
@@ -699,14 +704,20 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 				if req.UpstreamRoutes != nil && len(*req.UpstreamRoutes) == 0 {
 					merged.UpstreamRoutes = nil
 				}
-				effServers, effRoutes := fleetServers, fleetRoutes
+				if req.UpstreamBootstrap != nil && len(*req.UpstreamBootstrap) == 0 {
+					merged.UpstreamBootstrap = nil
+				}
+				effServers, effRoutes, effBootstrap := fleetServers, fleetRoutes, fleetBootstrap
 				if merged.UpstreamServers != nil {
 					effServers = *merged.UpstreamServers
 				}
 				if merged.UpstreamRoutes != nil {
 					effRoutes = *merged.UpstreamRoutes
 				}
-				if _, err := upstream.NewPool(effServers, effRoutes, ""); err != nil {
+				if merged.UpstreamBootstrap != nil {
+					effBootstrap = *merged.UpstreamBootstrap
+				}
+				if _, err := upstream.NewPoolWithBootstrap(effServers, effRoutes, "", effBootstrap); err != nil {
 					http.Error(w, "invalid upstream: "+err.Error(), http.StatusBadRequest)
 					return
 				}
@@ -720,11 +731,14 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			if req.UpstreamRoutes != nil {
 				fleetRoutes = *req.UpstreamRoutes
 			}
-			if _, err := upstream.NewPool(fleetServers, fleetRoutes, ""); err != nil {
+			if req.UpstreamBootstrap != nil {
+				fleetBootstrap = *req.UpstreamBootstrap
+			}
+			if _, err := upstream.NewPoolWithBootstrap(fleetServers, fleetRoutes, "", fleetBootstrap); err != nil {
 				http.Error(w, "invalid upstream: "+err.Error(), http.StatusBadRequest)
 				return
 			}
-			applied := s.fleet.SetUpstream(r.Context(), fleetServers, fleetRoutes)
+			applied := s.fleet.SetUpstream(r.Context(), fleetServers, fleetRoutes, fleetBootstrap)
 			writeJSON(w, map[string]interface{}{"ok": true, "applied": applied})
 			return
 		}

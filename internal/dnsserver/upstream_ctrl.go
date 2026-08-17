@@ -28,12 +28,13 @@ func (s *Server) upstreamAuto() upstream.Resolver {
 	return p.Auto()
 }
 
-// SetUpstream atomically replaces the upstream pool and conditional-forwarding
-// routes. Passing nil/empty for both reverts to the blipd config-file upstream.
-// This implements control.LocalResolverController so the management API can
-// reconfigure forwarding at runtime (the controller pushes from Settings).
-func (s *Server) SetUpstream(servers []upstream.UpstreamServer, routes []upstream.UpstreamRoute) error {
-	pool, err := upstream.NewPool(servers, routes, s.cfg.Upstream)
+// SetUpstream atomically replaces the upstream pool, conditional-forwarding
+// routes, and bootstrap DNS servers. Passing nil/empty for all reverts to the
+// blipd config-file upstream. This implements control.LocalResolverController
+// so the management API can reconfigure forwarding at runtime (the controller
+// pushes from Settings).
+func (s *Server) SetUpstream(servers []upstream.UpstreamServer, routes []upstream.UpstreamRoute, bootstrap []upstream.UpstreamServer) error {
+	pool, err := upstream.NewPoolWithBootstrap(servers, routes, s.cfg.Upstream, bootstrap)
 	if err != nil {
 		return err
 	}
@@ -47,14 +48,14 @@ func (s *Server) SetUpstream(servers []upstream.UpstreamServer, routes []upstrea
 	return nil
 }
 
-// Upstream returns the active upstream pool (servers + routes) for stats
-// readback, so the controller can detect drift after a restart.
-func (s *Server) Upstream() ([]upstream.UpstreamServer, []upstream.UpstreamRoute) {
+// Upstream returns the active upstream pool (servers + routes + bootstrap) for
+// stats readback, so the controller can detect drift after a restart.
+func (s *Server) Upstream() ([]upstream.UpstreamServer, []upstream.UpstreamRoute, []upstream.UpstreamServer) {
 	p := s.safePool()
 	if p == nil {
-		return nil, nil
+		return nil, nil, nil
 	}
-	return p.Servers(), p.Routes()
+	return p.Servers(), p.Routes(), p.Bootstrap()
 }
 
 // upstreamFor selects the resolver for a query. Order (per the settings model):

@@ -72,28 +72,98 @@ func errUpstream(addr string, err error) error {
 
 // DoHResolver forwards over DNS-over-HTTPS (RFC 8484).
 type DoHResolver struct {
-	endpoint string
-	client   *http.Client
+	endpoint  string
+	client    *http.Client
+	bootstrap Resolver
 }
 
 // NewDoH creates a DoH upstream resolver for endpoint (e.g.
 // https://1.1.1.1/dns-query) with the given timeout (0 = 5 second default).
 // The client reuses HTTP/2 connections.
 func NewDoH(endpoint string, timeout time.Duration) *DoHResolver {
+	return NewDoHWithBootstrap(endpoint, timeout, nil)
+}
+
+// NewDoHWithBootstrap creates a DoH upstream resolver like NewDoH, but resolves
+// the endpoint's hostname through the bootstrap resolver before dialing instead
+// of the system resolver. This lets a DoH server configured by hostname (e.g.
+// https://dns.google/dns-query) be reached even when /etc/resolv.conf is
+// unusable. Bootstrap resolvers themselves are dialed via the system resolver —
+// there is no chicken-and-egg — so a bootstrap endpoint should normally be a
+// literal IP such as https://1.1.1.1/dns-query. A nil bootstrap uses the
+// system resolver (historical behavior).
+func NewDoHWithBootstrap(endpoint string, timeout time.Duration, bootstrap Resolver) *DoHResolver {
 	if timeout <= 0 {
 		timeout = 5 * time.Second
 	}
-	return &DoHResolver{
-		endpoint: endpoint,
-		client: &http.Client{
-			Timeout: timeout,
-			Transport: &http.Transport{
-				MaxIdleConns:        64,
-				MaxIdleConnsPerHost: 32,
-				IdleConnTimeout:     90 * time.Second,
-			},
-		},
+	tr := &http.Transport{
+		MaxIdleConns:        64,
+		MaxIdleConnsPerHost: 32,
+		IdleConnTimeout:     90 * time.Second,
+		ForceAttemptHTTP2:   true,
 	}
+	if bootstrap != nil {
+		tr.DialContext = bootstrapDialContext(bootstrap, timeout)
+	}
+	return &DoHResolver{
+		endpoint:  endpoint,
+		client:    &http.Client{Timeout: timeout, Transport: tr},
+		bootstrap: bootstrap,
+	}
+}
+
+// bootstrapDialContext returns a DialContext that resolves the address
+// hostname through the bootstrap resolver and dials the first reachable
+// address, keeping the port. TLS is handled by the transport after this dial,
+// so the DoH certificate is still verified against the endpoint hostname.
+func bootstrapDialContext(bootstrap Resolver, timeout time.Duration) func(ctx context.Context, network, addr string) (net.Conn, error) {
+	d := &net.Dialer{Timeout: timeout}
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, err
+		}
+		if net.ParseIP(host) != nil {
+			return d.DialContext(ctx, network, addr)
+		}
+		ips := bootstrapLookupIP(ctx, bootstrap, host)
+		if len(ips) == 0 {
+			return nil, fmt.Errorf("bootstrap resolve %q: no addresses", host)
+		}
+		var lastErr error
+		for _, ip := range ips {
+			c, derr := d.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
+			if derr == nil {
+				return c, nil
+			}
+			lastErr = derr
+		}
+		return nil, lastErr
+	}
+}
+
+// bootstrapLookupIP resolves A and AAAA for host through r, tolerating a
+// resolver that only answers one family (a failed AAAA query is not fatal when
+// the A query succeeded, and vice-versa).
+func bootstrapLookupIP(ctx context.Context, r Resolver, host string) []net.IP {
+	var ips []net.IP
+	for _, t := range []uint16{dns.TypeA, dns.TypeAAAA} {
+		q := new(dns.Msg)
+		q.SetQuestion(dns.Fqdn(host), t)
+		resp, err := r.Resolve(ctx, q)
+		if err != nil {
+			continue
+		}
+		for _, rr := range resp.Answer {
+			switch v := rr.(type) {
+			case *dns.A:
+				ips = append(ips, v.A)
+			case *dns.AAAA:
+				ips = append(ips, v.AAAA)
+			}
+		}
+	}
+	return ips
 }
 
 func (r *DoHResolver) Resolve(ctx context.Context, q *dns.Msg) (*dns.Msg, error) {

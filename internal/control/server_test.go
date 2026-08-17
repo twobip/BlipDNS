@@ -210,30 +210,32 @@ func TestDoHEndpoint(t *testing.T) {
 	srv.SetDoHController(nil)
 }
 
-// fakeLocalResolver records every upstream pool+routes it is asked to run,
-// validating specs the way the real dnsserver.Server.SetUpstream does (via
-// upstream.NewPool).
+// fakeLocalResolver records every upstream pool+routes+bootstrap it is asked to
+// run, validating specs the way the real dnsserver.Server.SetUpstream does (via
+// upstream.NewPoolWithBootstrap).
 type fakeLocalResolver struct {
-	mu      sync.Mutex
-	servers []upstream.UpstreamServer
-	routes  []upstream.UpstreamRoute
+	mu        sync.Mutex
+	servers   []upstream.UpstreamServer
+	routes    []upstream.UpstreamRoute
+	bootstrap []upstream.UpstreamServer
 }
 
-func (f *fakeLocalResolver) SetUpstream(servers []upstream.UpstreamServer, routes []upstream.UpstreamRoute) error {
-	if _, err := upstream.NewPool(servers, routes, ""); err != nil {
+func (f *fakeLocalResolver) SetUpstream(servers []upstream.UpstreamServer, routes []upstream.UpstreamRoute, bootstrap []upstream.UpstreamServer) error {
+	if _, err := upstream.NewPoolWithBootstrap(servers, routes, "", bootstrap); err != nil {
 		return err
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.servers = servers
 	f.routes = routes
+	f.bootstrap = bootstrap
 	return nil
 }
 
-func (f *fakeLocalResolver) Upstream() ([]upstream.UpstreamServer, []upstream.UpstreamRoute) {
+func (f *fakeLocalResolver) Upstream() ([]upstream.UpstreamServer, []upstream.UpstreamRoute, []upstream.UpstreamServer) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.servers, f.routes
+	return f.servers, f.routes, f.bootstrap
 }
 
 func TestUpstreamEndpoint(t *testing.T) {
@@ -270,8 +272,9 @@ func TestUpstreamEndpoint(t *testing.T) {
 	// GET reports the (empty) current pool.
 	resp = authReq(http.MethodGet, "")
 	var got struct {
-		Servers []upstream.UpstreamServer `json:"servers"`
-		Routes  []upstream.UpstreamRoute  `json:"routes"`
+		Servers   []upstream.UpstreamServer `json:"servers"`
+		Routes    []upstream.UpstreamRoute  `json:"routes"`
+		Bootstrap []upstream.UpstreamServer `json:"bootstrap"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
 		t.Fatal(err)
@@ -280,21 +283,22 @@ func TestUpstreamEndpoint(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("GET status = %d", resp.StatusCode)
 	}
-	if len(got.Servers) != 0 || len(got.Routes) != 0 {
-		t.Errorf("initial upstream = %+v / %+v, want empty", got.Servers, got.Routes)
+	if len(got.Servers) != 0 || len(got.Routes) != 0 || len(got.Bootstrap) != 0 {
+		t.Errorf("initial upstream = %+v / %+v / %+v, want empty", got.Servers, got.Routes, got.Bootstrap)
 	}
 
-	// PUT installs the pool + routes.
+	// PUT installs the pool + routes + bootstrap.
 	servers := []upstream.UpstreamServer{{Name: "quad9", Address: "udp://9.9.9.9:53", Priority: 1}}
 	routes := []upstream.UpstreamRoute{{Name: "corp", QnameSuffix: ".corp.", Server: "quad9"}}
-	body, _ := json.Marshal(map[string]interface{}{"servers": servers, "routes": routes})
+	bootstrap := []upstream.UpstreamServer{{Address: "https://1.1.1.1/dns-query"}, {Address: "8.8.8.8"}}
+	body, _ := json.Marshal(map[string]interface{}{"servers": servers, "routes": routes, "bootstrap": bootstrap})
 	resp = authReq(http.MethodPut, string(body))
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("PUT status = %d", resp.StatusCode)
 	}
 	resp.Body.Close()
-	if gotS, gotR := uc.Upstream(); len(gotS) != 1 || gotS[0].Name != "quad9" || !reflect.DeepEqual(gotR, routes) {
-		t.Errorf("controller upstream = %+v / %+v", gotS, gotR)
+	if gotS, gotR, gotB := uc.Upstream(); len(gotS) != 1 || gotS[0].Name != "quad9" || !reflect.DeepEqual(gotR, routes) || !reflect.DeepEqual(gotB, bootstrap) {
+		t.Errorf("controller upstream = %+v / %+v / %+v", gotS, gotR, gotB)
 	}
 
 	// stats now report the pool so the controller can detect drift.
@@ -309,8 +313,8 @@ func TestUpstreamEndpoint(t *testing.T) {
 		t.Fatal(err)
 	}
 	sresp.Body.Close()
-	if !reflect.DeepEqual(st.UpstreamServers, servers) || !reflect.DeepEqual(st.UpstreamRoutes, routes) {
-		t.Errorf("stats upstream = %+v / %+v, want %+v / %+v", st.UpstreamServers, st.UpstreamRoutes, servers, routes)
+	if !reflect.DeepEqual(st.UpstreamServers, servers) || !reflect.DeepEqual(st.UpstreamRoutes, routes) || !reflect.DeepEqual(st.BootstrapServers, bootstrap) {
+		t.Errorf("stats upstream = %+v / %+v / %+v, want %+v / %+v / %+v", st.UpstreamServers, st.UpstreamRoutes, st.BootstrapServers, servers, routes, bootstrap)
 	}
 
 	// An invalid server spec is rejected; the pool is left unchanged.
@@ -319,8 +323,18 @@ func TestUpstreamEndpoint(t *testing.T) {
 		t.Errorf("bad server status = %d, want 400", resp.StatusCode)
 	}
 	resp.Body.Close()
-	if gotS, _ := uc.Upstream(); len(gotS) != 1 || gotS[0].Name != "quad9" {
+	if gotS, _, _ := uc.Upstream(); len(gotS) != 1 || gotS[0].Name != "quad9" {
 		t.Errorf("controller upstream changed after rejected PUT: %+v", gotS)
+	}
+
+	// An invalid bootstrap spec is rejected too.
+	resp = authReq(http.MethodPut, `{"bootstrap":[{"address":"wibble://x"}]}`)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("bad bootstrap status = %d, want 400", resp.StatusCode)
+	}
+	resp.Body.Close()
+	if _, _, gotB := uc.Upstream(); !reflect.DeepEqual(gotB, bootstrap) {
+		t.Errorf("controller bootstrap changed after rejected PUT: %+v", gotB)
 	}
 
 	srv.SetLocalResolverController(nil)

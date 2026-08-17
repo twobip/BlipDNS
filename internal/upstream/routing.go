@@ -34,14 +34,16 @@ type UpstreamRoute struct {
 
 // ResolverPool is the runtime upstream configuration: named resolvers, the
 // automatic failover rotation (Priority>0 servers, or the legacy upstream
-// string), and conditional-forwarding routes. It is built once and replaced
-// wholesale via SetUpstream, so its fields are read-only after construction.
+// string), conditional-forwarding routes, and the bootstrap DNS servers used
+// to resolve DoH server hostnames. It is built once and replaced wholesale via
+// SetUpstream, so its fields are read-only after construction.
 type ResolverPool struct {
-	named   map[string]Resolver // server name -> resolver (all servers, incl. priority 0)
-	auto    Resolver            // Priority>0 servers as an ordered failover group, or the legacy upstream
-	rules   []routeRule         // conditional-forwarding routes
-	servers []UpstreamServer
-	routes  []UpstreamRoute
+	named     map[string]Resolver // server name -> resolver (all servers, incl. priority 0)
+	auto      Resolver            // Priority>0 servers as an ordered failover group, or the legacy upstream
+	rules     []routeRule         // conditional-forwarding routes
+	servers   []UpstreamServer
+	routes    []UpstreamRoute
+	bootstrap []UpstreamServer // bootstrap DNS servers for resolving DoH server hostnames
 }
 
 type routeRule struct {
@@ -55,9 +57,23 @@ type routeRule struct {
 // `upstream:` configs keep working). Passing nil/empty for both servers and
 // legacyUp yields a pool with no automatic resolver (only routes).
 func NewPool(servers []UpstreamServer, routes []UpstreamRoute, legacyUp string) (*ResolverPool, error) {
-	p := &ResolverPool{named: make(map[string]Resolver)}
+	return NewPoolWithBootstrap(servers, routes, legacyUp, nil)
+}
+
+// NewPoolWithBootstrap builds a resolver pool exactly like NewPool, plus a set
+// of bootstrap DNS servers used to resolve the hostnames of DoH upstream
+// servers before dialing them. Each entry is a single endpoint spec like
+// "1.1.1.1" or "https://1.1.1.1/dns-query" (bootstrap servers support both UDP
+// and DoH; see fromServerSpec). An empty bootstrap leaves DoH hostnames to the
+// system resolver.
+func NewPoolWithBootstrap(servers []UpstreamServer, routes []UpstreamRoute, legacyUp string, bootstrap []UpstreamServer) (*ResolverPool, error) {
+	p := &ResolverPool{named: make(map[string]Resolver), bootstrap: bootstrap}
 	p.servers = servers
 	p.routes = routes
+	bootstrapResolver, err := buildBootstrapResolver(bootstrap)
+	if err != nil {
+		return nil, err
+	}
 	for _, sv := range servers {
 		if sv.Name == "" {
 			sv.Name = "server#" + sv.Address
@@ -65,7 +81,7 @@ func NewPool(servers []UpstreamServer, routes []UpstreamRoute, legacyUp string) 
 		if _, dup := p.named[sv.Name]; dup {
 			return nil, fmt.Errorf("upstream: duplicate server name %q", sv.Name)
 		}
-		r, err := fromServerSpec(sv.Address, timeoutForServer(sv))
+		r, err := fromServerSpecWithBootstrap(sv.Address, timeoutForServer(sv), bootstrapResolver)
 		if err != nil {
 			return nil, fmt.Errorf("upstream: server %q: %w", sv.Name, err)
 		}
@@ -137,6 +153,12 @@ func serverPriority(servers []UpstreamServer, name string) int {
 // A server address must name exactly one endpoint (the multi-token form belongs
 // to the legacy `upstream:` string, handled by FromSpec).
 func fromServerSpec(spec string, timeout time.Duration) (Resolver, error) {
+	return fromServerSpecWithBootstrap(spec, timeout, nil)
+}
+
+// fromServerSpecWithBootstrap is fromServerSpec with the DoH resolver threaded
+// a bootstrap resolver for resolving the endpoint's own hostname.
+func fromServerSpecWithBootstrap(spec string, timeout time.Duration, bootstrap Resolver) (Resolver, error) {
 	specs, err := ParseSpec(spec)
 	if err != nil {
 		return nil, err
@@ -148,9 +170,34 @@ func fromServerSpec(spec string, timeout time.Duration) (Resolver, error) {
 	case "udp":
 		return NewUDP(specs[0].Address, timeout), nil
 	case "doh":
-		return NewDoH("https://"+specs[0].Address, timeout), nil
+		return NewDoHWithBootstrap("https://"+specs[0].Address, timeout, bootstrap), nil
 	}
 	return nil, fmt.Errorf("unknown upstream type %q", specs[0].Type)
+}
+
+// buildBootstrapResolver converts the bootstrap server list into a failover
+// resolver (MultiResolver) used to resolve DoH server hostnames, or nil for an
+// empty list. Bootstrap servers are built without a bootstrap of their own:
+// their hostnames resolve via the system resolver, since bootstrapping the
+// bootstrap would be circular — so a bootstrap endpoint should be a literal IP
+// (e.g. "1.1.1.1" or "https://1.1.1.1/dns-query").
+func buildBootstrapResolver(bootstrap []UpstreamServer) (Resolver, error) {
+	var rs []Resolver
+	for _, sv := range bootstrap {
+		r, err := fromServerSpec(sv.Address, timeoutForServer(sv))
+		if err != nil {
+			return nil, fmt.Errorf("upstream: bootstrap server %q: %w", sv.Address, err)
+		}
+		rs = append(rs, r)
+	}
+	switch len(rs) {
+	case 0:
+		return nil, nil
+	case 1:
+		return rs[0], nil
+	default:
+		return NewMulti(rs...), nil
+	}
 }
 
 // timeoutForServer returns the resolver timeout for an UpstreamServer, defaulting
@@ -218,6 +265,14 @@ func (p *ResolverPool) Routes() []UpstreamRoute {
 		return nil
 	}
 	return p.routes
+}
+
+// Bootstrap returns the configured bootstrap DNS servers (for stats readback).
+func (p *ResolverPool) Bootstrap() []UpstreamServer {
+	if p == nil {
+		return nil
+	}
+	return p.bootstrap
 }
 
 // Match returns the resolver for the best-matching route (longest qname suffix,

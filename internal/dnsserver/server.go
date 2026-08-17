@@ -47,6 +47,7 @@ type Config struct {
 	Upstream          string           // upstream spec(s)
 	UpstreamServers   []upstream.UpstreamServer
 	UpstreamRoutes    []upstream.UpstreamRoute
+	UpstreamBootstrap []upstream.UpstreamServer // DNS servers used to resolve DoH upstream hostnames
 	CacheCap          time.Duration
 	CacheSize         int           // max cached responses in RAM (0 = unlimited)
 	CacheWarmCount    int           // most-popular entries to auto-refresh (0 = off)
@@ -99,7 +100,7 @@ func New(cfg Config) (*Server, error) {
 	if cfg.Store == nil {
 		cfg.Store = filter.NewStore(nil)
 	}
-	up, err := upstream.NewPool(cfg.UpstreamServers, cfg.UpstreamRoutes, cfg.Upstream)
+	up, err := upstream.NewPoolWithBootstrap(cfg.UpstreamServers, cfg.UpstreamRoutes, cfg.Upstream, cfg.UpstreamBootstrap)
 	if err != nil {
 		return nil, err
 	}

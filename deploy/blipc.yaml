@@ -47,6 +47,14 @@ default_policy:
 #     qname_suffix: ".internal.corp."
 #     server: "internal"
 #     client_cidr: "10.0.0.0/8"
+# Bootstrap DNS servers: used to resolve the hostname of a DoH upstream server
+# (e.g. https://dns.google/dns-query) before dialing it. Each entry is a single
+# endpoint spec; UDP ("1.1.1.1") and DoH ("https://1.1.1.1/dns-query") both
+# work. Leave empty to let each instance use the system resolver. Edited from
+# the Settings -> Upstream -> Bootstrap DNS panel too.
+# upstream_bootstrap:
+#   - address: "1.1.1.1"
+#   - address: "https://1.1.1.1/dns-query"
 # Pi-hole style blocklist sources: one or more AdBlock Plus (ABP) or hosts
 # format lists. blipc fetches + merges them, then pushes the merged list to
 # every blipd instance (and re-pushes on poll if an instance drifts). Edit

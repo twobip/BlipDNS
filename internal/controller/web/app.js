@@ -1430,10 +1430,11 @@ let savedOverrides = {};       // sparse per-instance overrides keyed by instanc
 let scopeState = "default";    // "default" or an instance id
 let savedUpServers = [];       // fleet-wide default named servers
 let savedUpRoutes = [];        // fleet-wide default conditional-forwarding routes
+let savedUpBootstrap = [];     // fleet-wide default bootstrap DNS resolvers
 
-// visibleUpServers/visibleUpRoutes return what the editor should show for a
-// scope: the fleet default at "default", otherwise only the instance's own
-// override (blank = inherits the fleet default).
+// visibleUpServers/visibleUpRoutes/visibleUpBootstrap return what the editor
+// should show for a scope: the fleet default at "default", otherwise only the
+// instance's own override (blank = inherits the fleet default).
 function visibleUpServers(scope) {
   if (scope === "default") return savedUpServers;
   const o = savedOverrides[scope];
@@ -1443,6 +1444,11 @@ function visibleUpRoutes(scope) {
   if (scope === "default") return savedUpRoutes;
   const o = savedOverrides[scope];
   return Array.isArray(o && o.upstream_routes) ? o.upstream_routes : [];
+}
+function visibleUpBootstrap(scope) {
+  if (scope === "default") return savedUpBootstrap;
+  const o = savedOverrides[scope];
+  return Array.isArray(o && o.upstream_bootstrap) ? o.upstream_bootstrap : [];
 }
 // effectiveUpServers is the full pool an instance would run (override or fleet
 // default) — used to populate the route-server dropdown.
@@ -1459,6 +1465,31 @@ function upsertOverrideField(id, field, value) {
   else delete o[field];
   if (Object.keys(o).length) savedOverrides[id] = o;
   else delete savedOverrides[id];
+}
+
+// ---- Bootstrap DNS editor ----
+// A bootstrap resolver is just an address string: "1.1.1.1" (UDP) or
+// "https://1.1.1.1/dns-query" (DoH). Used to resolve the hostname of a DoH
+// upstream server before dialing it.
+function bootstrapRow(b) {
+  const row = document.createElement("div");
+  row.className = "row up-row";
+  row.innerHTML = `
+    <input class="input grow boot-addr" placeholder="1.1.1.1 (udp:53) or https://1.1.1.1/dns-query" value="${esc(b.address || "")}"/>
+    <button class="icon-btn boot-del" title="Remove">${IC.trash}</button>`;
+  row.querySelector(".boot-del").onclick = () => row.remove();
+  return row;
+}
+function renderBootstrapList(list) {
+  const wrap = $("s-boot-list");
+  wrap.innerHTML = "";
+  for (const b of list) wrap.appendChild(bootstrapRow(b));
+  if (!list.length) wrap.innerHTML = `<div class="hint" style="padding:2px 0 6px">No bootstrap resolvers — a DoH server hostname is resolved via the system resolver.</div>`;
+}
+function collectBootstrap() {
+  return [...document.querySelectorAll("#s-boot-list .up-row")].map((row) => ({
+    address: row.querySelector(".boot-addr").value.trim(),
+  })).filter((b) => b.address !== "");
 }
 
 
@@ -1628,31 +1659,41 @@ function loadScopeEditor() {
   renderScopeSelect();
   const badge = $("s-scope-badge");
   const cfBadge = $("s-cf-badge");
+  const bootBadge = $("s-boot-badge");
   const hint = $("s-scope-hint");
   const cfHint = $("s-cf-hint");
   const upHint = $("s-up-hint");
+  const bootHint = $("s-boot-hint");
   if (scopeState === "default") {
     badge.textContent = "fleet-wide";
     badge.className = "badge accent";
     cfBadge.textContent = "fleet-wide";
     cfBadge.className = "badge accent";
+    bootBadge.textContent = "fleet-wide";
+    bootBadge.className = "badge accent";
     hint.textContent = "Applies to every instance that doesn't have its own override.";
     cfHint.textContent = "Matching queries are forwarded to the named server. Routes reference the servers above; a default disabled local-PTR rule is pre-seeded for you.";
     upHint.textContent = "priority 1+ servers form the automatic failover rotation; priority 0 servers are used only by conditional-forwarding routes.";
+    bootHint.textContent = "Resolve the hostname of a DoH server above through these resolvers before dialing it. Each can be UDP (\"1.1.1.1\") or DoH (\"https://1.1.1.1/dns-query\").";
     renderServerList(savedUpServers);
     renderRouteList(savedUpRoutes, savedUpServers, true);
+    renderBootstrapList(savedUpBootstrap);
   } else {
     badge.textContent = "instance";
     badge.className = "badge purple";
     cfBadge.textContent = "instance";
     cfBadge.className = "badge purple";
+    bootBadge.textContent = "instance";
+    bootBadge.className = "badge purple";
     hint.textContent = "Only for this instance. Fields you leave blank inherit the fleet-wide default.";
     cfHint.textContent = "Only for this instance. Blank = inherit the fleet-wide default.";
     upHint.textContent = "Blank = inherit the fleet-wide server pool.";
+    bootHint.textContent = "Only for this instance. Blank = inherit the fleet-wide bootstrap resolvers.";
     const o = savedOverrides[scopeState] || {};
     renderServerList(Array.isArray(o.upstream_servers) ? o.upstream_servers : []);
     const routes = Array.isArray(o.upstream_routes) ? o.upstream_routes : [];
     renderRouteList(routes, effectiveUpServers(scopeState));
+    renderBootstrapList(Array.isArray(o.upstream_bootstrap) ? o.upstream_bootstrap : []);
   }
 }
 
@@ -1676,9 +1717,10 @@ async function refreshSettings() {
     loadReleaseEditor();
     // fleet-wide local DNS records
     savedRecords = (d.records || []).map((r) => ({ ...r }));
-    // fleet-wide default upstream pool + conditional-forwarding routes
+    // fleet-wide default upstream pool + conditional-forwarding routes + bootstrap
     savedUpServers = Array.isArray(d.upstream_servers) ? d.upstream_servers : [];
     savedUpRoutes = Array.isArray(d.upstream_routes) ? d.upstream_routes : [];
+    savedUpBootstrap = Array.isArray(d.upstream_bootstrap) ? d.upstream_bootstrap : [];
     // carry over any per-instance doh_http_addr not already surfaced
     loadScopeEditor();
     loadDoHEditor();
@@ -2108,6 +2150,36 @@ $("s-save-cf").onclick = async () => {
   } catch (e) { st.textContent = ""; toast("save failed: " + e.message, "err"); }
 };
 $("s-scope").addEventListener("change", (e) => { scopeState = e.target.value; loadScopeEditor(); });
+
+$("s-boot-add").onclick = () => {
+  $("s-boot-list").appendChild(bootstrapRow({ address: "" }));
+};
+$("s-save-boot").onclick = async () => {
+  const bootstrap = collectBootstrap();
+  const st = $("s-boot-status");
+  st.textContent = "saving…";
+  let body, msg;
+  if (scopeState === "default") {
+    body = { upstream_bootstrap: bootstrap };
+    msg = bootstrap.length ? "fleet bootstrap DNS saved" : "fleet bootstrap DNS cleared";
+  } else {
+    body = { scope: "instance", instance: scopeState, upstream_bootstrap: bootstrap };
+    msg = bootstrap.length ? "instance bootstrap DNS saved" : "instance bootstrap DNS cleared (inherits fleet)";
+  }
+  try {
+    const r = await API("/api/settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const d = await r.json();
+    if (scopeState === "default") savedUpBootstrap = bootstrap;
+    else upsertOverrideField(scopeState, "upstream_bootstrap", bootstrap);
+    const applied = d.applied || {};
+    const ids = Object.keys(applied);
+    const ok = ids.filter((k) => applied[k] === "ok").length;
+    const failed = ids.filter((k) => applied[k] !== "ok");
+    st.textContent = ids.length ? `saved on blipc · pushed to ${ok}/${ids.length} instance${ids.length > 1 ? "s" : ""}` + (failed.length ? ` · errors: ${failed.map((k) => k + ": " + applied[k]).join(", ")}` : "") : "saved on blipc · no instance to push to yet";
+    toast(msg + (ids.length ? ` (${ok}/${ids.length})` : ""));
+    renderScopeSelect();
+  } catch (e) { st.textContent = ""; toast("save failed: " + e.message, "err"); }
+};
 
 /* DoH editor wiring */
 $("s-doh-scope").addEventListener("change", (e) => { dohScopeState = e.target.value; loadDoHEditor(); });

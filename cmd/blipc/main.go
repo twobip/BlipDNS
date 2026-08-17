@@ -34,6 +34,7 @@ type config struct {
 	QueryLogRetentionHours int                                     `yaml:"query_log_retention_hours"`
 	UpstreamServers        []upstream.UpstreamServer               `yaml:"upstream_servers"`
 	UpstreamRoutes         []upstream.UpstreamRoute                `yaml:"upstream_routes"`
+	UpstreamBootstrap      []upstream.UpstreamServer               `yaml:"upstream_bootstrap"`
 	BlocklistSources       []string                                `yaml:"blocklist_sources"`
 	BlocklistDisabled      []string                                `yaml:"blocklist_disabled"`
 	BlocklistUpdateHours   int                                     `yaml:"blocklist_update_hours"`
@@ -96,7 +97,7 @@ func main() {
 		fleet.StartReleaseCheck()
 	}
 	if len(cfg.UpstreamServers) > 0 || len(cfg.UpstreamRoutes) > 0 {
-		fleet.SetUpstreamDefault(cfg.UpstreamServers, cfg.UpstreamRoutes)
+		fleet.SetUpstreamDefault(cfg.UpstreamServers, cfg.UpstreamRoutes, cfg.UpstreamBootstrap)
 		if len(cfg.UpstreamServers) > 0 {
 			fleet.WarnOrphanPolicyUpstreams(cfg.UpstreamServers)
 		}

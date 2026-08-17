@@ -57,30 +57,34 @@ func (r *dohRec) snapshot() []string {
 	return out
 }
 
-// upstreamCall is one upstream pool+routes push observed by upstreamRec.
+// upstreamCall is one upstream pool+routes+bootstrap push observed by upstreamRec.
 type upstreamCall struct {
-	servers []upstream.UpstreamServer
-	routes  []upstream.UpstreamRoute
+	servers   []upstream.UpstreamServer
+	routes    []upstream.UpstreamRoute
+	bootstrap []upstream.UpstreamServer
 }
 
-// upstreamRec records every upstream pool+routes push to a fake blipd and
-// reports the current set back from /api/v1/stats so the controller can
+// upstreamRec records every upstream pool+routes+bootstrap push to a fake blipd
+// and reports the current set back from /api/v1/stats so the controller can
 // converge a restarted instance (mirroring dohRec).
 type upstreamRec struct {
-	mu      sync.Mutex
-	servers []upstream.UpstreamServer
-	routes  []upstream.UpstreamRoute
-	calls   []upstreamCall
+	mu        sync.Mutex
+	servers   []upstream.UpstreamServer
+	routes    []upstream.UpstreamRoute
+	bootstrap []upstream.UpstreamServer
+	calls     []upstreamCall
 }
 
-func (r *upstreamRec) applied(servers []upstream.UpstreamServer, routes []upstream.UpstreamRoute) {
+func (r *upstreamRec) applied(servers []upstream.UpstreamServer, routes []upstream.UpstreamRoute, bootstrap []upstream.UpstreamServer) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.servers = make([]upstream.UpstreamServer, len(servers))
 	copy(r.servers, servers)
 	r.routes = make([]upstream.UpstreamRoute, len(routes))
 	copy(r.routes, routes)
-	r.calls = append(r.calls, upstreamCall{servers, routes})
+	r.bootstrap = make([]upstream.UpstreamServer, len(bootstrap))
+	copy(r.bootstrap, bootstrap)
+	r.calls = append(r.calls, upstreamCall{servers, routes, bootstrap})
 }
 
 func (r *upstreamRec) snapshot() []upstreamCall {
@@ -92,12 +96,12 @@ func (r *upstreamRec) snapshot() []upstreamCall {
 }
 
 // lastUpstream returns the most recent upstream push an instance received.
-func lastUpstream(r *upstreamRec) ([]upstream.UpstreamServer, []upstream.UpstreamRoute) {
+func lastUpstream(r *upstreamRec) ([]upstream.UpstreamServer, []upstream.UpstreamRoute, []upstream.UpstreamServer) {
 	sn := r.snapshot()
 	if len(sn) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
-	return sn[len(sn)-1].servers, sn[len(sn)-1].routes
+	return sn[len(sn)-1].servers, sn[len(sn)-1].routes, sn[len(sn)-1].bootstrap
 }
 
 // cacheCall is one cache-config push observed by cacheRec.
@@ -231,6 +235,7 @@ func fakeBlipdWithRec(t *testing.T, token, claimCode string, health *control.Hea
 			up.mu.Lock()
 			st.UpstreamServers = up.servers
 			st.UpstreamRoutes = up.routes
+			st.BootstrapServers = up.bootstrap
 			up.mu.Unlock()
 		}
 		if cache != nil {
@@ -317,13 +322,13 @@ func fakeBlipdWithRec(t *testing.T, token, claimCode string, health *control.Hea
 		}
 		switch r.Method {
 		case http.MethodGet:
-			servers, routes := []upstream.UpstreamServer{}, []upstream.UpstreamRoute{}
+			servers, routes, bootstrap := []upstream.UpstreamServer{}, []upstream.UpstreamRoute{}, []upstream.UpstreamServer{}
 			if up != nil {
 				up.mu.Lock()
-				servers, routes = up.servers, up.routes
+				servers, routes, bootstrap = up.servers, up.routes, up.bootstrap
 				up.mu.Unlock()
 			}
-			writeJSONH(w, map[string]interface{}{"servers": servers, "routes": routes})
+			writeJSONH(w, map[string]interface{}{"servers": servers, "routes": routes, "bootstrap": bootstrap})
 		case http.MethodPut, http.MethodPost:
 			var req control.SetUpstreamRequest
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -331,7 +336,7 @@ func fakeBlipdWithRec(t *testing.T, token, claimCode string, health *control.Hea
 				return
 			}
 			if up != nil {
-				up.applied(req.Servers, req.Routes)
+				up.applied(req.Servers, req.Routes, req.Bootstrap)
 			}
 			writeJSONH(w, map[string]bool{"ok": true})
 		default:
@@ -1654,21 +1659,28 @@ func TestFleetSetUpstream(t *testing.T) {
 	routes := []upstream.UpstreamRoute{
 		{Name: "corp", QnameSuffix: ".corp.", Server: "rr", ClientCIDR: "10.0.0.0/8"},
 	}
-	res := fleet.SetUpstream(ctx, servers, routes)
+	bootstrap := []upstream.UpstreamServer{
+		{Address: "https://1.1.1.1/dns-query"},
+		{Address: "8.8.8.8"},
+	}
+	res := fleet.SetUpstream(ctx, servers, routes, bootstrap)
 	if res["a"] != "ok" || res["b"] != "ok" {
 		t.Fatalf("expected both ok, got %+v", res)
 	}
 	// Each instance must have received the pool (possibly twice: once from the
 	// initial poll reconcile and once from the explicit fleet-wide push).
-	if gotS, gotR := lastUpstream(upA); !reflect.DeepEqual(gotS, servers) || !reflect.DeepEqual(gotR, routes) {
-		t.Errorf("instance a upstream = %+v / %+v, want %+v / %+v", gotS, gotR, servers, routes)
+	if gotS, gotR, gotB := lastUpstream(upA); !reflect.DeepEqual(gotS, servers) || !reflect.DeepEqual(gotR, routes) || !reflect.DeepEqual(gotB, bootstrap) {
+		t.Errorf("instance a upstream = %+v / %+v / %+v, want %+v / %+v / %+v", gotS, gotR, gotB, servers, routes, bootstrap)
 	}
-	if gotS, gotR := lastUpstream(upB); !reflect.DeepEqual(gotS, servers) || !reflect.DeepEqual(gotR, routes) {
-		t.Errorf("instance b upstream = %+v / %+v, want %+v / %+v", gotS, gotR, servers, routes)
+	if gotS, gotR, gotB := lastUpstream(upB); !reflect.DeepEqual(gotS, servers) || !reflect.DeepEqual(gotR, routes) || !reflect.DeepEqual(gotB, bootstrap) {
+		t.Errorf("instance b upstream = %+v / %+v / %+v, want %+v / %+v / %+v", gotS, gotR, gotB, servers, routes, bootstrap)
 	}
 	gotS, gotR := fleet.Upstream()
 	if !reflect.DeepEqual(gotS, servers) || !reflect.DeepEqual(gotR, routes) {
 		t.Errorf("fleet.Upstream = %+v / %+v", gotS, gotR)
+	}
+	if gotB := fleet.UpstreamBootstrap(); !reflect.DeepEqual(gotB, bootstrap) {
+		t.Errorf("fleet.UpstreamBootstrap = %+v, want %+v", gotB, bootstrap)
 	}
 	// persisted to the controller config
 	b, err := os.ReadFile(cfgPath)
@@ -1680,6 +1692,9 @@ func TestFleetSetUpstream(t *testing.T) {
 	}
 	if !bytes.Contains(b, []byte("upstream_routes:")) || !bytes.Contains(b, []byte(".corp.")) {
 		t.Errorf("upstream_routes not persisted:\n%s", b)
+	}
+	if !bytes.Contains(b, []byte("upstream_bootstrap:")) || !bytes.Contains(b, []byte("1.1.1.1")) {
+		t.Errorf("upstream_bootstrap not persisted:\n%s", b)
 	}
 }
 
@@ -1694,7 +1709,7 @@ func TestFleetUpstreamReconcileRestartRevert(t *testing.T) {
 
 	servers := []upstream.UpstreamServer{{Name: "quad9", Address: "udp://9.9.9.9:53", Priority: 1}}
 	fleet := NewFleet("/tmp/blip-test-config.yaml")
-	fleet.SetUpstreamDefault(servers, nil)
+	fleet.SetUpstreamDefault(servers, nil, nil)
 	if err := fleet.Add(context.Background(), InstanceConfig{ID: "a", URL: srv.URL, Token: "t"}); err != nil {
 		t.Fatal(err)
 	}
@@ -1721,7 +1736,7 @@ func TestFleetUpstreamReconcileRestartRevert(t *testing.T) {
 	up.mu.Unlock()
 
 	waitForUp(2, "no re-push after simulated restart revert")
-	if gotS, _ := lastUpstream(up); !reflect.DeepEqual(gotS, servers) {
+	if gotS, _, _ := lastUpstream(up); !reflect.DeepEqual(gotS, servers) {
 		t.Errorf("last upstream push = %+v, want %+v", gotS, servers)
 	}
 }
@@ -1751,7 +1766,7 @@ func TestFleetUpstreamOverride(t *testing.T) {
 	}
 	// Instance a must have received its override pool; b (fleet default empty)
 	// receives no upstream push.
-	if gotS, _ := lastUpstream(upA); !reflect.DeepEqual(gotS, servers) {
+	if gotS, _, _ := lastUpstream(upA); !reflect.DeepEqual(gotS, servers) {
 		t.Errorf("instance a upstream = %+v, want %+v", gotS, servers)
 	}
 	if len(upB.snapshot()) != 0 {
@@ -1998,7 +2013,7 @@ func TestServerSettingsUpstreamFleet(t *testing.T) {
 	if applied := ack["applied"].(map[string]interface{}); applied["a"] != "ok" {
 		t.Errorf("applied a = %v", applied["a"])
 	}
-	if gotS, gotR := lastUpstream(upA); !reflect.DeepEqual(gotS, servers) || !reflect.DeepEqual(gotR, routes) {
+	if gotS, gotR, _ := lastUpstream(upA); !reflect.DeepEqual(gotS, servers) || !reflect.DeepEqual(gotR, routes) {
 		t.Errorf("instance a upstream = %+v / %+v, want %+v / %+v", gotS, gotR, servers, routes)
 	}
 
@@ -2227,7 +2242,7 @@ func TestServerSettingsUpstreamInstanceOverride(t *testing.T) {
 
 	// Give the fleet a baseline default so both instances have one.
 	fleetServers := []upstream.UpstreamServer{{Name: "quad9", Address: "udp://9.9.9.9:53", Priority: 1}}
-	if res := fleet.SetUpstream(context.Background(), fleetServers, nil); res["a"] != "ok" || res["b"] != "ok" {
+	if res := fleet.SetUpstream(context.Background(), fleetServers, nil, nil); res["a"] != "ok" || res["b"] != "ok" {
 		t.Fatalf("fleet upstream push: %+v", res)
 	}
 	time.Sleep(150 * time.Millisecond) // let poll reconcile settle
@@ -2299,10 +2314,10 @@ func TestServerSettingsUpstreamInstanceOverride(t *testing.T) {
 		t.Errorf("b override routes = %+v, want %+v", *o.UpstreamRoutes, routes)
 	}
 	// b's fake instance received the full merged pool + routes; a kept the fleet default.
-	if gotS, gotR := lastUpstream(upB); !reflect.DeepEqual(gotS, ovrServers) || !reflect.DeepEqual(gotR, routes) {
+	if gotS, gotR, _ := lastUpstream(upB); !reflect.DeepEqual(gotS, ovrServers) || !reflect.DeepEqual(gotR, routes) {
 		t.Errorf("instance b upstream = %+v / %+v, want %+v / %+v", gotS, gotR, ovrServers, routes)
 	}
-	if gotS, _ := lastUpstream(upA); !reflect.DeepEqual(gotS, fleetServers) {
+	if gotS, _, _ := lastUpstream(upA); !reflect.DeepEqual(gotS, fleetServers) {
 		t.Errorf("instance a upstream = %+v, want fleet default %+v", gotS, fleetServers)
 	}
 }

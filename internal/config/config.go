@@ -28,6 +28,7 @@ type Config struct {
 	Upstream             string                    `yaml:"upstream"`
 	UpstreamServers      []upstream.UpstreamServer `yaml:"upstream_servers"`       // named upstream pool (priority 0 = route-only)
 	UpstreamRoutes       []upstream.UpstreamRoute  `yaml:"upstream_routes"`        // conditional forwarding (qname/client -> server)
+	UpstreamBootstrap    []upstream.UpstreamServer `yaml:"upstream_bootstrap"`     // DNS servers used to resolve DoH upstream hostnames (UDP or DoH)
 	CacheCap             time.Duration             `yaml:"cache_cap"`              // max TTL for cached responses
 	CacheSize            int                       `yaml:"cache_size"`             // max cached responses in RAM (0 = unlimited)
 	CacheWarmCount       int                       `yaml:"cache_warm_count"`       // most-popular entries kept fresh (0 = off)

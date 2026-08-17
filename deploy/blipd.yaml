@@ -8,6 +8,14 @@ state_file: "/var/lib/blipd/adopted.json"
 # Production upstreams with failover (override in /etc/blipd/blipd.yaml).
 upstream: "https://1.1.1.1/dns-query https://8.8.8.8/dns-query"
 cache_cap: 1h
+# Bootstrap DNS servers: used to resolve the hostname of a DoH upstream server
+# (e.g. https://dns.google/dns-query) before dialing it. Each entry is a single
+# endpoint spec; UDP ("1.1.1.1") and DoH ("https://1.1.1.1/dns-query") both
+# work. Leave empty to use the system resolver. Managed from blipc's Settings
+# -> Upstream -> Bootstrap DNS panel when a controller is managing this node.
+# upstream_bootstrap:
+#   - address: "1.1.1.1"
+#   - address: "https://1.1.1.1/dns-query"
 # Optional global DNS blocklist (AdBlock Plus format). Applied to ALL clients
 # before per-client policy. Set blocklist_url and blocklist_update_hours to
 # auto-refresh from a URL (e.g. a self-hosted EasyList mirror).

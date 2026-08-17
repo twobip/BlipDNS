@@ -59,10 +59,11 @@ type StatsResponse struct {
 	CacheSize    int `json:"cache_size,omitempty"`
 	CacheWarm    int `json:"cache_warm,omitempty"`
 	CacheRegular int `json:"cache_regular,omitempty"`
-	// UpstreamServers / UpstreamRoutes expose the instance's conditional
-	// forwarding configuration so the controller can detect drift.
-	UpstreamServers []upstream.UpstreamServer `json:"upstream_servers,omitempty"`
-	UpstreamRoutes  []upstream.UpstreamRoute  `json:"upstream_routes,omitempty"`
+	// UpstreamServers / UpstreamRoutes / BootstrapServers expose the instance's
+	// conditional-forwarding configuration so the controller can detect drift.
+	UpstreamServers  []upstream.UpstreamServer `json:"upstream_servers,omitempty"`
+	UpstreamRoutes   []upstream.UpstreamRoute  `json:"upstream_routes,omitempty"`
+	BootstrapServers []upstream.UpstreamServer `json:"bootstrap_servers,omitempty"`
 	// RecordsHash is a checksum of the instance's local DNS records so the
 	// controller can detect drift (e.g. after a restart) and re-push them.
 	RecordsHash uint64 `json:"records_hash,omitempty"`
@@ -109,10 +110,13 @@ type PurgeCacheResponse struct {
 
 // SetUpstreamRequest replaces the instance's upstream pool and conditional
 // forwarding routes. Servers with priority 0 are route-only; an empty request
-// reverts the instance to its local (config-file) upstream.
+// reverts the instance to its local (config-file) upstream. Bootstrap lists
+// the DNS servers used to resolve the hostnames of DoH upstream servers
+// before dialing them.
 type SetUpstreamRequest struct {
-	Servers []upstream.UpstreamServer `json:"servers"`
-	Routes  []upstream.UpstreamRoute  `json:"routes"`
+	Servers   []upstream.UpstreamServer `json:"servers"`
+	Routes    []upstream.UpstreamRoute  `json:"routes"`
+	Bootstrap []upstream.UpstreamServer `json:"bootstrap"`
 }
 
 // domains (already normalized, plain "domain" or "*.root" wildcard entries).

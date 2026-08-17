@@ -150,6 +150,7 @@ func main() {
 		Upstream:          cfg.Upstream,
 		UpstreamServers:   cfg.UpstreamServers,
 		UpstreamRoutes:    cfg.UpstreamRoutes,
+		UpstreamBootstrap: cfg.UpstreamBootstrap,
 		CacheCap:          cfg.CacheCap,
 		CacheSize:         cfg.CacheSize,
 		CacheWarmCount:    cfg.CacheWarmCount,

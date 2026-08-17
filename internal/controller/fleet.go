@@ -81,6 +81,10 @@ type InstanceOverride struct {
 	// UpstreamRoutes, when set, overrides the fleet-wide upstream routes
 	// (conditional forwarding) for this instance. nil = inherit the fleet default.
 	UpstreamRoutes *[]upstream.UpstreamRoute `json:"upstream_routes,omitempty" yaml:"upstream_routes,omitempty"`
+	// UpstreamBootstrap, when set, overrides the fleet-wide bootstrap DNS
+	// servers (used to resolve DoH upstream hostnames) for this instance.
+	// nil = inherit the fleet default.
+	UpstreamBootstrap *[]upstream.UpstreamServer `json:"upstream_bootstrap,omitempty" yaml:"upstream_bootstrap,omitempty"`
 	// CacheSize, when set, overrides the fleet-wide max cached responses for
 	// this instance. nil = inherit the fleet default.
 	CacheSize *int `json:"cache_size,omitempty" yaml:"cache_size,omitempty"`
@@ -97,7 +101,7 @@ type InstanceOverride struct {
 
 // IsEmpty reports whether the override changes nothing.
 func (o *InstanceOverride) IsEmpty() bool {
-	return o == nil || (o.Upstream == nil && o.BlockAction == nil && o.Log == nil && o.DoHHTTPAddr == nil && o.RateLimitQPS == nil && o.UpstreamServers == nil && o.UpstreamRoutes == nil && o.CacheSize == nil && o.CacheWarm == nil && o.CacheRegular == nil && o.Records == nil)
+	return o == nil || (o.Upstream == nil && o.BlockAction == nil && o.Log == nil && o.DoHHTTPAddr == nil && o.RateLimitQPS == nil && o.UpstreamServers == nil && o.UpstreamRoutes == nil && o.UpstreamBootstrap == nil && o.CacheSize == nil && o.CacheWarm == nil && o.CacheRegular == nil && o.Records == nil)
 }
 
 // Fleet holds all instances, the event bus, and the global blocklist.
@@ -135,6 +139,7 @@ type Fleet struct {
 	cacheConfigured   bool                         // true once the operator explicitly set a fleet-wide cache value
 	upstreamServers   []upstream.UpstreamServer    // fleet-wide default upstream pool
 	upstreamRoutes    []upstream.UpstreamRoute     // fleet-wide default upstream routes
+	upstreamBootstrap []upstream.UpstreamServer    // fleet-wide bootstrap DNS servers for resolving DoH hostnames
 	qlRetentionHours  int                          // how long query log entries are kept (0 = 24h default)
 	records           []control.RecordEntry        // fleet-wide local DNS records
 	haCluster         control.HACluster            // LAN two-node VRRP desired state
@@ -851,21 +856,30 @@ func (f *Fleet) Upstream() ([]upstream.UpstreamServer, []upstream.UpstreamRoute)
 	return f.upstreamServers, f.upstreamRoutes
 }
 
-// SetUpstreamDefault records the fleet-wide default upstream pool and routes
-// without distributing it. Used at startup from the controller config.
-func (f *Fleet) SetUpstreamDefault(servers []upstream.UpstreamServer, routes []upstream.UpstreamRoute) {
+// UpstreamBootstrap returns the fleet-wide bootstrap DNS servers.
+func (f *Fleet) UpstreamBootstrap() []upstream.UpstreamServer {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return f.upstreamBootstrap
+}
+
+// SetUpstreamDefault records the fleet-wide default upstream pool, routes and
+// bootstrap servers without distributing them. Used at startup from the
+// controller config.
+func (f *Fleet) SetUpstreamDefault(servers []upstream.UpstreamServer, routes []upstream.UpstreamRoute, bootstrap []upstream.UpstreamServer) {
 	f.mu.Lock()
 	f.upstreamServers = servers
 	f.upstreamRoutes = routes
+	f.upstreamBootstrap = bootstrap
 	f.mu.Unlock()
 }
 
-// SetUpstream sets the fleet-wide default upstream pool and routes, persists it,
-// and pushes the effective value (default or per-instance override) to every
-// adopted instance.
-func (f *Fleet) SetUpstream(ctx context.Context, servers []upstream.UpstreamServer, routes []upstream.UpstreamRoute) map[string]string {
+// SetUpstream sets the fleet-wide default upstream pool, routes and bootstrap
+// servers, persists them, and pushes the effective value (default or
+// per-instance override) to every adopted instance.
+func (f *Fleet) SetUpstream(ctx context.Context, servers []upstream.UpstreamServer, routes []upstream.UpstreamRoute, bootstrap []upstream.UpstreamServer) map[string]string {
 	prev, _ := f.Upstream()
-	f.SetUpstreamDefault(servers, routes)
+	f.SetUpstreamDefault(servers, routes, bootstrap)
 	if f.configPath != "" {
 		if err := f.saveConfig(); err != nil {
 			log.Printf("blipc: warning: failed to persist upstream setting: %v", err)
@@ -978,13 +992,14 @@ func (f *Fleet) orphanPolicyUpstreams(match func(ref string) bool) []string {
 	return out
 }
 
-// effectiveUpstream returns the upstream pool + routes an instance should have:
-// its own override if set, otherwise the fleet-wide default.
-func (f *Fleet) effectiveUpstream(instID string) ([]upstream.UpstreamServer, []upstream.UpstreamRoute) {
+// effectiveUpstream returns the upstream pool + routes + bootstrap an instance
+// should have: its own override if set, otherwise the fleet-wide default.
+func (f *Fleet) effectiveUpstream(instID string) ([]upstream.UpstreamServer, []upstream.UpstreamRoute, []upstream.UpstreamServer) {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
 	servers := f.upstreamServers
 	routes := f.upstreamRoutes
+	bootstrap := f.upstreamBootstrap
 	if o := f.overrides[instID]; o != nil {
 		if o.UpstreamServers != nil {
 			servers = *o.UpstreamServers
@@ -992,33 +1007,40 @@ func (f *Fleet) effectiveUpstream(instID string) ([]upstream.UpstreamServer, []u
 		if o.UpstreamRoutes != nil {
 			routes = *o.UpstreamRoutes
 		}
+		if o.UpstreamBootstrap != nil {
+			bootstrap = *o.UpstreamBootstrap
+		}
 	}
-	return servers, routes
+	return servers, routes, bootstrap
 }
 
-// upstreamHash returns a stable fingerprint of the upstream pool + routes so
-// the controller can detect drift after a restart (mirroring the DoH and
-// rate-limit reconcilers).
-func upstreamHash(servers []upstream.UpstreamServer, routes []upstream.UpstreamRoute) string {
+// upstreamHash returns a stable fingerprint of the upstream pool + routes +
+// bootstrap so the controller can detect drift after a restart (mirroring the
+// DoH and rate-limit reconcilers).
+func upstreamHash(servers []upstream.UpstreamServer, routes []upstream.UpstreamRoute, bootstrap []upstream.UpstreamServer) string {
 	if servers == nil {
 		servers = []upstream.UpstreamServer{}
 	}
 	if routes == nil {
 		routes = []upstream.UpstreamRoute{}
 	}
+	if bootstrap == nil {
+		bootstrap = []upstream.UpstreamServer{}
+	}
 	b, err := json.Marshal(struct {
-		Servers []upstream.UpstreamServer `json:"servers"`
-		Routes  []upstream.UpstreamRoute  `json:"routes"`
-	}{servers, routes})
+		Servers   []upstream.UpstreamServer `json:"servers"`
+		Routes    []upstream.UpstreamRoute  `json:"routes"`
+		Bootstrap []upstream.UpstreamServer `json:"bootstrap"`
+	}{servers, routes, bootstrap})
 	if err != nil {
 		return ""
 	}
 	return fmt.Sprintf("%x", sha256.Sum256(b))
 }
 
-// pushUpstream distributes the effective upstream pool + routes to every
-// adopted instance. Instances whose effective upstream is empty (neither the
-// fleet default nor a per-instance override sets any servers or routes) are
+// pushUpstream distributes the effective upstream pool + routes + bootstrap to
+// every adopted instance. Instances whose effective upstream is empty (neither
+// the fleet default nor a per-instance override sets any servers or routes) are
 // skipped: the fleet is not managing upstream for them, so they keep whatever
 // they currently have (config-file or previously pushed).
 func (f *Fleet) pushUpstream(ctx context.Context) map[string]string {
@@ -1034,12 +1056,12 @@ func (f *Fleet) pushUpstream(ctx context.Context) map[string]string {
 			results[i.Config.ID] = "not adopted"
 			continue
 		}
-		wantServers, wantRoutes := f.effectiveUpstream(i.Config.ID)
+		wantServers, wantRoutes, wantBootstrap := f.effectiveUpstream(i.Config.ID)
 		if len(wantServers) == 0 && len(wantRoutes) == 0 {
 			results[i.Config.ID] = "no upstream configured"
 			continue
 		}
-		if err := i.ctl().SetUpstream(ctx, wantServers, wantRoutes); err != nil {
+		if err := i.ctl().SetUpstream(ctx, wantServers, wantRoutes, wantBootstrap); err != nil {
 			results[i.Config.ID] = err.Error()
 			continue
 		}
@@ -1048,25 +1070,25 @@ func (f *Fleet) pushUpstream(ctx context.Context) map[string]string {
 	return results
 }
 
-// maybePushUpstream converges an instance's upstream pool + routes to its fleet
-// default (or per-instance override) when the instance reports a divergent set —
-// e.g. after a restart it reverted to its own config-file pool. Skips instances
-// whose effective upstream is empty (the fleet is not managing upstream for
-// them).
+// maybePushUpstream converges an instance's upstream pool + routes + bootstrap
+// to its fleet default (or per-instance override) when the instance reports a
+// divergent set — e.g. after a restart it reverted to its own config-file pool.
+// Skips instances whose effective upstream is empty (the fleet is not managing
+// upstream for them).
 func (f *Fleet) maybePushUpstream(ctx context.Context, i *Instance, reported *control.StatsResponse) {
-	wantServers, wantRoutes := f.effectiveUpstream(i.Config.ID)
+	wantServers, wantRoutes, wantBootstrap := f.effectiveUpstream(i.Config.ID)
 	if len(wantServers) == 0 && len(wantRoutes) == 0 {
 		return
 	}
-	wantHash := upstreamHash(wantServers, wantRoutes)
+	wantHash := upstreamHash(wantServers, wantRoutes, wantBootstrap)
 	repHash := ""
 	if reported != nil {
-		repHash = upstreamHash(reported.UpstreamServers, reported.UpstreamRoutes)
+		repHash = upstreamHash(reported.UpstreamServers, reported.UpstreamRoutes, reported.BootstrapServers)
 	}
 	if wantHash == repHash || !i.hasToken() {
 		return
 	}
-	if err := i.ctl().SetUpstream(ctx, wantServers, wantRoutes); err != nil {
+	if err := i.ctl().SetUpstream(ctx, wantServers, wantRoutes, wantBootstrap); err != nil {
 		log.Printf("blipc: reconcile upstream for %s: %v", i.Config.ID, err)
 	}
 }
@@ -1102,6 +1124,9 @@ func mergeOverride(existing, partial *InstanceOverride) *InstanceOverride {
 	}
 	if partial.UpstreamRoutes != nil {
 		merged.UpstreamRoutes = partial.UpstreamRoutes
+	}
+	if partial.UpstreamBootstrap != nil {
+		merged.UpstreamBootstrap = partial.UpstreamBootstrap
 	}
 	if partial.CacheSize != nil {
 		merged.CacheSize = partial.CacheSize
@@ -1643,11 +1668,11 @@ func (f *Fleet) pushInstance(ctx context.Context, id string) map[string]string {
 		}
 		i.markConfigAppliedWith(f.appliedHashFor(id), eff.Upstream)
 	}
-	// Push the effective upstream pool + routes when the fleet is managing
-	// upstream for this instance (non-empty server pool or routes).
-	wantServers, wantRoutes := f.effectiveUpstream(id)
+	// Push the effective upstream pool + routes + bootstrap when the fleet is
+	// managing upstream for this instance (non-empty server pool or routes).
+	wantServers, wantRoutes, wantBootstrap := f.effectiveUpstream(id)
 	if len(wantServers) > 0 || len(wantRoutes) > 0 {
-		if err := i.ctl().SetUpstream(ctx, wantServers, wantRoutes); err != nil {
+		if err := i.ctl().SetUpstream(ctx, wantServers, wantRoutes, wantBootstrap); err != nil {
 			res[id] = "upstream: " + err.Error()
 		}
 	}
@@ -2669,6 +2694,7 @@ func (f *Fleet) saveConfig() error {
 		RateLimitQPS           int                          `yaml:"rate_limit_qps"`
 		UpstreamServers        []upstream.UpstreamServer    `yaml:"upstream_servers"`
 		UpstreamRoutes         []upstream.UpstreamRoute     `yaml:"upstream_routes"`
+		UpstreamBootstrap      []upstream.UpstreamServer    `yaml:"upstream_bootstrap"`
 		CacheSize              int                          `yaml:"cache_size"`
 		CacheWarm              int                          `yaml:"cache_warm"`
 		CacheRegular           int                          `yaml:"cache_regular"`
@@ -2709,6 +2735,7 @@ func (f *Fleet) saveConfig() error {
 	upstreamServers, upstreamRoutes := f.Upstream()
 	cfg.UpstreamServers = upstreamServers
 	cfg.UpstreamRoutes = upstreamRoutes
+	cfg.UpstreamBootstrap = f.UpstreamBootstrap()
 	cfg.CacheSize, cfg.CacheWarm, cfg.CacheRegular = f.CacheConfig()
 	cfg.QueryLogRetentionHours = f.QueryLogRetentionHours()
 	cfg.BlocklistSources = blSources

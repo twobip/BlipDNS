@@ -2,7 +2,12 @@ package upstream
 
 import (
 	"context"
+	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
+	"reflect"
+	"sync"
 	"testing"
 	"time"
 
@@ -315,5 +320,138 @@ func TestDoHTimeout(t *testing.T) {
 	r := p.named["doh1"].(*DoHResolver)
 	if r.client.Timeout != 3*time.Second {
 		t.Errorf("doh timeout = %v, want 3s", r.client.Timeout)
+	}
+}
+
+func TestPoolWithBootstrap(t *testing.T) {
+	servers := []UpstreamServer{
+		{Name: "doh", Address: "https://dns.example.com/dns-query", Priority: 1},
+	}
+	bootstrap := []UpstreamServer{
+		{Address: "https://1.1.1.1/dns-query"},
+		{Address: "8.8.8.8"},
+	}
+	p, err := NewPoolWithBootstrap(servers, nil, "", bootstrap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(p.Bootstrap(), bootstrap) {
+		t.Errorf("pool.Bootstrap() = %+v, want %+v", p.Bootstrap(), bootstrap)
+	}
+	r := p.named["doh"].(*DoHResolver)
+	if r.bootstrap == nil {
+		t.Fatal("DoH resolver missing bootstrap resolver")
+	}
+	if tr, ok := r.client.Transport.(*http.Transport); !ok || tr.DialContext == nil {
+		t.Error("DoH transport must use a bootstrap DialContext")
+	}
+	// A bad bootstrap spec is rejected at pool build time.
+	if _, err := NewPoolWithBootstrap(servers, nil, "", []UpstreamServer{{Address: "wibble://x"}}); err == nil {
+		t.Error("invalid bootstrap spec accepted")
+	}
+	// Empty bootstrap keeps historical behavior (system resolver dialing).
+	p2, err := NewPoolWithBootstrap(servers, nil, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r2 := p2.named["doh"].(*DoHResolver)
+	if r2.bootstrap != nil {
+		t.Error("nil bootstrap should leave no bootstrap resolver")
+	}
+	if tr, ok := r2.client.Transport.(*http.Transport); ok && tr.DialContext != nil {
+		t.Error("nil bootstrap should not install a DialContext")
+	}
+}
+
+// stubBootstrapResolver answers A/AAAA for a fixed host so a DoH endpoint can
+// be reached over the loopback without touching the real system resolver.
+type stubBootstrapResolver struct {
+	host  string
+	ips   []net.IP
+	mu    sync.Mutex
+	asked []string
+}
+
+func (s *stubBootstrapResolver) Resolve(ctx context.Context, q *dns.Msg) (*dns.Msg, error) {
+	m := new(dns.Msg)
+	m.SetReply(q)
+	if len(q.Question) != 1 {
+		return m, nil
+	}
+	s.mu.Lock()
+	s.asked = append(s.asked, q.Question[0].Name)
+	s.mu.Unlock()
+	if q.Question[0].Name != dns.Fqdn(s.host) {
+		return m, nil
+	}
+	hdr := dns.RR_Header{Name: q.Question[0].Name, Rrtype: q.Question[0].Qtype, Class: dns.ClassINET, Ttl: 60}
+	for _, ip := range s.ips {
+		switch q.Question[0].Qtype {
+		case dns.TypeA:
+			if ip.To4() != nil {
+				m.Answer = append(m.Answer, &dns.A{Hdr: hdr, A: ip.To4()})
+			}
+		case dns.TypeAAAA:
+			if ip.To4() == nil {
+				m.Answer = append(m.Answer, &dns.AAAA{Hdr: hdr, AAAA: ip})
+			}
+		}
+	}
+	return m, nil
+}
+
+func TestDoHBootstrapResolve(t *testing.T) {
+	// A plain-HTTP DoH endpoint ("doh.test:PORT"): TLS is not involved, so the
+	// only hostname handling that must happen is the bootstrap resolution.
+	done := make(chan struct{})
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		q := new(dns.Msg)
+		if err := q.Unpack(b); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		m := new(dns.Msg)
+		m.SetReply(q)
+		m.Answer = append(m.Answer, &dns.A{Hdr: dns.RR_Header{Name: q.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60}, A: net.ParseIP("1.2.3.4")})
+		out, _ := m.Pack()
+		w.Header().Set("Content-Type", "application/dns-message")
+		w.Write(out)
+		close(done)
+	}))
+	defer ts.Close()
+	_, port, _ := net.SplitHostPort(ts.Listener.Addr().String())
+
+	bs := &stubBootstrapResolver{host: "doh.test", ips: []net.IP{net.ParseIP("127.0.0.1")}}
+	r := NewDoHWithBootstrap("http://doh.test:"+port+"/dns-query", 2*time.Second, bs)
+
+	q := new(dns.Msg)
+	q.SetQuestion("example.com.", dns.TypeA)
+	resp, err := r.Resolve(context.Background(), q)
+	if err != nil {
+		t.Fatalf("resolve via bootstrap: %v", err)
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("DoH endpoint never reached")
+	}
+	if len(resp.Answer) != 1 {
+		t.Fatalf("answers = %+v", resp.Answer)
+	}
+	if a := resp.Answer[0].(*dns.A); !a.A.Equal(net.ParseIP("1.2.3.4")) {
+		t.Errorf("answer A = %v, want 1.2.3.4", a.A)
+	}
+	// The bootstrap resolver must have been queried for the endpoint hostname.
+	bs.mu.Lock()
+	defer bs.mu.Unlock()
+	found := false
+	for _, n := range bs.asked {
+		if n == dns.Fqdn("doh.test") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("bootstrap was never asked to resolve the DoH host; asked = %v", bs.asked)
 	}
 }

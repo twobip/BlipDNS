@@ -526,6 +526,23 @@
             </div>
           </div>
         </div>
+
+        <div class="panel mt">
+          <div class="panel-head"><h3>Bootstrap DNS</h3><span class="spacer"></span><span class="badge accent" id="s-boot-badge">fleet-wide</span></div>
+          <div class="panel-body">
+            <div class="field">
+              <label>Bootstrap resolvers <span class="faint">used to resolve the hostname of a DoH server above (e.g. https://dns.google/dns-query)</span></label>
+              <div class="list-head" style="gap:8px"><span style="flex:1">Address</span><span style="width:28px"></span></div>
+              <div id="s-boot-list"></div>
+              <button class="btn btn-sm" id="s-boot-add">+ Add bootstrap resolver</button>
+              <span class="hint" id="s-boot-hint"></span>
+            </div>
+            <div class="row mt">
+              <button class="btn btn-primary" id="s-save-boot">Save</button>
+              <span class="hint" id="s-boot-status"></span>
+            </div>
+          </div>
+        </div>
        </section>
 
        <!-- ================= LOCAL RECORDS ================= -->
