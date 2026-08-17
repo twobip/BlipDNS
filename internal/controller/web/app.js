@@ -724,15 +724,11 @@ function recordValuePlaceholder(t) {
          t === "CNAME" ? "target.example.com" : "value";
 }
 
-function recordInstLabel(rec) {
-  return rec._instance || "";
-}
-
 function renderRecords() {
   const tb = $("r-tbody");
   $("r-count").textContent = savedRecords.length + (savedRecords.length === 1 ? " record" : " records");
   if (!savedRecords.length) {
-    tb.innerHTML = `<tr class="empty-row"><td colspan="6"><div class="empty"><div class="empty-ic">${IC.set}</div><h4>No local records</h4><p>Click "Add Record" to create a static DNS entry answered locally before forwarding.</p></div></td></tr>`;
+    tb.innerHTML = `<tr class="empty-row"><td colspan="5"><div class="empty"><div class="empty-ic">${IC.set}</div><h4>No local records</h4><p>Click "Add Record" to create a static DNS entry answered locally before forwarding.</p></div></td></tr>`;
     return;
   }
   tb.innerHTML = savedRecords.map((r, i) => {
@@ -742,7 +738,6 @@ function renderRecords() {
       <td>${t}</td>
       <td><span class="mono">${esc(r.value)}</span></td>
       <td class="num mono">${r.ttl > 0 ? r.ttl : "—"}</td>
-      <td class="q-inst">${esc(recordInstLabel(r))}</td>
       <td>
         <div class="row-actions">
           <button class="icon-btn" data-r-act="edit" data-r-i="${i}" title="Edit">${IC.edit}</button>
@@ -824,7 +819,7 @@ async function loadRecords() {
   try {
     const res = await API("/api/records");
     const d = await res.json();
-    savedRecords = (d.records || []).map((r) => ({ ...r, _instance: "" }));
+    savedRecords = (d.records || []).map((r) => ({ ...r }));
     renderRecords();
   } catch (e) { toast("failed to load records: " + e.message, "err"); }
 }
@@ -1680,7 +1675,7 @@ async function refreshSettings() {
     savedReleaseChannel = d.release_channel === "dev" ? "dev" : "stable";
     loadReleaseEditor();
     // fleet-wide local DNS records
-    savedRecords = (d.records || []).map((r) => ({ ...r, _instance: "" }));
+    savedRecords = (d.records || []).map((r) => ({ ...r }));
     // fleet-wide default upstream pool + conditional-forwarding routes
     savedUpServers = Array.isArray(d.upstream_servers) ? d.upstream_servers : [];
     savedUpRoutes = Array.isArray(d.upstream_routes) ? d.upstream_routes : [];
