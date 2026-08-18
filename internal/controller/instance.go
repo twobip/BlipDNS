@@ -57,6 +57,7 @@ type Instance struct {
 
 	blPushing    bool      // a blocklist push is in flight
 	blRetryAfter time.Time // earliest time a failed blocklist push may be retried
+	blForeign    bool      // a non-fleet writer changed the instance's list since our last push
 }
 
 // pollInterval is how often the controller polls an instance's health/stats.
@@ -162,6 +163,29 @@ func (i *Instance) blocklistApplied(hash uint64) bool {
 	return i.blHash == hash
 }
 
+// pushedBlocklistHash returns the checksum of the list this controller last
+// pushed successfully (0 when none).
+func (i *Instance) pushedBlocklistHash() uint64 {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.blHash
+}
+
+// foreignBlocklistDetected claims (once) that the instance's list no longer
+// matches what this controller pushed, i.e. some other writer changed it. It
+// reports false until the controller pushes successfully again, so the
+// resulting warning is logged once per foreign-write episode instead of on
+// every poll.
+func (i *Instance) foreignBlocklistDetected() bool {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.blForeign {
+		return false
+	}
+	i.blForeign = true
+	return true
+}
+
 // reportedBlocklistHash returns the blocklist checksum the instance reported
 // in its latest stats (0 when unknown).
 func reportedBlocklistHash(s *control.StatsResponse) uint64 {
@@ -213,6 +237,7 @@ func (i *Instance) finishBlocklistPush(err error, hash uint64) {
 	}
 	i.blRetryAfter = time.Time{}
 	i.blHash = hash
+	i.blForeign = false
 }
 
 func (i *Instance) poll(ctx context.Context) {

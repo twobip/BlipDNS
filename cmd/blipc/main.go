@@ -154,7 +154,7 @@ func main() {
 		IdleTimeout:       60 * time.Second,
 		MaxHeaderBytes:    1 << 20,
 	}
-	log.Printf("blipc %s listening on %s (%d instances)", controller.ControllerVersion(), cfg.Listen, len(cfg.Instances))
+	log.Printf("blipc %s (pid %d) listening on %s (%d instances)", controller.ControllerVersion(), os.Getpid(), cfg.Listen, len(cfg.Instances))
 	go func() {
 		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("blipc: %v", err)

@@ -2650,14 +2650,21 @@ func (f *Fleet) maybePushBlocklist(ctx context.Context, i *Instance, reported *c
 		i.markBlocklistApplied(hash)
 		return
 	}
+	// If the reported list matches neither the fleet's nor the list we last
+	// pushed successfully, another controller (or process) has overwritten the
+	// instance — warn loudly once so an external writer can't hide.
+	if rep != i.pushedBlocklistHash() && i.foreignBlocklistDetected() {
+		log.Printf("blipc: WARNING instance=%s url=%s blocklist changed by an external writer: reported=%016x fleet=%016x last-pushed=%016x",
+			i.Config.ID, i.Config.URL, rep, hash, i.pushedBlocklistHash())
+	}
 	// Don't re-upload the whole list while a previous push is still in flight,
 	// and back off after a failure so a stuck instance (or one that rejects the
 	// payload) doesn't get hammered with full-list uploads every poll.
 	if !i.tryBeginBlocklistPush(f.now()) {
-		log.Printf("blipc: reconcile blocklist instance=%s SKIP (push in flight or backing off) fleet=%016x reported=%016x", i.Config.ID, hash, rep)
+		log.Printf("blipc: reconcile blocklist instance=%s url=%s SKIP (push in flight or backing off) fleet=%016x reported=%016x", i.Config.ID, i.Config.URL, hash, rep)
 		return
 	}
-	log.Printf("blipc: reconcile blocklist instance=%s PUSH fleet=%016x reported=%016x domains=%d allowed=%d", i.Config.ID, hash, rep, f.blocklist.Count(), len(f.blocklist.Allowed()))
+	log.Printf("blipc: reconcile blocklist instance=%s url=%s PUSH fleet=%016x reported=%016x domains=%d allowed=%d", i.Config.ID, i.Config.URL, hash, rep, f.blocklist.Count(), len(f.blocklist.Allowed()))
 	err := i.ctl().SetBlocklist(ctx, f.blocklist.List(), f.blocklist.Allowed())
 	i.finishBlocklistPush(err, hash)
 	if err != nil {
