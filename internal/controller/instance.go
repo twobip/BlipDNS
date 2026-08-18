@@ -52,6 +52,9 @@ type Instance struct {
 	lastUpstr   string // default upstream the instance last reported (for drift detection)
 	blHash      uint64 // checksum of the blocklist last successfully pushed
 	haHash      string // hash of the HA config last successfully applied
+
+	blPushing    bool      // a blocklist push is in flight
+	blRetryAfter time.Time // earliest time a failed blocklist push may be retried
 }
 
 // pollInterval is how often the controller polls an instance's health/stats.
@@ -159,6 +162,43 @@ func (i *Instance) markBlocklistApplied(hash uint64) {
 	i.mu.Lock()
 	i.blHash = hash
 	i.mu.Unlock()
+}
+
+// blocklistPushBackoff is how long the poll loop waits before retrying a
+// failed blocklist push. Without it, a push that keeps failing (e.g. the
+// instance is unreachable, or the management API rejects the payload) would be
+// re-uploaded wholesale every poll interval, burning bandwidth and CPU for
+// nothing — the exact symptom of a large list getting cut off by the peer's
+// request timeout.
+const blocklistPushBackoff = 60 * time.Second
+
+// tryBeginBlocklistPush claims the blocklist push slot, reporting false when a
+// push is already in flight or the previous attempt failed within the backoff
+// window. Concurrent reconcilers (the poll loop and the import path) can both
+// reach SetBlocklist, so this keeps full-list uploads from piling up.
+func (i *Instance) tryBeginBlocklistPush(now time.Time) bool {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.blPushing || now.Before(i.blRetryAfter) {
+		return false
+	}
+	i.blPushing = true
+	return true
+}
+
+// finishBlocklistPush releases the push slot and records the outcome. A
+// failure arms the retry cooldown so the next poll doesn't immediately re-send
+// the whole list; a success clears it and records the applied checksum.
+func (i *Instance) finishBlocklistPush(err error, hash uint64) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.blPushing = false
+	if err != nil {
+		i.blRetryAfter = i.fleet.now().Add(blocklistPushBackoff)
+		return
+	}
+	i.blRetryAfter = time.Time{}
+	i.blHash = hash
 }
 
 func (i *Instance) poll(ctx context.Context) {

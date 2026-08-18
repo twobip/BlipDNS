@@ -2632,8 +2632,16 @@ func (f *Fleet) maybePushBlocklist(ctx context.Context, i *Instance, reported *c
 		i.markBlocklistApplied(hash)
 		return
 	}
-	if err := i.ctl().SetBlocklist(ctx, f.blocklist.List(), f.blocklist.Allowed()); err == nil {
-		i.markBlocklistApplied(hash)
+	// Don't re-upload the whole list while a previous push is still in flight,
+	// and back off after a failure so a stuck instance (or one that rejects the
+	// payload) doesn't get hammered with full-list uploads every poll.
+	if !i.tryBeginBlocklistPush(f.now()) {
+		return
+	}
+	err := i.ctl().SetBlocklist(ctx, f.blocklist.List(), f.blocklist.Allowed())
+	i.finishBlocklistPush(err, hash)
+	if err != nil {
+		log.Printf("blipc: reconcile blocklist for %s: %v", i.Config.ID, err)
 	}
 }
 

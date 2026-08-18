@@ -190,11 +190,19 @@ func main() {
 		}
 		go func() {
 			admin := &http.Server{
-				Addr:              cfg.AdminAddr,
-				Handler:           srv.ControlServer().Handler(),
+				Addr:    cfg.AdminAddr,
+				Handler: srv.ControlServer().Handler(),
+				// The controller ships the blocklist over this API as a single
+				// multi-tens-of-MB JSON body (it caps at 2 GiB server-side).
+				// A 30s Read/WriteTimeout cuts such an upload off on any link
+				// slower than ~3 MB/s, which makes the controller retry the
+				// whole list every poll and burn bandwidth/CPU forever. Use a
+				// generous deadline (matching the controller's 10-minute
+				// SetBlocklist client) and keep a short header timeout for
+				// slowloris protection.
 				ReadHeaderTimeout: 10 * time.Second,
-				ReadTimeout:       30 * time.Second,
-				WriteTimeout:      30 * time.Second,
+				ReadTimeout:       10 * time.Minute,
+				WriteTimeout:      10 * time.Minute,
 				IdleTimeout:       60 * time.Second,
 				MaxHeaderBytes:    1 << 20,
 			}
