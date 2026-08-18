@@ -122,6 +122,7 @@ type Fleet struct {
 	blGen             int
 	blCancel          context.CancelFunc
 	blStatus          BlocklistStatus
+	blLastStart       time.Time
 	blLoading         atomic.Bool                  // true while the startup cache load is in flight
 	sourceStats       []SourceStat                 // per-source download stats, refreshed on import
 	importLog         []string                     // recent import output lines (capped ring buffer)
@@ -1928,7 +1929,7 @@ func (f *Fleet) SetBlocklistSources(ctx context.Context, urls []string) {
 			log.Printf("blipc: warning: failed to persist blocklist sources: %v", err)
 		}
 	}
-	f.startBlocklistImport()
+	f.startBlocklistImport("sources-updated")
 }
 
 // BlocklistSourceEnabled reports whether the given source URL is enabled.
@@ -1981,7 +1982,7 @@ func (f *Fleet) SetBlocklistSourceEnabled(ctx context.Context, url string, enabl
 			log.Printf("blipc: warning: failed to persist blocklist source state: %v", err)
 		}
 	}
-	f.startBlocklistImport()
+	f.startBlocklistImport("source-toggle")
 }
 
 // SetBlocklistDisabled records which source URLs are disabled. Used at startup
@@ -1999,7 +2000,7 @@ func (f *Fleet) SetBlocklistDisabled(urls []string) {
 // ImportBlocklist starts a background import of the current sources. No-op if
 // one is already running.
 func (f *Fleet) ImportBlocklist() {
-	f.startBlocklistImport()
+	f.startBlocklistImport("manual-import")
 }
 
 // AutoUpdateHours returns the configured refresh interval in hours (0 = off).
@@ -2043,7 +2044,7 @@ func (f *Fleet) StartAutoUpdater() {
 			}
 			f.blMu.Unlock()
 			if due {
-				f.startBlocklistImport()
+				f.startBlocklistImport("auto-update")
 			}
 		}
 	}()
@@ -2324,13 +2325,16 @@ func (f *Fleet) cancelBlocklistImport() {
 	}
 }
 
-func (f *Fleet) startBlocklistImport() {
+func (f *Fleet) startBlocklistImport(reason string) {
 	f.blMu.Lock()
 	f.blGen++
 	gen := f.blGen
-	if f.blCancel != nil {
+	superseded := f.blCancel != nil
+	if superseded {
 		f.blCancel() // cancel any in-flight import; the new one supersedes it
 	}
+	lastStart := f.blLastStart
+	f.blLastStart = f.now()
 	ctx, cancel := context.WithCancel(context.Background())
 	f.blCancel = cancel
 	f.blRunning = true
@@ -2340,26 +2344,36 @@ func (f *Fleet) startBlocklistImport() {
 			enabled++
 		}
 	}
+	sourceCount := len(f.blocklistSources)
 	f.blStatus = BlocklistStatus{Running: true, SourceTotal: enabled}
 	f.importLog = nil
 	f.blMu.Unlock()
+	log.Printf("blipc: blocklist import trigger reason=%s gen=%d sources=%d enabled=%d superseded=%v since_last=%s",
+		reason, gen, sourceCount, enabled, superseded, f.now().Sub(lastStart).Round(time.Second))
 	if enabled < len(f.blocklistSources) {
 		f.logImport("starting import of %d enabled source(s) (%d disabled)", enabled, len(f.blocklistSources)-enabled)
 	} else {
 		f.logImport("starting import of %d source(s)", len(f.blocklistSources))
 	}
-	go f.runBlocklistImport(ctx, gen)
+	go func() {
+		defer recoverLog("blocklist import")
+		f.runBlocklistImport(ctx, gen)
+	}()
 }
 
 // logImport appends a timestamped line to the in-memory import log surfaced in
 // the web UI. The buffer is capped so a long-running sync can't grow forever.
+// The line is also mirrored to the process journal so a re-download loop is
+// visible in journald even when nobody is watching the dashboard.
 func (f *Fleet) logImport(format string, args ...interface{}) {
+	line := fmt.Sprintf(format, args...)
 	f.blMu.Lock()
-	defer f.blMu.Unlock()
-	f.importLog = append(f.importLog, fmt.Sprintf("%s %s", f.now().Format("15:04:05"), fmt.Sprintf(format, args...)))
+	f.importLog = append(f.importLog, fmt.Sprintf("%s %s", f.now().Format("15:04:05"), line))
 	if len(f.importLog) > 300 {
 		f.importLog = append([]string(nil), f.importLog[len(f.importLog)-300:]...)
 	}
+	f.blMu.Unlock()
+	log.Printf("blipc: import: %s", line)
 }
 
 // ClearImportLog drops all buffered import output.
@@ -2592,17 +2606,21 @@ func (f *Fleet) pushBlocklist(ctx context.Context) map[string]string {
 	}
 	f.mu.RUnlock()
 
+	log.Printf("blipc: distributing blocklist to %d instance(s): domains=%d allowed=%d hash=%016x", len(insts), len(domains), len(allowed), hash)
 	results := make(map[string]string, len(insts))
 	for _, i := range insts {
 		if !i.hasToken() {
 			results[i.Config.ID] = "not adopted"
 			continue
 		}
+		t0 := f.now()
 		if err := i.ctl().SetBlocklist(ctx, domains, allowed); err != nil {
+			log.Printf("blipc: distribute blocklist instance=%s FAILED after %s: %v", i.Config.ID, f.now().Sub(t0).Round(time.Millisecond), err)
 			results[i.Config.ID] = err.Error()
 			continue
 		}
 		i.markBlocklistApplied(hash)
+		log.Printf("blipc: distribute blocklist instance=%s ok in %s (domains=%d)", i.Config.ID, f.now().Sub(t0).Round(time.Millisecond), len(domains))
 		results[i.Config.ID] = "ok"
 	}
 	return results
@@ -2636,8 +2654,10 @@ func (f *Fleet) maybePushBlocklist(ctx context.Context, i *Instance, reported *c
 	// and back off after a failure so a stuck instance (or one that rejects the
 	// payload) doesn't get hammered with full-list uploads every poll.
 	if !i.tryBeginBlocklistPush(f.now()) {
+		log.Printf("blipc: reconcile blocklist instance=%s SKIP (push in flight or backing off) fleet=%016x reported=%016x", i.Config.ID, hash, rep)
 		return
 	}
+	log.Printf("blipc: reconcile blocklist instance=%s PUSH fleet=%016x reported=%016x domains=%d allowed=%d", i.Config.ID, hash, rep, f.blocklist.Count(), len(f.blocklist.Allowed()))
 	err := i.ctl().SetBlocklist(ctx, f.blocklist.List(), f.blocklist.Allowed())
 	i.finishBlocklistPush(err, hash)
 	if err != nil {

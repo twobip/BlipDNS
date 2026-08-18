@@ -2,6 +2,8 @@ package controller
 
 import (
 	"context"
+	"log"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -69,6 +71,7 @@ func (i *Instance) start(parent context.Context) {
 	i.wg.Add(1)
 	go func() {
 		defer i.wg.Done()
+		defer recoverLog("instance poll")
 		t := time.NewTicker(pollInterval)
 		defer t.Stop()
 		i.poll(ctx)
@@ -86,6 +89,7 @@ func (i *Instance) start(parent context.Context) {
 	i.wg.Add(1)
 	go func() {
 		defer i.wg.Done()
+		defer recoverLog("instance watch")
 		i.watch(ctx)
 	}()
 }
@@ -95,6 +99,16 @@ func (i *Instance) stop() {
 		i.cancel()
 	}
 	i.wg.Wait()
+}
+
+// recoverLog logs any panic from a background goroutine with a full stack trace
+// instead of letting it kill the whole process. blipc restarting silently is a
+// plausible cause of repeated blocklist re-imports, so a crash must never go
+// unobserved.
+func recoverLog(label string) {
+	if r := recover(); r != nil {
+		log.Printf("blipc: PANIC in %s: %v\n%s", label, r, string(debug.Stack()))
+	}
 }
 
 func (i *Instance) ctl() *control.Client {
@@ -208,6 +222,16 @@ func (i *Instance) poll(ctx context.Context) {
 	s, serr := c.Stats(ctx)
 	latencyMs := float64(time.Since(start).Milliseconds())
 
+	if herr != nil && ctx.Err() == nil {
+		log.Printf("blipc: poll instance=%s health error: %v", i.Config.ID, herr)
+	}
+	if serr != nil && ctx.Err() == nil {
+		log.Printf("blipc: poll instance=%s stats error: %v", i.Config.ID, serr)
+	}
+	if d := time.Since(start); d > time.Second && ctx.Err() == nil {
+		log.Printf("blipc: poll instance=%s slow: %s (health=%v stats=%v)", i.Config.ID, d.Round(time.Millisecond), herr, serr)
+	}
+
 	i.mu.Lock()
 	if herr == nil {
 		i.online = true
@@ -289,6 +313,8 @@ func (i *Instance) poll(ctx context.Context) {
 }
 
 func (i *Instance) watch(ctx context.Context) {
+	reconnects := 0
+	lastLog := time.Time{}
 	for {
 		select {
 		case <-ctx.Done():
@@ -344,12 +370,19 @@ func (i *Instance) watch(ctx context.Context) {
 				})
 			}
 		})
-		if err != nil {
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(2 * time.Second):
-			}
+		// Watch returns nil on a clean EOF (the instance closed the stream).
+		// Reconnecting immediately on EOF with no delay would busy-loop at
+		// 100% CPU when the stream drops quickly, so every reconnect — error
+		// or not — waits at least a second.
+		if time.Since(lastLog) > 15*time.Second || reconnects%50 == 0 {
+			log.Printf("blipc: watch reconnect instance=%s count=%d err=%v", i.Config.ID, reconnects, err)
+			lastLog = time.Now()
+		}
+		reconnects++
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(time.Second):
 		}
 	}
 }

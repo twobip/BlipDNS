@@ -591,6 +591,7 @@ func (s *Server) handleBlocklist(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	log.Printf("blipd: set blocklist domains=%d allowed=%d", len(req.Domains), len(req.Allowed))
 	s.blocklist.FromDomains(req.Domains)
 	s.blocklist.SetAllowed(req.Allowed)
 	// A new blocklist can flip domains between blocked and allowed, so drop
@@ -832,11 +833,13 @@ func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request) {
 	s.watchMu.Lock()
 	s.watchers[ch] = struct{}{}
 	s.watchMu.Unlock()
+	log.Printf("blipd: watch open")
 	defer func() {
 		s.watchMu.Lock()
 		delete(s.watchers, ch)
 		s.watchMu.Unlock()
 		close(ch)
+		log.Printf("blipd: watch close")
 	}()
 
 	w.Header().Set("Content-Type", "text/event-stream")

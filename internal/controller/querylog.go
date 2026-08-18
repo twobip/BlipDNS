@@ -817,6 +817,7 @@ func (s *QueryLogStore) DroppedEvents() uint64 {
 // so high-frequency block/pass events do not bottleneck the watch stream.
 func (s *QueryLogStore) batchWriter() {
 	defer s.wg.Done()
+	defer recoverLog("querylog batch writer")
 	buf := make([]QueryLogEntry, 0, batchMax)
 	ticker := time.NewTicker(batchInterval)
 	defer ticker.Stop()
