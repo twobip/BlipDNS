@@ -67,6 +67,9 @@ var safeBlocklistTransport = &http.Transport{
 	TLSHandshakeTimeout: 10 * time.Second,
 }
 
+// maxSourceFetchers bounds how many blocklist sources are fetched concurrently.
+const maxSourceFetchers = 8
+
 func mustPort(addr string) string {
 	_, p, err := net.SplitHostPort(addr)
 	if err != nil || p == "" {
@@ -427,9 +430,12 @@ func (b *Blocklist) LoadFromURL(ctx context.Context, rawURL string) error {
 
 // LoadFromURLs fetches and parses each source (AdBlock Plus or hosts format),
 // merges the results, and replaces the current blocklist. Progress is reported
-// via opts.Progress after each source completes. A source failing does not
-// abort the others; errors are reported in the returned LoadResult. A non-nil
-// error is returned only when no domains could be loaded at all.
+// via opts.Progress after each source completes. Sources are fetched
+// concurrently (bounded by maxSourceFetchers) so a long list of feeds doesn't
+// serialize into minutes of downloads; results are assembled in the configured
+// order so LoadResult stays deterministic. A source failing does not abort the
+// others; errors are reported in the returned LoadResult. A non-nil error is
+// returned only when no domains could be loaded at all.
 func (b *Blocklist) LoadFromURLs(ctx context.Context, urls []string, opts *LoadOptions) (*LoadResult, error) {
 	if len(urls) == 0 {
 		return nil, errors.New("no blocklist sources configured")
@@ -440,11 +446,36 @@ func (b *Blocklist) LoadFromURLs(ctx context.Context, urls []string, opts *LoadO
 		}
 	}
 
+	type srcResult struct {
+		set map[string]struct{}
+		err error
+	}
+	sem := make(chan struct{}, maxSourceFetchers)
+	results := make([]srcResult, len(urls))
+	var wg sync.WaitGroup
+	for i, u := range urls {
+		wg.Add(1)
+		go func(idx int, raw string) {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				results[idx].err = ctx.Err()
+				return
+			}
+			defer func() { <-sem }()
+			set, err := FetchSource(ctx, raw)
+			results[idx].set = set
+			results[idx].err = err
+		}(i, u)
+	}
+	wg.Wait()
+
 	merged := make(map[string]struct{})
 	res := &LoadResult{Sources: len(urls)}
 	for i, u := range urls {
 		per := SourceResult{URL: u}
-		set, err := FetchSource(ctx, u)
+		set, err := results[i].set, results[i].err
 		if err != nil {
 			res.Failed++
 			per.Err = err.Error()

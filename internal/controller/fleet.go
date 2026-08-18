@@ -2316,6 +2316,10 @@ func (f *Fleet) persistBlocklist() {
 }
 
 // cancelBlocklistImport stops any in-flight import.
+// maxBlocklistFetchers bounds how many blocklist sources blipc fetches
+// concurrently during an import (matching the blocklist package's limit).
+const maxBlocklistFetchers = 8
+
 func (f *Fleet) cancelBlocklistImport() {
 	f.blMu.Lock()
 	defer f.blMu.Unlock()
@@ -2460,20 +2464,49 @@ func (f *Fleet) runBlocklistImport(ctx context.Context, gen int) {
 	if len(merged) > 0 {
 		f.logImport("seeding %d manually added domain(s)", len(merged))
 	}
+
+	// Fetch all sources concurrently (bounded) so a long list of feeds doesn't
+	// serialize into an 8-minute download; results are merged in configured
+	// order so progress and per-source stats stay deterministic.
+	type blSourceResult struct {
+		set map[string]struct{}
+		err error
+		dur time.Duration
+	}
+	sem := make(chan struct{}, maxBlocklistFetchers)
+	results := make([]blSourceResult, len(urls))
+	var wg sync.WaitGroup
+	for i, u := range urls {
+		wg.Add(1)
+		go func(idx int, u string) {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				results[idx] = blSourceResult{err: ctx.Err()}
+				return
+			}
+			defer func() { <-sem }()
+			t0 := f.now()
+			f.logImport("[%d/%d] fetching %s", idx+1, len(urls), u)
+			set, ferr := blocklist.FetchSource(ctx, u)
+			results[idx] = blSourceResult{set: set, err: ferr, dur: time.Since(t0)}
+		}(i, u)
+	}
+	wg.Wait()
+	if !current() {
+		return
+	}
+
 	stats := make([]SourceStat, 0, len(urls))
 	failed := 0
-	for i, u := range urls {
-		if !current() {
-			return
-		}
+	for i, r := range results {
+		u := urls[i]
 		st := SourceStat{URL: u}
-		t0 := f.now()
-		f.logImport("[%d/%d] fetching %s", i+1, len(urls), u)
-		set, ferr := blocklist.FetchSource(ctx, u)
-		if ferr != nil {
+		if r.err != nil {
 			failed++
-			st.Error = ferr.Error()
-			f.logImport("[%d/%d] failed: %s", i+1, len(urls), ferr)
+			st.Error = r.err.Error()
+			f.logImport("[%d/%d] failed: %s", i+1, len(urls), r.err)
 			// Fall back to the last good snapshot from the local DB.
 			if f.blocklistDB != nil {
 				if dbSet, derr := f.blocklistDB.LoadSourceDomains(ctx, u); derr == nil && len(dbSet) > 0 {
@@ -2495,15 +2528,15 @@ func (f *Fleet) runBlocklistImport(ctx context.Context, gen int) {
 				f.logImport("[%d/%d] no fallback snapshot available", i+1, len(urls))
 			}
 		} else {
-			f.logImport("[%d/%d] ok: %d domains in %s", i+1, len(urls), len(set), time.Since(t0).Round(time.Millisecond))
-			for d := range set {
+			f.logImport("[%d/%d] ok: %d domains in %s", i+1, len(urls), len(r.set), r.dur.Round(time.Millisecond))
+			for d := range r.set {
 				merged[d] = struct{}{}
 			}
-			st.Domains = len(set)
+			st.Domains = len(r.set)
 			st.LastUpdate = f.now()
 			if f.blocklistDB != nil {
-				domains := make([]string, 0, len(set))
-				for d := range set {
+				domains := make([]string, 0, len(r.set))
+				for d := range r.set {
 					domains = append(domains, d)
 				}
 				if err := f.blocklistDB.ReplaceSourceDomains(ctx, u, domains); err != nil {

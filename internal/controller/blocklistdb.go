@@ -221,17 +221,60 @@ func (s *BlocklistStore) ReplaceSourceDomains(ctx context.Context, url string, d
 	if _, err := tx.ExecContext(ctx, `DELETE FROM blocklist_source_domains WHERE source_url = ?`, url); err != nil {
 		return err
 	}
-	stmt, err := tx.PrepareContext(ctx, `INSERT INTO blocklist_source_domains (source_url, domain) VALUES (?, ?)`)
+
+	// Batch the inserts so multi-million-domain snapshots (e.g. oisd.big)
+	// don't spend minutes in per-row SQLite calls. Each statement's placeholder
+	// count must match its chunk size, so a full-size statement is prepared once
+	// and a final partial chunk gets its own one-off statement.
+	const batch = 500
+	fullStmt, err := tx.PrepareContext(ctx, multiRowInsertSQL(batch))
 	if err != nil {
 		return err
 	}
-	defer stmt.Close()
-	for _, d := range domains {
-		if _, err := stmt.ExecContext(ctx, url, d); err != nil {
+	defer fullStmt.Close()
+	for i := 0; i < len(domains); i += batch {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		end := i + batch
+		if end > len(domains) {
+			end = len(domains)
+		}
+		chunk := domains[i:end]
+		if len(chunk) == batch {
+			if err := execMultiRow(ctx, fullStmt, url, chunk); err != nil {
+				return err
+			}
+			continue
+		}
+		partialStmt, err := tx.PrepareContext(ctx, multiRowInsertSQL(len(chunk)))
+		if err != nil {
+			return err
+		}
+		err = execMultiRow(ctx, partialStmt, url, chunk)
+		partialStmt.Close()
+		if err != nil {
 			return err
 		}
 	}
 	return tx.Commit()
+}
+
+// multiRowInsertSQL builds a single-statement multi-row INSERT with n rows.
+func multiRowInsertSQL(n int) string {
+	return "INSERT INTO blocklist_source_domains (source_url, domain) VALUES " +
+		strings.TrimSuffix(strings.Repeat("(?,?),", n), ",")
+}
+
+// execMultiRow fills the (?,?) placeholders of a multi-row INSERT with the
+// url/domain pairs of chunk.
+func execMultiRow(ctx context.Context, stmt *sql.Stmt, url string, chunk []string) error {
+	args := make([]interface{}, 0, len(chunk)*2)
+	for _, d := range chunk {
+		args = append(args, url, d)
+	}
+	_, err := stmt.ExecContext(ctx, args...)
+	return err
 }
 
 // LoadSourceDomains returns the last successfully downloaded domain set for a
