@@ -132,24 +132,61 @@ func minTTL(m *dns.Msg) time.Duration {
 // Get returns a fresh copy of a cached response with decremented TTLs, or
 // (nil, false) on miss/expiry. A hit bumps the entry's popularity count and
 // marks it most-recently-used so it survives LRU eviction.
+//
+// The common hit path takes a shared lock first (to avoid blocking concurrent
+// readers on the map lookup), then briefly escalates to an exclusive lock to
+// bump the hit counter and move the entry to the front of the LRU. The actual
+// message Copy happens outside the lock so a slow Copy can't block other
+// readers or writers.
 func (c *Cache) Get(k string) (*dns.Msg, bool) {
 	if k == "" {
 		return nil, false
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	// Fast path: shared lock for the lookup and expiry check.
+	c.mu.RLock()
 	e, ok := c.items[k]
 	if !ok {
+		c.mu.RUnlock()
 		return nil, false
 	}
 	now := c.now()
 	if now.After(e.expire) {
-		delete(c.items, k)
-		c.lru.Remove(e.elem)
+		c.mu.RUnlock()
+		// Expired: escalate to exclusive lock to delete it.
+		c.mu.Lock()
+		// Re-check: a concurrent Set may have refreshed it.
+		var fresh *entry
+		if e2, ok2 := c.items[k]; ok2 && !c.now().After(e2.expire) {
+			// Refreshed by a concurrent Set; use the fresh entry.
+			fresh = e2
+		}
+		if fresh != nil {
+			e = fresh
+			now = c.now()
+			c.mu.Unlock()
+			goto copy
+		}
+		if e2, ok2 := c.items[k]; ok2 {
+			delete(c.items, k)
+			c.lru.Remove(e2.elem)
+		}
+		c.mu.Unlock()
+		return nil, false
+	}
+	c.mu.RUnlock()
+
+	// Common hit path: escalate to exclusive lock for the mutations.
+	c.mu.Lock()
+	// Re-check existence: a concurrent Purge may have removed it.
+	if _, ok := c.items[k]; !ok {
+		c.mu.Unlock()
 		return nil, false
 	}
 	e.hits++
 	c.lru.MoveToFront(e.elem)
+	c.mu.Unlock()
+
+copy:
 	remaining := e.expire.Sub(now)
 	ttl := uint32(remaining.Seconds())
 	if sTTL := e.srcTTL; sTTL > 0 && ttl > sTTL {
@@ -177,27 +214,27 @@ func (c *Cache) Set(k string, m *dns.Msg) {
 		return
 	}
 	now := c.now()
+	srcTTL := uint32(minTTL(m).Seconds())
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if e, ok := c.items[k]; ok {
 		e.msg = m.Copy()
-		e.srcTTL = uint32(minTTL(m).Seconds())
-		e.expire = now.Add(c.lifetimeForLocked(k, e.hits, m))
+		e.srcTTL = srcTTL
+		e.expire = now.Add(c.lifetimeForLocked(k, e.hits, srcTTL))
 		c.lru.MoveToFront(e.elem)
 		return
 	}
-	src := uint32(minTTL(m).Seconds())
-	e := &entry{key: k, msg: m.Copy(), srcTTL: src}
-	e.expire = now.Add(c.lifetimeForLocked(k, 0, m))
+	e := &entry{key: k, msg: m.Copy(), srcTTL: srcTTL}
+	e.expire = now.Add(c.lifetimeForLocked(k, 0, srcTTL))
 	e.elem = c.lru.PushFront(e)
 	c.items[k] = e
 	c.evictLocked()
 }
 
 // lifetimeForLocked returns how long the entry for k should be cached, given
-// its current hit count. Caller holds c.mu.
-func (c *Cache) lifetimeForLocked(k string, hits uint64, m *dns.Msg) time.Duration {
-	dnsTTL := minTTL(m)
+// its current hit count and the source record's min TTL. Caller holds c.mu.
+func (c *Cache) lifetimeForLocked(k string, hits uint64, srcTTL uint32) time.Duration {
+	dnsTTL := time.Duration(srcTTL) * time.Second
 	if dnsTTL > c.ttlCap {
 		dnsTTL = c.ttlCap
 	}
