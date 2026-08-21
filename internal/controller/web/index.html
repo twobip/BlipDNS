@@ -758,7 +758,15 @@
           <div class="panel">
             <div class="panel-head"><h3>VRRP pair</h3><span class="spacer"></span><span class="hint">LAN only</span></div>
             <div class="panel-body form-grid">
-              <label class="field"><span>Enable HA</span><input type="checkbox" id="ha-enabled"></label>
+              <div class="ha-toggle-row">
+                <div>
+                  <div class="ha-toggle-title">Enable HA</div>
+                  <div class="ha-toggle-sub">Master switch for the VRRP pair</div>
+                </div>
+                <label class="switch" title="Enable HA">
+                  <input type="checkbox" id="ha-enabled"/><i></i>
+                </label>
+              </div>
               <label class="field"><span>Primary instance</span><select class="select" id="ha-primary"></select></label>
               <label class="field"><span>Secondary instance</span><select class="select" id="ha-secondary"></select></label>
               <label class="field"><span>VRRP mode</span><select class="select" id="ha-mode"><option value="unicast">Unicast (recommended)</option><option value="multicast">LAN multicast</option></select></label>
