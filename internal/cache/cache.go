@@ -11,17 +11,25 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/miekg/dns"
 	"golang.org/x/sync/singleflight"
 )
 
+// promoteEvery controls how often a cache hit promotes its entry to the front
+// of the LRU. Promoting on every hit would force every concurrent reader to
+// take the exclusive lock (list mutation is not safe under RLock); promoting
+// on 1-in-N hits keeps an approximate-LRU ordering while the common hit path
+// stays entirely on shared locks + atomics.
+const promoteEvery = 16
+
 type entry struct {
 	key    string
 	msg    *dns.Msg
 	expire time.Time
-	hits   uint64
+	hits   atomic.Uint64
 	elem   *list.Element
 	srcTTL uint32 // source record min TTL in seconds (caps the TTL served)
 }
@@ -131,18 +139,18 @@ func minTTL(m *dns.Msg) time.Duration {
 
 // Get returns a fresh copy of a cached response with decremented TTLs, or
 // (nil, false) on miss/expiry. A hit bumps the entry's popularity count and
-// marks it most-recently-used so it survives LRU eviction.
+// (every promoteEvery-th hit) marks it most-recently-used so it survives LRU
+// eviction.
 //
-// The common hit path takes a shared lock first (to avoid blocking concurrent
-// readers on the map lookup), then briefly escalates to an exclusive lock to
-// bump the hit counter and move the entry to the front of the LRU. The actual
-// message Copy happens outside the lock so a slow Copy can't block other
-// readers or writers.
+// The entire hit path runs on the shared lock: the lookup and expiry check
+// take c.mu.RLock, the popularity bump is an atomic add, and LRU promotion is
+// skipped for all but every promoteEvery-th hit. Only expiry cleanup and the
+// occasional promotion take the exclusive lock. The message Copy happens
+// outside the lock so a slow Copy can't block other readers or writers.
 func (c *Cache) Get(k string) (*dns.Msg, bool) {
 	if k == "" {
 		return nil, false
 	}
-	// Fast path: shared lock for the lookup and expiry check.
 	c.mu.RLock()
 	e, ok := c.items[k]
 	if !ok {
@@ -152,12 +160,11 @@ func (c *Cache) Get(k string) (*dns.Msg, bool) {
 	now := c.now()
 	if now.After(e.expire) {
 		c.mu.RUnlock()
-		// Expired: escalate to exclusive lock to delete it.
+		// Expired: take the exclusive lock to delete it (or use a value a
+		// concurrent Set refreshed in the meantime).
 		c.mu.Lock()
-		// Re-check: a concurrent Set may have refreshed it.
 		var fresh *entry
 		if e2, ok2 := c.items[k]; ok2 && !c.now().After(e2.expire) {
-			// Refreshed by a concurrent Set; use the fresh entry.
 			fresh = e2
 		}
 		if fresh != nil {
@@ -173,18 +180,21 @@ func (c *Cache) Get(k string) (*dns.Msg, bool) {
 		c.mu.Unlock()
 		return nil, false
 	}
-	c.mu.RUnlock()
-
-	// Common hit path: escalate to exclusive lock for the mutations.
-	c.mu.Lock()
-	// Re-check existence: a concurrent Purge may have removed it.
-	if _, ok := c.items[k]; !ok {
+	e.hits.Add(1)
+	// Approximate LRU: promote only every promoteEvery-th hit. The counter is
+	// per-entry, so promotion is probabilistic under concurrency — good
+	// enough to keep hot entries at the front without exclusive locking.
+	if e.hits.Load()%promoteEvery == 0 {
+		c.mu.RUnlock()
+		c.mu.Lock()
+		// Re-check: the entry may have been evicted or replaced meanwhile.
+		if e2, ok2 := c.items[k]; ok2 && e2 == e {
+			c.lru.MoveToFront(e.elem)
+		}
 		c.mu.Unlock()
-		return nil, false
+	} else {
+		c.mu.RUnlock()
 	}
-	e.hits++
-	c.lru.MoveToFront(e.elem)
-	c.mu.Unlock()
 
 copy:
 	remaining := e.expire.Sub(now)
@@ -220,7 +230,7 @@ func (c *Cache) Set(k string, m *dns.Msg) {
 	if e, ok := c.items[k]; ok {
 		e.msg = m.Copy()
 		e.srcTTL = srcTTL
-		e.expire = now.Add(c.lifetimeForLocked(k, e.hits, srcTTL))
+		e.expire = now.Add(c.lifetimeForLocked(k, e.hits.Load(), srcTTL))
 		c.lru.MoveToFront(e.elem)
 		return
 	}
@@ -255,7 +265,7 @@ func (c *Cache) isTopLocked(k string, hits uint64, n int) bool {
 		if key == k {
 			continue
 		}
-		if other.hits > hits {
+		if other.hits.Load() > hits {
 			ahead++
 			if ahead >= n {
 				return false
@@ -355,7 +365,7 @@ func (c *Cache) Popular(n int) []string {
 		keys = append(keys, k)
 	}
 	sort.Slice(keys, func(i, j int) bool {
-		return c.items[keys[i]].hits > c.items[keys[j]].hits
+		return c.items[keys[i]].hits.Load() > c.items[keys[j]].hits.Load()
 	})
 	if n > 0 && n < len(keys) {
 		keys = keys[:n]
