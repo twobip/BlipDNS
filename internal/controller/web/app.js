@@ -217,10 +217,10 @@ function updateConn() {
 /* ---------- dashboard ---------- */
 // d-range maps a dropdown value to a backend `since` window and chart bucket.
 const STAT_RANGES = {
-  "1h":  { since: "1h",  bucket: "10s", label: "1 hour" },
-  "1d":  { since: "24h", bucket: "5m",  label: "1 day" },
-  "1w":  { since: "168h", bucket: "1h", label: "1 week" },
-  "1mo": { since: "720h", bucket: "6h", label: "1 month" },
+  "1h":  { since: "1h",   bucket: "10s", label: "1 hour",  dates: false },
+  "1d":  { since: "24h",  bucket: "5m",  label: "1 day",   dates: false },
+  "1w":  { since: "168h", bucket: "1h",  label: "1 week",  dates: true },
+  "1mo": { since: "720h", bucket: "6h",  label: "1 month", dates: true },
 };
 
 // Dashboard totals come from blipc's persisted stats samples (SQLite), so they
@@ -313,7 +313,7 @@ async function fetchStats() {
     if (!ctx) return;
     const gl = ctx.getContext("2d");
     const stats = d.series;
-    const labels = stats.map((s) => new Date(s.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }));
+    const labels = stats.map((s) => fmtChartTick(new Date(s.timestamp), rng.dates));
     const tq = stats.map((s) => s.total_queries);
     const bq = stats.map((s) => s.blocked_queries);
     if (!chart) {
@@ -352,6 +352,11 @@ function cgrad(ctx, rgb) {
   g.addColorStop(0, `rgba(${rgb},.18)`);
   g.addColorStop(1, `rgba(${rgb},0)`);
   return g;
+}
+// X-axis tick labels: time-of-day for short ranges, dates for week/month.
+function fmtChartTick(d, dates) {
+  if (!dates) return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  return d.toLocaleDateString([], { weekday: "short", day: "numeric", month: "short" });
 }
 
 /* ---------- live events (SSE) ---------- */
@@ -518,13 +523,13 @@ function queryRowHtml(r) {
   const tipValue = isBlock
     ? (r.blocklist || "blocklist")
     : r.cached ? "Served from cache" : (r.upstream || "unknown");
-  return `<tr class="${isBlock ? "q-row-block" : ""}">
+  return `<tr class="q-row ${isBlock ? "q-row-block" : ""}" data-ts="${esc(r.timestamp)}">
     <td class="q-time"><span class="t" data-t="${esc(r.timestamp)}" title="${esc(r.timestamp)}">…</span></td>
     <td class="q-domain">
       <span class="q-globe">${IC.globe}</span>
-      <span class="mono q-dom" title="${esc(r.domain)}">${esc(r.domain)}</span>
-      <span class="q-info" data-tipl="${esc(tipLabel)}" data-tipv="${esc(tipValue)}">${IC.info}</span>
+      <span class="q-dom" title="${esc(r.domain)}">${esc(r.domain)}</span>
       <button class="icon-btn q-copy" data-copy="${esc(r.domain)}" title="Copy domain">${IC.copy}</button>
+      <button class="icon-btn q-expand" data-expand="${esc(r.timestamp)}|${esc(r.domain)}" title="Details">${IC.info}</button>
     </td>
     <td><span class="badge badge-action ${actionBadge}">${isBlock ? IC.block : action === "PASS" ? IC.arrow : ""}${actionLabel}</span></td>
     <td class="q-client">${clientCellHtml(r)}</td>
@@ -534,9 +539,17 @@ function queryRowHtml(r) {
   </tr>`;
 }
 
+// qRowByStamp finds a loaded log row by its timestamp+domain pair (the drawer
+// opener stores both in data-expand; timestamps can collide across instances,
+// so the domain disambiguates).
+function qRowByStamp(stamp) {
+  const [ts, dom] = stamp.split("|");
+  return qPage.rows.find((r) => String(r.timestamp) === ts && r.domain === dom);
+}
+
 async function renderQueries() {
   const tb = $("q-tbody");
-  qTip.hide();
+  closeQueryDetail();
   qPage = { offset: 0, total: 0, ended: false, loading: false, rows: [] };
   propsInstanceOptions();
   await fetchQueryPage(tb);
@@ -570,16 +583,42 @@ async function fetchQueryPage(tb) {
 
 function renderQueryRows(tb) {
   if (!qPage.rows.length) {
+    const filtered = qState.action || qState.cached || qState.filter || qState.inst;
     tb.innerHTML = `
-      <tr class="empty-row"><td colspan="7"><div class="empty"><div class="empty-ic">${IC.query}</div><h4>No queries</h4><p>Nothing matched in the last 24 hours.</p></div></td></tr>
+      <tr class="empty-row"><td colspan="7"><div class="empty"><div class="empty-ic">${IC.query}</div>
+        <h4>${filtered ? "No matching queries" : "No queries yet"}</h4>
+        <p>${filtered ? "Nothing in the last 24 hours matches these filters." : "New queries appear here in real time as clients resolve names."}</p></div></td></tr>
       <tr id="q-sentinel"><td colspan="7"></td></tr>`;
+    updateQueryStats();
     return;
   }
   const rows = qPage.rows.map((r) => queryRowHtml(r)).join("");
   const count = qPage.total > 0 ? qPage.total : qPage.rows.length;
-  $("q-count").textContent = qPage.rows.length + " of " + count + " entries loaded";
+  $("q-count").textContent = fmt(qPage.rows.length) + " of " + fmt(count) + " entries · scroll for more";
   tb.innerHTML = rows + `<tr id="q-sentinel"><td colspan="7"></td></tr>`;
   tb.querySelectorAll(".t").forEach((t) => { t.textContent = timeAgo(t.dataset.t); });
+  updateQueryStats();
+}
+
+// updateQueryStats fills the summary strip. Totals come from the server's
+// filtered counts when available; per-action numbers are derived from loaded
+// rows (proportional estimate scaled to the total) so the cards are useful
+// without extra API calls.
+function updateQueryStats() {
+  const el = (id) => $(id);
+  if (!el("q-n-all")) return;
+  const rows = qPage.rows;
+  const count = (f) => rows.filter(f).length;
+  const pass = count((r) => (r.action || "").toUpperCase() === "PASS");
+  const block = count((r) => (r.action || "").toUpperCase() === "BLOCK");
+  const cached = count((r) => r.cached === 1 || r.cached === true);
+  // Scale loaded-row proportions up to the full total once we know it.
+  const scale = qPage.total > 0 && rows.length > 0 ? qPage.total / rows.length : 1;
+  const fmtN = (n, exact) => exact ? fmt(n) : n >= 1000 ? fmt(Math.round(n / 100) / 10) + "k" : String(Math.round(n));
+  el("q-n-all").textContent = fmt(qPage.total || rows.length);
+  el("q-n-pass").textContent = fmtN(pass * scale, qPage.rows.length >= qPage.total);
+  el("q-n-block").textContent = fmtN(block * scale, qPage.rows.length >= qPage.total);
+  el("q-n-cache").textContent = fmtN(cached * scale, qPage.rows.length >= qPage.total);
 }
 
 // Observe the sentinel <tr> at the bottom of the table; when it scrolls into
@@ -1865,52 +1904,108 @@ $("cs-range").addEventListener("change", (e) => { csState.since = e.target.value
 $("cs-prev").addEventListener("click", () => { if (csState.page > 0) { csState.page--; renderCacheStats(); } });
 $("cs-next").addEventListener("click", () => { csState.page++; renderCacheStats(); });
 $("q-tbody").addEventListener("click", (e) => {
-  const c = e.target.closest("[data-copy]"); if (!c) return;
-  copyText(c.dataset.copy);
+  const c = e.target.closest("[data-copy]"); if (c) { copyText(c.dataset.copy); return; }
+  const x = e.target.closest("[data-expand]");
+  if (x) { openQueryDetail(x.dataset.expand); }
 });
-// Query-log info tooltip: a floating panel (appended to <body> so it is not
-// clipped by the table's scroll container) that shows which upstream answered
-// a query or which list blocked it when hovering the info icon on a row.
-const qTip = (() => {
-  const el = document.createElement("div");
-  el.className = "q-tip";
-  el.style.display = "none";
-  document.body.appendChild(el);
-  const hide = () => { el.style.display = "none"; };
-  const show = (trigger) => {
-    const label = trigger.dataset.tipl || "";
-    const value = trigger.dataset.tipv || "";
-    if (!label && !value) return hide();
-    el.innerHTML = `${label ? `<div class="q-tip-l">${esc(label)}</div>` : ""}<div class="q-tip-v">${esc(value)}</div>`;
-    const r = trigger.getBoundingClientRect();
-    el.style.display = "block";
-    const w = el.offsetWidth, h = el.offsetHeight;
-    let x = r.left + r.width / 2 - w / 2;
-    x = Math.max(8, Math.min(x, window.innerWidth - w - 8));
-    let y = r.bottom + 8;
-    if (y + h > window.innerHeight - 8) y = r.top - h - 8;
-    el.style.left = x + "px";
-    el.style.top = y + "px";
-  };
-  $("q-tbody").addEventListener("mouseover", (e) => {
-    const t = e.target.closest(".q-info");
-    if (t) { show(t); return; }
-    hide();
-  });
-  $("q-tbody").addEventListener("mouseout", (e) => {
-    if (!e.target.closest(".q-info")) hide();
-  });
-  return { hide };
-})();
+// Query-log detail drawer: full metadata for one log entry in a slide-in
+// panel (replaces the old hover tooltip, which only showed one field).
+function openQueryDetail(stamp) {
+  const r = qRowByStamp(stamp);
+  if (!r) return;
+  const action = (r.action || "").toUpperCase();
+  const isBlock = action === "BLOCK";
+  const inst = instances.find((i) => (i.label || i.id) === r.instance);
+  const dur = r.duration_us == null ? null : Number(r.duration_us);
+  const lat = dur == null ? "—" : dur < 1000 ? dur + " µs" : (dur / 1000).toFixed(2) + " ms";
+  const ans = r.answers && r.answers.length ? r.answers : [];
+  const ips = r.ips || [];
+  const row = (k, v) => v ? `<div class="q-d-row"><span class="q-d-k">${k}</span><span class="q-d-v">${v}</span></div>` : "";
+  const answersHtml = ans.length
+    ? ans.map((a) => `<div class="q-d-ans"><span class="badge">${esc(a.type || "?")}</span><span class="mono">${esc(a.data)}</span>${a.ttl ? `<span class="muted">TTL ${a.ttl}s</span>` : ""}</div>`).join("")
+    : ips.length
+      ? ips.map((ip) => `<div class="q-d-ans"><span class="badge">IP</span><span class="mono">${esc(ip)}</span></div>`).join("")
+      : `<span class="muted">no answer records</span>`;
+  $("q-drawer").innerHTML = `
+    <div class="q-d-head">
+      <div>
+        <div class="q-d-domain mono">${esc(r.domain)}</div>
+        <div class="muted" style="font-size:12px">${esc(r.timestamp)}${r.q_type ? " · " + esc(r.q_type) : ""}</div>
+      </div>
+      <button class="icon-btn" id="q-d-close" title="Close">✕</button>
+    </div>
+    <div class="q-d-body">
+      <div class="q-d-sect">Result</div>
+      <div class="q-d-row"><span class="q-d-k">Action</span><span class="badge badge-action ${isBlock ? "err" : action === "PASS" ? "on" : ""}">${isBlock ? "Blocked" : action === "PASS" ? "Allowed" : esc(action)}</span></div>
+      ${row(isBlock ? "Blocked by" : "Upstream", esc(isBlock ? (r.blocklist || "blocklist") : (r.upstream || "unknown")))}
+      ${row("Cache", r.cached ? "Served from cache" : "Fetched")}
+      <div class="q-d-row"><span class="q-d-k">Latency</span><span class="mono q-d-v">${lat}</span></div>
+      <div class="q-d-sect">Answers</div>
+      ${answersHtml}
+      <div class="q-d-sect">Client</div>
+      ${row("Client", esc(r.client || "—"))}
+      ${row("Instance", esc(inst ? (inst.label || inst.id) : (r.instance || "—")))}
+    </div>
+    <div class="q-d-foot">
+      <button class="btn" id="q-d-copy">${IC.copy} Copy domain</button>
+    </div>`;
+  const ov = $("q-detail-overlay");
+  ov.classList.remove("hidden");
+  ov.onclick = (e) => { if (e.target === ov) closeQueryDetail(); };
+  $("q-d-close").onclick = closeQueryDetail;
+  $("q-d-copy").onclick = () => copyText(r.domain);
+}
+function closeQueryDetail() {
+  $("q-detail-overlay").classList.add("hidden");
+}
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !$("q-detail-overlay").classList.contains("hidden")) closeQueryDetail();
+});
 // setQueryAction updates the query-log action filter ("" = all, "PASS",
 // "BLOCK") and the highlighted segment button, then re-renders. Used by the
 // segment buttons and by dashboard links that deep-link into a filtered view.
 function setQueryAction(action) {
   qState.action = action;
   document.querySelectorAll("#q-action-seg button").forEach((x) => x.classList.toggle("active", x.dataset.a === action));
+  syncQueryFilterUI();
   renderQueries();
 }
 document.querySelectorAll("#q-action-seg button").forEach((b) => b.onclick = () => setQueryAction(b.dataset.a));
+// Summary strip cards double as filters: click = apply that filter, click
+// again (when active) = clear it.
+function bindQStatCard(id, apply, isActive) {
+  const card = $(id);
+  if (!card) return;
+  card.addEventListener("click", () => {
+    if (isActive()) { apply(""); }
+    else { apply(card.dataset.a !== undefined ? card.dataset.a : "1"); }
+    syncQueryFilterUI();
+    renderQueries();
+  });
+}
+bindQStatCard("q-stat-all",  (v) => setQueryActionSilent(v), () => !qState.action && !qState.cached);
+bindQStatCard("q-stat-pass", (v) => setQueryActionSilent(v), () => qState.action === "PASS" && !qState.cached);
+bindQStatCard("q-stat-block",(v) => setQueryActionSilent(v), () => qState.action === "BLOCK" && !qState.cached);
+bindQStatCard("q-stat-cache",(v) => { qState.action = ""; qState.cached = v; }, () => qState.cached === "1");
+function setQueryActionSilent(action) {
+  qState.action = action;
+  qState.cached = "";
+}
+// syncQueryFilterUI mirrors qState into the segment buttons and selects so
+// the strip cards and the toolbar stay consistent.
+function syncQueryFilterUI() {
+  document.querySelectorAll("#q-action-seg button").forEach((x) => x.classList.toggle("active", x.dataset.a === qState.action));
+  document.querySelectorAll(".q-stat").forEach((c) => {
+    const on =
+      (c.id === "q-stat-all" && !qState.action && !qState.cached) ||
+      (c.id === "q-stat-pass" && qState.action === "PASS" && !qState.cached) ||
+      (c.id === "q-stat-block" && qState.action === "BLOCK" && !qState.cached) ||
+      (c.id === "q-stat-cache" && qState.cached === "1");
+    c.classList.toggle("active", on);
+  });
+  const cachedSel = $("q-cached");
+  if (cachedSel) cachedSel.value = qState.cached;
+}
 $("q-cached").addEventListener("change", (e) => { qState.cached = e.target.value; renderQueries(); });
 
 /* clients */

@@ -279,34 +279,61 @@
 
       <!-- ================= QUERIES / LOGS ================= -->
       <section id="view-queries" class="view hidden">
-        <div class="row">
+        <!-- summary strip: live counts per action, doubles as filter -->
+        <div class="q-stats">
+          <button class="q-stat" id="q-stat-all" data-a="">
+            <span class="q-stat-num" id="q-n-all">—</span>
+            <span class="q-stat-lab">All queries</span>
+          </button>
+          <button class="q-stat q-stat-pass" id="q-stat-pass" data-a="PASS">
+            <span class="q-stat-num" id="q-n-pass">—</span>
+            <span class="q-stat-lab">Allowed</span>
+          </button>
+          <button class="q-stat q-stat-block" id="q-stat-block" data-a="BLOCK">
+            <span class="q-stat-num" id="q-n-block">—</span>
+            <span class="q-stat-lab">Blocked</span>
+          </button>
+          <button class="q-stat q-stat-cache" id="q-stat-cache" data-c="1">
+            <span class="q-stat-num" id="q-n-cache">—</span>
+            <span class="q-stat-lab">From cache</span>
+          </button>
+        </div>
+        <div class="row q-toolbar">
           <div class="seg" id="q-action-seg">
             <button data-a="" class="active">All</button>
             <button data-a="PASS">Allowed</button>
             <button data-a="BLOCK">Blocked</button>
           </div>
-          <select class="select" id="q-cached" style="max-width:160px">
-            <option value="">All (cached &amp; uncached)</option>
+          <select class="select" id="q-cached" style="max-width:170px">
+            <option value="">Cache: any</option>
             <option value="1">Cached only</option>
             <option value="0">Uncached only</option>
           </select>
-          <div class="search grow" style="max-width:320px">
+          <div class="search grow" style="max-width:340px">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
-            <input class="input" id="q-filter" placeholder="Filter domain / client / instance…"/>
+            <input class="input" id="q-filter" placeholder="Filter domain, client, instance…"/>
           </div>
           <select class="select" id="q-instance"><option value="">All instances</option></select>
           <span class="right"></span>
-          <button class="btn" id="q-refresh">
+          <button class="btn" id="q-refresh" title="Refresh">
             <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-2.6-6.3M21 3v6h-6"/></svg>
-            Refresh
           </button>
-          <span class="muted" id="q-count">0 entries</span>
         </div>
-        <div class="table-wrap">
-          <table class="tbl">
-            <thead><tr><th>Time</th><th>Domain</th><th>Action</th><th>Client</th><th>Resolved IP</th><th>Latency</th><th>Instance</th></tr></thead>
-            <tbody id="q-tbody"></tbody>
-          </table>
+        <div class="panel q-panel">
+          <div class="table-wrap q-wrap">
+            <table class="tbl q-tbl">
+              <thead><tr><th>Time</th><th>Domain</th><th>Action</th><th>Client</th><th>Answer</th><th>Latency</th><th>Instance</th></tr></thead>
+              <tbody id="q-tbody"></tbody>
+            </table>
+          </div>
+          <div class="panel-foot">
+            <span class="muted" id="q-count">0 entries</span>
+            <span class="muted" id="q-window">last 24 hours · scroll for more</span>
+          </div>
+        </div>
+        <!-- slide-in detail drawer -->
+        <div class="overlay hidden" id="q-detail-overlay">
+          <div class="q-drawer" id="q-drawer"></div>
         </div>
       </section>
 
