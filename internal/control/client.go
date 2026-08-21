@@ -20,13 +20,29 @@ type Client struct {
 	http  *http.Client
 }
 
+// newTransport returns the tuned *http.Transport used by all control clients.
+// blipd's management API is cleartext HTTP (the controller connects over
+// http://host:8443/8444), so HTTP/2 is not negotiated here — ForceAttemptHTTP2
+// would be a no-op on http:// URLs without an h2c upgrade handler on the server.
+func newTransport(disableCompression bool) *http.Transport {
+	return &http.Transport{
+		MaxIdleConns:        64,
+		MaxIdleConnsPerHost: 32,
+		IdleConnTimeout:     90 * time.Second,
+		DisableCompression:  disableCompression,
+	}
+}
+
 // NewClient creates a controller client for baseURL (e.g.
-// http://host:8443) guarded by token.
+// http://host:8444) guarded by token.
 func NewClient(baseURL, token string) *Client {
 	return &Client{
 		base:  baseURL,
 		token: token,
-		http:  &http.Client{Timeout: 10 * time.Second},
+		http: &http.Client{
+			Timeout:   10 * time.Second,
+			Transport: newTransport(false),
+		},
 	}
 }
 
@@ -72,7 +88,7 @@ func (c *Client) Health(ctx context.Context) (*HealthResponse, error) {
 
 func (c *Client) Stats(ctx context.Context) (*StatsResponse, error) {
 	var s StatsResponse
-	if err := c.do(ctx, http.MethodGet, "/api/v1/stats", nil, &s); err != nil {
+	if err := c.do(ctx, http.MethodGet, "/api/v1/stats?per_client=0", nil, &s); err != nil {
 		return nil, err
 	}
 	return &s, nil
@@ -107,7 +123,10 @@ func (c *Client) SetBlocklist(ctx context.Context, domains, allowed []string) er
 	httpReq.Header.Set("Authorization", "Bearer "+c.token)
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	slow := &http.Client{Timeout: 10 * time.Minute}
+	slow := &http.Client{
+		Timeout:   10 * time.Minute,
+		Transport: newTransport(true), // blocklist payloads are already large; no point negotiating gzip
+	}
 	resp, err := slow.Do(httpReq)
 	if err != nil {
 		return err
@@ -259,7 +278,9 @@ func (c *Client) Watch(ctx context.Context, fn func(WatchEvent)) error {
 		return err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
-	resp, err := (&http.Client{}).Do(req)
+	resp, err := (&http.Client{
+		Transport: newTransport(false),
+	}).Do(req)
 	if err != nil {
 		return err
 	}

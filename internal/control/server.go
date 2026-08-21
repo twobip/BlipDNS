@@ -445,6 +445,13 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 				st.RecordsHash = RecordsHash(recs)
 			}
 		}
+		// The per-client query-count map grows with every unique client IP and
+		// is only consumed by the /api/clients endpoint. The poll loop never
+		// needs it, so callers can request ?per_client=0 to exclude it and keep
+		// the response small on a 5-second poll cycle.
+		if r.URL.Query().Get("per_client") == "0" {
+			st.PerClient = nil
+		}
 	}
 	s.addUpstreamStats(st)
 	writeJSON(w, st)

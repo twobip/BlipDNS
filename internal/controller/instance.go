@@ -243,8 +243,24 @@ func (i *Instance) finishBlocklistPush(err error, hash uint64) {
 func (i *Instance) poll(ctx context.Context) {
 	c := i.ctl()
 	start := time.Now()
-	h, herr := c.Health(ctx)
-	s, serr := c.Stats(ctx)
+	// Fetch health and stats concurrently: they are independent HTTP calls and
+	// the 5-second poll cycle pays for both round-trips serially.
+	var (
+		herr, serr error
+		h          *control.HealthResponse
+		s          *control.StatsResponse
+		wg         sync.WaitGroup
+	)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		h, herr = c.Health(ctx)
+	}()
+	go func() {
+		defer wg.Done()
+		s, serr = c.Stats(ctx)
+	}()
+	wg.Wait()
 	latencyMs := float64(time.Since(start).Milliseconds())
 
 	if herr != nil && ctx.Err() == nil {
