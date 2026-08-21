@@ -263,6 +263,8 @@ body.sidebar-collapsed .main { margin-left: 60px; }
 }
 .card-pad { padding: 20px; }
 .panel { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow-1); }
+.callout.warn { background: rgba(245,185,74,.07); border: 1px solid rgba(245,185,74,.3); border-radius: var(--radius); padding: 12px 16px; font-size: 13px; color: var(--text); }
+.callout.warn strong { color: var(--amber); }
 .panel-head { display: flex; align-items: center; gap: 12px; padding: 18px 24px; border-bottom: 1px solid var(--border); }
 .panel-head h3 { margin: 0; font-size: 14px; font-weight: 600; }
 .panel-head .spacer { flex: 1; }

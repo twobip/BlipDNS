@@ -771,7 +771,11 @@ func (s *Server) handleHighAvailability(w http.ResponseWriter, r *http.Request) 
 		// locally, while API reads never disclose credentials.
 		cluster.Primary.AuthPass = ""
 		cluster.Secondary.AuthPass = ""
-		writeJSON(w, map[string]interface{}{"cluster": cluster, "statuses": s.fleet.HAStatuses(r.Context())})
+		writeJSON(w, map[string]interface{}{
+			"cluster":    cluster,
+			"statuses":   s.fleet.HAStatuses(r.Context()),
+			"load_error": s.fleet.HALoadError(),
+		})
 	case http.MethodPut:
 		var req struct {
 			Cluster control.HACluster `json:"cluster"`

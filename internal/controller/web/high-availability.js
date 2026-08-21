@@ -13,6 +13,20 @@ async function loadHighAvailability() {
   }
 }
 
+/* haLoadWarning renders the banner shown when blipc could not load the
+   on-disk HA config at startup (e.g. validation failure). The config keeps
+   working on the nodes, but update-time priority degradation is disarmed
+   until the operator fixes and re-saves the form. */
+function haLoadWarning() {
+  const err = haData.load_error;
+  if (!err) return "";
+  return `<div class="callout warn" style="margin-bottom:12px">
+    <strong>HA config on disk failed to load:</strong> ${esc(err)}<br/>
+    <span class="muted">The saved configuration was preserved in controller.yaml and your keepalived nodes are unaffected,
+    but priority degradation during updates is NOT active. Fix the fields below and press Save to re-arm it.</span>
+  </div>`;
+}
+
 function haInstanceOptions(selected) {
   return instances.map((i) => `<option value="${esc(i.id)}" ${i.id === selected ? "selected" : ""}>${esc(i.label || i.id)}</option>`).join("");
 }
@@ -27,6 +41,8 @@ function haNodeIP(instId) {
 function renderHighAvailability() {
   const c = haData.cluster || {};
   const p = c.primary || {}, s = c.secondary || {};
+  const warn = $("ha-load-warning");
+  if (warn) warn.innerHTML = haLoadWarning();
   const status = $("ha-status");
   const statuses = haData.statuses || {};
   const active = Object.values(statuses).some((v) => v && v.active);

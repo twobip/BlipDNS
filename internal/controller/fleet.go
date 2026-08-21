@@ -144,6 +144,8 @@ type Fleet struct {
 	qlRetentionHours  int                          // how long query log entries are kept (0 = 24h default)
 	records           []control.RecordEntry        // fleet-wide local DNS records
 	haCluster         control.HACluster            // LAN two-node VRRP desired state
+	haClusterSet      bool                         // true once a validated cluster was loaded or saved; guards saveConfig against erasing an on-disk config blipc never loaded
+	haClusterLoadErr  string                       // non-empty when startup load failed validation; surfaced in the UI
 	releaseChannel    string                       // stable or dev
 	updateMu          sync.Mutex
 	updateJob         UpdateJobStatus
@@ -222,12 +224,21 @@ func (f *Fleet) HACluster() control.HACluster {
 
 // SetHAClusterDefault loads the desired LAN VRRP configuration without
 // persisting it. Used while blipc is starting from controller.yaml.
+//
+// A validation failure is remembered (haClusterLoadErr) so the UI can surface
+// it loudly: the on-disk config is left untouched, and saveConfig will refuse
+// to overwrite it with the empty in-memory state.
 func (f *Fleet) SetHAClusterDefault(cluster control.HACluster) error {
 	if err := validateHACluster(cluster); err != nil {
+		f.mu.Lock()
+		f.haClusterLoadErr = err.Error()
+		f.mu.Unlock()
 		return err
 	}
 	f.mu.Lock()
 	f.haCluster = cluster
+	f.haClusterSet = true
+	f.haClusterLoadErr = ""
 	f.mu.Unlock()
 	return nil
 }
@@ -301,6 +312,10 @@ func (f *Fleet) SetHACluster(ctx context.Context, cluster control.HACluster) err
 		// Unchecking HA is a real lifecycle operation: stop both services and
 		// persist the disabled desired state rather than leaving keepalived
 		// running with a stale configuration.
+		f.mu.Lock()
+		f.haClusterSet = true // explicit operator action: saving is legitimate
+		f.haClusterLoadErr = ""
+		f.mu.Unlock()
 		current := f.HACluster()
 		if cluster.PrimaryInstance == "" {
 			cluster.PrimaryInstance = current.PrimaryInstance
@@ -314,6 +329,14 @@ func (f *Fleet) SetHACluster(ctx context.Context, cluster control.HACluster) err
 		return err
 	}
 	return f.setHAClusterPersisted(cluster)
+}
+
+// HALoadError returns the reason the startup HA config failed validation, or
+// "" when the cluster loaded cleanly (or was never configured).
+func (f *Fleet) HALoadError() string {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return f.haClusterLoadErr
 }
 
 // haPriorityDelta is subtracted from the updating node's VRRP priority when it
@@ -443,6 +466,8 @@ func (f *Fleet) setHAClusterPersisted(cluster control.HACluster) error {
 	}
 	f.mu.Lock()
 	f.haCluster = cluster
+	f.haClusterSet = true
+	f.haClusterLoadErr = ""
 	f.mu.Unlock()
 	if f.configPath != "" {
 		return f.saveConfig()
@@ -2810,7 +2835,7 @@ func (f *Fleet) saveConfig() error {
 	cfg.BlocklistDisabled = f.DisabledBlocklistSources()
 	cfg.BlocklistUpdateHours = autoHours
 	cfg.Records = f.Records()
-	cfg.HACluster = f.HACluster()
+	cfg.HACluster = f.haClusterForSave(b)
 	cfg.ReleaseChannel = f.ReleaseChannel()
 
 	out, err := yaml.Marshal(cfg)
@@ -2819,6 +2844,42 @@ func (f *Fleet) saveConfig() error {
 	}
 	// 0600: config holds admin tokens for every instance, so no group/world access.
 	return os.WriteFile(f.configPath, out, 0600)
+}
+
+// haClusterForSave decides what to persist under high_availability.
+//
+// Normally that is the in-memory desired state. But if blipc never loaded a
+// cluster (haClusterSet false — e.g. startup validation failed, or the config
+// predates the HA feature) while the on-disk file still carries one, the
+// in-memory zero value must NOT be written: doing so is exactly how a working
+// keepalived setup was silently erased from controller.yaml by an unrelated
+// settings save. In that case the on-disk block is preserved verbatim and the
+// load error (if any) keeps surfacing in the UI until the operator fixes it.
+func (f *Fleet) haClusterForSave(onDisk []byte) control.HACluster {
+	f.mu.RLock()
+	set, loadErr := f.haClusterSet, f.haClusterLoadErr
+	inMem := f.haCluster
+	f.mu.RUnlock()
+	if set {
+		return inMem
+	}
+	var disk fullConfigShim
+	if len(onDisk) > 0 && yaml.Unmarshal(onDisk, &disk) == nil && disk.HACluster != (control.HACluster{}) {
+		if loadErr != "" {
+			log.Printf("blipc: WARNING preserving on-disk high_availability config that failed to load: %s", loadErr)
+		} else {
+			log.Printf("blipc: WARNING preserving on-disk high_availability config that was never loaded into memory")
+		}
+		return disk.HACluster
+	}
+	return inMem
+}
+
+// fullConfigShim mirrors only the high_availability key of controller.yaml for
+// on-disk preservation checks. It exists so haClusterForSave does not need the
+// larger saveConfig struct.
+type fullConfigShim struct {
+	HACluster control.HACluster `yaml:"high_availability"`
 }
 
 // ResolveTokenFile expands token paths like "@/path" or an absolute file path
