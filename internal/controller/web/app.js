@@ -217,10 +217,10 @@ function updateConn() {
 /* ---------- dashboard ---------- */
 // d-range maps a dropdown value to a backend `since` window and chart bucket.
 const STAT_RANGES = {
-  "1h":  { since: "1h",  bucket: "10s", label: "1 hour" },
-  "1d":  { since: "24h", bucket: "5m",  label: "1 day" },
-  "1w":  { since: "168h", bucket: "1h", label: "1 week" },
-  "1mo": { since: "720h", bucket: "6h", label: "1 month" },
+  "1h":  { since: "1h",   bucket: "10s", label: "1 hour",  dates: false },
+  "1d":  { since: "24h",  bucket: "5m",  label: "1 day",   dates: false },
+  "1w":  { since: "168h", bucket: "1h",  label: "1 week",  dates: true },
+  "1mo": { since: "720h", bucket: "6h",  label: "1 month", dates: true },
 };
 
 // Dashboard totals come from blipc's persisted stats samples (SQLite), so they
@@ -313,7 +313,7 @@ async function fetchStats() {
     if (!ctx) return;
     const gl = ctx.getContext("2d");
     const stats = d.series;
-    const labels = stats.map((s) => new Date(s.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }));
+    const labels = stats.map((s) => fmtChartTick(new Date(s.timestamp), rng.dates));
     const tq = stats.map((s) => s.total_queries);
     const bq = stats.map((s) => s.blocked_queries);
     if (!chart) {
@@ -352,6 +352,11 @@ function cgrad(ctx, rgb) {
   g.addColorStop(0, `rgba(${rgb},.18)`);
   g.addColorStop(1, `rgba(${rgb},0)`);
   return g;
+}
+// X-axis tick labels: time-of-day for short ranges, dates for week/month.
+function fmtChartTick(d, dates) {
+  if (!dates) return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  return d.toLocaleDateString([], { weekday: "short", day: "numeric", month: "short" });
 }
 
 /* ---------- live events (SSE) ---------- */
