@@ -38,7 +38,7 @@ func TestSetBlocklistEndpoint(t *testing.T) {
 	m := new(dns.Msg)
 	m.SetQuestion("a.com.", dns.TypeA)
 	m.Answer = []dns.RR{&dns.A{Hdr: dns.RR_Header{Name: "a.com.", Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60}, A: []byte{1, 2, 3, 4}}}
-	k := cache.Key(m)
+	k := cache.KeyOf(m)
 	c.Set(k, m)
 	if c.Len() != 1 {
 		t.Fatalf("precondition: cache Len = %d, want 1", c.Len())
@@ -567,7 +567,7 @@ func TestCacheEndpoint(t *testing.T) {
 	m := new(dns.Msg)
 	m.SetQuestion("a.com.", dns.TypeA)
 	m.Answer = []dns.RR{&dns.A{Hdr: dns.RR_Header{Name: "a.com.", Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60}, A: []byte{1, 2, 3, 4}}}
-	c.Set(cache.Key(m), m)
+	c.Set(cache.KeyOf(m), m)
 	if c.Len() != 1 {
 		t.Fatalf("precondition: cache Len = %d, want 1", c.Len())
 	}

@@ -335,7 +335,7 @@ func TestRefreshPopularRefreshesStale(t *testing.T) {
 	if !refreshed {
 		t.Fatal("expected refreshPopular to re-resolve the stale entry")
 	}
-	k := cache.Key(q)
+	k := cache.KeyOf(q)
 	if srv.cache.Stale(k, 0) {
 		t.Error("expected refreshed entry to no longer be stale")
 	}
