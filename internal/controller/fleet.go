@@ -1325,12 +1325,12 @@ func (f *Fleet) maybePushHA(ctx context.Context, i *Instance) {
 }
 
 // QueryLogRetentionHours returns how long query log entries are kept on blipc.
-// 0 in the field means "unset": the 24h default applies.
+// 0 in the field means "unset": the 30-day default applies.
 func (f *Fleet) QueryLogRetentionHours() int {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
 	if f.qlRetentionHours <= 0 {
-		return 24
+		return 720
 	}
 	return f.qlRetentionHours
 }

@@ -1544,7 +1544,7 @@ function loadRlEditor() {
 let savedCacheSize = 0;          // fleet-wide max cached responses (0 = unlimited)
 let savedCacheWarm = 0;          // fleet-wide auto-refresh count (0 = off)
 let savedCacheRegular = 0;       // fleet-wide regular-hold seconds for non-top entries (0 = record TTL)
-let savedQLRetention = 24;       // how long query log entries are kept (hours)
+let savedQLRetention = 720;      // how long query log entries are kept (hours)
 let savedReleaseChannel = "stable";
 let cacheScopeState = "default"; // "default" or an instance id
 function renderCacheScopeSelect() {
@@ -1712,7 +1712,7 @@ async function refreshSettings() {
     savedCacheSize = (d.cache_size != null && d.cache_size !== undefined) ? Number(d.cache_size || 0) : 0;
     savedCacheWarm = (d.cache_warm != null && d.cache_warm !== undefined) ? Number(d.cache_warm || 0) : 0;
     savedCacheRegular = (d.cache_regular != null && d.cache_regular !== undefined) ? Number(d.cache_regular || 0) : 0;
-    savedQLRetention = (d.query_log_retention_hours != null && d.query_log_retention_hours !== undefined) ? Number(d.query_log_retention_hours || 24) : 24;
+    savedQLRetention = (d.query_log_retention_hours != null && d.query_log_retention_hours !== undefined) ? Number(d.query_log_retention_hours || 720) : 720;
     savedReleaseChannel = d.release_channel === "dev" ? "dev" : "stable";
     loadReleaseEditor();
     // fleet-wide local DNS records
@@ -2295,7 +2295,7 @@ $("s-cache-purge").onclick = async () => {
 
 function loadQLEditor() {
   const sel = $("s-ql-retention");
-  if (![24, 168, 720, 4320, 8760].includes(savedQLRetention)) savedQLRetention = 24;
+  if (![24, 168, 720, 4320, 8760].includes(savedQLRetention)) savedQLRetention = 720;
   sel.value = String(savedQLRetention);
 }
 $("s-save-ql").onclick = async () => {

@@ -35,8 +35,9 @@ const (
 )
 
 // defaultQueryLogRetention is how long query log entries are kept unless the
-// operator picks a different retention in the controller settings.
-const defaultQueryLogRetention = 24 * time.Hour
+// operator picks a different retention in the controller settings. 30 days
+// keeps a useful history window without unbounded growth.
+const defaultQueryLogRetention = 720 * time.Hour
 
 // Answer is a single resource record attached to a QueryLogEntry for display.
 type Answer struct {
