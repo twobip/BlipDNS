@@ -2,6 +2,7 @@ package dnsserver
 
 import (
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -23,6 +24,10 @@ type rateLimiter struct {
 	burst   int
 	buckets map[string]*tokenBucket
 	maxLive int // cap on tracked clients to avoid memory exhaustion
+
+	// off mirrors qpsVal == 0 as an atomic so the (default) unlimited case
+	// never takes mu on the per-query hot path.
+	off atomic.Bool
 }
 
 func newRateLimiter() *rateLimiter {
@@ -47,6 +52,7 @@ func (rl *rateLimiter) set(qps int, burst int) {
 	rl.qpsVal = float64(qps)
 	rl.burst = burst
 	rl.buckets = make(map[string]*tokenBucket)
+	rl.off.Store(qps == 0)
 }
 
 // qps returns the current per-client QPS limit (0 = disabled).
@@ -58,13 +64,13 @@ func (rl *rateLimiter) qps() int {
 
 // allow reports whether a query from client may proceed, refilling its bucket.
 func (rl *rateLimiter) allow(client string) bool {
-	if client == "" {
-		return true
+	if client == "" || rl.off.Load() {
+		return true // disabled (atomic fast path: no lock when unlimited)
 	}
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
 	if rl.qpsVal <= 0 {
-		return true // disabled
+		return true // disabled (set() may have flipped it between the load and here)
 	}
 	now := time.Now()
 	b, ok := rl.buckets[client]

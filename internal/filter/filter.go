@@ -87,19 +87,28 @@ func (m *matcher) match(name string) bool {
 	if _, ok := m.exact[name]; ok {
 		return true
 	}
-	labels := strings.Split(name, ".")
-	// suffix roots: name == root or name is a subdomain of root.
-	for i := 0; i < len(labels); i++ {
-		root := strings.Join(labels[i:], ".")
-		if _, ok := m.suffix[root]; ok {
-			return true
+	// Walk the label boundaries without allocating: instead of Split+Join,
+	// index each dot and probe the remainder as the candidate root.
+	if len(m.suffix) > 0 {
+		for i := 0; i < len(name); i++ {
+			if name[i] != '.' {
+				continue
+			}
+			if _, ok := m.suffix[name[i+1:]]; ok {
+				return true
+			}
 		}
 	}
-	// subOnly roots: only subdomains (i >= 1) match.
-	for i := 1; i < len(labels); i++ {
-		root := strings.Join(labels[i:], ".")
-		if _, ok := m.subOnly[root]; ok {
-			return true
+	// subOnly roots: only subdomains (proper suffixes after at least one
+	// label) match.
+	if len(m.subOnly) > 0 {
+		for i := 0; i < len(name); i++ {
+			if name[i] != '.' {
+				continue
+			}
+			if _, ok := m.subOnly[name[i+1:]]; ok {
+				return true
+			}
 		}
 	}
 	return false

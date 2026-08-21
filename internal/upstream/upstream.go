@@ -28,6 +28,8 @@ type Resolver interface {
 type UDPResolver struct {
 	addr    string
 	timeout time.Duration
+	udp     dns.Client // pre-built; reused across queries (no per-query alloc)
+	tcp     dns.Client
 }
 
 // NewUDP creates a UDP/TCP upstream resolver for addr (host:port) with the
@@ -36,18 +38,21 @@ func NewUDP(addr string, timeout time.Duration) *UDPResolver {
 	if timeout <= 0 {
 		timeout = 5 * time.Second
 	}
-	return &UDPResolver{addr: addr, timeout: timeout}
+	return &UDPResolver{
+		addr:    addr,
+		timeout: timeout,
+		udp:     dns.Client{Net: "udp", Timeout: timeout},
+		tcp:     dns.Client{Net: "tcp", Timeout: timeout},
+	}
 }
 
 func (r *UDPResolver) Resolve(ctx context.Context, q *dns.Msg) (*dns.Msg, error) {
-	c := &dns.Client{Net: "udp", Timeout: r.timeout}
-	resp, _, err := c.Exchange(q, r.addr)
+	resp, _, err := r.udp.Exchange(q, r.addr)
 	if err != nil {
 		return nil, errUpstream(r.addr, err)
 	}
 	if resp.Truncated {
-		c.Net = "tcp"
-		resp, _, err = c.Exchange(q, r.addr)
+		resp, _, err = r.tcp.Exchange(q, r.addr)
 		if err != nil {
 			return nil, errUpstream(r.addr, err)
 		}

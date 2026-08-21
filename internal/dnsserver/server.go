@@ -263,6 +263,8 @@ func (s *Server) serve(ctx context.Context, clientIP net.IP, clientID string, re
 	start := time.Now()
 	client := clientID
 	if client == "" {
+		// No DoH client-id: the rendered IP is both the log identity and the
+		// rate-limit key, so render it once (IP.String() allocates).
 		client = clientIP.String()
 	}
 	// Per-client rate limit is keyed by the SOURCE IP (post trusted-proxy
@@ -272,12 +274,18 @@ func (s *Server) serve(ctx context.Context, clientIP net.IP, clientID string, re
 	// queries are tracked separately (AddRateLimited) and excluded from the
 	// query totals / query log: only queries that actually get resolved count
 	// toward throughput, cache and top-domain stats.
-	if s.rl != nil && !s.rl.allow(clientIP.String()) {
-		s.cnt.AddRateLimited()
-		resp := new(dns.Msg)
-		resp.SetReply(req)
-		resp.Rcode = dns.RcodeRefused
-		return resp
+	if s.rl != nil {
+		rlKey := client // classic-DNS / no-id case: already the rendered IP
+		if clientID != "" {
+			rlKey = clientIP.String() // separate allocation, keyed by IP only
+		}
+		if !s.rl.allow(rlKey) {
+			s.cnt.AddRateLimited()
+			resp := new(dns.Msg)
+			resp.SetReply(req)
+			resp.Rcode = dns.RcodeRefused
+			return resp
+		}
 	}
 	s.cnt.AddQuery(client)
 	resp := new(dns.Msg)

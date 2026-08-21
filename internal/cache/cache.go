@@ -317,7 +317,15 @@ func (c *Cache) DoHit(ctx context.Context, k string, fn func() (*dns.Msg, error)
 	if err != nil {
 		return nil, false, err
 	}
-	return v.(*dns.Msg), shared, nil
+	m := v.(*dns.Msg)
+	if shared {
+		// Coalesced callers share one result pointer; serve() mutates the
+		// returned message (Id, Question), so give each sharer its own copy
+		// instead of racing on a shared one. The cache stored its own copy
+		// in Set, so this does not touch cached state.
+		m = m.Copy()
+	}
+	return m, shared, nil
 }
 
 // Purge drops every cached response. It is used when the blocklist changes so
