@@ -305,20 +305,10 @@ func (i *Instance) poll(ctx context.Context) {
 	}
 	i.mu.Unlock()
 	if herr == nil {
-		// The bus event carries stats to the browser via SSE. PerClient
-		// (which grows with every unique client IP) is not needed in the
-		// live event stream — it's only consumed by the /api/stats
-		// endpoint — so nil it out to keep SSE payloads small. Use a
-		// shallow copy so convergence checks below still see the full map.
-		statsForEvent := s
-		if statsForEvent != nil {
-			statsForEvent = &control.StatsResponse{}
-			*statsForEvent = *s
-			statsForEvent.PerClient = nil
-		}
+		// The bus event carries the polled stats to the browser via SSE.
 		i.fleet.bus.Publish(Event{
 			InstanceID: i.Config.ID, Instance: i.Config.Label,
-			Type: "health", At: i.fleet.now(), Health: h, Stats: statsForEvent,
+			Type: "health", At: i.fleet.now(), Health: h, Stats: s,
 		})
 		// Converge the instance to the fleet default config if it is behind
 		// (newly added/adopted, restarted, or reverted to its own config).

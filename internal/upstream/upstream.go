@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/miekg/dns"
@@ -209,10 +210,14 @@ func (r *DoHResolver) Resolve(ctx context.Context, q *dns.Msg) (*dns.Msg, error)
 // MultiResolver tries each resolver in priority order until one succeeds and
 // remembers which resolvers are currently failing so a down upstream is
 // skipped for a short cooldown instead of stalling every request.
+//
+// downUntil holds unix-nanos per resolver, accessed atomically: the hot path
+// (all resolvers healthy) never takes a lock, it only loads the cooldown
+// stamps. The mutex guards only the rare all-down reset.
 type MultiResolver struct {
 	resolvers []Resolver
 	mu        sync.Mutex
-	downUntil []time.Time
+	downUntil []int64 // unix nanos; 0 = up
 	cooldown  time.Duration
 }
 
@@ -221,44 +226,40 @@ type MultiResolver struct {
 func NewMulti(resolvers ...Resolver) *MultiResolver {
 	return &MultiResolver{
 		resolvers: resolvers,
-		downUntil: make([]time.Time, len(resolvers)),
+		downUntil: make([]int64, len(resolvers)),
 		cooldown:  15 * time.Second,
 	}
 }
 
 func (m *MultiResolver) Resolve(ctx context.Context, q *dns.Msg) (*dns.Msg, error) {
-	m.mu.Lock()
-	now := time.Now()
+	now := time.Now().UnixNano()
 	var order []int
 	allDown := true
 	for i := range m.resolvers {
-		if !m.downUntil[i].After(now) {
+		if atomic.LoadInt64(&m.downUntil[i]) <= now {
 			order = append(order, i)
 			allDown = false
 		}
 	}
 	if allDown { // everything tripped: retry all in order this pass
+		m.mu.Lock()
+		m.downUntil = make([]int64, len(m.resolvers))
+		m.mu.Unlock()
 		order = make([]int, len(m.resolvers))
 		for i := range order {
 			order[i] = i
 		}
-		m.downUntil = make([]time.Time, len(m.resolvers))
 	}
-	m.mu.Unlock()
 
 	var lastErr error
 	for _, i := range order {
 		resp, err := m.resolvers[i].Resolve(ctx, q)
 		if err == nil {
-			m.mu.Lock()
-			m.downUntil[i] = time.Time{}
-			m.mu.Unlock()
+			atomic.StoreInt64(&m.downUntil[i], 0)
 			return resp, nil
 		}
 		lastErr = err
-		m.mu.Lock()
-		m.downUntil[i] = now.Add(m.cooldown)
-		m.mu.Unlock()
+		atomic.StoreInt64(&m.downUntil[i], now+m.cooldown.Nanoseconds())
 	}
 	if lastErr == nil {
 		lastErr = fmt.Errorf("upstream: no resolvers configured")

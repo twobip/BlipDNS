@@ -41,6 +41,9 @@ type Server struct {
 	mu        sync.RWMutex
 	watchMu   sync.Mutex
 	watchers  map[chan WatchEvent]struct{}
+	// watchCount mirrors len(watchers) as an atomic so the DNS hot path can
+	// skip building WatchEvents entirely when no consumer is streaming.
+	watchCount atomic.Int64
 
 	// droppedEvents counts WatchEvents dropped because a consumer's buffer was
 	// full. The send is non-blocking so the DNS hot path is never stalled.
@@ -304,11 +307,21 @@ func (s *Server) persistAdopted(adopted bool) {
 	}
 }
 
+// HasWatchers reports whether any consumer is currently streaming events.
+// Event producers check this (one atomic load) to skip building WatchEvent
+// payloads — answer rendering, timestamps, slices — that no one would read.
+func (s *Server) HasWatchers() bool {
+	if s == nil {
+		return false
+	}
+	return s.watchCount.Load() > 0
+}
+
 // Notify pushes a WatchEvent to all connected watchers. Sends are
 // non-blocking: a consumer that cannot keep up has events dropped and counted
 // (see droppedEvents) rather than stalling the caller.
 func (s *Server) Notify(e WatchEvent) {
-	if s == nil {
+	if s == nil || !s.HasWatchers() {
 		return
 	}
 	s.mu.RLock()
@@ -444,13 +457,6 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 			if recs, err := rc.GetRecords(); err == nil {
 				st.RecordsHash = RecordsHash(recs)
 			}
-		}
-		// The per-client query-count map grows with every unique client IP and
-		// is only consumed by the /api/clients endpoint. The poll loop never
-		// needs it, so callers can request ?per_client=0 to exclude it and keep
-		// the response small on a 5-second poll cycle.
-		if r.URL.Query().Get("per_client") == "0" {
-			st.PerClient = nil
 		}
 	}
 	s.addUpstreamStats(st)
@@ -848,11 +854,13 @@ func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request) {
 	ch := make(chan WatchEvent, 4096)
 	s.watchMu.Lock()
 	s.watchers[ch] = struct{}{}
+	s.watchCount.Store(int64(len(s.watchers)))
 	s.watchMu.Unlock()
 	log.Printf("blipd: watch open")
 	defer func() {
 		s.watchMu.Lock()
 		delete(s.watchers, ch)
+		s.watchCount.Store(int64(len(s.watchers)))
 		s.watchMu.Unlock()
 		close(ch)
 		log.Printf("blipd: watch close")
@@ -873,13 +881,10 @@ func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request) {
 			flusher.Flush()
 		case <-ticker.C:
 			// Keepalive: a lightweight stats ping so the controller can
-			// detect liveness. PerClient (which can grow to thousands of
-			// entries) is intentionally omitted — it's only needed by the
-			// /api/v1/stats HTTP endpoint, not the live event stream.
+			// detect liveness on the live event stream.
 			st := &StatsResponse{}
 			if s.stats != nil {
 				st = s.stats.Stats()
-				st.PerClient = nil
 				st.UpstreamServers = nil
 				st.UpstreamRoutes = nil
 			}

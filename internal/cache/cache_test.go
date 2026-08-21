@@ -156,9 +156,12 @@ func TestEvictLeastRecentlyUsed(t *testing.T) {
 	c := New(time.Hour, 2)
 	c.Set("k1", mkMsg("a.test", 60))
 	c.Set("k2", mkMsg("b.test", 60))
-	// promote k1 to most-recently-used
-	if _, ok := c.Get("k1"); !ok {
-		t.Fatal("expected k1 hit")
+	// promote k1 to most-recently-used; hits are promoted every
+	// promoteEvery-th hit, so hit it that many times to guarantee promotion.
+	for i := 0; i < promoteEvery; i++ {
+		if _, ok := c.Get("k1"); !ok {
+			t.Fatal("expected k1 hit")
+		}
 	}
 	c.Set("k3", mkMsg("c.test", 60)) // k2 is now LRU -> evicted
 	if _, ok := c.Get("k2"); ok {
@@ -182,8 +185,8 @@ func TestSetPreservesHits(t *testing.T) {
 	_, _ = c.Get(k)
 	_, _ = c.Get(k)
 	c.Set(k, mkMsg("a.test", 60)) // refresh, must keep hit count
-	if got := c.Popular(0); len(got) != 1 || c.items[k].hits != 2 {
-		t.Errorf("expected refreshed entry to keep 2 hits, got %d", c.items[k].hits)
+	if got := c.Popular(0); len(got) != 1 || c.items[k].hits.Load() != 2 {
+		t.Errorf("expected refreshed entry to keep 2 hits, got %d", c.items[k].hits.Load())
 	}
 }
 
