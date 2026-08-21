@@ -88,7 +88,7 @@ func (c *Client) Health(ctx context.Context) (*HealthResponse, error) {
 
 func (c *Client) Stats(ctx context.Context) (*StatsResponse, error) {
 	var s StatsResponse
-	if err := c.do(ctx, http.MethodGet, "/api/v1/stats?per_client=0", nil, &s); err != nil {
+	if err := c.do(ctx, http.MethodGet, "/api/v1/stats", nil, &s); err != nil {
 		return nil, err
 	}
 	return &s, nil

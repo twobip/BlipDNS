@@ -9,11 +9,8 @@ import (
 )
 
 func base64urlDecode(s string) ([]byte, error) {
-	// RFC 4648 URL-safe base64, no padding.
-	if len(s)%4 != 0 {
-		s += string("===="[:4-len(s)%4])
-	}
-	return base64.URLEncoding.DecodeString(s)
+	// RFC 4648 URL-safe base64; RawURLEncoding tolerates missing padding.
+	return base64.RawURLEncoding.DecodeString(s)
 }
 
 // clientIDFromPath extracts an optional DoH client identity from a request

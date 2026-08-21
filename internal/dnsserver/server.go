@@ -304,13 +304,17 @@ func (s *Server) serve(ctx context.Context, clientIP net.IP, clientID string, re
 	// blocked by the global blocklist (or any policy block list).
 	if s.cfg.Blocklist != nil && s.cfg.Blocklist.IsBlocked(domain) && !s.cfg.Store.Allowed(clientIP, clientID, domain) {
 		s.cnt.AddBlocked()
-		s.ctrl.Notify(control.WatchEvent{
-			Type: "block", At: time.Now(),
-			Client: client, Domain: domain,
-			QType: qType(req), Answers: answersFor(req, resp),
-			BlockList:  "global",
-			DurationUs: time.Since(start).Microseconds(),
-		})
+		// Building the watch event renders every answer record; skip it
+		// entirely when nobody is streaming events.
+		if s.ctrl.HasWatchers() {
+			s.ctrl.Notify(control.WatchEvent{
+				Type: "block", At: time.Now(),
+				Client: client, Domain: domain,
+				QType: qType(req), Answers: answersFor(req, resp),
+				BlockList:  "global",
+				DurationUs: time.Since(start).Microseconds(),
+			})
+		}
 		if s.logfn != nil {
 			s.logfn(client, domain)
 		}
@@ -321,13 +325,15 @@ func (s *Server) serve(ctx context.Context, clientIP net.IP, clientID string, re
 	blocked, action, upstreamOverride, log := s.cfg.Store.Classify(clientIP, clientID, domain)
 	if blocked {
 		s.cnt.AddBlocked()
-		s.ctrl.Notify(control.WatchEvent{
-			Type: "block", At: time.Now(),
-			Client: client, Domain: domain,
-			QType: qType(req), Answers: answersFor(req, resp),
-			BlockList:  s.cfg.Store.BlockSource(clientIP, clientID, domain),
-			DurationUs: time.Since(start).Microseconds(),
-		})
+		if s.ctrl.HasWatchers() {
+			s.ctrl.Notify(control.WatchEvent{
+				Type: "block", At: time.Now(),
+				Client: client, Domain: domain,
+				QType: qType(req), Answers: answersFor(req, resp),
+				BlockList:  s.cfg.Store.BlockSource(clientIP, clientID, domain),
+				DurationUs: time.Since(start).Microseconds(),
+			})
+		}
 		if log && s.logfn != nil {
 			s.logfn(client, domain)
 		}
@@ -345,17 +351,19 @@ func (s *Server) serve(ctx context.Context, clientIP net.IP, clientID string, re
 	// Check local static records first — these short-circuit before cache/upstream.
 	if s.rec != nil {
 		if recResp, ok := s.rec.Lookup(req); ok {
-			s.ctrl.Notify(control.WatchEvent{
-				Type:       "pass",
-				At:         time.Now(),
-				Client:     client,
-				Domain:     domain,
-				QType:      qType(req),
-				Answers:    answersFor(req, recResp),
-				Cached:     false,
-				Upstream:   "local",
-				DurationUs: time.Since(start).Microseconds(),
-			})
+			if s.ctrl.HasWatchers() {
+				s.ctrl.Notify(control.WatchEvent{
+					Type:       "pass",
+					At:         time.Now(),
+					Client:     client,
+					Domain:     domain,
+					QType:      qType(req),
+					Answers:    answersFor(req, recResp),
+					Cached:     false,
+					Upstream:   "local",
+					DurationUs: time.Since(start).Microseconds(),
+				})
+			}
 			out := recResp
 			return out
 		}
@@ -394,26 +402,30 @@ func (s *Server) serve(ctx context.Context, clientIP net.IP, clientID string, re
 
 	// Notify pass event for query log (with full answer records + qtype so
 	// non-address answers like TXT/CNAME/MX are preserved, not just A/AAAA).
-	answers := answersFor(req, out)
-	// answersFor already populated IPs for the legacy IPs field below.
-	var ips []string
-	for _, a := range answers {
-		if isAddressType(a.Type) {
-			ips = append(ips, a.Data)
+	// Building the event renders every answer record; skip it entirely when
+	// nobody is streaming events.
+	if s.ctrl.HasWatchers() {
+		answers := answersFor(req, out)
+		// answersFor already populated IPs for the legacy IPs field below.
+		var ips []string
+		for _, a := range answers {
+			if isAddressType(a.Type) {
+				ips = append(ips, a.Data)
+			}
 		}
+		s.ctrl.Notify(control.WatchEvent{
+			Type:       "pass",
+			At:         time.Now(),
+			Client:     client,
+			Domain:     domain,
+			QType:      qType(req),
+			IPs:        ips,
+			Answers:    answers,
+			Cached:     cached,
+			Upstream:   upstreamLabel,
+			DurationUs: time.Since(start).Microseconds(),
+		})
 	}
-	s.ctrl.Notify(control.WatchEvent{
-		Type:       "pass",
-		At:         time.Now(),
-		Client:     client,
-		Domain:     domain,
-		QType:      qType(req),
-		IPs:        ips,
-		Answers:    answers,
-		Cached:     cached,
-		Upstream:   upstreamLabel,
-		DurationUs: time.Since(start).Microseconds(),
-	})
 	return out
 }
 
