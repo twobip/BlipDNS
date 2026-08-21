@@ -305,6 +305,12 @@ func (s *Server) persistAdopted(adopted bool) {
 	if err := os.WriteFile(s.stateFile, b, 0600); err != nil {
 		log.Printf("blipd: warning: cannot persist adoption state to %s: %v", s.stateFile, err)
 	}
+	// WriteFile never chmods an existing file; enforce 0600 in case the file
+	// predates this mode (e.g. created before hardening). Best-effort, like the
+	// querylog chmod — do not fail adoption over a defensive chmod.
+	if err := os.Chmod(s.stateFile, 0600); err != nil {
+		log.Printf("blipd: warning: cannot chmod adoption state %s: %v", s.stateFile, err)
+	}
 }
 
 // HasWatchers reports whether any consumer is currently streaming events.
