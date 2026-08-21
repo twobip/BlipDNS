@@ -9,7 +9,6 @@ import (
 	"context"
 	"sort"
 	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -25,8 +24,27 @@ import (
 // stays entirely on shared locks + atomics.
 const promoteEvery = 16
 
+// Key identifies a cached response by (name, qtype, qclass). It is a
+// comparable struct so it can be used directly as a map key: building it
+// allocates nothing (unlike a formatted string) and lookups hash a few fixed
+// words instead of re-hashing the whole encoded name on every query.
+type Key struct {
+	Name   string // FQDN, exactly as queried (case preserved)
+	QType  uint16
+	QClass uint16
+}
+
+// KeyOf returns the cache key for the first question of m.
+func KeyOf(m *dns.Msg) Key {
+	if len(m.Question) == 0 {
+		return Key{}
+	}
+	q := m.Question[0]
+	return Key{Name: q.Name, QType: q.Qtype, QClass: q.Qclass}
+}
+
 type entry struct {
-	key    string
+	key    Key
 	msg    *dns.Msg
 	expire time.Time
 	hits   atomic.Uint64
@@ -45,7 +63,7 @@ type entry struct {
 // data). With regularHold == 0 every entry simply uses its record TTL.
 type Cache struct {
 	mu          sync.RWMutex
-	items       map[string]*entry
+	items       map[Key]*entry
 	lru         *list.List
 	ttlCap      time.Duration
 	maxEntries  int
@@ -64,7 +82,7 @@ func New(ttlCap time.Duration, maxEntries int) *Cache {
 		ttlCap = time.Hour
 	}
 	return &Cache{
-		items:      make(map[string]*entry),
+		items:      make(map[Key]*entry),
 		lru:        list.New(),
 		ttlCap:     ttlCap,
 		maxEntries: maxEntries,
@@ -88,27 +106,11 @@ func (c *Cache) SetHold(warm int, regular time.Duration) {
 	c.regularHold = regular
 }
 
-// Key returns a stable cache key for the first question of m.
-func Key(m *dns.Msg) string {
-	if len(m.Question) == 0 {
-		return ""
-	}
-	q := m.Question[0]
-	return q.Name + "|" + strconv.Itoa(int(q.Qtype)) + "|" + strconv.Itoa(int(q.Qclass))
-}
-
-// ParseKey reconstructs the (name, qtype, qclass) triple from a Key string.
-func ParseKey(k string) (name string, qtype, qclass uint16, ok bool) {
-	parts := strings.Split(k, "|")
-	if len(parts) != 3 {
-		return "", 0, 0, false
-	}
-	t, errT := strconv.ParseUint(parts[1], 10, 16)
-	cl, errC := strconv.ParseUint(parts[2], 10, 16)
-	if errT != nil || errC != nil {
-		return "", 0, 0, false
-	}
-	return parts[0], uint16(t), uint16(cl), true
+// String renders the key as "name|qtype|qclass". Not used on the cache read
+// path — it exists for the singleflight coalescing key (string-keyed) and
+// for logs.
+func (k Key) String() string {
+	return k.Name + "|" + strconv.Itoa(int(k.QType)) + "|" + strconv.Itoa(int(k.QClass))
 }
 
 func minTTL(m *dns.Msg) time.Duration {
@@ -147,8 +149,8 @@ func minTTL(m *dns.Msg) time.Duration {
 // skipped for all but every promoteEvery-th hit. Only expiry cleanup and the
 // occasional promotion take the exclusive lock. The message Copy happens
 // outside the lock so a slow Copy can't block other readers or writers.
-func (c *Cache) Get(k string) (*dns.Msg, bool) {
-	if k == "" {
+func (c *Cache) Get(k Key) (*dns.Msg, bool) {
+	if k.Name == "" {
 		return nil, false
 	}
 	c.mu.RLock()
@@ -184,7 +186,7 @@ func (c *Cache) Get(k string) (*dns.Msg, bool) {
 	// Approximate LRU: promote only every promoteEvery-th hit. The counter is
 	// per-entry, so promotion is probabilistic under concurrency — good
 	// enough to keep hot entries at the front without exclusive locking.
-	if e.hits.Load()%promoteEvery == 0 {
+	if h := e.hits.Load(); h%promoteEvery == 0 {
 		c.mu.RUnlock()
 		c.mu.Lock()
 		// Re-check: the entry may have been evicted or replaced meanwhile.
@@ -219,8 +221,8 @@ copy:
 // The retention time depends on the two-tier configuration: if a non-zero
 // regularHold is set, entries rank among the warmCount most-popular keep their
 // record TTL while the rest are held for regularHold (possibly stale).
-func (c *Cache) Set(k string, m *dns.Msg) {
-	if k == "" || m == nil {
+func (c *Cache) Set(k Key, m *dns.Msg) {
+	if k.Name == "" || m == nil {
 		return
 	}
 	now := c.now()
@@ -243,7 +245,7 @@ func (c *Cache) Set(k string, m *dns.Msg) {
 
 // lifetimeForLocked returns how long the entry for k should be cached, given
 // its current hit count and the source record's min TTL. Caller holds c.mu.
-func (c *Cache) lifetimeForLocked(k string, hits uint64, srcTTL uint32) time.Duration {
+func (c *Cache) lifetimeForLocked(k Key, hits uint64, srcTTL uint32) time.Duration {
 	dnsTTL := time.Duration(srcTTL) * time.Second
 	if dnsTTL > c.ttlCap {
 		dnsTTL = c.ttlCap
@@ -259,7 +261,7 @@ func (c *Cache) lifetimeForLocked(k string, hits uint64, srcTTL uint32) time.Dur
 
 // isTopLocked reports whether an entry with the given hit count ranks within
 // the n most-popular cached entries. Caller holds c.mu.
-func (c *Cache) isTopLocked(k string, hits uint64, n int) bool {
+func (c *Cache) isTopLocked(k Key, hits uint64, n int) bool {
 	ahead := 0
 	for key, other := range c.items {
 		if key == k {
@@ -302,7 +304,7 @@ func (c *Cache) SetMaxEntries(n int) {
 
 // Do returns a cached response if present, otherwise runs fn (coalescing
 // concurrent identical requests) and caches the result.
-func (c *Cache) Do(ctx context.Context, k string, fn func() (*dns.Msg, error)) (*dns.Msg, error) {
+func (c *Cache) Do(ctx context.Context, k Key, fn func() (*dns.Msg, error)) (*dns.Msg, error) {
 	m, _, err := c.DoHit(ctx, k, fn)
 	return m, err
 }
@@ -312,11 +314,11 @@ func (c *Cache) Do(ctx context.Context, k string, fn func() (*dns.Msg, error)) (
 // concurrent identical fetch count as cache hits: they were answered from
 // in-memory state (the in-flight singleflight result) without a fresh
 // upstream round trip.
-func (c *Cache) DoHit(ctx context.Context, k string, fn func() (*dns.Msg, error)) (*dns.Msg, bool, error) {
+func (c *Cache) DoHit(ctx context.Context, k Key, fn func() (*dns.Msg, error)) (*dns.Msg, bool, error) {
 	if m, ok := c.Get(k); ok {
 		return m, true, nil
 	}
-	v, err, shared := c.group.Do(k, func() (interface{}, error) {
+	v, err, shared := c.group.Do(k.String(), func() (interface{}, error) {
 		m, ferr := fn()
 		if ferr != nil {
 			return nil, ferr
@@ -344,7 +346,7 @@ func (c *Cache) DoHit(ctx context.Context, k string, fn func() (*dns.Msg, error)
 func (c *Cache) Purge() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.items = make(map[string]*entry)
+	c.items = make(map[Key]*entry)
 	c.lru.Init()
 }
 
@@ -357,18 +359,24 @@ func (c *Cache) Len() int {
 
 // Popular returns the keys of the n most-served cached responses, most
 // popular first. Pass 0 or a negative n to get all keys.
-func (c *Cache) Popular(n int) []string {
+func (c *Cache) Popular(n int) []Key {
 	c.mu.RLock()
-	defer c.mu.RUnlock()
-	keys := make([]string, 0, len(c.items))
-	for k := range c.items {
-		keys = append(keys, k)
+	type kv struct {
+		k    Key
+		hits uint64
 	}
-	sort.Slice(keys, func(i, j int) bool {
-		return c.items[keys[i]].hits.Load() > c.items[keys[j]].hits.Load()
-	})
-	if n > 0 && n < len(keys) {
-		keys = keys[:n]
+	pairs := make([]kv, 0, len(c.items))
+	for k, e := range c.items {
+		pairs = append(pairs, kv{k, e.hits.Load()})
+	}
+	c.mu.RUnlock()
+	sort.Slice(pairs, func(i, j int) bool { return pairs[i].hits > pairs[j].hits })
+	if n > 0 && n < len(pairs) {
+		pairs = pairs[:n]
+	}
+	keys := make([]Key, len(pairs))
+	for i, p := range pairs {
+		keys[i] = p.k
 	}
 	return keys
 }
@@ -376,7 +384,7 @@ func (c *Cache) Popular(n int) []string {
 // Stale reports whether the entry for k is missing, already expired, or will
 // expire within lookahead — i.e. it should be refreshed now. It does not
 // count as a hit.
-func (c *Cache) Stale(k string, lookahead time.Duration) bool {
+func (c *Cache) Stale(k Key, lookahead time.Duration) bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	e, ok := c.items[k]

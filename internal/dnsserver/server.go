@@ -387,7 +387,7 @@ func (s *Server) serve(ctx context.Context, clientIP net.IP, clientID string, re
 	}
 	upstreamLabel := s.upstreamLabel(resolver, matchedRoute, upstreamOverride)
 
-	key := cache.Key(req)
+	key := cache.KeyOf(req)
 	out, cached, err := s.cache.DoHit(ctx, key, func() (*dns.Msg, error) {
 		return resolver.Resolve(ctx, req)
 	})
@@ -562,13 +562,9 @@ func (s *Server) refreshPopular() {
 		if !s.cache.Stale(k, ahead) {
 			continue
 		}
-		name, qtype, qclass, ok := cache.ParseKey(k)
-		if !ok {
-			continue
-		}
 		req := new(dns.Msg)
 		req.RecursionDesired = true
-		req.Question = []dns.Question{{Name: name, Qtype: qtype, Qclass: qclass}}
+		req.Question = []dns.Question{{Name: k.Name, Qtype: k.QType, Qclass: k.QClass}}
 		m, err := auto.Resolve(ctx, req)
 		if err != nil {
 			continue

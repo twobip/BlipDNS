@@ -19,9 +19,14 @@ func mkMsg(name string, ttl uint32) *dns.Msg {
 	return m
 }
 
+// testKey builds a cache key for an A/IN query for name.
+func testKey(name string) Key {
+	return Key{Name: dns.Fqdn(name), QType: dns.TypeA, QClass: dns.ClassINET}
+}
+
 func TestSetGetDecrementsTTL(t *testing.T) {
 	c := New(time.Hour, 0)
-	k := Key(mkMsg("a.test", 60))
+	k := KeyOf(mkMsg("a.test", 60))
 	c.Set(k, mkMsg("a.test", 60))
 	got, ok := c.Get(k)
 	if !ok {
@@ -34,8 +39,8 @@ func TestSetGetDecrementsTTL(t *testing.T) {
 
 func TestPurge(t *testing.T) {
 	c := New(time.Hour, 0)
-	c.Set(Key(mkMsg("a.test", 60)), mkMsg("a.test", 60))
-	c.Set(Key(mkMsg("b.test", 60)), mkMsg("b.test", 60))
+	c.Set(KeyOf(mkMsg("a.test", 60)), mkMsg("a.test", 60))
+	c.Set(KeyOf(mkMsg("b.test", 60)), mkMsg("b.test", 60))
 	if c.Len() != 2 {
 		t.Fatalf("precondition: Len = %d, want 2", c.Len())
 	}
@@ -43,11 +48,11 @@ func TestPurge(t *testing.T) {
 	if c.Len() != 0 {
 		t.Fatalf("Len after purge = %d, want 0", c.Len())
 	}
-	if _, ok := c.Get(Key(mkMsg("a.test", 60))); ok {
+	if _, ok := c.Get(KeyOf(mkMsg("a.test", 60))); ok {
 		t.Error("expected miss after purge")
 	}
 	// cache must remain usable after purge
-	k := Key(mkMsg("a.test", 60))
+	k := KeyOf(mkMsg("a.test", 60))
 	c.Set(k, mkMsg("a.test", 60))
 	if _, ok := c.Get(k); !ok {
 		t.Error("expected hit after re-insertion post-purge")
@@ -58,7 +63,7 @@ func TestExpiry(t *testing.T) {
 	c := New(time.Hour, 0)
 	c.now = func() time.Time { return time.Unix(1000, 0) }
 	// inject an entry expiring at 1010
-	k := Key(mkMsg("a.test", 5))
+	k := KeyOf(mkMsg("a.test", 5))
 	m := mkMsg("a.test", 5)
 	c.Set(k, m)
 	// before expiry
@@ -89,7 +94,7 @@ func TestCoalesce(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, _ = c.Do(context.Background(), "k", fn)
+			_, _ = c.Do(context.Background(), testKey("a.test."), fn)
 		}()
 	}
 	wg.Wait()
@@ -106,12 +111,12 @@ func TestDoHitReportsCacheSource(t *testing.T) {
 		return mkMsg("a.test", 60), nil
 	}
 	// First call must miss and fetch.
-	_, cached, err := c.DoHit(context.Background(), "k", fn)
+	_, cached, err := c.DoHit(context.Background(), testKey("a.test."), fn)
 	if err != nil || cached {
 		t.Errorf("first DoHit: cached=%v err=%v, want miss", cached, err)
 	}
 	// Second call must be served from cache.
-	_, cached, err = c.DoHit(context.Background(), "k", fn)
+	_, cached, err = c.DoHit(context.Background(), testKey("a.test."), fn)
 	if err != nil || !cached {
 		t.Errorf("second DoHit: cached=%v err=%v, want hit", cached, err)
 	}
@@ -135,7 +140,7 @@ func TestDoHitCoalescedWaiterIsHit(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, cached, _ := c.DoHit(context.Background(), "k", fn)
+			_, cached, _ := c.DoHit(context.Background(), testKey("a.test."), fn)
 			mu.Lock()
 			cacheds = append(cacheds, cached)
 			mu.Unlock()
@@ -154,23 +159,23 @@ func TestDoHitCoalescedWaiterIsHit(t *testing.T) {
 
 func TestEvictLeastRecentlyUsed(t *testing.T) {
 	c := New(time.Hour, 2)
-	c.Set("k1", mkMsg("a.test", 60))
-	c.Set("k2", mkMsg("b.test", 60))
+	c.Set(testKey("a.test."), mkMsg("a.test", 60))
+	c.Set(testKey("b.test."), mkMsg("b.test", 60))
 	// promote k1 to most-recently-used; hits are promoted every
 	// promoteEvery-th hit, so hit it that many times to guarantee promotion.
 	for i := 0; i < promoteEvery; i++ {
-		if _, ok := c.Get("k1"); !ok {
+		if _, ok := c.Get(testKey("a.test.")); !ok {
 			t.Fatal("expected k1 hit")
 		}
 	}
-	c.Set("k3", mkMsg("c.test", 60)) // k2 is now LRU -> evicted
-	if _, ok := c.Get("k2"); ok {
+	c.Set(testKey("c.test."), mkMsg("c.test", 60)) // b.test. is now LRU -> evicted
+	if _, ok := c.Get(testKey("b.test.")); ok {
 		t.Error("expected k2 to be evicted")
 	}
-	if _, ok := c.Get("k1"); !ok {
+	if _, ok := c.Get(testKey("a.test.")); !ok {
 		t.Error("expected k1 to survive (it was used most recently)")
 	}
-	if _, ok := c.Get("k3"); !ok {
+	if _, ok := c.Get(testKey("c.test.")); !ok {
 		t.Error("expected k3 present")
 	}
 	if c.Len() != 2 {
@@ -180,7 +185,7 @@ func TestEvictLeastRecentlyUsed(t *testing.T) {
 
 func TestSetPreservesHits(t *testing.T) {
 	c := New(time.Hour, 0)
-	k := Key(mkMsg("a.test", 60))
+	k := KeyOf(mkMsg("a.test", 60))
 	c.Set(k, mkMsg("a.test", 60))
 	_, _ = c.Get(k)
 	_, _ = c.Get(k)
@@ -192,23 +197,24 @@ func TestSetPreservesHits(t *testing.T) {
 
 func TestPopularOrdering(t *testing.T) {
 	c := New(time.Hour, 0)
-	c.Set("k1", mkMsg("a.test", 60))
-	c.Set("k2", mkMsg("b.test", 60))
-	c.Set("k3", mkMsg("c.test", 60))
-	_, _ = c.Get("k1")
-	_, _ = c.Get("k1")
-	_, _ = c.Get("k1")
-	_, _ = c.Get("k2")
+	c.Set(testKey("a.test."), mkMsg("a.test", 60))
+	c.Set(testKey("b.test."), mkMsg("b.test", 60))
+	c.Set(testKey("c.test."), mkMsg("c.test", 60))
+	_, _ = c.Get(testKey("a.test."))
+	_, _ = c.Get(testKey("a.test."))
+	_, _ = c.Get(testKey("a.test."))
+	_, _ = c.Get(testKey("b.test."))
 	got := c.Popular(2)
-	if len(got) != 2 || got[0] != "k1" || got[1] != "k2" {
-		t.Errorf("expected [k1 k2], got %v", got)
+	wantA, wantB := testKey("a.test."), testKey("b.test.")
+	if len(got) != 2 || got[0] != wantA || got[1] != wantB {
+		t.Errorf("expected [a.test. b.test.], got %v %v", got[0], got[1])
 	}
 }
 
 func TestStaleLookahead(t *testing.T) {
 	c := New(time.Hour, 0)
 	c.now = func() time.Time { return time.Unix(1000, 0) }
-	k := Key(mkMsg("a.test", 5)) // expires at 1005
+	k := KeyOf(mkMsg("a.test", 5)) // expires at 1005
 	c.Set(k, mkMsg("a.test", 5))
 	if c.Stale(k, time.Second) {
 		t.Error("not stale yet: 4s left, lookahead 1s")
@@ -220,18 +226,8 @@ func TestStaleLookahead(t *testing.T) {
 	if !c.Stale(k, 0) {
 		t.Error("should be stale once expired")
 	}
-	if c.Stale("missing", 0) {
+	if c.Stale(testKey("missing."), 0) {
 		t.Error("missing key is not stale")
-	}
-}
-
-func TestParseKey(t *testing.T) {
-	name, qtype, qclass, ok := ParseKey("example.com.|1|1")
-	if !ok || name != "example.com." || qtype != dns.TypeA || qclass != dns.ClassINET {
-		t.Errorf("bad ParseKey result: %q %d %d %v", name, qtype, qclass, ok)
-	}
-	if _, _, _, ok := ParseKey("garbage"); ok {
-		t.Error("expected parse failure on malformed key")
 	}
 }
 
@@ -241,31 +237,31 @@ func TestTwoTierHold(t *testing.T) {
 	c.now = func() time.Time { return time.Unix(1000, 0) }
 
 	// Seed some entries with record TTL 5s.
-	for _, n := range []string{"a.test", "b.test", "c.test", "d.test"} {
-		c.Set(Key(mkMsg(n, 5)), mkMsg(n, 5))
+	for _, n := range []string{"a.test.", "b.test.", "c.test.", "d.test."} {
+		c.Set(testKey(n), mkMsg(n, 5))
 	}
 	// Make a and b clearly more popular than the rest (2 >= warm=2 higher-hit
 	// entries), so they rank in the top tier.
 	for i := 0; i < 5; i++ {
-		_, _ = c.Get(Key(mkMsg("a.test", 5)))
-		_, _ = c.Get(Key(mkMsg("b.test", 5)))
+		_, _ = c.Get(testKey("a.test."))
+		_, _ = c.Get(testKey("b.test."))
 	}
 	// Re-set a low-hit entry now that 2 others are more popular: it must fall
 	// into the regular-hold tier (1h), not its record TTL.
-	c.Set(Key(mkMsg("e.test", 5)), mkMsg("e.test", 5))
+	c.Set(testKey("e.test."), mkMsg("e.test", 5))
 
 	// 20s later: past every record TTL (5s).
 	c.now = func() time.Time { return time.Unix(1020, 0) }
 
 	// The non-top entry e stays cached for regularHold (may serve stale).
-	if _, ok := c.Get(Key(mkMsg("e.test", 5))); !ok {
+	if _, ok := c.Get(testKey("e.test.")); !ok {
 		t.Error("non-top entry should still be cached within regularHold")
 	}
 	// Top entries a,b expire at their own record TTL.
-	if _, ok := c.Get(Key(mkMsg("a.test", 5))); ok {
+	if _, ok := c.Get(testKey("a.test.")); ok {
 		t.Error("top-2 entry should expire at its record TTL")
 	}
-	if _, ok := c.Get(Key(mkMsg("b.test", 5))); ok {
+	if _, ok := c.Get(testKey("b.test.")); ok {
 		t.Error("top-2 entry should expire at its record TTL")
 	}
 }
@@ -274,9 +270,9 @@ func TestTwoTierDefaultUsesRecordTTL(t *testing.T) {
 	c := New(time.Hour, 0)
 	c.SetHold(0, 0) // two-tier off -> record TTL everywhere
 	c.now = func() time.Time { return time.Unix(1000, 0) }
-	c.Set(Key(mkMsg("a.test", 5)), mkMsg("a.test", 5))
+	c.Set(testKey("a.test."), mkMsg("a.test", 5))
 	c.now = func() time.Time { return time.Unix(1006, 0) }
-	if _, ok := c.Get(Key(mkMsg("a.test", 5))); ok {
+	if _, ok := c.Get(testKey("a.test.")); ok {
 		t.Error("without regularHold, entry should expire at its record TTL")
 	}
 }
@@ -284,8 +280,8 @@ func TestTwoTierDefaultUsesRecordTTL(t *testing.T) {
 func TestServeTTLCappedAtSource(t *testing.T) {
 	c := New(time.Hour, 0)
 	c.SetHold(0, time.Hour) // non-top held 1h but source TTL is 60s
-	c.Set(Key(mkMsg("a.test", 60)), mkMsg("a.test", 60))
-	got, ok := c.Get(Key(mkMsg("a.test", 60)))
+	c.Set(testKey("a.test."), mkMsg("a.test", 60))
+	got, ok := c.Get(testKey("a.test."))
 	if !ok {
 		t.Fatal("expected hit")
 	}
