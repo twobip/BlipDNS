@@ -14,8 +14,11 @@
 - `internal/filter` — per-client CIDR policy store (longest-prefix match) + suffix/wildcard domain matching. Allowlist beats blocklist.
 - `internal/upstream` — DoH + UDP resolvers with failover (`MultiResolver`). `UpstreamServer.TimeoutSec` controls per-server failover timeout.
 - `internal/cache`, `internal/config`, `internal/certgen`, `internal/blocklist`.
+- `internal/ha` — keepalived/VRRP config manager for 2-node LAN HA (writes `/var/lib/blipd/keepalived.conf`).
+- `internal/controller/querylog.go` — SQLite query log via `modernc.org/sqlite` (CGO-free); per-client activity on the dashboard comes from here, not from in-memory counters.
 - `deploy/` — example systemd units, configs, and install/uninstall scripts.
 - `scripts/install-*.sh` — one-shot install scripts that clone from GitHub, build, and set up systemd.
+- `testing/` — dnsperf input files, security audit reports, and `testing/benchmarks/` (hot-path Go benchmarks). **Gitignored** — local-only, never commit it.
 
 ## Commands (memorize these)
 ```
@@ -25,16 +28,24 @@ go vet ./...
 gofmt -w <file>                                  # only gofmt files you edit
 go test ./...
 go test ./internal/dnsserver/                   # a single package
+go test -bench . -benchmem ./testing/benchmarks/  # hot-path benchmarks (cache Get, MultiResolver)
 ```
 - Required order: **build → vet → test**. `go vet` and `go test` are fast and gate the whole repo.
 - `go test` is hermetic for the controller (`internal/controller/*_test.go` spins up an in-process fake `blipd` HTTP API — no live daemon needed).
 - `gofmt -l internal/ cmd/` is clean.
 
 ## Test quirks / gotchas
-- The `TestDnsperf*` tests in `internal/dnsserver` require the external `dnsperf` binary and a **live `blipd` on `:53`**. They `t.Skip` when `dnsperf` is absent, so a clean `go test ./...` should not fail on them — if they run and fail, you need the binary + running resolver.
-- `bin/` is gitignored build output.
-- `*.log` files are gitignored — do not commit them.
+- The `TestDnsperf*` tests in `internal/dnsserver` require the external `dnsperf` binary and a **live `blipd` on `:53`**. They `t.Skip` only when `dnsperf` is absent — if the binary is installed but no resolver is listening, they **fail** rather than skip (all 4 fail identically on a clean tree; check the daemon first).
+- `bin/`, `/testing/`, `.worktrees/` are gitignored. `*.log` files are gitignored — do not commit them.
 - Management API requires a bearer token (`SetMgmtToken`); `blipd` runs `warnConfigPerms` and warns if the config file is group/world readable (it holds tokens).
+
+## Query hot path (performance-sensitive)
+`dnsserver.Server.serve` runs per query: filter → blocklist → local records → cache/upstream. Hard-won rules from past optimization passes:
+- No mutex-guarded counters or map writes on this path — use `atomic.Uint64` etc. (`control.Counters`, `cache.entry.hits` are all atomics now).
+- Don't build `control.WatchEvent` payloads without checking `s.ctrl.HasWatchers()` first: rendering answers allocates per RR and nobody consumes it when no SSE client is connected.
+- Cache hits stay on `RLock`; LRU promotion is approximate (every 16th hit, `promoteEvery`). Don't reintroduce an exclusive-lock escalation per hit.
+- `MultiResolver.downUntil` is atomic unix-nanos; the healthy fast path takes no lock.
+- Verify hot-path changes with `testing/benchmarks/` before/after, not by eyeballing.
 
 ## Architecture flow (rate-limit feature, as a worked example)
 Runtime config of the per-client DNS QPS limit flows **controller → blipd**:
