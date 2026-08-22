@@ -982,7 +982,14 @@ func (s *Server) handleTopDomains(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
-	writeJSON(w, map[string]interface{}{"domains": domains})
+	// Blocked ranking comes from BLOCK rows only — a separate list so the
+	// dashboard can show "top allowed" and "top blocked" side by side.
+	blocked, err := s.fleet.queryLog.TopBlockedDomains(r.Context(), instance, since, limit)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	writeJSON(w, map[string]interface{}{"domains": domains, "blocked": blocked})
 }
 
 // handleCacheStats reports per-instance cache hit rates over the query-log

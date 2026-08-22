@@ -217,14 +217,23 @@ func TestQueryLogStoreTopDomains(t *testing.T) {
 		t.Fatalf("TopDomains: %v", err)
 	}
 	if len(domains) != 2 {
-		t.Fatalf("TopDomains returned %d domains, want 2 (health_check excluded): %+v", len(domains), domains)
+		t.Fatalf("TopDomains returned %d domains, want 2 (health_check + blocked rows excluded): %+v", len(domains), domains)
 	}
-	// Most frequent first, health_check probe excluded from the ranking.
-	if domains[0].Domain != "example.com" || domains[0].Queries != 4 || domains[0].Blocked != 1 {
-		t.Errorf("top = %+v, want example.com with 4 queries / 1 blocked", domains[0])
+	// Most frequent ALLOWED first; health_check probes and BLOCK rows are
+	// excluded from this ranking (blocked domains have their own list).
+	if domains[0].Domain != "example.com" || domains[0].Queries != 3 {
+		t.Errorf("top = %+v, want example.com with 3 allowed queries", domains[0])
 	}
-	if domains[1].Domain != "news.test" || domains[1].Queries != 1 || domains[1].Blocked != 0 {
+	if domains[1].Domain != "news.test" || domains[1].Queries != 1 {
 		t.Errorf("second = %+v, want news.test with 1 query", domains[1])
+	}
+
+	blocked, err := store.TopBlockedDomains(ctx, "", now.Add(-24*time.Hour), 10)
+	if err != nil {
+		t.Fatalf("TopBlockedDomains: %v", err)
+	}
+	if len(blocked) != 1 || blocked[0].Domain != "example.com" || blocked[0].Queries != 1 {
+		t.Fatalf("TopBlockedDomains = %+v, want example.com with 1 blocked query", blocked)
 	}
 
 	// Limit truncates and an instance filter narrows the tally.

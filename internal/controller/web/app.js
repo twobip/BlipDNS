@@ -278,14 +278,34 @@ function renderTopDomains(domains) {
   const max = list[0].queries || 1;
   el.innerHTML = list.map((d, i) => {
     const pct = Math.max(4, Math.round(d.queries / max * 100));
-    const blocked = d.blocked > 0 ? `<span class="badge off" style="flex:none" title="blocked queries">${fmt(d.blocked)} blk</span>` : "";
     return `<li>
       <span class="mono" style="flex:none;width:22px;color:var(--faint);font-size:12px">${i + 1}</span>
       <div class="grow" style="min-width:0">
         <div style="font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(d.domain)}">${esc(d.domain)}</div>
         <div class="cell-sub"><span class="meter"><i style="width:${pct}%"></i></span> <span class="muted">${fmt(d.queries)} queries</span></div>
       </div>
-      ${blocked}
+    </li>`;
+  }).join("");
+}
+
+// renderTopBlocked fills the "Top Blocked" panel — same row layout as the
+// allowed list but red meters and no "N blk" chip (everything here is blocked).
+function renderTopBlocked(domains) {
+  const el = $("d-topblocked");
+  const list = Array.isArray(domains) ? domains : [];
+  if (!list.length) {
+    el.innerHTML = `<div class="empty"><div class="empty-ic">${IC.check}</div><h4>Nothing blocked</h4><p>No blocked queries in this window.</p></div>`;
+    return;
+  }
+  const max = list[0].queries || 1;
+  el.innerHTML = list.map((d, i) => {
+    const pct = Math.max(4, Math.round(d.queries / max * 100));
+    return `<li>
+      <span class="mono" style="flex:none;width:22px;color:var(--faint);font-size:12px">${i + 1}</span>
+      <div class="grow" style="min-width:0">
+        <div style="font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(d.domain)}">${esc(d.domain)}</div>
+        <div class="cell-sub"><span class="meter meter-red"><i style="width:${pct}%"></i></span> <span class="muted">${fmt(d.queries)} blocked</span></div>
+      </div>
     </li>`;
   }).join("");
 }
@@ -308,7 +328,7 @@ async function fetchStats() {
     renderDashInstances(d.per_instance);
     API(`/api/top-domains?since=${rng.since}&limit=10`)
       .then((r) => r.json())
-      .then((t) => renderTopDomains(t.domains))
+      .then((t) => { renderTopDomains(t.domains); renderTopBlocked(t.blocked); })
       .catch(() => { /* best-effort */ });
     if (!ctx) return;
     const gl = ctx.getContext("2d");

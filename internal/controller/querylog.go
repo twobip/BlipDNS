@@ -148,11 +148,12 @@ func (s *QueryLogStore) ClientStats(ctx context.Context, instance string, since 
 	return out, rows.Err()
 }
 
-// TopDomains returns the most-queried domains within the range, by total query
-// count, with the blocked subset of each. health_check probes and empty
-// (rate-limited before the domain was known) entries are excluded.
+// TopDomains returns the most-queried (ALLOWED) domains within the range, by
+// query count. Blocked queries are excluded here — they have their own
+// TopBlockedDomains ranking. health_check probes and empty (rate-limited
+// before the domain was known) entries are also excluded.
 func (s *QueryLogStore) TopDomains(ctx context.Context, instance string, since time.Time, limit int) ([]TopDomain, error) {
-	query := `SELECT ql.domain, COUNT(*), SUM(CASE WHEN ql.action = 'BLOCK' THEN 1 ELSE 0 END) FROM query_log ql WHERE ql.timestamp >= ? AND ql.domain != 'health_check' AND ql.domain != ''`
+	query := `SELECT ql.domain, COUNT(*), 0 FROM query_log ql WHERE ql.timestamp >= ? AND ql.action != 'BLOCK' AND ql.domain != 'health_check' AND ql.domain != ''`
 	args := []interface{}{since}
 	if instance != "" {
 		query += " AND ql.instance = ?"
@@ -179,6 +180,39 @@ func (s *QueryLogStore) TopDomains(ctx context.Context, instance string, since t
 	}
 	if out == nil {
 		out = []TopDomain{}
+	}
+	return out, rows.Err()
+}
+
+// TopBlockedDomains returns the most-blocked domains within the range, by
+// blocked-query count. Only BLOCK rows count; the same health_check/empty
+// exclusions as TopDomains apply.
+func (s *QueryLogStore) TopBlockedDomains(ctx context.Context, instance string, since time.Time, limit int) ([]TopDomain, error) {
+	query := `SELECT ql.domain, SUM(CASE WHEN ql.action = 'BLOCK' THEN 1 ELSE 0 END), 0 FROM query_log ql WHERE ql.timestamp >= ? AND ql.action = 'BLOCK' AND ql.domain != 'health_check' AND ql.domain != ''`
+	args := []interface{}{since}
+	if instance != "" {
+		query += " AND ql.instance = ?"
+		args = append(args, instance)
+	}
+	query += " GROUP BY ql.domain ORDER BY SUM(CASE WHEN ql.action = 'BLOCK' THEN 1 ELSE 0 END) DESC LIMIT ?"
+	args = append(args, limit)
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := []TopDomain{}
+	for rows.Next() {
+		var td TopDomain
+		var blocked, total sql.NullInt64
+		if err := rows.Scan(&td.Domain, &blocked, &total); err != nil {
+			return nil, err
+		}
+		td.Blocked = int(blocked.Int64)
+		td.Queries = td.Blocked
+		out = append(out, td)
 	}
 	return out, rows.Err()
 }

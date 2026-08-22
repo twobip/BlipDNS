@@ -513,6 +513,8 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
 /* ---------- sparkline-ish progress ---------- */
 .meter { width: 60px; height: 5px; border-radius: 4px; background: var(--surface-3); overflow: hidden; display:inline-block; vertical-align: middle; }
 .meter > i { display: block; height: 100%; border-radius: 4px; background: var(--accent-grad); }
+.meter-red { background: rgba(247,107,107,.12); }
+.meter-red > i { background: linear-gradient(90deg, #f76b6b, #ff9d6b); }
 
 /* ============================================================
    MODAL
