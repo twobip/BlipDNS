@@ -549,10 +549,13 @@ function queryRowHtml(r) {
   return `<tr class="q-row ${isBlock ? "q-row-block" : ""}" data-ts="${esc(r.timestamp)}">
     <td class="q-time"><span class="t" data-t="${esc(r.timestamp)}" title="${esc(r.timestamp)}">…</span></td>
     <td class="q-domain">
-      <span class="q-globe">${IC.globe}</span>
-      <span class="q-dom" title="${esc(r.domain)}">${esc(r.domain)}</span>
-      <button class="icon-btn q-copy" data-copy="${esc(r.domain)}" title="Copy domain">${IC.copy}</button>
-      <button class="icon-btn q-expand" data-expand="${esc(r.timestamp)}|${esc(r.domain)}" title="Details">${IC.info}</button>
+      <div class="q-dom-line">
+        <span class="q-globe">${IC.globe}</span>
+        <span class="q-dom" title="${esc(r.domain)}">${esc(r.domain)}</span>
+        <span class="grow"></span>
+        <button class="icon-btn q-copy" data-copy="${esc(r.domain)}" title="Copy domain">${IC.copy}</button>
+        <button class="icon-btn q-expand" data-expand="${esc(r.timestamp)}|${esc(r.domain)}" title="Details">${IC.info}</button>
+      </div>
     </td>
     <td><span class="badge badge-action ${actionBadge}">${isBlock ? IC.block : action === "PASS" ? IC.arrow : ""}${actionLabel}</span></td>
     <td class="q-client">${clientCellHtml(r)}</td>
@@ -673,8 +676,9 @@ function debounce(fn, ms) {
 function latencyHtml(r) {
   const dur = (r.duration_us == null) ? null : Number(r.duration_us);
   const lat = dur == null ? "—" : dur < 1000 ? dur + "µs" : (dur / 1000).toFixed(1) + "ms";
-  const badge = r.cached ? `<span class="badge badge-action on" title="Served from cache">cache</span>` : "";
-  return badge + `<span class="muted mono" title="${dur == null ? "no timing data" : dur + " µs"}">${lat}</span>`;
+  // Cache shown as a compact icon (not a text badge) so the column stays narrow.
+  const cache = r.cached ? `<span class="q-cache-ic" title="Served from cache">${IC.cache}</span>` : "";
+  return `<span class="q-lat-wrap">${cache}<span class="muted mono" title="${dur == null ? "no timing data" : dur + " µs"}">${lat}</span></span>`;
 }
 function propsInstanceOptions() {
   const sel = $("q-instance");
