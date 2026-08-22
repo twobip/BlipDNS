@@ -105,7 +105,7 @@ const NAV = [
   { id: "ha", label: "High Availability", icon: IC.shield, group: "System" },
 ];
 const TITLES = {
-  dashboard: ["Dashboard", "Fleet throughput &amp; health"],
+  dashboard: ["Dashboard", "Fleet throughput & health"],
   queries: ["Query Log", "Live DNS resolution history"],
   "cache-stats": ["Cache Stats", "Cache hit rate and in-memory domain counts"],
   "upstream-errors": ["Upstream Errors", "Failed upstream requests and when they happened"],
@@ -113,7 +113,7 @@ const TITLES = {
   instances: ["Instances", "Managed blipd resolvers"],
   blocklist: ["Blocklists", "Global blocked domains and list sources"],
   filters: ["DNS Filters", "Per-instance policies and scope rules"],
-  upstream: ["Upstream &amp; Conditional Forwarding", "Named resolvers and per-suffix forwarding routes"],
+  upstream: ["Upstream & Conditional Forwarding", "Named resolvers and per-suffix forwarding routes"],
   records: ["Local Records", "Static DNS records answered locally before forwarding"],
   settings: ["Settings", "Controller configuration"],
   ha: ["High Availability", "LAN keepalived / VRRP failover"],
