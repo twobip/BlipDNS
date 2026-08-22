@@ -356,7 +356,10 @@ function cgrad(ctx, rgb) {
 // X-axis tick labels: time-of-day for short ranges, dates for week/month.
 function fmtChartTick(d, dates) {
   if (!dates) return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  return d.toLocaleDateString([], { weekday: "short", day: "numeric", month: "short" });
+  // Long ranges: show the date AND the time. Buckets within a day (hourly on
+  // 1w, 6-hourly on 1mo) would otherwise be indistinguishable from each other.
+  return d.toLocaleDateString([], { weekday: "short", day: "numeric", month: "short" })
+    + " " + d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
 /* ---------- live events (SSE) ---------- */
