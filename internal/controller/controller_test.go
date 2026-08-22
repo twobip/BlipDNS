@@ -831,10 +831,11 @@ func TestFleetConfigSynced(t *testing.T) {
 	if err := fleet.Add(context.Background(), InstanceConfig{ID: "a", URL: srv.URL, Token: "t"}); err != nil {
 		t.Fatal(err)
 	}
-	// not synced until the first reconcile push lands
-	if st := fleet.List()[0]; st.ConfigSynced {
-		t.Error("expected not synced before first push")
-	}
+	// NOTE: no "not synced before first push" assertion here — Add() starts
+	// the poll loop, which fires immediately (before the first ticker tick),
+	// so under -race timing the first push can complete before this test
+	// ever observes the instance. Whether ConfigSynced is false at t=0 is a
+	// scheduling coin-flip, not a contract.
 	deadline := time.After(3 * time.Second)
 	for {
 		if st := fleet.List()[0]; st.ConfigSynced {
