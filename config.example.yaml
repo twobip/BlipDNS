@@ -21,6 +21,33 @@ admin_token: "test-token"
 #   upstream: "udp://1.1.1.1:53 https://1.1.1.1/dns-query"  # UDP primary, DoH failover
 #   upstream: "udp://8.8.8.8:53|2 https://1.1.1.1/dns-query|1"  # DoH is primary
 upstream: "udp://1.1.1.1:53 https://1.1.1.1/dns-query"
+# Named upstream pool with conditional routing (optional). Each server gets a
+# priority (0 = never forwarded to directly, route-only). Routes send matching
+# queries to a named server; everything else follows the `upstream` failover
+# list above.
+# upstream_servers:
+#   - name: "home"
+#     address: "udp://192.168.1.1:53"
+#     priority: 1
+#   - name: "work-doh"
+#     address: "https://dns.work.example/dns-query"
+#     priority: 2
+#     timeout_sec: 3            # per-server failover timeout (0 = 5s default)
+# upstream_routes:
+#   - name: "internal-to-home"
+#     qname_suffix: "internal.example"   # queries ending in this go to "home"
+#     server: "home"
+#   - name: "corp-clients"
+#     qname_suffix: ""                   # empty suffix matches all names
+#     client_cidr: "10.0.0.0/8"          # ...from these clients only
+#     server: "work-doh"
+# Bootstrap DNS servers: used to resolve the hostname of a DoH upstream server
+# (e.g. https://dns.google/dns-query) before dialing it. UDP ("1.1.1.1") and
+# DoH ("https://1.1.1.1/dns-query") both work. Leave empty to use the system
+# resolver.
+# upstream_bootstrap:
+#   - address: "1.1.1.1"
+#   - address: "https://1.1.1.1/dns-query"
 # DNS response cache (in-RAM). cache_cap caps how long any response may be
 # cached regardless of its record TTL; cache_size bounds the number of cached
 # responses (0 = unlimited, entries dropped on TTL expiry only).
@@ -32,6 +59,34 @@ cache_size: 10000
 cache_warm_count: 100
 cache_warm_ahead: 30s
 cache_warm_interval: 10s
+# Two-tier retention: popular entries (see cache_warm_count) are kept fresh by
+# the warm loop above, while everything else is dropped after cache_regular.
+# 0 = non-popular entries just follow each record's TTL.
+# cache_regular: 5m
+
+# DoH serving. doh_tls on means DoHAddr speaks HTTPS; a self-signed cert is
+# auto-generated when cert_file/key_file are unset and persisted under tls_dir.
+# doh_http_addr additionally exposes plain-HTTP DoH (RFC 8484) on its own port.
+# doh_tls: true
+# cert_file: "/etc/blipd/tls.crt"
+# key_file: "/etc/blipd/tls.key"
+# tls_dir: "/var/lib/blipd"
+# doh_http_addr: "0.0.0.0:8053"
+
+# Adoption/identity state. Persists the instance id + claim code so a restart
+# doesn't regenerate them (the controller needs the claim code to bootstrap).
+# state_file: "/var/lib/blipd/adopted.json"
+# instance_id: "blipd-1"
+
+# Global DNS blocklists (AdBlock Plus / hosts format), applied to ALL clients
+# before per-client policy. Multiple feeds merge; blocklist_update_hours sets
+# the auto-refresh interval (0 = fetch once at boot). blocklist_cache_file
+# persists a snapshot so an unreachable feed doesn't blank filtering at boot.
+# blocklist_urls:
+#   - "https://example.com/easylist.txt"
+#   - "https://example.com/hosts-ad.txt"
+# blocklist_update_hours: 24
+# blocklist_cache_file: "/var/lib/blipd/blocklist.cache"
 
 default_policy:
   id: "default"
