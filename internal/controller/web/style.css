@@ -561,6 +561,7 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
    EMPTY STATE / SKELETON / SPINNER
    ============================================================ */
 .empty { text-align: center; padding: 56px 24px; }
+.dash-fixed .empty { display: grid; place-content: center; height: 100%; padding: 24px; }
 .empty-ic { width: 52px; height: 52px; margin: 0 auto 16px; border-radius: 14px; background: var(--surface-2); border: 1px solid var(--border); display: grid; place-items: center; }
 .empty-ic svg { width: 24px; height: 24px; color: var(--muted); }
 .empty h4 { margin: 0 0 6px; font-size: 15px; font-weight: 600; }
@@ -578,6 +579,22 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
    CHART / LISTS / MISC
    ============================================================ */
 .chart-wrap { position: relative; height: 320px; padding: 18px 24px 22px; }
+
+/* Dashboard panels keep a fixed height so page load / data swaps don't
+   reflow the layout (the "flash" when rows arrive). The body scrolls
+   internally if content ever exceeds it. */
+.dash-fixed { height: 460px; display: flex; flex-direction: column; }
+.dash-fixed .panel-head { flex-shrink: 0; }
+.dash-fixed > .list, .dash-fixed > #d-instances { flex: 1; overflow-y: auto; min-height: 0; }
+/* Shimmer placeholder shown until real rows replace it. */
+.dash-skeleton {
+  height: 100%;
+  background: linear-gradient(100deg,
+    var(--surface) 30%, var(--surface-3) 50%, var(--surface) 70%);
+  background-size: 200% 100%;
+  animation: dash-skel 1.2s linear infinite;
+}
+@keyframes dash-skel { from { background-position: 200% 0; } to { background-position: -200% 0; } }
 .kpi-bar { display: flex; gap: 14px; padding: 14px 20px; flex-wrap: wrap; }
 .kpi { flex: 1; min-width: 130px; }
 .kpi .k { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
