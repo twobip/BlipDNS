@@ -16,8 +16,6 @@ internal/
   control/    management API server + controller client (shared types)
   dnsserver/  unified UDP/TCP/DoH query path: filter -> cache -> upstream
   config/     YAML configuration loader
-testdata/
-  mockdns/    tiny DNS server used by the e2e smoke test
 ```
 
 ## Build
@@ -139,7 +137,3 @@ blipctl --token SECRET http://10.0.0.5:8444 block 192.168.10.0/24 ads.net
 ```
 go test ./...
 ```
-
-The `testdata/mockdns` helper plus `config.e2e.yaml` can drive a full
-end-to-end smoke test (see the build notes) that exercises the classic DNS
-path, the DoH path, and live per-client policy pushes from the controller.
