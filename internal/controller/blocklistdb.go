@@ -70,7 +70,8 @@ CREATE TABLE IF NOT EXISTS blocklist_membership (
 	source_id INTEGER NOT NULL,
 	domain_id INTEGER NOT NULL,
 	PRIMARY KEY (source_id, domain_id)
-) WITHOUT ROWID;`); err != nil {
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS idx_blocklist_membership_domain_id ON blocklist_membership(domain_id);`); err != nil {
 		return nil, fmt.Errorf("create blocklist source schema: %w", err)
 	}
 	s := &BlocklistStore{db: db}
