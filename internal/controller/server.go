@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/hex"
@@ -86,6 +87,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/instances/", api(s.handleInstance))            // /add /delete /policies /policy /adopt /adopt/status /adopt/reset /label /query-log
 	mux.HandleFunc("/api/queries", api(s.handleQueries))                // query log
 	mux.HandleFunc("/api/upstream-errors", api(s.handleUpstreamErrors)) // upstream failure details
+	mux.HandleFunc("/api/upstream/test", api(s.handleUpstreamTest))     // POST test query against given upstreams
 	mux.HandleFunc("/api/clients", api(s.handleClients))                // per-client activity
 	mux.HandleFunc("/api/client-names", api(s.handleClientNames))       // friendly client renames
 	mux.HandleFunc("/api/stats", api(s.handleStats))                    // aggregated query stats for graphs
@@ -1074,6 +1076,58 @@ func (s *Server) handleUpstreamErrors(w http.ResponseWriter, r *http.Request) {
 		total += st.Count
 	}
 	writeJSON(w, map[string]interface{}{"total": total, "errors": stats})
+}
+
+// handleUpstreamTest probes each given upstream with one A query (default
+// example.com) and reports per-server reachability + latency. The probes run
+// from blipc itself, concurrently, each bounded by its server timeout —
+// useful to validate the editor contents before saving. This deliberately
+// stays blipc-local: it does not touch instances or the control.Client.
+func (s *Server) handleUpstreamTest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		Servers []upstream.UpstreamServer `json:"servers"`
+		Domain  string                    `json:"domain"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	if len(req.Servers) == 0 {
+		http.Error(w, "no servers to test", http.StatusBadRequest)
+		return
+	}
+	if len(req.Servers) > 32 {
+		http.Error(w, "too many servers (max 32)", http.StatusBadRequest)
+		return
+	}
+	domain := strings.TrimSpace(req.Domain)
+	if domain == "" {
+		domain = "example.com"
+	}
+	if len(domain) > 253 {
+		http.Error(w, "domain too long", http.StatusBadRequest)
+		return
+	}
+	// Cap the whole fan-out; individual probes time out sooner via their own
+	// per-server timeout.
+	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	defer cancel()
+	results := make([]upstream.ProbeResult, len(req.Servers))
+	var wg sync.WaitGroup
+	for i, sv := range req.Servers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			results[i] = upstream.ProbeServer(ctx, sv, domain)
+		}()
+	}
+	wg.Wait()
+	writeJSON(w, map[string]interface{}{"domain": domain, "results": results})
 }
 
 // handleMaintenance handles destructive maintenance actions: reset_stats

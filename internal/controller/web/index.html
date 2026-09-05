@@ -504,8 +504,12 @@
               </div>
               <div class="row mt">
                 <button class="btn btn-primary" id="s-save-upstream">Save</button>
+                <input class="input" id="s-up-test-domain" style="width:200px" value="example.com" title="Domain to query on each server"/>
+                <button class="btn" id="s-test-upstream">Test</button>
                 <span class="hint" id="s-up-status"></span>
               </div>
+              <div class="hint" style="margin-top:2px">Test sends one query from blipc itself to every server listed above — unsaved edits included.</div>
+              <div id="s-up-test-results" class="mt"></div>
             </div>
           </div>
 

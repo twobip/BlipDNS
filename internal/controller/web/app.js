@@ -2133,6 +2133,34 @@ $("s-save-upstream").onclick = async () => {
 $("s-cf-add").onclick = () => {
   $("s-cf-list").appendChild(routeRow({ name: "", qname_suffix: "", server: "", client_cidr: "" }, effectiveUpServers(scopeState)));
 };
+// testUpstream sends one query for the test domain to every server currently
+// in the editor (saved or not) and renders per-server reachability inline.
+$("s-test-upstream").onclick = async () => {
+  const btn = $("s-test-upstream");
+  const box = $("s-up-test-results");
+  const servers = collectServers();
+  const domain = ($("s-up-test-domain").value || "example.com").trim() || "example.com";
+  if (!servers.length) { toast("add a server first", "err"); return; }
+  btn.disabled = true;
+  btn.textContent = "Testing…";
+  box.innerHTML = `<div class="hint">querying ${esc(domain)} on ${servers.length} server${servers.length > 1 ? "s" : ""}…</div>`;
+  try {
+    const r = await API("/api/upstream/test", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ servers, domain }) });
+    const d = await r.json();
+    const rows = (d.results || []).map((t) => {
+      const label = esc(t.name || t.address);
+      const addr = esc(t.address);
+      if (t.ok) {
+        const ans = (t.answers || []).slice(0, 3).map(esc).join(", ") || "no answer section";
+        const more = (t.answers || []).length > 3 ? ` (+${t.answers.length - 3} more)` : "";
+        return `<li><span class="badge on">ok · ${t.latency_ms}ms · ${esc(t.rcode || "")}</span><span class="mono">${label}</span> <span class="faint mono">${addr}</span><div class="cell-sub mono">${ans}${more}</div></li>`;
+      }
+      return `<li><span class="badge err">fail</span><span class="mono">${label}</span> <span class="faint mono">${addr}</span><div class="cell-sub">${esc(t.error || "unknown error")}</div></li>`;
+    }).join("");
+    box.innerHTML = `<div class="faint" style="font-size:12px;margin-bottom:6px">A ${esc(d.domain || domain)} query from blipc:</div><ul class="list">${rows}</ul>`;
+  } catch (e) { box.innerHTML = ""; toast("test failed: " + e.message, "err"); }
+  finally { btn.disabled = false; btn.textContent = "Test"; }
+};
 $("s-save-cf").onclick = async () => {
   const routes = collectRoutes();
   const st = $("s-cf-status");
