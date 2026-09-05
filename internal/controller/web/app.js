@@ -181,6 +181,12 @@ let chart = null;
 let chartRange = "1d";
 let sse = null, evLive = false;
 let pollTimer = null;
+// Poll timer for the controller self-update badge (Settings → About).
+// Declared with the other top-level state: refreshSettings() (invoked by the
+// initial go() route below) reaches it via loadControllerUpdate(), so it must
+// be initialized before that call — `let` is in the temporal dead zone until
+// its declaration executes.
+let ctrlUpdateTimer = null;
 
 /* ---------- data refresh ---------- */
 async function refresh() {
@@ -2021,7 +2027,6 @@ function loadReleaseEditor() {
   apply();
 })();
 
-let ctrlUpdateTimer = null;
 async function loadControllerUpdate() {
   if (ctrlUpdateTimer) clearTimeout(ctrlUpdateTimer);
   const badge = $("s-ctrl-up-badge");

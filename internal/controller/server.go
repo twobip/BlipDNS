@@ -135,7 +135,7 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 		// disable caching entirely: stale JS is the #1 "my edit didn't take" bug.
 		w.Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
 		w.Header().Set("Content-Security-Policy",
-			"default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; "+
+			"default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; "+
 				"script-src 'self'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'")
 		if r.Body != nil && r.Method != http.MethodGet && r.Method != http.MethodHead {
 			r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
