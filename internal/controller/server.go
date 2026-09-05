@@ -1117,13 +1117,21 @@ func (s *Server) handleUpstreamTest(w http.ResponseWriter, r *http.Request) {
 	// per-server timeout.
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 	defer cancel()
+	// DoH endpoints given as hostnames (e.g. dns.quad9.net) resolve through
+	// the fleet's bootstrap servers when configured, instead of blipc's
+	// system resolver — the same path blipd itself uses.
+	bootstrap, err := upstream.BuildBootstrapResolver(s.fleet.UpstreamBootstrap())
+	if err != nil {
+		http.Error(w, "bad bootstrap servers: "+err.Error(), http.StatusBadRequest)
+		return
+	}
 	results := make([]upstream.ProbeResult, len(req.Servers))
 	var wg sync.WaitGroup
 	for i, sv := range req.Servers {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			results[i] = upstream.ProbeServer(ctx, sv, domain)
+			results[i] = upstream.ProbeServerWithBootstrap(ctx, sv, domain, bootstrap)
 		}()
 	}
 	wg.Wait()

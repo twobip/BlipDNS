@@ -24,10 +24,18 @@ type ProbeResult struct {
 }
 
 // ProbeServer sends one A query for qname to sv and reports what happened.
-// A DNS-level answer (even NXDOMAIN/SERVFAIL) counts as reachable (OK=true);
-// only transport errors and timeouts fail the probe. The per-server timeout
-// (TimeoutSec, default 5s) bounds the call.
+// It uses the system resolver for DoH endpoint hostnames; use
+// ProbeServerWithBootstrap when bootstrap resolvers are configured.
 func ProbeServer(ctx context.Context, sv UpstreamServer, qname string) ProbeResult {
+	return ProbeServerWithBootstrap(ctx, sv, qname, nil)
+}
+
+// ProbeServerWithBootstrap is ProbeServer but resolves a DoH endpoint's own
+// hostname through bootstrap (typically the fleet's bootstrap servers) instead
+// of the system resolver. A DNS-level answer (even NXDOMAIN/SERVFAIL) counts
+// as reachable (OK=true); only transport errors and timeouts fail the probe.
+// The per-server timeout (TimeoutSec, default 5s) bounds the call.
+func ProbeServerWithBootstrap(ctx context.Context, sv UpstreamServer, qname string, bootstrap Resolver) ProbeResult {
 	res := ProbeResult{Name: sv.Name, Address: sv.Address}
 	fqdn := dns.Fqdn(strings.TrimSpace(qname))
 	if _, ok := dns.IsDomainName(fqdn); !ok {
@@ -35,7 +43,7 @@ func ProbeServer(ctx context.Context, sv UpstreamServer, qname string) ProbeResu
 		return res
 	}
 	timeout := timeoutForServer(sv)
-	r, err := fromServerSpec(sv.Address, timeout)
+	r, err := fromServerSpecWithBootstrap(sv.Address, timeout, bootstrap)
 	if err != nil {
 		res.Error = err.Error()
 		return res

@@ -70,7 +70,7 @@ func NewPoolWithBootstrap(servers []UpstreamServer, routes []UpstreamRoute, lega
 	p := &ResolverPool{named: make(map[string]Resolver), bootstrap: bootstrap}
 	p.servers = servers
 	p.routes = routes
-	bootstrapResolver, err := buildBootstrapResolver(bootstrap)
+	bootstrapResolver, err := BuildBootstrapResolver(bootstrap)
 	if err != nil {
 		return nil, err
 	}
@@ -175,13 +175,13 @@ func fromServerSpecWithBootstrap(spec string, timeout time.Duration, bootstrap R
 	return nil, fmt.Errorf("unknown upstream type %q", specs[0].Type)
 }
 
-// buildBootstrapResolver converts the bootstrap server list into a failover
+// BuildBootstrapResolver converts the bootstrap server list into a failover
 // resolver (MultiResolver) used to resolve DoH server hostnames, or nil for an
 // empty list. Bootstrap servers are built without a bootstrap of their own:
 // their hostnames resolve via the system resolver, since bootstrapping the
 // bootstrap would be circular — so a bootstrap endpoint should be a literal IP
 // (e.g. "1.1.1.1" or "https://1.1.1.1/dns-query").
-func buildBootstrapResolver(bootstrap []UpstreamServer) (Resolver, error) {
+func BuildBootstrapResolver(bootstrap []UpstreamServer) (Resolver, error) {
 	var rs []Resolver
 	for _, sv := range bootstrap {
 		r, err := fromServerSpec(sv.Address, timeoutForServer(sv))
