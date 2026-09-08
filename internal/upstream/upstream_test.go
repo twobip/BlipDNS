@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -43,6 +44,25 @@ func TestErrUpstreamStripsEphemeralSocket(t *testing.T) {
 	// Non-network errors pass through with just the address label.
 	if got := errUpstream("https://1.1.1.1/dns-query", &simpleErr{"doh: upstream returned 500"}).Error(); got != "https://1.1.1.1/dns-query: doh: upstream returned 500" {
 		t.Errorf("errUpstream doh = %q", got)
+	}
+}
+
+// TestDoHResolveLabelsEndpoint verifies DoH failures name the endpoint, so the
+// errors page shows which upstream returned the status (e.g. Quad9 403s).
+func TestDoHResolveLabelsEndpoint(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "forbidden", http.StatusForbidden)
+	}))
+	defer ts.Close()
+	r := NewDoH(ts.URL+"/dns-query", time.Second)
+	q := new(dns.Msg)
+	q.SetQuestion("example.com.", dns.TypeA)
+	_, err := r.Resolve(context.Background(), q)
+	if err == nil {
+		t.Fatal("expected 403 error, got nil")
+	}
+	if !strings.Contains(err.Error(), ts.URL+"/dns-query") || !strings.Contains(err.Error(), "403") {
+		t.Errorf("DoH error = %q, want endpoint and 403", err.Error())
 	}
 }
 

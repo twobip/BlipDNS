@@ -186,23 +186,23 @@ func (r *DoHResolver) Resolve(ctx context.Context, q *dns.Msg) (*dns.Msg, error)
 
 	resp, err := r.client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, err // url.Error already embeds the endpoint URL
 	}
 	defer resp.Body.Close()
 	const maxDNSResponseBytes = 65535
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxDNSResponseBytes+1))
 	if err != nil {
-		return nil, err
+		return nil, errUpstream(r.endpoint, err)
 	}
 	if len(body) > maxDNSResponseBytes {
-		return nil, fmt.Errorf("doh: upstream response too large")
+		return nil, errUpstream(r.endpoint, fmt.Errorf("doh: upstream response too large"))
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("doh: upstream returned %d", resp.StatusCode)
+		return nil, errUpstream(r.endpoint, fmt.Errorf("doh: upstream returned %d", resp.StatusCode))
 	}
 	out := new(dns.Msg)
 	if err := out.Unpack(body); err != nil {
-		return nil, fmt.Errorf("doh: unpack response: %w", err)
+		return nil, errUpstream(r.endpoint, fmt.Errorf("doh: unpack response: %w", err))
 	}
 	return out, nil
 }
