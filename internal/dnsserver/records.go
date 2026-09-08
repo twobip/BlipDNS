@@ -9,8 +9,12 @@ import (
 	"github.com/twobip/BlipDNS/internal/control"
 )
 
-// defaultRecordTTL is the TTL used when a record entry omits one (0).
+// defaultRecordTTL is the TTL used when a record entry omits one (0) or sets
+// an invalid negative one (which would otherwise wrap to ~136 years as uint32).
 const defaultRecordTTL = 60
+
+// maxRecordTTL caps how long a local record may live (one week, in seconds).
+const maxRecordTTL = 7 * 24 * 3600
 
 // RecordStore holds static DNS records (A, AAAA, CNAME) answered locally by
 // blipd instead of being forwarded upstream. It implements control.RecordController.
@@ -133,8 +137,10 @@ func (rs *RecordStore) Lookup(req *dns.Msg) (*dns.Msg, bool) {
 			continue
 		}
 		ttl := uint32(r.TTL)
-		if ttl == 0 {
+		if r.TTL <= 0 {
 			ttl = defaultRecordTTL
+		} else if ttl > maxRecordTTL {
+			ttl = maxRecordTTL
 		}
 		switch rrType {
 		case dns.TypeA:

@@ -235,6 +235,13 @@ func TestParseKey(t *testing.T) {
 	}
 }
 
+func TestParseKeyIgnoresUpstreamQualifier(t *testing.T) {
+	name, qtype, qclass, ok := ParseKey("example.com.|1|1|auto (DoH)")
+	if !ok || name != "example.com." || qtype != dns.TypeA || qclass != dns.ClassINET {
+		t.Errorf("bad qualified ParseKey result: %q %d %d %v", name, qtype, qclass, ok)
+	}
+}
+
 func TestTwoTierHold(t *testing.T) {
 	c := New(time.Hour, 0)
 	c.SetHold(2, time.Hour) // keep top-2 at record TTL, everyone else 1h

@@ -98,9 +98,11 @@ func Key(m *dns.Msg) string {
 }
 
 // ParseKey reconstructs the (name, qtype, qclass) triple from a Key string.
+// Keys may carry a "|<upstream>" qualifier appended by the DNS server so
+// answers from different upstreams don't share entries; it is ignored here.
 func ParseKey(k string) (name string, qtype, qclass uint16, ok bool) {
-	parts := strings.Split(k, "|")
-	if len(parts) != 3 {
+	parts := strings.SplitN(k, "|", 4)
+	if len(parts) < 3 {
 		return "", 0, 0, false
 	}
 	t, errT := strconv.ParseUint(parts[1], 10, 16)

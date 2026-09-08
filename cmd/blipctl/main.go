@@ -31,8 +31,15 @@ import (
 
 func main() {
 	token := flag.String("token", os.Getenv("BLIP_TOKEN"), "management API bearer token")
+	tokenFile := flag.String("token-file", "", "read management API bearer token from file (used only when --token/BLIP_TOKEN is empty)")
 	flag.Usage = func() { usage() }
 	flag.Parse()
+
+	if *token == "" && *tokenFile != "" {
+		b, err := os.ReadFile(*tokenFile)
+		die(err)
+		*token = strings.TrimSpace(string(b))
+	}
 
 	args := flag.Args()
 	if len(args) < 2 {

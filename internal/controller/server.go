@@ -922,6 +922,10 @@ func (s *Server) handleClientNames(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "client required", http.StatusBadRequest)
 			return
 		}
+		if len(req.Client) > 256 || len(req.Name) > 128 {
+			http.Error(w, "client/name too long", http.StatusBadRequest)
+			return
+		}
 		if err := s.fleet.queryLog.SetClientName(r.Context(), req.Client, req.Name); err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return

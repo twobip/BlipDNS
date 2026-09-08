@@ -59,8 +59,10 @@ type Server struct {
 	claimCode  string
 	stateFile  string
 	instanceID string
-	adoptFails int
-	adoptUntil time.Time
+	// adoptFails tracks bad claim-code guesses per source IP, so one
+	// attacker burning guesses can't lock out the real operator (and a
+	// distributed guesser is still capped by the same small budget each).
+	adoptFails map[string]*adoptFail
 
 	// dohCtrl drives the optional plain-HTTP DoH listener at runtime.
 	dohCtrl DoHController
@@ -604,7 +606,7 @@ func (s *Server) handleBlocklist(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "blocklist not configured", http.StatusServiceUnavailable)
 		return
 	}
-	dec := json.NewDecoder(io.LimitReader(r.Body, 1<<31)) // 2 GiB cap
+	dec := json.NewDecoder(io.LimitReader(r.Body, 256<<20)) // 256 MiB cap: the largest real lists are tens of MB
 	dec.UseNumber()
 	var req SetBlocklistRequest
 	if err := dec.Decode(&req); err != nil {
@@ -946,15 +948,24 @@ func (s *Server) handleAdopt(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, AdoptResponse{Adopted: true, Message: "already adopted"})
 		return
 	}
-	if time.Now().Before(s.adoptUntil) {
+	if s.adoptFails == nil {
+		s.adoptFails = make(map[string]*adoptFail)
+	}
+	src := adoptIP(r)
+	if f := s.adoptFails[src]; f != nil && time.Now().Before(f.until) {
 		http.Error(w, "too many attempts; try again later", http.StatusTooManyRequests)
 		return
 	}
 	if req.Code == "" || req.Code != s.claimCode {
-		s.adoptFails++
-		if s.adoptFails >= 5 {
-			s.adoptUntil = time.Now().Add(5 * time.Minute)
-			s.adoptFails = 0
+		f := s.adoptFails[src]
+		if f == nil {
+			f = &adoptFail{}
+			s.adoptFails[src] = f
+		}
+		f.count++
+		if f.count >= 5 {
+			f.until = time.Now().Add(5 * time.Minute)
+			f.count = 0
 		}
 		writeJSON(w, AdoptResponse{Adopted: false, Message: "invalid code"})
 		return
@@ -973,12 +984,26 @@ func (s *Server) handleAdoptReset(w http.ResponseWriter, r *http.Request) {
 	}
 	s.adoptMu.Lock()
 	s.adopted = false
-	s.adoptFails = 0
-	s.adoptUntil = time.Time{}
+	s.adoptFails = make(map[string]*adoptFail)
 	s.persistAdopted(false)
 	s.genClaim()
 	s.adoptMu.Unlock()
 	writeJSON(w, AckResponse{OK: true, Msg: "reset; new adoption code generated (see journal)"})
+}
+
+// adoptFail is one source IP's bad-guess state for the claim-code handshake.
+type adoptFail struct {
+	count int
+	until time.Time
+}
+
+// adoptIP keys guess tracking on the immediate peer, not X-Forwarded-For
+// (spoofable) — same reason the controller's login limiter ignores it.
+func adoptIP(r *http.Request) string {
+	if h, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		return h
+	}
+	return r.RemoteAddr
 }
 
 func mustJSON(v interface{}) string {

@@ -18,9 +18,11 @@ type Config struct {
 	DoHAddr              string                    `yaml:"doh_addr"`
 	CertFile             string                    `yaml:"cert_file"`
 	KeyFile              string                    `yaml:"key_file"`
-	DoHTLS               bool                      `yaml:"doh_tls"`       // serve DoH over HTTPS on DoHAddr (self-signed cert auto-generated when CertFile/KeyFile unset)
-	DoHHTTPAddr          string                    `yaml:"doh_http_addr"` // additional plain-HTTP DoH listener ("" = off)
-	TLSDir               string                    `yaml:"tls_dir"`       // where a generated self-signed DoH cert/key are persisted
+	DoHTLS               bool                      `yaml:"doh_tls"`          // serve DoH over HTTPS on DoHAddr (self-signed cert auto-generated when CertFile/KeyFile unset)
+	DoHHTTPAddr          string                    `yaml:"doh_http_addr"`    // additional plain-HTTP DoH listener ("" = off)
+	RateLimitQPS         int                       `yaml:"rate_limit_qps"`   // per-client DNS QPS limit (0 = unlimited; the controller can override live)
+	RateLimitBurst       int                       `yaml:"rate_limit_burst"` // per-client burst above QPS (0 = auto = QPS, min 1)
+	TLSDir               string                    `yaml:"tls_dir"`          // where a generated self-signed DoH cert/key are persisted
 	AdminAddr            string                    `yaml:"admin_addr"`
 	AdminToken           string                    `yaml:"admin_token"`
 	TrustedProxies       []string                  `yaml:"trusted_proxies"` // CIDRs/IPs allowed to supply X-Forwarded-For to DoH

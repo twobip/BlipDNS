@@ -7,6 +7,7 @@ import (
 	"context"
 	"flag"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -54,6 +55,7 @@ func main() {
 		log.Fatalf("blipc: %v", err)
 	}
 	blipconfig.WarnConfigPerms("blipc", *cfgPath)
+	warnPlainHTTP("blipc", "dashboard", cfg.Listen)
 	if cfg.Username == "" {
 		cfg.Username = os.Getenv("BLIPC_USER")
 	}
@@ -182,4 +184,17 @@ func load(path string) (*config, error) {
 		return nil, err
 	}
 	return c, nil
+}
+
+// warnPlainHTTP logs when the credential-bearing dashboard binds beyond
+// loopback without TLS (session cookies cross the wire in cleartext there).
+func warnPlainHTTP(prog, what, addr string) {
+	h, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return
+	}
+	if h == "" || h == "127.0.0.1" || h == "::1" || h == "localhost" {
+		return
+	}
+	log.Printf("%s: WARNING: %s on %s is plain HTTP on a non-loopback address; session cookies are sniffable. Terminate TLS in front of it.", prog, what, addr)
 }

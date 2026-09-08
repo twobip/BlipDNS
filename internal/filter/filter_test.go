@@ -39,6 +39,28 @@ func TestSuffixAndWildcard(t *testing.T) {
 	}
 }
 
+func TestClientIDRequiresNetwork(t *testing.T) {
+	p := &Policy{
+		ID:       "kids",
+		Networks: []string{"10.0.0.0/8"},
+		Clients:  []string{"kid"},
+		Block:    []string{"games.example.com"},
+	}
+	s := NewStore(nil)
+	if err := s.SetPolicy(p); err != nil {
+		t.Fatal(err)
+	}
+	if blocked, _, _, _ := s.Classify(mustIP("10.1.2.3"), "kid", "games.example.com"); !blocked {
+		t.Error("in-network client-ID should match its policy")
+	}
+	// A self-asserted DoH client-ID from outside the policy's networks must
+	// not select it — otherwise anyone could claim a permissive ID to escape
+	// their network's policy.
+	if blocked, _, _, _ := s.Classify(mustIP("192.168.1.1"), "kid", "games.example.com"); blocked {
+		t.Error("out-of-network client-ID must not select the policy")
+	}
+}
+
 func TestAllowed(t *testing.T) {
 	p := &Policy{
 		ID:       "p",

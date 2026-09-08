@@ -219,6 +219,15 @@ func (s *Store) rebuildLocked() {
 	s.byClient = byClient
 }
 
+func netsContain(nets []*net.IPNet, ip net.IP) bool {
+	for _, n := range nets {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
 // All returns a snapshot of every policy plus the default.
 func (s *Store) All() (def *Policy, list []*Policy) {
 	s.mu.RLock()
@@ -241,7 +250,17 @@ func (s *Store) lookup(ip net.IP, clientID string) *compiledPolicy {
 	defer s.mu.RUnlock()
 	if clientID != "" {
 		if p, ok := s.byClient[clientID]; ok {
-			return p
+			// A DoH client-ID is self-asserted (no auth), so it only selects
+			// its policy when the source IP also falls inside that policy's
+			// networks (or the policy has none). Otherwise anyone could claim
+			// a permissive ID to escape their network's policy.
+			nip := ip
+			if ip4 := ip.To4(); ip4 != nil {
+				nip = ip4
+			}
+			if len(p.nets) == 0 || netsContain(p.nets, nip) {
+				return p
+			}
 		}
 	}
 	best := -1

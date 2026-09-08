@@ -16,6 +16,7 @@ package dnsserver
 
 import (
 	"fmt"
+	"net"
 	"os/exec"
 	"path/filepath"
 	"regexp"
@@ -37,6 +38,7 @@ func runDnsperf(t *testing.T, dataPath string, extraArgs ...string) (*dnsperfRes
 	if dnsperfBin == "" {
 		t.Skip("dnsperf not installed, skipping DNS performance test")
 	}
+	skipIfNoLocalResolver(t)
 
 	args := []string{
 		"-s", "127.0.0.1",
@@ -54,6 +56,18 @@ func runDnsperf(t *testing.T, dataPath string, extraArgs ...string) (*dnsperfRes
 		return nil, fmt.Errorf("dnsperf failed: %w\n%s", err, string(out))
 	}
 	return parseDnsperfOutput(string(out))
+}
+
+// skipIfNoLocalResolver skips a dnsperf test when no resolver listens on
+// 127.0.0.1:53. blipd serves TCP alongside UDP, so a TCP dial proves one is
+// actually there (a UDP dial would "succeed" with nothing listening).
+func skipIfNoLocalResolver(t *testing.T) {
+	t.Helper()
+	if c, err := net.DialTimeout("tcp", "127.0.0.1:53", 500*time.Millisecond); err != nil {
+		t.Skip("no local resolver on 127.0.0.1:53, skipping DNS performance test")
+	} else {
+		_ = c.Close()
+	}
 }
 
 // dnsperfResult holds key metrics from a dnsperf run.
@@ -234,6 +248,7 @@ func TestDnsperfThroughput(t *testing.T) {
 	if dnsperfBin == "" {
 		t.Skip("dnsperf not installed")
 	}
+	skipIfNoLocalResolver(t)
 	dataPath := filepath.Join("testdata", "dnsperf", "resolve-domains.txt")
 
 	cmd := exec.Command(dnsperfBin,
