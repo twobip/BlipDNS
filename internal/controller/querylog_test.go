@@ -443,6 +443,14 @@ func TestClientNames(t *testing.T) {
 	if len(entries) != 1 || entries[0].Client != "laptop" || entries[0].Name != "Gaming Rig" {
 		t.Fatalf("Query by name = %+v, want one laptop entry named Gaming Rig", entries)
 	}
+	// The total must agree with the page for the same filter.
+	n, err := store.QueryCount(ctx, "", "Gaming Rig", "", "", now.Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("QueryCount: %v", err)
+	}
+	if n != len(entries) {
+		t.Fatalf("QueryCount by name = %d, want %d", n, len(entries))
+	}
 }
 
 func TestQueryLogStoreCacheStats(t *testing.T) {

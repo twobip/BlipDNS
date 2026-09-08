@@ -449,10 +449,10 @@ func (s *QueryLogStore) Insert(ctx context.Context, e QueryLogEntry) error {
 // id) DESC so consecutive pages never duplicate or skip a row. An empty action
 // means "any action"; pass "PASS" or "BLOCK" to narrow by query outcome.
 // cached is "" (any), "1" (cached only) or "0" (uncached only).
-func (s *QueryLogStore) Query(ctx context.Context, instance, filter, action, cached string, since time.Time, offset, limit int) ([]QueryLogEntry, error) {
-	query := `SELECT ql.id, ql.timestamp, ql.instance, ql.client, COALESCE(cn.name, ''), ql.domain, ql.action, ql.upstream, ql.q_type, ql.blocklist, ql.ips, ql.answers, ql.duration_us, ql.cached FROM query_log ql LEFT JOIN client_names cn ON cn.client = ql.client WHERE ql.timestamp >= ? AND ql.domain != 'health_check' AND ql.domain != ''`
-	args := []interface{}{since}
-
+// logFilter appends the shared instance/action/cached/text predicates. Query
+// and QueryCount must build them in one place: the page and its total can
+// never disagree (e.g. a friendly-name filter matching rows but counting 0).
+func logFilter(query string, args []interface{}, instance, action, cached, filter string) (string, []interface{}) {
 	if instance != "" {
 		query += " AND ql.instance = ?"
 		args = append(args, instance)
@@ -465,13 +465,18 @@ func (s *QueryLogStore) Query(ctx context.Context, instance, filter, action, cac
 		query += " AND ql.cached = ?"
 		args = append(args, cached)
 	}
-
-	filterLower := ""
 	if filter != "" {
-		filterLower = "%" + filter + "%"
+		fl := "%" + filter + "%"
 		query += " AND (LOWER(ql.client) LIKE ? OR LOWER(cn.name) LIKE ? OR LOWER(ql.domain) LIKE ? OR LOWER(ql.action) LIKE ?)"
-		args = append(args, filterLower, filterLower, filterLower, filterLower)
+		args = append(args, fl, fl, fl, fl)
 	}
+	return query, args
+}
+
+func (s *QueryLogStore) Query(ctx context.Context, instance, filter, action, cached string, since time.Time, offset, limit int) ([]QueryLogEntry, error) {
+	query := `SELECT ql.id, ql.timestamp, ql.instance, ql.client, COALESCE(cn.name, ''), ql.domain, ql.action, ql.upstream, ql.q_type, ql.blocklist, ql.ips, ql.answers, ql.duration_us, ql.cached FROM query_log ql LEFT JOIN client_names cn ON cn.client = ql.client WHERE ql.timestamp >= ? AND ql.domain != 'health_check' AND ql.domain != ''`
+	args := []interface{}{since}
+	query, args = logFilter(query, args, instance, action, cached, filter)
 
 	query += " ORDER BY ql.timestamp DESC, ql.id DESC LIMIT ? OFFSET ?"
 	args = append(args, limit, offset)
@@ -515,25 +520,11 @@ func (s *QueryLogStore) Query(ctx context.Context, instance, filter, action, cac
 // (instance, filter, action, cached, since) constraints, regardless of any
 // limit/offset paging.
 func (s *QueryLogStore) QueryCount(ctx context.Context, instance, filter, action, cached string, since time.Time) (int, error) {
-	query := `SELECT COUNT(*) FROM query_log WHERE timestamp >= ? AND domain != 'health_check' AND domain != ''`
+	// Same FROM/JOIN as Query (client is the join key, so COUNT(*) is exact)
+	// with the shared predicates, so the total always matches the pages.
+	query := `SELECT COUNT(*) FROM query_log ql LEFT JOIN client_names cn ON cn.client = ql.client WHERE ql.timestamp >= ? AND ql.domain != 'health_check' AND ql.domain != ''`
 	args := []interface{}{since}
-	if instance != "" {
-		query += " AND instance = ?"
-		args = append(args, instance)
-	}
-	if action != "" {
-		query += " AND action = ?"
-		args = append(args, action)
-	}
-	if cached != "" {
-		query += " AND cached = ?"
-		args = append(args, cached)
-	}
-	if filter != "" {
-		fl := "%" + filter + "%"
-		query += " AND (LOWER(client) LIKE ? OR LOWER(domain) LIKE ? OR LOWER(action) LIKE ?)"
-		args = append(args, fl, fl, fl)
-	}
+	query, args = logFilter(query, args, instance, action, cached, filter)
 	var n int
 	if err := s.db.QueryRowContext(ctx, query, args...).Scan(&n); err != nil {
 		return 0, err

@@ -1254,11 +1254,6 @@ func (f *Fleet) pushDoH(ctx context.Context) map[string]string {
 			results[i.Config.ID] = err.Error()
 			continue
 		}
-		qps := f.effectiveRateLimitQPS(i.Config.ID)
-		if err := i.ctl().SetRateLimit(ctx, qps, 0); err != nil {
-			results[i.Config.ID] = err.Error()
-			continue
-		}
 		results[i.Config.ID] = "ok"
 	}
 	return results
@@ -1704,6 +1699,15 @@ func (f *Fleet) pushInstance(ctx context.Context, id string) map[string]string {
 	if err := i.ctl().SetCacheConfig(ctx, wantSize, wantWarm, wantRegular); err != nil {
 		res[id] = "cache: " + err.Error()
 	}
+	if err := i.ctl().SetRateLimit(ctx, f.effectiveRateLimitQPS(id), 0); err != nil {
+		res[id] = "rate_limit: " + err.Error()
+	}
+	if err := i.ctl().SetRecords(ctx, f.effectiveRecords(id)); err != nil {
+		res[id] = "records: " + err.Error()
+	}
+	// No blocklist push here: it is a multi-MB upload that belongs in the
+	// poll-loop reconciler, which short-circuits on the reported hash and
+	// backs off while a push is in flight.
 	if eff != nil {
 		if err := i.ctl().SetPolicy(ctx, eff); err != nil {
 			res[id] = err.Error()
