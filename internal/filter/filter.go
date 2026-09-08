@@ -88,25 +88,18 @@ func (m *matcher) match(name string) bool {
 		return true
 	}
 	// Walk the label boundaries without allocating: instead of Split+Join,
-	// index each dot and probe the remainder as the candidate root.
-	if len(m.suffix) > 0 {
+	// index each dot and probe the remainder as the candidate root in both
+	// sets (plain suffixes and "subdomains only" wildcards share the walk).
+	if len(m.suffix) > 0 || len(m.subOnly) > 0 {
 		for i := 0; i < len(name); i++ {
 			if name[i] != '.' {
 				continue
 			}
-			if _, ok := m.suffix[name[i+1:]]; ok {
+			rest := name[i+1:]
+			if _, ok := m.suffix[rest]; ok {
 				return true
 			}
-		}
-	}
-	// subOnly roots: only subdomains (proper suffixes after at least one
-	// label) match.
-	if len(m.subOnly) > 0 {
-		for i := 0; i < len(name); i++ {
-			if name[i] != '.' {
-				continue
-			}
-			if _, ok := m.subOnly[name[i+1:]]; ok {
+			if _, ok := m.subOnly[rest]; ok {
 				return true
 			}
 		}
@@ -118,6 +111,7 @@ type compiledPolicy struct {
 	Policy
 	allowM *matcher
 	blockM *matcher
+	nets   []*net.IPNet // parsed from Networks once in SetPolicy
 }
 
 func compile(p *Policy) *compiledPolicy {
@@ -171,13 +165,12 @@ func (s *Store) SetPolicy(p *Policy) error {
 		return ErrPolicyID
 	}
 	cp := compile(p)
-	entries := make([]netEntry, 0, len(p.Networks))
 	for _, n := range p.Networks {
 		_, ipnet, err := net.ParseCIDR(n)
 		if err != nil {
 			return &NetError{Net: n, Err: err}
 		}
-		entries = append(entries, netEntry{net: ipnet, policy: cp})
+		cp.nets = append(cp.nets, ipnet)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -206,11 +199,7 @@ func (s *Store) rebuildLocked() {
 	sort.Strings(ids)
 	for _, id := range ids {
 		cp := s.policies[id]
-		for _, n := range cp.Networks {
-			_, ipnet, err := net.ParseCIDR(n)
-			if err != nil {
-				continue
-			}
+		for _, ipnet := range cp.nets {
 			nets = append(nets, netEntry{net: ipnet, policy: cp})
 		}
 		for _, c := range cp.Clients {

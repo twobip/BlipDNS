@@ -1,9 +1,6 @@
 package control
 
-import (
-	"sync/atomic"
-	"time"
-)
+import "sync/atomic"
 
 // Counters tracks server metrics. Every counter is an atomic so the per-query
 // hot path never contends on a mutex.
@@ -15,7 +12,7 @@ type Counters struct {
 }
 
 // AddQuery records a query.
-func (c *Counters) AddQuery(_ ...string) {
+func (c *Counters) AddQuery() {
 	if c == nil {
 		return
 	}
@@ -71,5 +68,3 @@ func (s *Server) SetToken(tok string) {
 	s.token = tok
 	s.mu.Unlock()
 }
-
-var _ = time.Now

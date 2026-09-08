@@ -3,6 +3,7 @@ package config
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"time"
 
@@ -87,4 +88,22 @@ func Load(path string) (*Config, error) {
 		}
 	}
 	return c, nil
+}
+
+// WarnConfigPerms logs a warning if the config file is group- or
+// world-readable, since it may hold tokens or credentials.
+func WarnConfigPerms(prog, path string) {
+	if path == "" {
+		return
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			log.Printf("%s: cannot stat config %s: %v", prog, path, err)
+		}
+		return
+	}
+	if m := fi.Mode().Perm(); m&0o077 != 0 {
+		log.Printf("%s: WARNING: config file %s is group/world-accessible (mode %04o); it may contain credentials. Use `chmod 600 %s`.", prog, path, m, path)
+	}
 }

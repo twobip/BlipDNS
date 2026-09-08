@@ -210,11 +210,6 @@ func (s *Server) updateController() UpdateController {
 	return c
 }
 
-// NewServer builds a management API server guarded by token.
-func NewServer(token string, store *filter.Store, c *cache.Cache, stats StatsCollector, version string) *Server {
-	return NewServerWithBlocklist(token, store, c, stats, version, nil)
-}
-
 // NewServerWithBlocklist builds a management API server that can also receive
 // a controller-managed global blocklist (nil disables the endpoint).
 func NewServerWithBlocklist(token string, store *filter.Store, c *cache.Cache, stats StatsCollector, version string, bl *blocklist.Blocklist) *Server {
@@ -390,17 +385,23 @@ func (s *Server) withSecurityHeaders(next http.Handler) http.Handler {
 	})
 }
 
+// checkToken compares the Authorization header against the bearer token in
+// constant time ("Bearer " prefix optional).
+func checkToken(hdr, want string) bool {
+	tok := hdr
+	if len(tok) > 7 && tok[:7] == "Bearer " {
+		tok = tok[7:]
+	}
+	return tok != "" && len(tok) == len(want) && subtle.ConstantTimeCompare([]byte(tok), []byte(want)) == 1
+}
+
 func (s *Server) auth(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if s.token == "" {
 			http.Error(w, "management API disabled", http.StatusServiceUnavailable)
 			return
 		}
-		tok := r.Header.Get("Authorization")
-		if len(tok) > 7 && tok[:7] == "Bearer " {
-			tok = tok[7:]
-		}
-		if len(tok) != len(s.token) || subtle.ConstantTimeCompare([]byte(tok), []byte(s.token)) != 1 {
+		if !checkToken(r.Header.Get("Authorization"), s.token) {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -926,11 +927,7 @@ func (s *Server) authenticated(r *http.Request) bool {
 	if s.token == "" {
 		return false
 	}
-	tok := r.Header.Get("Authorization")
-	if len(tok) > 7 && tok[:7] == "Bearer " {
-		tok = tok[7:]
-	}
-	return tok != "" && len(tok) == len(s.token) && subtle.ConstantTimeCompare([]byte(tok), []byte(s.token)) == 1
+	return checkToken(r.Header.Get("Authorization"), s.token)
 }
 
 func (s *Server) handleAdopt(w http.ResponseWriter, r *http.Request) {

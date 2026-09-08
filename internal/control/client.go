@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"net/url"
 	"time"
+
+	"github.com/twobip/BlipDNS/internal/upstream"
 )
 
 // Client is the controller-side client that connects to a managed blipd
@@ -160,6 +162,13 @@ func (c *Client) SetRateLimit(ctx context.Context, qps, burst int) error {
 // how long non-most-popular entries stay cached in seconds (0 = use record TTL).
 func (c *Client) SetCacheConfig(ctx context.Context, size, warm, regular int) error {
 	return c.do(ctx, http.MethodPut, "/api/v1/cache", &SetCacheRequest{Size: size, Warm: warm, Regular: regular}, nil)
+}
+
+// SetUpstream replaces the instance's upstream pool, conditional-forwarding
+// routes, and bootstrap DNS servers. Passing nil/empty for all three reverts
+// the instance to its local (config-file) upstream.
+func (c *Client) SetUpstream(ctx context.Context, servers []upstream.UpstreamServer, routes []upstream.UpstreamRoute, bootstrap []upstream.UpstreamServer) error {
+	return c.do(ctx, http.MethodPut, "/api/v1/upstream", &SetUpstreamRequest{Servers: servers, Routes: routes, Bootstrap: bootstrap}, nil)
 }
 
 // PurgeCache drops every cached response on the instance and returns how many

@@ -289,7 +289,7 @@ func (s *Server) serve(ctx context.Context, clientIP net.IP, clientID string, re
 			return resp
 		}
 	}
-	s.cnt.AddQuery(client)
+	s.cnt.AddQuery()
 	resp := new(dns.Msg)
 	resp.SetReply(req)
 	if len(req.Question) == 0 {

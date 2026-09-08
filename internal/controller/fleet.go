@@ -45,7 +45,7 @@ type Event struct {
 	IPs []string `json:"ips,omitempty"`
 	// Answers carries every response record so non-IP answers (TXT, CNAME, etc.)
 	// are visible in the live event stream, not just in the persisted query log.
-	Answers []Answer `json:"answers,omitempty"`
+	Answers []control.Answer `json:"answers,omitempty"`
 	// Cached reports whether a "pass" event was served from the response cache.
 	Cached bool `json:"cached,omitempty"`
 	// Upstream names the resolver that answered a pass event.

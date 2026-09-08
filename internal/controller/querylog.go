@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/twobip/BlipDNS/internal/control"
 	_ "modernc.org/sqlite"
 )
 
@@ -40,14 +41,8 @@ const (
 // keeps a useful history window without unbounded growth.
 const defaultQueryLogRetention = 720 * time.Hour
 
-// Answer is a single resource record attached to a QueryLogEntry for display.
-type Answer struct {
-	Type string `json:"type"` // textual RR type, e.g. "A", "AAAA", "TXT", "CNAME", "MX", "SRV"
-	Data string `json:"data"` // rendered rdata (owner name omitted)
-	TTL  int    `json:"ttl,omitempty"`
-}
-
 // QueryLogEntry represents a single DNS query event
+// (answers reuse control.Answer: identical JSON, single type).
 type QueryLogEntry struct {
 	ID        int64     `json:"id"`
 	Timestamp time.Time `json:"timestamp"`
@@ -67,7 +62,7 @@ type QueryLogEntry struct {
 	IPs []string `json:"ips,omitempty"`
 	// Answers holds every response record in display form (type + data),
 	// preserving non-IP answers like TXT/CNAME/MX for the query log.
-	Answers []Answer `json:"answers,omitempty"`
+	Answers []control.Answer `json:"answers,omitempty"`
 	// DurationUs is how long the query took to answer, in microseconds.
 	// Cached reports whether the answer was served from the response cache.
 	DurationUs int64 `json:"duration_us,omitempty"`
@@ -429,17 +424,23 @@ func NewQueryLogStore(dbPath string) (*QueryLogStore, error) {
 	return store, nil
 }
 
-// Insert adds a new query log entry
-func (s *QueryLogStore) Insert(ctx context.Context, e QueryLogEntry) error {
-	ips := strings.Join(e.IPs, ",")
-	ans, _ := json.Marshal(e.Answers)
-	cached := 0
+// row renders the columns shared by the single- and batched-insert paths.
+func (e QueryLogEntry) row() (ips, ans string, cached int) {
+	ips = strings.Join(e.IPs, ",")
+	b, _ := json.Marshal(e.Answers)
+	ans = string(b)
 	if e.Cached {
 		cached = 1
 	}
+	return ips, ans, cached
+}
+
+// Insert adds a new query log entry
+func (s *QueryLogStore) Insert(ctx context.Context, e QueryLogEntry) error {
+	ips, ans, cached := e.row()
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO query_log (timestamp, instance, client, domain, action, upstream, q_type, blocklist, ips, answers, duration_us, cached) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		e.Timestamp, e.Instance, e.Client, e.Domain, e.Action, e.Upstream, e.QType, e.BlockList, ips, string(ans), e.DurationUs, cached)
+		e.Timestamp, e.Instance, e.Client, e.Domain, e.Action, e.Upstream, e.QType, e.BlockList, ips, ans, e.DurationUs, cached)
 	return err
 }
 
@@ -854,13 +855,8 @@ func (s *QueryLogStore) insertBatch(ctx context.Context, entries []QueryLogEntry
 	}
 	defer stmt.Close()
 	for _, e := range entries {
-		cached := 0
-		if e.Cached {
-			cached = 1
-		}
-		ips := strings.Join(e.IPs, ",")
-		ans, _ := json.Marshal(e.Answers)
-		if _, err := stmt.Exec(e.Timestamp, e.Instance, e.Client, e.Domain, e.Action, e.Upstream, e.QType, e.BlockList, ips, string(ans), e.DurationUs, cached); err != nil {
+		ips, ans, cached := e.row()
+		if _, err := stmt.Exec(e.Timestamp, e.Instance, e.Client, e.Domain, e.Action, e.Upstream, e.QType, e.BlockList, ips, ans, e.DurationUs, cached); err != nil {
 			_ = tx.Rollback()
 			return
 		}

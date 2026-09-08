@@ -1157,30 +1157,21 @@ func (s *Server) handleMaintenance(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch req.Action {
-	case "reset_stats":
+	case "reset_stats", "clear_query_log", "clear_upstream_errors":
 		if s.fleet.queryLog == nil {
 			http.Error(w, "query log not available", http.StatusServiceUnavailable)
 			return
 		}
-		if err := s.fleet.queryLog.ClearStatsSamples(r.Context()); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
+		var err error
+		switch req.Action {
+		case "reset_stats":
+			err = s.fleet.queryLog.ClearStatsSamples(r.Context())
+		case "clear_query_log":
+			err = s.fleet.queryLog.ClearQueryLog(r.Context())
+		case "clear_upstream_errors":
+			err = s.fleet.queryLog.ClearUpstreamErrors(r.Context(), req.Instance)
 		}
-	case "clear_query_log":
-		if s.fleet.queryLog == nil {
-			http.Error(w, "query log not available", http.StatusServiceUnavailable)
-			return
-		}
-		if err := s.fleet.queryLog.ClearQueryLog(r.Context()); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-	case "clear_upstream_errors":
-		if s.fleet.queryLog == nil {
-			http.Error(w, "query log not available", http.StatusServiceUnavailable)
-			return
-		}
-		if err := s.fleet.queryLog.ClearUpstreamErrors(r.Context(), req.Instance); err != nil {
+		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}

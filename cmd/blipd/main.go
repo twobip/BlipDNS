@@ -51,7 +51,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("blipd: %v", err)
 	}
-	warnConfigPerms(*cfgPath)
+	config.WarnConfigPerms("blipd", *cfgPath)
 
 	store := filter.NewStore(cfg.Default)
 	for _, p := range cfg.Policies {
@@ -72,32 +72,32 @@ func main() {
 		}
 	}
 	if urls := blocklistSources(cfg); len(urls) > 0 {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-		defer cancel()
-		if res, err := bl.LoadFromURLs(ctx, urls, nil); err != nil {
-			log.Printf("blipd: blocklist load: %v (continuing without blocklist)", err)
-		} else {
-			log.Printf("blipd: blocklist loaded from %d sources (%d domains)", res.Sources, res.Domains)
+		load := func(ctx context.Context) error {
+			res, err := bl.LoadFromURLs(ctx, urls, nil)
+			if err != nil {
+				return err
+			}
+			log.Printf("blipd: blocklist loaded (%d domains)", res.Domains)
 			if cfg.BlocklistCacheFile != "" {
 				_ = bl.SaveCache(cfg.BlocklistCacheFile)
 			}
-			if cfg.BlocklistUpdateHours > 0 {
-				go func() {
-					ticker := time.NewTicker(time.Duration(cfg.BlocklistUpdateHours) * time.Hour)
-					defer ticker.Stop()
-					for range ticker.C {
-						log.Printf("blipd: refreshing blocklist from %d sources", len(urls))
-						if res, err := bl.LoadFromURLs(context.Background(), urls, nil); err != nil {
-							log.Printf("blipd: blocklist refresh: %v", err)
-						} else {
-							log.Printf("blipd: blocklist refreshed (%d domains)", res.Domains)
-							if cfg.BlocklistCacheFile != "" {
-								_ = bl.SaveCache(cfg.BlocklistCacheFile)
-							}
-						}
+			return nil
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+		if err := load(ctx); err != nil {
+			log.Printf("blipd: blocklist load: %v (continuing without blocklist)", err)
+		} else if cfg.BlocklistUpdateHours > 0 {
+			go func() {
+				ticker := time.NewTicker(time.Duration(cfg.BlocklistUpdateHours) * time.Hour)
+				defer ticker.Stop()
+				for range ticker.C {
+					log.Printf("blipd: refreshing blocklist from %d sources", len(urls))
+					if err := load(context.Background()); err != nil {
+						log.Printf("blipd: blocklist refresh: %v", err)
 					}
-				}()
-			}
+				}
+			}()
 		}
 	}
 
@@ -237,23 +237,4 @@ func dohScheme(cfg *config.Config) string {
 		return "https"
 	}
 	return "http"
-}
-
-// warnConfigPerms logs a warning if the config file is group- or world-readable,
-// since it may contain credentials. blipd's config holds the admin_token.
-func warnConfigPerms(path string) {
-	if path == "" {
-		return
-	}
-	fi, err := os.Stat(path)
-	if err != nil {
-		if !os.IsNotExist(err) {
-			log.Printf("blipd: cannot stat config %s: %v", path, err)
-		}
-		return
-	}
-	m := fi.Mode().Perm()
-	if m&0o077 != 0 {
-		log.Printf("blipd: WARNING: config file %s is group/world-accessible (mode %04o); it may contain the admin token. Use `chmod 600 %s`.", path, m, path)
-	}
 }
