@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"maps"
 	"sort"
 	"time"
 
@@ -42,16 +43,8 @@ func (f *Fleet) UpdateJob() UpdateJobStatus {
 }
 
 func cloneUpdateJob(in UpdateJobStatus) UpdateJobStatus {
-	in.Results = mapsClone(in.Results)
+	in.Results = maps.Clone(in.Results)
 	return in
-}
-
-func mapsClone(in map[string]string) map[string]string {
-	out := make(map[string]string, len(in))
-	for k, v := range in {
-		out[k] = v
-	}
-	return out
 }
 
 func (f *Fleet) StartUpdates(ctx context.Context, channel string) (UpdateJobStatus, error) {

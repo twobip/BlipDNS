@@ -180,9 +180,6 @@ func main() {
 
 	// Admin / management API.
 	if cfg.AdminToken != "" || cfg.StateFile != "" {
-		if cfg.AdminToken == "" && cfg.StateFile == "" {
-			cfg.AdminToken = "" // let ConfigureAdoption generate an ephemeral token
-		}
 		srv.SetMgmtToken(cfg.AdminToken)
 		srv.ControlServer().ConfigureAdoption(cfg.StateFile, cfg.InstanceID)
 		if cfg.BlocklistCacheFile != "" {
@@ -233,7 +230,6 @@ func main() {
 	<-sig
 	log.Println("blipd: shutting down")
 	srv.Shutdown()
-	_ = context.Background()
 }
 
 func dohScheme(cfg *config.Config) string {

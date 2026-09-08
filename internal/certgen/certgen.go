@@ -194,7 +194,13 @@ func localIPs() []net.IP {
 			continue
 		}
 		for _, a := range addrs {
-			ip := networkIP(a)
+			var ip net.IP
+			switch v := a.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			}
 			if ip == nil || ip.IsLoopback() {
 				continue
 			}
@@ -204,45 +210,38 @@ func localIPs() []net.IP {
 	return out
 }
 
-func networkIP(a net.Addr) net.IP {
-	switch v := a.(type) {
-	case *net.IPNet:
-		return v.IP
-	case *net.IPAddr:
-		return v.IP
-	}
-	return nil
-}
-
 func dedupeStrings(in []string) []string {
-	seen := make(map[string]struct{}, len(in))
-	out := make([]string, 0, len(in))
-	for _, s := range in {
+	return dedupe(in, func(s string) (string, bool) {
 		if s == "" {
-			continue
+			return "", false
 		}
-		if _, ok := seen[s]; ok {
-			continue
-		}
-		seen[s] = struct{}{}
-		out = append(out, s)
-	}
-	return out
+		return s, true
+	})
 }
 
 func dedupeIPs(in []net.IP) []net.IP {
-	seen := make(map[string]struct{}, len(in))
-	out := make([]net.IP, 0, len(in))
-	for _, ip := range in {
+	return dedupe(in, func(ip net.IP) (string, bool) {
 		if ip == nil {
+			return "", false
+		}
+		return ip.String(), true
+	})
+}
+
+// dedupe keeps the first occurrence of each key while dropping empties.
+func dedupe[T any](in []T, key func(T) (string, bool)) []T {
+	seen := make(map[string]struct{}, len(in))
+	out := make([]T, 0, len(in))
+	for _, v := range in {
+		k, ok := key(v)
+		if !ok {
 			continue
 		}
-		k := ip.String()
-		if _, ok := seen[k]; ok {
+		if _, dup := seen[k]; dup {
 			continue
 		}
 		seen[k] = struct{}{}
-		out = append(out, ip)
+		out = append(out, v)
 	}
 	return out
 }

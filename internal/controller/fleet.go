@@ -2039,12 +2039,6 @@ func (f *Fleet) SetBlocklistDisabled(urls []string) {
 	f.blMu.Unlock()
 }
 
-// ImportBlocklist starts a background import of the current sources. No-op if
-// one is already running.
-func (f *Fleet) ImportBlocklist() {
-	f.startBlocklistImport("manual-import")
-}
-
 // AutoUpdateHours returns the configured refresh interval in hours (0 = off).
 func (f *Fleet) AutoUpdateHours() int {
 	f.blMu.Lock()
@@ -2357,19 +2351,9 @@ func (f *Fleet) persistBlocklist() {
 	}()
 }
 
-// cancelBlocklistImport stops any in-flight import.
 // maxBlocklistFetchers bounds how many blocklist sources blipc fetches
 // concurrently during an import (matching the blocklist package's limit).
 const maxBlocklistFetchers = 8
-
-func (f *Fleet) cancelBlocklistImport() {
-	f.blMu.Lock()
-	defer f.blMu.Unlock()
-	if f.blCancel != nil {
-		f.blCancel()
-		f.blCancel = nil
-	}
-}
 
 func (f *Fleet) startBlocklistImport(reason string) {
 	f.blMu.Lock()
@@ -2759,29 +2743,6 @@ func cleanURLs(urls []string) []string {
 	return out
 }
 
-// LoadConfig adds instances from a YAML config file (instances: section).
-func (f *Fleet) LoadConfig(ctx context.Context, path string) error {
-	if path == "" {
-		return nil
-	}
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return err
-	}
-	var doc struct {
-		Instances []InstanceConfig `yaml:"instances"`
-	}
-	if err := yamlUnmarshal(b, &doc); err != nil {
-		return err
-	}
-	for _, ic := range doc.Instances {
-		if err := f.Add(ctx, ic); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 // saveConfig writes the current fleet config (including updated tokens) to the config file.
 func (f *Fleet) saveConfig() error {
 	if f.configPath == "" {
@@ -2902,6 +2863,3 @@ func hasTraversal(p string) bool {
 	}
 	return false
 }
-
-// ConfigDir returns the controller config directory hint.
-func ConfigDir() string { return filepath.Dir(os.Args[0]) }

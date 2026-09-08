@@ -264,26 +264,6 @@ func (m *Manager) DisableHA() error {
 	return fmt.Errorf("disabling keepalived is intentionally not performed through the API; stop it with the host service manager")
 }
 
-func (m *Manager) disableHA() error {
-	m.mu.RLock()
-	cfg := m.cfg
-	m.mu.RUnlock()
-	cfg.Enabled = false
-	if err := m.persistState(cfg); err != nil {
-		m.recordError(err)
-		return fmt.Errorf("save disabled high availability configuration: %w", err)
-	}
-	if err := os.Remove(m.path); err != nil && !os.IsNotExist(err) {
-		m.recordError(err)
-		return fmt.Errorf("remove keepalived configuration: %w", err)
-	}
-	m.mu.Lock()
-	m.cfg = cfg
-	m.lastError = ""
-	m.mu.Unlock()
-	return nil
-}
-
 func validate(cfg control.HAConfig) error {
 	if !cfg.Enabled {
 		return nil

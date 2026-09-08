@@ -7,6 +7,7 @@ package dnsserver
 import (
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"log"
@@ -199,7 +200,8 @@ func (s *Server) handleDoH(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "dns parameter too large", http.StatusRequestEntityTooLarge)
 			return
 		}
-		b, err := base64urlDecode(v)
+		// RFC 4648 URL-safe base64; RawURLEncoding tolerates missing padding.
+		b, err := base64.RawURLEncoding.DecodeString(v)
 		if err != nil {
 			http.Error(w, "bad dns parameter", http.StatusBadRequest)
 			return
@@ -645,7 +647,10 @@ func (s *Server) SetDoHHTTPAddr(addr string) error {
 	if addr == "" {
 		return nil
 	}
-	if err := validateAddr("tcp", addr); err != nil {
+	if _, port, err := net.SplitHostPort(addr); err != nil || port == "" {
+		if err == nil {
+			err = fmt.Errorf("missing port")
+		}
 		return fmt.Errorf("doh http addr %q: %w", addr, err)
 	}
 	ln, err := net.Listen("tcp", addr)
@@ -660,21 +665,6 @@ func (s *Server) SetDoHHTTPAddr(addr string) error {
 			log.Printf("blipd: doh http listener %s: %v", addr, err)
 		}
 	}()
-	return nil
-}
-
-// validateAddr checks that addr parses and (for TCP) carries a port.
-func validateAddr(network, addr string) error {
-	host, port, err := net.SplitHostPort(addr)
-	if err != nil {
-		return err
-	}
-	if port == "" {
-		return fmt.Errorf("missing port")
-	}
-	if network == "tcp" && host == "" {
-		return nil
-	}
 	return nil
 }
 

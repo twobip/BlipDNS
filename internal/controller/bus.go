@@ -1,9 +1,6 @@
 package controller
 
-import (
-	"sync"
-	"time"
-)
+import "sync"
 
 // Bus is a thread-safe broadcast hub with a bounded ring buffer of recent
 // events for late-joining SSE clients.
@@ -71,5 +68,3 @@ func (b *Bus) Recent() []Event {
 	copy(out, b.buffer)
 	return out
 }
-
-var _ = time.Now

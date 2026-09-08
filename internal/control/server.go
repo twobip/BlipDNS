@@ -592,15 +592,6 @@ func (s *Server) SetBlocklistCache(path string) {
 	s.blocklistCachePath = path
 }
 
-// remoteHost returns the caller's IP (without port) for logging.
-func remoteHost(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
-	}
-	return host
-}
-
 // handleBlocklist replaces the instance's global blocklist with the given
 // domains. It accepts a large payload (multi-million entry lists).
 func (s *Server) handleBlocklist(w http.ResponseWriter, r *http.Request) {
@@ -619,7 +610,11 @@ func (s *Server) handleBlocklist(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	log.Printf("blipd: set blocklist from %s domains=%d allowed=%d", remoteHost(r), len(req.Domains), len(req.Allowed))
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	log.Printf("blipd: set blocklist from %s domains=%d allowed=%d", host, len(req.Domains), len(req.Allowed))
 	s.blocklist.FromDomains(req.Domains)
 	s.blocklist.SetAllowed(req.Allowed)
 	// A new blocklist can flip domains between blocked and allowed, so drop

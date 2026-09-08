@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -733,13 +734,9 @@ func (s *QueryLogStore) AggregateStats(ctx context.Context, instance string, buc
 	for _, v := range buckets {
 		agg.Series = append(agg.Series, *v)
 	}
-	for i := 0; i < len(agg.Series)-1; i++ {
-		for j := i + 1; j < len(agg.Series); j++ {
-			if agg.Series[i].Timestamp.After(agg.Series[j].Timestamp) {
-				agg.Series[i], agg.Series[j] = agg.Series[j], agg.Series[i]
-			}
-		}
-	}
+	sort.Slice(agg.Series, func(i, j int) bool {
+		return agg.Series[i].Timestamp.Before(agg.Series[j].Timestamp)
+	})
 	return agg, nil
 }
 

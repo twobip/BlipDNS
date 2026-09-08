@@ -1,17 +1,11 @@
 package dnsserver
 
 import (
-	"encoding/base64"
 	"fmt"
 	"net"
 	"net/http"
 	"strings"
 )
-
-func base64urlDecode(s string) ([]byte, error) {
-	// RFC 4648 URL-safe base64; RawURLEncoding tolerates missing padding.
-	return base64.RawURLEncoding.DecodeString(s)
-}
 
 // clientIDFromPath extracts an optional DoH client identity from a request
 // path of the form "/dns-query/{client-id}". The bare "/dns-query" path (or a
@@ -91,10 +85,8 @@ func parseTrustedProxies(values []string) ([]*net.IPNet, error) {
 }
 
 func firstToken(s string) string {
-	for i, r := range s {
-		if r == ',' || r == ' ' {
-			return s[:i]
-		}
+	if i := strings.IndexAny(s, ", "); i >= 0 {
+		return s[:i]
 	}
 	return s
 }

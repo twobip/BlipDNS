@@ -383,23 +383,9 @@ func FromSpec(spec string) (Resolver, error) {
 }
 
 func splitSpec(spec string) []string {
-	var out []string
-	cur := ""
-	flush := func() {
-		if cur != "" {
-			out = append(out, cur)
-			cur = ""
-		}
-	}
-	for _, r := range spec {
-		if r == ' ' || r == ',' || r == '\n' || r == '\t' {
-			flush()
-			continue
-		}
-		cur += string(r)
-	}
-	flush()
-	return out
+	return strings.FieldsFunc(spec, func(r rune) bool {
+		return r == ' ' || r == ',' || r == '\n' || r == '	'
+	})
 }
 
 // LookupIP is a convenience helper that resolves A/AAAA for host using r.

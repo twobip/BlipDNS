@@ -22,6 +22,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/twobip/BlipDNS/internal/control"
@@ -126,16 +127,14 @@ func loadPolicyFile(path string) *control.Policy {
 }
 
 func sanitize(s string) string {
-	out := make([]rune, 0, len(s))
-	for _, r := range s {
+	return strings.Map(func(r rune) rune {
 		switch {
 		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '_':
-			out = append(out, r)
+			return r
 		default:
-			out = append(out, '-')
+			return '-'
 		}
-	}
-	return string(out)
+	}, s)
 }
 
 func printJSON(v interface{}) {

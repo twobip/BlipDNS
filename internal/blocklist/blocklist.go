@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"net"
 	"net/http"
@@ -727,10 +728,7 @@ func LoadCache(path string) (*Blocklist, error) {
 
 // hashString returns an FNV-1a 32-bit hash as a uint64 (for the checksum sum).
 func hashString(s string) uint64 {
-	h := uint32(2166136261)
-	for i := 0; i < len(s); i++ {
-		h ^= uint32(s[i])
-		h *= 16777619
-	}
-	return uint64(h)
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(s))
+	return uint64(h.Sum32())
 }

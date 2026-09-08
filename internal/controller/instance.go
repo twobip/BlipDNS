@@ -155,14 +155,6 @@ func (i *Instance) markHAApplied(hash string) {
 	i.mu.Unlock()
 }
 
-// blocklistApplied reports whether the instance has the blocklist with the
-// given checksum (empty checksum means none has ever been pushed).
-func (i *Instance) blocklistApplied(hash uint64) bool {
-	i.mu.RLock()
-	defer i.mu.RUnlock()
-	return i.blHash == hash
-}
-
 // pushedBlocklistHash returns the checksum of the list this controller last
 // pushed successfully (0 when none).
 func (i *Instance) pushedBlocklistHash() uint64 {
