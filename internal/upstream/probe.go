@@ -6,6 +6,8 @@ package upstream
 import (
 	"context"
 	"fmt"
+	"net"
+	"net/url"
 	"strings"
 	"time"
 
@@ -34,7 +36,11 @@ func ProbeServer(ctx context.Context, sv UpstreamServer, qname string) ProbeResu
 // hostname through bootstrap (typically the fleet's bootstrap servers) instead
 // of the system resolver. A DNS-level answer (even NXDOMAIN/SERVFAIL) counts
 // as reachable (OK=true); only transport errors and timeouts fail the probe.
-// The per-server timeout (TimeoutSec, default 5s) bounds the call.
+// The per-server timeout (TimeoutSec, default 5s) bounds the query itself; a
+// DoH endpoint's bootstrap lookup runs first on the caller's context, so a
+// slow bootstrap can't eat the query's budget and surface as a misleading
+// "context deadline exceeded". Hostname endpoints without a bootstrap still
+// resolve via the system resolver inside the dial.
 func ProbeServerWithBootstrap(ctx context.Context, sv UpstreamServer, qname string, bootstrap Resolver) ProbeResult {
 	res := ProbeResult{Name: sv.Name, Address: sv.Address}
 	fqdn := dns.Fqdn(strings.TrimSpace(qname))
@@ -47,6 +53,26 @@ func ProbeServerWithBootstrap(ctx context.Context, sv UpstreamServer, qname stri
 	if err != nil {
 		res.Error = err.Error()
 		return res
+	}
+	// Warm a hostname DoH endpoint through bootstrap on the caller's context,
+	// then pin the timed query's dial to the warmed IPs: otherwise the
+	// bootstrap A+AAAA lookups burn the per-server budget and a slow bootstrap
+	// surfaces as a misleading "context deadline exceeded". DoH resolvers
+	// built without a bootstrap dial via the system resolver (which this can't
+	// pre-warm); IP literals need no lookup at all. A failed warm-up is
+	// advisory — the query below retries through bootstrap — so only a dead
+	// caller context aborts here.
+	if doh, ok := r.(*DoHResolver); ok && doh.bootstrap != nil {
+		if host := endpointHost(doh.endpoint); host != "" && net.ParseIP(host) == nil {
+			pinned, werr := warmDoHEndpoint(ctx, doh, timeout, host)
+			if werr != nil {
+				res.Error = werr.Error()
+				return res
+			}
+			if pinned != nil {
+				r = pinned
+			}
+		}
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -69,4 +95,58 @@ func ProbeServerWithBootstrap(ctx context.Context, sv UpstreamServer, qname stri
 	}
 	res.OK = true
 	return res
+}
+
+// endpointHost extracts the hostname from a DoH endpoint URL ("https://host/path").
+func endpointHost(endpoint string) string {
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return ""
+	}
+	return u.Hostname()
+}
+
+// warmDoHEndpoint resolves host through doh's bootstrap on the caller's
+// context and rebuilds the resolver pinned to those IPs, so the timed query's
+// dial skips lookup and the per-server timeout covers the query alone. A nil
+// resolver means warm-up failed but was advisory (the query retries through
+// bootstrap); only a dead caller context returns an error.
+func warmDoHEndpoint(ctx context.Context, doh *DoHResolver, timeout time.Duration, host string) (Resolver, error) {
+	ips := bootstrapLookupIP(ctx, doh.bootstrap, host)
+	if len(ips) == 0 {
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("bootstrap resolve %q: %v", host, ctx.Err())
+		}
+		return nil, nil
+	}
+	pinned := NewDoHWithBootstrap(doh.endpoint, timeout, &staticResolver{host: host, ips: ips})
+	return pinned, nil
+}
+
+// staticResolver answers one hostname from a fixed IP list. Probe-only: it
+type staticResolver struct {
+	host string
+	ips  []net.IP
+}
+
+func (s *staticResolver) Resolve(ctx context.Context, q *dns.Msg) (*dns.Msg, error) {
+	m := new(dns.Msg)
+	m.SetReply(q)
+	if len(q.Question) != 1 || q.Question[0].Name != dns.Fqdn(s.host) {
+		return m, nil
+	}
+	hdr := dns.RR_Header{Name: q.Question[0].Name, Rrtype: q.Question[0].Qtype, Class: dns.ClassINET, Ttl: 60}
+	for _, ip := range s.ips {
+		switch q.Question[0].Qtype {
+		case dns.TypeA:
+			if ip.To4() != nil {
+				m.Answer = append(m.Answer, &dns.A{Hdr: hdr, A: ip.To4()})
+			}
+		case dns.TypeAAAA:
+			if ip.To4() == nil {
+				m.Answer = append(m.Answer, &dns.AAAA{Hdr: hdr, AAAA: ip})
+			}
+		}
+	}
+	return m, nil
 }
