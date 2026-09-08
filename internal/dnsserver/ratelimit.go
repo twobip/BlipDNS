@@ -1,6 +1,7 @@
 package dnsserver
 
 import (
+	"hash/fnv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -14,24 +15,41 @@ type tokenBucket struct {
 	last   time.Time
 }
 
+// rlShards splits the bucket map so concurrent queries from different clients
+// don't serialize on one mutex. 16 shards is plenty: beyond that the per-
+// query FNV hash costs more than the contention it removes.
+// ponytail: fixed shard count; grow only if profiles show shard collisions.
+const rlShards = 16
+
+// maxLiveClients caps tracked clients per limiter to avoid memory exhaustion
+// against spoofed/rotating source IPs.
+const maxLiveClients = 1 << 14
+
+type rlShard struct {
+	mu      sync.Mutex
+	buckets map[string]*tokenBucket
+}
+
 // rateLimiter enforces a per-client QPS limit. A qps of 0 disables limiting.
 // Clients are keyed by their identity (DoH client-id if present, else IP).
 // Buckets are evicted after they go idle to bound memory against spoofed/
 // rotating source IPs.
 type rateLimiter struct {
-	mu      sync.Mutex
-	qpsVal  float64 // 0 = disabled
-	burst   int
-	buckets map[string]*tokenBucket
-	maxLive int // cap on tracked clients to avoid memory exhaustion
+	qpsVal   atomic.Int64 // 0 = disabled
+	burstVal atomic.Int64
+	shards   [rlShards]rlShard
 
-	// off mirrors qpsVal == 0 as an atomic so the (default) unlimited case
-	// never takes mu on the per-query hot path.
+	// off mirrors qps == 0 as an atomic so the (default) unlimited case
+	// never takes a lock on the per-query hot path.
 	off atomic.Bool
 }
 
 func newRateLimiter() *rateLimiter {
-	return &rateLimiter{maxLive: 1 << 14}
+	rl := &rateLimiter{}
+	for i := range rl.shards {
+		rl.shards[i].buckets = make(map[string]*tokenBucket)
+	}
+	return rl
 }
 
 // set updates the limit. A non-positive burst defaults to qps (min 1) so a
@@ -47,19 +65,26 @@ func (rl *rateLimiter) set(qps int, burst int) {
 			burst = 1
 		}
 	}
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
-	rl.qpsVal = float64(qps)
-	rl.burst = burst
-	rl.buckets = make(map[string]*tokenBucket)
+	rl.qpsVal.Store(int64(qps))
+	rl.burstVal.Store(int64(burst))
+	for i := range rl.shards {
+		sh := &rl.shards[i]
+		sh.mu.Lock()
+		sh.buckets = make(map[string]*tokenBucket)
+		sh.mu.Unlock()
+	}
 	rl.off.Store(qps == 0)
 }
 
 // qps returns the current per-client QPS limit (0 = disabled).
 func (rl *rateLimiter) qps() int {
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
-	return int(rl.qpsVal)
+	return int(rl.qpsVal.Load())
+}
+
+func rlShardFor(client string) int {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(client))
+	return int(h.Sum32() & (rlShards - 1))
 }
 
 // allow reports whether a query from client may proceed, refilling its bucket.
@@ -67,35 +92,38 @@ func (rl *rateLimiter) allow(client string) bool {
 	if client == "" || rl.off.Load() {
 		return true // disabled (atomic fast path: no lock when unlimited)
 	}
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
-	if rl.qpsVal <= 0 {
-		return true // disabled (set() may have flipped it between the load and here)
+	qps := float64(rl.qpsVal.Load())
+	burst := int(rl.burstVal.Load())
+	if qps <= 0 {
+		return true // set() flipped it between the load and here
 	}
+	sh := &rl.shards[rlShardFor(client)]
+	sh.mu.Lock()
+	defer sh.mu.Unlock()
 	now := time.Now()
-	b, ok := rl.buckets[client]
+	b, ok := sh.buckets[client]
 	if !ok {
 		// bound tracked clients; if saturated, allow (fail-open) rather than DoS.
-		if len(rl.buckets) >= rl.maxLive {
+		if len(sh.buckets) >= maxLiveClients/rlShards {
 			// evict an idle entry to make room
-			for k, v := range rl.buckets {
+			for k, v := range sh.buckets {
 				if now.Sub(v.last) > time.Minute {
-					delete(rl.buckets, k)
+					delete(sh.buckets, k)
 					break
 				}
 			}
-			if len(rl.buckets) >= rl.maxLive {
+			if len(sh.buckets) >= maxLiveClients/rlShards {
 				return true
 			}
 		}
-		b = &tokenBucket{tokens: float64(rl.burst), last: now}
-		rl.buckets[client] = b
+		b = &tokenBucket{tokens: float64(burst), last: now}
+		sh.buckets[client] = b
 	}
 	elapsed := now.Sub(b.last).Seconds()
 	b.last = now
-	b.tokens += elapsed * rl.qpsVal
-	if b.tokens > float64(rl.burst) {
-		b.tokens = float64(rl.burst)
+	b.tokens += elapsed * qps
+	if b.tokens > float64(burst) {
+		b.tokens = float64(burst)
 	}
 	if b.tokens >= 1 {
 		b.tokens--

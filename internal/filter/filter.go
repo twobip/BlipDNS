@@ -78,9 +78,16 @@ func buildMatcher(domains []string) *matcher {
 	return m
 }
 
+// normalizeName lowercases a DNS name and strips the root dot (wire format
+// always carries it). Matchers store normalized keys, so every lookup
+// normalizes once up front instead of per match walk.
+func normalizeName(name string) string {
+	return strings.TrimSuffix(strings.ToLower(name), ".")
+}
+
 // match reports whether name is covered by this matcher.
+// name must already be normalized (see normalizeName).
 func (m *matcher) match(name string) bool {
-	name = strings.TrimSuffix(strings.ToLower(name), ".")
 	if name == "" {
 		return false
 	}
@@ -266,6 +273,7 @@ func (s *Store) Classify(clientIP net.IP, clientID, name string) (blocked bool, 
 	if p == nil {
 		return false, DefaultAction, "", false
 	}
+	name = normalizeName(name)
 	if p.allowM.match(name) {
 		return false, p.action(), p.Upstream, p.Log
 	}
@@ -284,7 +292,7 @@ func (s *Store) Allowed(clientIP net.IP, clientID, name string) bool {
 	if p == nil {
 		return false
 	}
-	return p.allowM.match(name)
+	return p.allowM.match(normalizeName(name))
 }
 
 // BlockSource returns a short label identifying the rule that would block
@@ -296,6 +304,7 @@ func (s *Store) BlockSource(clientIP net.IP, clientID, name string) string {
 	if p == nil {
 		return ""
 	}
+	name = normalizeName(name)
 	if p.allowM.match(name) || !p.blockM.match(name) {
 		return ""
 	}

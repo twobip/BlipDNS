@@ -72,6 +72,20 @@ func (s *Server) upstreamFor(name string, clientIP net.IP) (r upstream.Resolver,
 	return s.upstreamAuto(), false
 }
 
+// overrideResolver returns the memoized resolver for a per-policy upstream
+// spec string, building it once on first use.
+func (s *Server) overrideResolver(spec string) (upstream.Resolver, error) {
+	if r, ok := s.overrides.Load(spec); ok {
+		return r.(upstream.Resolver), nil
+	}
+	r, err := upstream.FromSpec(spec)
+	if err != nil {
+		return nil, err
+	}
+	actual, _ := s.overrides.LoadOrStore(spec, r)
+	return actual.(upstream.Resolver), nil
+}
+
 // upstreamLabel returns a short display label for the resolver used to answer
 // a query, for query-log attribution. A per-policy override that actually
 // took effect is labeled with its spec; otherwise the pool names the resolver

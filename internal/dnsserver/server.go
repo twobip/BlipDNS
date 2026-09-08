@@ -87,6 +87,11 @@ type Server struct {
 	rl *rateLimiter
 	// rec holds static local DNS records (A/AAAA/CNAME) answered before cache/upstream.
 	rec *RecordStore
+	// overrides memoizes per-policy upstream resolvers by spec string.
+	// Specs come from operator policy (bounded set); building a fresh
+	// resolver per query would mint a new http.Transport each time and
+	// destroy keepalive reuse (a TCP+TLS handshake per DoH query).
+	overrides sync.Map // string -> upstream.Resolver
 	// cacheMu guards the runtime cache configuration; both fields are seeded
 	// from cfg and can be overridden live by the controller (settings page).
 	cacheMu        sync.RWMutex
@@ -373,7 +378,7 @@ func (s *Server) serve(ctx context.Context, clientIP net.IP, clientID string, re
 	resolver, matchedRoute := s.upstreamFor(q.Name, clientIP)
 	if upstreamOverride != "" && !matchedRoute {
 		var err error
-		resolver, err = upstream.FromSpec(upstreamOverride)
+		resolver, err = s.overrideResolver(upstreamOverride)
 		if err != nil {
 			s.cnt.AddUpErr()
 			s.notifyUpstreamError(client, domain, fmt.Sprintf("invalid upstream override %q: %v", upstreamOverride, err))
