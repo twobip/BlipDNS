@@ -125,10 +125,32 @@ func extractVersion(v string) string {
 		v = v[i+1:]
 	}
 	v = strings.TrimSpace(v)
+	// CI stamps SemVer build metadata ("+a29f043") onto release builds so the
+	// dashboard badge can show the exact commit. Strip the plus-hex form the
+	// badge recognises before validating; anything else (e.g. "-rc1") still
+	// fails below.
+	if i := strings.IndexByte(v, '+'); i >= 0 && isHexSHA(v[i+1:]) {
+		v = v[:i]
+	}
 	if !validVersion(v) {
 		return ""
 	}
 	return v
+}
+
+// isHexSHA reports whether s looks like a git short SHA (7+ lowercase hex
+// digits) — the only build-metadata form the dashboard badge recognises.
+func isHexSHA(s string) bool {
+	if len(s) < 7 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // validVersion reports whether v is a well-formed "major.minor.patch" string.

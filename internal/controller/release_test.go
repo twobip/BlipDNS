@@ -11,6 +11,9 @@ func TestExtractVersion(t *testing.T) {
 		{"blipc/0.2.0", "0.2.0"},
 		{"0.2.0", "0.2.0"},
 		{"blipd/0.2.0-rc1", ""},
+		{"blipd/0.2.0+a29f043", "0.2.0"},
+		{"blipc/0.4.4+915badb", "0.4.4"},
+		{"blipd/0.2.0+xyz", ""},
 		{"", ""},
 		{"not-a-version", ""},
 		{"1.2", ""},
@@ -66,6 +69,12 @@ func TestReleaseCheckAvailable(t *testing.T) {
 	}
 	if rc.available("stable", "blipd/not-a-version") {
 		t.Error("unparseable version reported as update available")
+	}
+	if rc.available("stable", "blipd/0.2.0+a29f043") {
+		t.Error("same core with build metadata reported as update available")
+	}
+	if !rc.available("stable", "blipd/0.1.0+915badb") {
+		t.Error("older core with build metadata not reported as update available")
 	}
 }
 

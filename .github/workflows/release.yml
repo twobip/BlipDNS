@@ -55,8 +55,11 @@ jobs:
         run: |
           set -euo pipefail
           export CGO_ENABLED=0 GOOS=linux GOARCH=amd64
-          go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o blipd-linux-amd64 ./cmd/blipd
-          go build -trimpath -ldflags "-s -w -X github.com/twobip/BlipDNS/internal/controller.version=${VERSION}" -o blipc-linux-amd64 ./cmd/blipc
+          # Stamp the short commit SHA as SemVer build metadata so the
+          # dashboard badge shows the exact build instead of "unknown build".
+          STAMP="${VERSION}+$(git rev-parse --short=7 HEAD)"
+          go build -trimpath -ldflags "-s -w -X main.version=${STAMP}" -o blipd-linux-amd64 ./cmd/blipd
+          go build -trimpath -ldflags "-s -w -X github.com/twobip/BlipDNS/internal/controller.version=${STAMP}" -o blipc-linux-amd64 ./cmd/blipc
           go build -trimpath -ldflags "-s -w" -o blipctl-linux-amd64 ./cmd/blipctl
           sha256sum blipd-linux-amd64 blipc-linux-amd64 blipctl-linux-amd64 > SHA256SUMS
           echo "--- built artifacts ---"
