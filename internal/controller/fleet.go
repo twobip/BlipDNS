@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -141,6 +142,9 @@ type Fleet struct {
 	upstreamServers   []upstream.UpstreamServer    // fleet-wide default upstream pool
 	upstreamRoutes    []upstream.UpstreamRoute     // fleet-wide default upstream routes
 	upstreamBootstrap []upstream.UpstreamServer    // fleet-wide bootstrap DNS servers for resolving DoH hostnames
+	probeBootMu       sync.Mutex                   // guards probeBoot below
+	probeBootKey      string                       // fleet bootstrap spec the cached probe resolver was built from
+	probeBoot         upstream.Resolver            // reused probe bootstrap resolver: keeps its DoH keep-alive conns across Test clicks
 	qlRetentionHours  int                          // how long query log entries are kept (0 = 24h default)
 	records           []control.RecordEntry        // fleet-wide local DNS records
 	haCluster         control.HACluster            // LAN two-node VRRP desired state
@@ -862,6 +866,44 @@ func (f *Fleet) UpstreamBootstrap() []upstream.UpstreamServer {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
 	return f.upstreamBootstrap
+}
+
+// ProbeBootstrap returns a cached bootstrap resolver for the upstream Test
+// endpoint, rebuilt only when the fleet bootstrap config changes. Reusing it
+// keeps DoH keep-alive connections warm across Test clicks: a fresh resolver
+// per click pays a new TLS handshake every time, which is both slow and the
+// most RST-triggering pattern against rate-limiting upstreams like Quad9.
+// A nil bootstrap config returns (nil, nil): probes resolve DoH hostnames via
+// the system resolver, as before.
+func (f *Fleet) ProbeBootstrap() (upstream.Resolver, error) {
+	servers := f.UpstreamBootstrap()
+	key := bootstrapKey(servers)
+	f.probeBootMu.Lock()
+	defer f.probeBootMu.Unlock()
+	if f.probeBootKey == key && (f.probeBoot != nil || key == "") {
+		return f.probeBoot, nil
+	}
+	r, err := upstream.BuildBootstrapResolver(servers)
+	if err != nil {
+		return nil, err
+	}
+	f.probeBootKey = key
+	f.probeBoot = r
+	return r, nil
+}
+
+// bootstrapKey fingerprints a bootstrap server list for cache comparison.
+func bootstrapKey(servers []upstream.UpstreamServer) string {
+	var sb strings.Builder
+	for _, sv := range servers {
+		sb.WriteString(sv.Name)
+		sb.WriteByte(0)
+		sb.WriteString(sv.Address)
+		sb.WriteByte(0)
+		sb.WriteString(strconv.Itoa(sv.TimeoutSec))
+		sb.WriteByte(0)
+	}
+	return sb.String()
 }
 
 // SetUpstreamDefault records the fleet-wide default upstream pool, routes and

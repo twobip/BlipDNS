@@ -76,10 +76,8 @@ func ProbeServerWithBootstrap(ctx context.Context, sv UpstreamServer, qname stri
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	q := new(dns.Msg)
-	q.SetQuestion(fqdn, dns.TypeA)
 	start := time.Now()
-	resp, err := r.Resolve(ctx, q)
+	resp, err := resolveWithRetry(ctx, r, fqdn)
 	res.LatencyMs = time.Since(start).Milliseconds()
 	if err != nil {
 		res.Error = err.Error()
@@ -121,6 +119,32 @@ func warmDoHEndpoint(ctx context.Context, doh *DoHResolver, timeout time.Duratio
 	}
 	pinned := NewDoHWithBootstrap(doh.endpoint, timeout, &staticResolver{host: host, ips: ips})
 	return pinned, nil
+}
+
+// resolveWithRetry sends one A query for fqdn via r, retrying once on a
+// mid-connection TCP reset. Fresh TLS handshakes against throttling upstreams
+// (Quad9) RST intermittently; the retry opens a new connection and usually
+// succeeds. Only resets retry — timeouts, 403s and DNS errors return as-is.
+func resolveWithRetry(ctx context.Context, r Resolver, fqdn string) (*dns.Msg, error) {
+	q := new(dns.Msg)
+	q.SetQuestion(fqdn, dns.TypeA)
+	resp, err := r.Resolve(ctx, q)
+	if err != nil && isConnReset(err) {
+		q = new(dns.Msg)
+		q.SetQuestion(fqdn, dns.TypeA)
+		resp, err = r.Resolve(ctx, q)
+	}
+	return resp, err
+}
+
+// isConnReset reports whether err is a mid-connection TCP reset — the
+// signature of an upstream throttling fresh handshakes, worth one retry.
+// Timeouts and DNS-level failures are not resets and must not retry.
+func isConnReset(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "connection reset by peer")
 }
 
 // staticResolver answers one hostname from a fixed IP list. Probe-only: it

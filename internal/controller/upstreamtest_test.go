@@ -2,6 +2,7 @@ package controller
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -49,7 +50,6 @@ func authedUpstreamTestServer(t *testing.T) (string, func(method, path, body str
 
 func TestUpstreamTestEndpoint(t *testing.T) {
 	url, do := authedUpstreamTestServer(t)
-
 	// Unauthenticated: rejected.
 	resp, err := http.Post(url+"/api/upstream/test", "application/json",
 		strings.NewReader(`{"servers":[{"address":"udp://9.9.9.9:53"}]}`))
@@ -97,5 +97,41 @@ func TestUpstreamTestEndpoint(t *testing.T) {
 	}
 	if out.Results[0].OK || out.Results[0].Error == "" {
 		t.Fatalf("bad spec should fail with error, got %+v", out.Results[0])
+	}
+	resp.Body.Close()
+}
+
+func TestProbeBootstrapCachedAcrossCalls(t *testing.T) {
+	// Same fleet config twice must return the same resolver (keep-alives
+	// survive Test clicks); a config change must rebuild.
+	f := NewFleet("")
+	f.SetUpstreamDefault(nil, nil, []upstream.UpstreamServer{{Name: "b", Address: "udp://127.0.0.1:1"}})
+	first, err := f.ProbeBootstrap()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == nil {
+		t.Fatal("non-empty bootstrap should build a resolver")
+	}
+	second, err := f.ProbeBootstrap()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprintf("%p", first) != fmt.Sprintf("%p", second) {
+		t.Fatal("ProbeBootstrap should cache the resolver across calls")
+	}
+	f.SetUpstreamDefault(nil, nil, []upstream.UpstreamServer{{Name: "b", Address: "udp://127.0.0.1:2"}})
+	third, err := f.ProbeBootstrap()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprintf("%p", first) == fmt.Sprintf("%p", third) {
+		t.Fatal("bootstrap config change should rebuild the resolver")
+	}
+	// Empty config: (nil, nil), resolved via system resolver as before.
+	f.SetUpstreamDefault(nil, nil, nil)
+	r, err := f.ProbeBootstrap()
+	if err != nil || r != nil {
+		t.Fatalf("empty bootstrap = (%v, %v), want (nil, nil)", r, err)
 	}
 }

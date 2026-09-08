@@ -1119,8 +1119,10 @@ func (s *Server) handleUpstreamTest(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	// DoH endpoints given as hostnames (e.g. dns.quad9.net) resolve through
 	// the fleet's bootstrap servers when configured, instead of blipc's
-	// system resolver — the same path blipd itself uses.
-	bootstrap, err := upstream.BuildBootstrapResolver(s.fleet.UpstreamBootstrap())
+	// system resolver — the same path blipd itself uses. The bootstrap
+	// resolver is cached on the fleet so DoH keep-alives survive across Test
+	// clicks instead of paying a fresh TLS handshake (and RST risk) per click.
+	bootstrap, err := s.fleet.ProbeBootstrap()
 	if err != nil {
 		http.Error(w, "bad bootstrap servers: "+err.Error(), http.StatusBadRequest)
 		return

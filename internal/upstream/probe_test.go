@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -142,4 +143,68 @@ type failBootstrap struct{}
 func (f *failBootstrap) Resolve(ctx context.Context, q *dns.Msg) (*dns.Msg, error) {
 	<-ctx.Done()
 	return nil, ctx.Err()
+}
+
+func TestIsConnReset(t *testing.T) {
+	if isConnReset(nil) {
+		t.Error("nil must not be a reset")
+	}
+	if !isConnReset(&simpleErr{"Post \"https://x/dns-query\": read tcp 1.2.3.4:1->5.6.7.8:443: read: connection reset by peer"}) {
+		t.Error("RST error should retry")
+	}
+	for _, msg := range []string{
+		"Post \"https://x/dns-query\": context deadline exceeded",
+		"Post \"https://x/dns-query\": doh: upstream returned 403",
+		"boom",
+	} {
+		if isConnReset(&simpleErr{msg}) {
+			t.Errorf("%q must not retry", msg)
+		}
+	}
+}
+
+// flakyOnce fails its first Resolve with a mid-connection RST, then answers
+// like a healthy DoH endpoint — the probe must retry once and succeed.
+type flakyOnce struct {
+	mu    sync.Mutex
+	calls int
+	msg   *dns.Msg
+}
+
+func (f *flakyOnce) Resolve(ctx context.Context, q *dns.Msg) (*dns.Msg, error) {
+	f.mu.Lock()
+	f.calls++
+	n := f.calls
+	f.mu.Unlock()
+	if n == 1 {
+		return nil, &simpleErr{"Post \"https://x/dns-query\": read tcp 1.2.3.4:1->5.6.7.8:443: read: connection reset by peer"}
+	}
+	m := f.msg.Copy()
+	m.Id = q.Id
+	m.Question = q.Question
+	return m, nil
+}
+
+func TestProbeRetriesConnReset(t *testing.T) {
+	// A stub resolver that RSTs once then answers, driven through the real
+	// probe retry path (single shared retry helper, no network).
+	m := new(dns.Msg)
+	m.SetQuestion("example.com.", dns.TypeA)
+	m.Answer = append(m.Answer, &dns.A{Hdr: dns.RR_Header{Name: "example.com.", Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60}, A: net.ParseIP("1.2.3.4")})
+	f := &flakyOnce{msg: m}
+	resp, err := resolveWithRetry(context.Background(), f, "example.com.")
+	if err != nil {
+		t.Fatalf("retry should succeed, got %v", err)
+	}
+	if len(resp.Answer) != 1 {
+		t.Fatalf("answers = %+v", resp.Answer)
+	}
+	if f.calls != 2 {
+		t.Fatalf("calls = %d, want exactly 2 (fail once, retry once)", f.calls)
+	}
+	// A non-reset error must NOT retry.
+	always := &failResolver{}
+	if _, err := resolveWithRetry(context.Background(), always, "example.com."); err == nil {
+		t.Fatal("expected error from failing resolver")
+	}
 }
