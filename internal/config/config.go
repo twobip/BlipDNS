@@ -34,10 +34,6 @@ type Config struct {
 	UpstreamBootstrap    []upstream.UpstreamServer `yaml:"upstream_bootstrap"`     // DNS servers used to resolve DoH upstream hostnames (UDP or DoH)
 	CacheCap             time.Duration             `yaml:"cache_cap"`              // max TTL for cached responses
 	CacheSize            int                       `yaml:"cache_size"`             // max cached responses in RAM (0 = unlimited)
-	CacheWarmCount       int                       `yaml:"cache_warm_count"`       // most-popular entries kept fresh (0 = off)
-	CacheWarmAhead       time.Duration             `yaml:"cache_warm_ahead"`       // refresh popular entries when TTL drops below this
-	CacheWarmInterval    time.Duration             `yaml:"cache_warm_interval"`    // how often to check for stale popular entries
-	CacheRegular         time.Duration             `yaml:"cache_regular"`          // how long non-most-popular entries stay cached (0 = use record TTL)
 	BlocklistURL         string                    `yaml:"blocklist_url"`          // AdBlock Plus feed URL (optional, legacy single)
 	BlocklistURLs        []string                  `yaml:"blocklist_urls"`         // one or more ABP/hosts feeds (Pi-hole style)
 	BlocklistUpdateHours int                       `yaml:"blocklist_update_hours"` // refresh interval (0 = no auto-refresh)
@@ -58,9 +54,6 @@ func Default() *Config {
 		Upstream:           "udp://1.1.1.1:53 https://1.1.1.1/dns-query",
 		CacheCap:           1 * time.Hour,
 		CacheSize:          10000,
-		CacheWarmCount:     100,
-		CacheWarmAhead:     30 * time.Second,
-		CacheWarmInterval:  10 * time.Second,
 		BlocklistCacheFile: "/var/lib/blipd/blocklist.cache",
 	}
 }
@@ -79,15 +72,6 @@ func Load(path string) (*Config, error) {
 	}
 	if c.CacheCap <= 0 {
 		c.CacheCap = time.Hour
-	}
-	if c.CacheWarmCount != 0 {
-		// fill sensible intervals for a warm loop that's actually enabled
-		if c.CacheWarmAhead <= 0 {
-			c.CacheWarmAhead = 30 * time.Second
-		}
-		if c.CacheWarmInterval <= 0 {
-			c.CacheWarmInterval = 10 * time.Second
-		}
 	}
 	return c, nil
 }

@@ -106,9 +106,7 @@ func lastUpstream(r *upstreamRec) ([]upstream.UpstreamServer, []upstream.Upstrea
 
 // cacheCall is one cache-config push observed by cacheRec.
 type cacheCall struct {
-	size    int
-	warm    int
-	regular int
+	size int
 }
 
 // recCall is one records push observed by recRec.
@@ -147,27 +145,23 @@ func (r *recRec) callCount() int {
 	return len(r.calls)
 }
 
-// cacheRec records every cache config (size + auto-refresh) pushed to a fake
-// blipd, reports the current values back from /api/v1/stats (for reconcile),
-// and mirrors what an explicit purge would drop (fixed, so it is immune to
-// reconcile pushes rewriting the size/warm).
+// cacheRec records every cache size pushed to a fake blipd, reports the
+// current value back from /api/v1/stats (for reconcile), and mirrors what an
+// explicit purge would drop (fixed, so it is immune to reconcile pushes
+// rewriting the size).
 type cacheRec struct {
-	mu      sync.Mutex
-	size    int
-	warm    int
-	regular int
-	drop    int
-	calls   []cacheCall
-	purged  int
+	mu     sync.Mutex
+	size   int
+	drop   int
+	calls  []cacheCall
+	purged int
 }
 
-func (r *cacheRec) applied(size, warm, regular int) {
+func (r *cacheRec) applied(size int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.size = size
-	r.warm = warm
-	r.regular = regular
-	r.calls = append(r.calls, cacheCall{size, warm, regular})
+	r.calls = append(r.calls, cacheCall{size})
 }
 
 func (r *cacheRec) snapshot() []cacheCall {
@@ -241,8 +235,6 @@ func fakeBlipdWithRec(t *testing.T, token, claimCode string, health *control.Hea
 		if cache != nil {
 			cache.mu.Lock()
 			st.CacheSize = cache.size
-			st.CacheWarm = cache.warm
-			st.CacheRegular = cache.regular
 			cache.mu.Unlock()
 		}
 		if recCtrl != nil {
@@ -350,13 +342,13 @@ func fakeBlipdWithRec(t *testing.T, token, claimCode string, health *control.Hea
 		}
 		switch r.Method {
 		case http.MethodGet:
-			size, warm, regular := 0, 0, 0
+			size := 0
 			if cache != nil {
 				cache.mu.Lock()
-				size, warm, regular = cache.size, cache.warm, cache.regular
+				size = cache.size
 				cache.mu.Unlock()
 			}
-			writeJSONH(w, map[string]int{"size": size, "warm": warm, "regular": regular})
+			writeJSONH(w, map[string]int{"size": size})
 		case http.MethodPut, http.MethodPost:
 			var req control.SetCacheRequest
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -364,9 +356,9 @@ func fakeBlipdWithRec(t *testing.T, token, claimCode string, health *control.Hea
 				return
 			}
 			if cache != nil {
-				cache.applied(req.Size, req.Warm, req.Regular)
+				cache.applied(req.Size)
 			}
-			writeJSONH(w, map[string]int{"size": req.Size, "warm": req.Warm, "regular": req.Regular})
+			writeJSONH(w, map[string]int{"size": req.Size})
 		default:
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
@@ -1356,9 +1348,8 @@ func TestFleetDoHOverride(t *testing.T) {
 	}
 }
 
-// TestFleetSetCache verifies the fleet-wide response-cache config (max size +
-// auto-refresh count) is pushed to every instance and persisted to the
-// controller config.
+// TestFleetSetCache verifies the fleet-wide response-cache size is pushed to
+// every instance and persisted to the controller config.
 func TestFleetSetCache(t *testing.T) {
 	cacheA, cacheB := &cacheRec{}, &cacheRec{}
 	srvA := fakeBlipdWithRec(t, "t", "", &control.HealthResponse{OK: true}, &control.StatsResponse{}, &control.ListResponse{}, nil, nil, cacheA)
@@ -1376,7 +1367,7 @@ func TestFleetSetCache(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res := fleet.SetCache(ctx, 5000, 10, 3600)
+	res := fleet.SetCache(ctx, 5000)
 	if res["a"] != "ok" || res["b"] != "ok" {
 		t.Fatalf("expected both ok, got %+v", res)
 	}
@@ -1387,20 +1378,20 @@ func TestFleetSetCache(t *testing.T) {
 		}
 		return sn[len(sn)-1]
 	}
-	if got := last(cacheA); got.size != 5000 || got.warm != 10 || got.regular != 3600 {
-		t.Errorf("instance a last cache push = %+v, want 5000/10/3600 (history=%v)", got, cacheA.snapshot())
+	if got := last(cacheA); got.size != 5000 {
+		t.Errorf("instance a last cache push = %+v, want 5000 (history=%v)", got, cacheA.snapshot())
 	}
-	if got := last(cacheB); got.size != 5000 || got.warm != 10 || got.regular != 3600 {
-		t.Errorf("instance b last cache push = %+v, want 5000/10/3600 (history=%v)", got, cacheB.snapshot())
+	if got := last(cacheB); got.size != 5000 {
+		t.Errorf("instance b last cache push = %+v, want 5000 (history=%v)", got, cacheB.snapshot())
 	}
-	if s, w, reg := fleet.CacheConfig(); s != 5000 || w != 10 || reg != 3600 {
-		t.Errorf("fleet CacheConfig = %d/%d/%d, want 5000/10/3600", s, w, reg)
+	if s := fleet.CacheConfig(); s != 5000 {
+		t.Errorf("fleet CacheConfig = %d, want 5000", s)
 	}
 	b, err := os.ReadFile(cfgPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Contains(b, []byte("cache_size:")) || !bytes.Contains(b, []byte("5000")) || !bytes.Contains(b, []byte("cache_warm:")) || !bytes.Contains(b, []byte("10")) || !bytes.Contains(b, []byte("cache_regular:")) || !bytes.Contains(b, []byte("3600")) {
+	if !bytes.Contains(b, []byte("cache_size:")) || !bytes.Contains(b, []byte("5000")) {
 		t.Errorf("cache config not persisted:\n%s", b)
 	}
 }
@@ -1416,7 +1407,7 @@ func TestFleetCacheReconcileRestartRevert(t *testing.T) {
 	defer srv.Close()
 
 	fleet := NewFleet("/tmp/blip-test-config.yaml")
-	fleet.SetCacheDefault(5000, 10, 3600)
+	fleet.SetCacheDefault(5000)
 	if err := fleet.Add(context.Background(), InstanceConfig{ID: "a", URL: srv.URL, Token: "t"}); err != nil {
 		t.Fatal(err)
 	}
@@ -1436,14 +1427,14 @@ func TestFleetCacheReconcileRestartRevert(t *testing.T) {
 	}
 	waitFor(1, "initial cache push never happened")
 
-	// Simulate restart revert: blipd's cache reverts to default (0/off).
+	// Simulate restart revert: blipd's cache reverts to default (0).
 	cache.mu.Lock()
-	cache.size, cache.warm, cache.regular = 0, 0, 0
+	cache.size = 0
 	cache.mu.Unlock()
 
 	got := waitFor(2, "no re-push after simulated restart revert")
 	last := got[len(got)-1]
-	if last.size != 5000 || last.warm != 10 || last.regular != 3600 {
+	if last.size != 5000 {
 		t.Fatalf("unexpected re-push content: %+v", last)
 	}
 }
@@ -1456,7 +1447,7 @@ func TestFleetCacheNotConfiguredDefersToInstance(t *testing.T) {
 	pollInterval = 100 * time.Millisecond
 	defer func() { pollInterval = 5 * time.Second }()
 	// Simulate blipd's own config defaults persisted from its YAML.
-	cache := &cacheRec{size: 10000, warm: 100, regular: 0}
+	cache := &cacheRec{size: 10000}
 	srv := fakeBlipdWithRec(t, "t", "", &control.HealthResponse{OK: true}, &control.StatsResponse{}, &control.ListResponse{}, nil, nil, cache)
 	defer srv.Close()
 
@@ -1471,8 +1462,8 @@ func TestFleetCacheNotConfiguredDefersToInstance(t *testing.T) {
 		t.Fatalf("expected no cache push when unconfigured, got %d calls: %+v", len(got), got)
 	}
 	cache.mu.Lock()
-	if cache.size != 10000 || cache.warm != 100 || cache.regular != 0 {
-		t.Errorf("instance cache overridden to %d/%d/%d, want 10000/100/0 (blipd defaults preserved)", cache.size, cache.warm, cache.regular)
+	if cache.size != 10000 {
+		t.Errorf("instance cache overridden to %d, want 10000 (blipd defaults preserved)", cache.size)
 	}
 	cache.mu.Unlock()
 }
@@ -1488,7 +1479,7 @@ func TestFleetCacheOverride(t *testing.T) {
 	defer srvB.Close()
 
 	fleet := NewFleet(filepath.Join(t.TempDir(), "blipc.yaml"))
-	fleet.SetCacheDefault(5000, 10, 3600)
+	fleet.SetCacheDefault(5000)
 	ctx := context.Background()
 	if err := fleet.Add(ctx, InstanceConfig{ID: "a", URL: srvA.URL, Token: "t"}); err != nil {
 		t.Fatal(err)
@@ -1513,17 +1504,17 @@ func TestFleetCacheOverride(t *testing.T) {
 		}
 	}
 
-	size, warm := 1000, 3
-	res := fleet.SetInstanceOverride(ctx, "a", &InstanceOverride{CacheSize: &size, CacheWarm: &warm})
+	size := 1000
+	res := fleet.SetInstanceOverride(ctx, "a", &InstanceOverride{CacheSize: &size})
 	if res["a"] != "ok" {
 		t.Fatalf("expected a ok, got %+v", res)
 	}
-	if got := last(cacheA); got.size != 1000 || got.warm != 3 {
-		t.Errorf("instance a last cache push = %+v, want 1000/3 (history=%v)", got, cacheA.snapshot())
+	if got := last(cacheA); got.size != 1000 {
+		t.Errorf("instance a last cache push = %+v, want 1000 (history=%v)", got, cacheA.snapshot())
 	}
 	// instance b keeps the fleet default
-	if got := last(cacheB); got.size != 5000 || got.warm != 10 {
-		t.Errorf("instance b last cache push = %+v, want 5000/10", got)
+	if got := last(cacheB); got.size != 5000 {
+		t.Errorf("instance b last cache push = %+v, want 5000", got)
 	}
 	if o := fleet.InstanceOverrideOf("a"); o == nil || o.CacheSize == nil || *o.CacheSize != 1000 {
 		t.Errorf("override for a = %+v", o)
@@ -1587,11 +1578,11 @@ func TestServerSettingsCacheFleet(t *testing.T) {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
-	if d["cache_size"] != float64(0) || d["cache_warm"] != float64(0) {
-		t.Errorf("initial cache config = %v/%v, want 0/0", d["cache_size"], d["cache_warm"])
+	if d["cache_size"] != float64(0) {
+		t.Errorf("initial cache size = %v, want 0", d["cache_size"])
 	}
 
-	body, _ := json.Marshal(map[string]int{"cache_size": 5000, "cache_warm": 10})
+	body, _ := json.Marshal(map[string]int{"cache_size": 5000})
 	req, _ := http.NewRequest(http.MethodPut, "/api/settings", strings.NewReader(string(body)))
 	req.Header.Set("Content-Type", "application/json")
 	resp, err = c.Do(req)
@@ -1611,18 +1602,18 @@ func TestServerSettingsCacheFleet(t *testing.T) {
 		t.Errorf("applied a = %v", applied["a"])
 	}
 	hist := cacheA.snapshot()
-	if len(hist) == 0 || hist[len(hist)-1].size != 5000 || hist[len(hist)-1].warm != 10 {
-		t.Errorf("cache pushes = %v, want last 5000/10", hist)
+	if len(hist) == 0 || hist[len(hist)-1].size != 5000 {
+		t.Errorf("cache pushes = %v, want last 5000", hist)
 	}
 	resp, _ = c.Get("/api/settings")
 	json.NewDecoder(resp.Body).Decode(&d)
 	resp.Body.Close()
-	if d["cache_size"] != float64(5000) || d["cache_warm"] != float64(10) {
-		t.Errorf("read-back cache config = %v/%v, want 5000/10", d["cache_size"], d["cache_warm"])
+	if d["cache_size"] != float64(5000) {
+		t.Errorf("read-back cache size = %v, want 5000", d["cache_size"])
 	}
 
 	// negative values are rejected
-	body, _ = json.Marshal(map[string]int{"cache_size": -1, "cache_warm": 0})
+	body, _ = json.Marshal(map[string]int{"cache_size": -1})
 	req, _ = http.NewRequest(http.MethodPut, "/api/settings", strings.NewReader(string(body)))
 	req.Header.Set("Content-Type", "application/json")
 	resp, _ = c.Do(req)

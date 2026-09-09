@@ -51,11 +51,7 @@ type Config struct {
 	UpstreamRoutes    []upstream.UpstreamRoute
 	UpstreamBootstrap []upstream.UpstreamServer // DNS servers used to resolve DoH upstream hostnames
 	CacheCap          time.Duration
-	CacheSize         int           // max cached responses in RAM (0 = unlimited)
-	CacheWarmCount    int           // most-popular entries to auto-refresh (0 = off)
-	CacheWarmAhead    time.Duration // refresh a popular entry when its TTL drops below this
-	CacheWarmInterval time.Duration // how often to run the warm-refresh loop
-	CacheRegular      time.Duration // how long non-most-popular entries stay cached (0 = use record TTL)
+	CacheSize         int // max cached responses in RAM (0 = unlimited)
 	Store             *filter.Store
 	Version           string
 	Blocklist         *blocklist.Blocklist // global blocklist applied before per-client policy
@@ -82,7 +78,6 @@ type Server struct {
 	dohPlainMu   sync.Mutex
 	dohPlain     *http.Server
 	dohPlainAddr string
-	close        chan struct{}
 	once         sync.Once
 	// rl enforces the per-client DNS query rate limit (configurable live).
 	rl *rateLimiter
@@ -93,12 +88,10 @@ type Server struct {
 	// resolver per query would mint a new http.Transport each time and
 	// destroy keepalive reuse (a TCP+TLS handshake per DoH query).
 	overrides sync.Map // string -> upstream.Resolver
-	// cacheMu guards the runtime cache configuration; both fields are seeded
-	// from cfg and can be overridden live by the controller (settings page).
+	// cacheMu guards the runtime cache configuration, seeded from cfg and
+	// overridable live by the controller (settings page).
 	cacheMu        sync.RWMutex
-	cacheSize      int           // max cached responses (0 = unlimited)
-	cacheWarm      int           // most-popular entries auto-refreshed before expiry (0 = off)
-	cacheRegular   time.Duration // how long non-most-popular entries stay cached (0 = use record TTL)
+	cacheSize      int // max cached responses (0 = unlimited)
 	trustedProxies []*net.IPNet
 }
 
@@ -127,15 +120,11 @@ func New(cfg Config) (*Server, error) {
 		rl:             newRateLimiter(),
 		rec:            NewRecordStore(),
 		cacheSize:      cfg.CacheSize,
-		cacheWarm:      cfg.CacheWarmCount,
-		cacheRegular:   cfg.CacheRegular,
 		trustedProxies: trusted,
-		close:          make(chan struct{}),
 	}
-	c.SetHold(cfg.CacheWarmCount, cfg.CacheRegular)
 	// Let the management API toggle the optional plain-HTTP DoH listener, the
 	// per-client rate limit, the conditional-forwarding upstream config, and
-	// the response cache (size / auto-refresh / purge) at runtime.
+	// the response cache (size / purge) at runtime.
 	ctrl.SetDoHController(s)
 	ctrl.SetRateLimitController(s)
 	ctrl.SetLocalResolverController(s)
@@ -397,14 +386,14 @@ func (s *Server) serve(ctx context.Context, clientIP net.IP, clientID string, re
 	}
 	upstreamLabel := s.upstreamLabel(resolver, matchedRoute, upstreamOverride)
 
-	key := cache.Key(req)
+	key := cache.KeyOf(req)
 	if upstreamLabel != "" {
 		// Partition the cache by the resolver that will answer: routes and
 		// per-policy overrides can give different clients different answers
 		// for the same qname, and a shared entry would serve one client's
-		// view to another. The qualifier is "|" + label (sanitized so the
-		// warm loop's ParseKey keeps parsing the first three segments).
-		key += "|" + strings.ReplaceAll(upstreamLabel, "|", "/")
+		// view to another. The label is compared, never parsed, so it needs
+		// no sanitizing.
+		key.Label = upstreamLabel
 	}
 	out, cached, err := s.cache.DoHit(ctx, key, func() (*dns.Msg, error) {
 		return resolver.Resolve(ctx, req)
@@ -544,81 +533,8 @@ func applyBlockAction(resp *dns.Msg, q dns.Question, action filter.BlockAction) 
 	}
 }
 
-// startWarmLoop periodically re-resolves the most popular cached responses
-// shortly before they expire, so heavy hitters never go stale for clients. The
-// loop always runs and honors the runtime warm count, so the controller can
-// turn auto-refresh on/off without a restart.
-func (s *Server) startWarmLoop() {
-	interval := s.cfg.CacheWarmInterval
-	if interval <= 0 {
-		interval = 10 * time.Second
-	}
-	go func() {
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-s.close:
-				return
-			case <-ticker.C:
-				s.refreshPopular()
-			}
-		}
-	}()
-}
-
-// refreshPopular resolves the top CacheWarmCount cached keys that are stale
-// (expired, or expiring within CacheWarmAhead) using the default upstream and
-// re-caches the fresh responses. Best-effort: failures are skipped and the
-// next pass retries.
-func (s *Server) refreshPopular() {
-	warm := s.cacheWarmCount()
-	if warm <= 0 {
-		return
-	}
-	keys := s.cache.Popular(warm)
-	if len(keys) == 0 {
-		return
-	}
-	auto := s.upstreamAuto()
-	if auto == nil {
-		return
-	}
-	ahead := s.cfg.CacheWarmAhead
-	if ahead <= 0 {
-		ahead = 30 * time.Second
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-	for _, k := range keys {
-		if !s.cache.Stale(k, ahead) {
-			continue
-		}
-		name, qtype, qclass, ok := cache.ParseKey(k)
-		if !ok {
-			continue
-		}
-		req := new(dns.Msg)
-		req.RecursionDesired = true
-		req.Question = []dns.Question{{Name: name, Qtype: qtype, Qclass: qclass}}
-		m, err := auto.Resolve(ctx, req)
-		if err != nil {
-			continue
-		}
-		s.cache.Set(k, m)
-	}
-}
-
-// cacheWarmCount returns the runtime auto-refresh count (0 = off).
-func (s *Server) cacheWarmCount() int {
-	s.cacheMu.RLock()
-	defer s.cacheMu.RUnlock()
-	return s.cacheWarm
-}
-
 // Start launches UDP, TCP and DoH listeners (DoH blocks).
 func (s *Server) Start() error {
-	s.startWarmLoop()
 	dh := s.Handler()
 	s.doch = &http.Server{Addr: s.cfg.DoHAddr, Handler: dh, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 1 << 20}
 
@@ -725,22 +641,16 @@ func (s *Server) RateLimitQPS() int {
 	return s.rl.qps()
 }
 
-// SetCacheConfig tunes the response cache at runtime: size is the max cached
-// responses (0 = unlimited), warm the number of most-popular entries kept at
-// their record TTL and auto-refreshed before expiry (0 = off), and regular the
-// duration every other entry stays cached (0 = use record TTL). All values
-// must be >= 0.
-func (s *Server) SetCacheConfig(size, warm int, regular time.Duration) error {
-	if size < 0 || warm < 0 || regular < 0 {
-		return fmt.Errorf("cache size and warm count must be >= 0")
+// SetCacheConfig tunes the response cache size at runtime: the max cached
+// responses (0 = unlimited). Must be >= 0.
+func (s *Server) SetCacheConfig(size int) error {
+	if size < 0 {
+		return fmt.Errorf("cache size must be >= 0")
 	}
 	s.cacheMu.Lock()
 	s.cacheSize = size
-	s.cacheWarm = warm
-	s.cacheRegular = regular
 	s.cacheMu.Unlock()
 	s.cache.SetMaxEntries(size)
-	s.cache.SetHold(warm, regular)
 	return nil
 }
 
@@ -749,21 +659,6 @@ func (s *Server) CacheSize() int {
 	s.cacheMu.RLock()
 	defer s.cacheMu.RUnlock()
 	return s.cacheSize
-}
-
-// CacheWarm returns the current auto-refresh count (0 = off).
-func (s *Server) CacheWarm() int {
-	s.cacheMu.RLock()
-	defer s.cacheMu.RUnlock()
-	return s.cacheWarm
-}
-
-// CacheRegular returns how long non-most-popular entries stay cached
-// (0 = use the record TTL).
-func (s *Server) CacheRegular() time.Duration {
-	s.cacheMu.RLock()
-	defer s.cacheMu.RUnlock()
-	return s.cacheRegular
 }
 
 // PurgeCache drops every cached response (e.g. from the settings page).
@@ -789,7 +684,6 @@ func (s *Server) stopDoHPlainLocked() {
 // Shutdown stops all listeners.
 func (s *Server) Shutdown() {
 	s.once.Do(func() {
-		close(s.close)
 		s.dohPlainMu.Lock()
 		s.stopDoHPlainLocked()
 		s.dohPlainMu.Unlock()

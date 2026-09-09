@@ -128,14 +128,11 @@ func (s *Server) rateLimitController() RateLimitController {
 }
 
 // CacheController is the piece of the DNS server the management API can tune
-// at runtime: the response cache size limit, the auto-refresh (warm) count,
-// and an explicit purge. The controller reports the config back via stats so
-// its poll loop can converge it.
+// at runtime: the response cache size limit and an explicit purge. The
+// controller reports the config back via stats so its poll loop can converge it.
 type CacheController interface {
-	SetCacheConfig(size, warm int, regular time.Duration) error
+	SetCacheConfig(size int) error
 	CacheSize() int
-	CacheWarm() int
-	CacheRegular() time.Duration
 	PurgeCache()
 }
 
@@ -453,12 +450,10 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		if ifc := s.rateLimitController(); ifc != nil {
 			st.RateLimitQPS = ifc.RateLimitQPS()
 		}
-		// Report the runtime cache config so the controller can converge it
-		// (size limit + auto-refresh count) after a restart.
+		// Report the runtime cache size limit so the controller can converge
+		// it after a restart.
 		if cc := s.cacheController(); cc != nil {
 			st.CacheSize = cc.CacheSize()
-			st.CacheWarm = cc.CacheWarm()
-			st.CacheRegular = int(cc.CacheRegular().Seconds())
 		}
 		// Report the local DNS record hash so the controller can converge them
 		// (e.g. after a restart) by re-pushing on drift.
