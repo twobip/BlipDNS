@@ -21,7 +21,7 @@ func mkMsg(name string, ttl uint32) *dns.Msg {
 
 func TestSetGetDecrementsTTL(t *testing.T) {
 	c := New(time.Hour, 0)
-	k := Key(mkMsg("a.test", 60))
+	k := KeyOf(mkMsg("a.test", 60))
 	c.Set(k, mkMsg("a.test", 60))
 	got, ok := c.Get(k)
 	if !ok {
@@ -35,7 +35,7 @@ func TestSetGetDecrementsTTL(t *testing.T) {
 func TestSetCapsAtRecordTTL(t *testing.T) {
 	c := New(time.Hour, 0)
 	c.now = func() time.Time { return time.Unix(1000, 0) }
-	k := Key(mkMsg("a.test", 60))
+	k := KeyOf(mkMsg("a.test", 60))
 	c.Set(k, mkMsg("a.test", 60))
 	// Past the record TTL the entry is gone: the cache never serves
 	// records past the TTL their owner published.
@@ -47,8 +47,8 @@ func TestSetCapsAtRecordTTL(t *testing.T) {
 
 func TestPurge(t *testing.T) {
 	c := New(time.Hour, 0)
-	c.Set(Key(mkMsg("a.test", 60)), mkMsg("a.test", 60))
-	c.Set(Key(mkMsg("b.test", 60)), mkMsg("b.test", 60))
+	c.Set(KeyOf(mkMsg("a.test", 60)), mkMsg("a.test", 60))
+	c.Set(KeyOf(mkMsg("b.test", 60)), mkMsg("b.test", 60))
 	if c.Len() != 2 {
 		t.Fatalf("precondition: Len = %d, want 2", c.Len())
 	}
@@ -56,11 +56,11 @@ func TestPurge(t *testing.T) {
 	if c.Len() != 0 {
 		t.Fatalf("Len after purge = %d, want 0", c.Len())
 	}
-	if _, ok := c.Get(Key(mkMsg("a.test", 60))); ok {
+	if _, ok := c.Get(KeyOf(mkMsg("a.test", 60))); ok {
 		t.Error("expected miss after purge")
 	}
 	// cache must remain usable after purge
-	k := Key(mkMsg("a.test", 60))
+	k := KeyOf(mkMsg("a.test", 60))
 	c.Set(k, mkMsg("a.test", 60))
 	if _, ok := c.Get(k); !ok {
 		t.Error("expected hit after re-insertion post-purge")
@@ -71,7 +71,7 @@ func TestExpiry(t *testing.T) {
 	c := New(time.Hour, 0)
 	c.now = func() time.Time { return time.Unix(1000, 0) }
 	// inject an entry expiring at 1005
-	k := Key(mkMsg("a.test", 5))
+	k := KeyOf(mkMsg("a.test", 5))
 	m := mkMsg("a.test", 5)
 	c.Set(k, m)
 	// before expiry
@@ -102,7 +102,7 @@ func TestCoalesce(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, _ = c.Do(context.Background(), "k", fn)
+			_, _ = c.Do(context.Background(), Key{Name: "k"}, fn)
 		}()
 	}
 	wg.Wait()
@@ -119,12 +119,12 @@ func TestDoHitReportsCacheSource(t *testing.T) {
 		return mkMsg("a.test", 60), nil
 	}
 	// First call must miss and fetch.
-	_, cached, err := c.DoHit(context.Background(), "k", fn)
+	_, cached, err := c.DoHit(context.Background(), Key{Name: "k"}, fn)
 	if err != nil || cached {
 		t.Errorf("first DoHit: cached=%v err=%v, want miss", cached, err)
 	}
 	// Second call must be served from cache.
-	_, cached, err = c.DoHit(context.Background(), "k", fn)
+	_, cached, err = c.DoHit(context.Background(), Key{Name: "k"}, fn)
 	if err != nil || !cached {
 		t.Errorf("second DoHit: cached=%v err=%v, want hit", cached, err)
 	}
@@ -148,7 +148,7 @@ func TestDoHitCoalescedWaiterIsHit(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, cached, _ := c.DoHit(context.Background(), "k", fn)
+			_, cached, _ := c.DoHit(context.Background(), Key{Name: "k"}, fn)
 			mu.Lock()
 			cacheds = append(cacheds, cached)
 			mu.Unlock()
@@ -167,23 +167,23 @@ func TestDoHitCoalescedWaiterIsHit(t *testing.T) {
 
 func TestEvictLeastRecentlyUsed(t *testing.T) {
 	c := New(time.Hour, 2)
-	c.Set("k1", mkMsg("a.test", 60))
-	c.Set("k2", mkMsg("b.test", 60))
+	c.Set(Key{Name: "k1"}, mkMsg("a.test", 60))
+	c.Set(Key{Name: "k2"}, mkMsg("b.test", 60))
 	// promote k1 to most-recently-used; hits are promoted every
 	// promoteEvery-th hit, so hit it that many times to guarantee promotion.
 	for i := 0; i < promoteEvery; i++ {
-		if _, ok := c.Get("k1"); !ok {
+		if _, ok := c.Get(Key{Name: "k1"}); !ok {
 			t.Fatal("expected k1 hit")
 		}
 	}
-	c.Set("k3", mkMsg("c.test", 60)) // k2 is now LRU -> evicted
-	if _, ok := c.Get("k2"); ok {
+	c.Set(Key{Name: "k3"}, mkMsg("c.test", 60)) // k2 is now LRU -> evicted
+	if _, ok := c.Get(Key{Name: "k2"}); ok {
 		t.Error("expected k2 to be evicted")
 	}
-	if _, ok := c.Get("k1"); !ok {
+	if _, ok := c.Get(Key{Name: "k1"}); !ok {
 		t.Error("expected k1 to survive (it was used most recently)")
 	}
-	if _, ok := c.Get("k3"); !ok {
+	if _, ok := c.Get(Key{Name: "k3"}); !ok {
 		t.Error("expected k3 present")
 	}
 	if c.Len() != 2 {
@@ -193,7 +193,7 @@ func TestEvictLeastRecentlyUsed(t *testing.T) {
 
 func TestSetPreservesHits(t *testing.T) {
 	c := New(time.Hour, 0)
-	k := Key(mkMsg("a.test", 60))
+	k := KeyOf(mkMsg("a.test", 60))
 	c.Set(k, mkMsg("a.test", 60))
 	_, _ = c.Get(k)
 	_, _ = c.Get(k)

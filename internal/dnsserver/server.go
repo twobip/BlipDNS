@@ -386,14 +386,14 @@ func (s *Server) serve(ctx context.Context, clientIP net.IP, clientID string, re
 	}
 	upstreamLabel := s.upstreamLabel(resolver, matchedRoute, upstreamOverride)
 
-	key := cache.Key(req)
+	key := cache.KeyOf(req)
 	if upstreamLabel != "" {
 		// Partition the cache by the resolver that will answer: routes and
 		// per-policy overrides can give different clients different answers
 		// for the same qname, and a shared entry would serve one client's
-		// view to another. The qualifier is "|" + label (sanitized so it
-		// never contains a "|" itself).
-		key += "|" + strings.ReplaceAll(upstreamLabel, "|", "/")
+		// view to another. The label is compared, never parsed, so it needs
+		// no sanitizing.
+		key.Label = upstreamLabel
 	}
 	out, cached, err := s.cache.DoHit(ctx, key, func() (*dns.Msg, error) {
 		return resolver.Resolve(ctx, req)
