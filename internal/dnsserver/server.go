@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -410,7 +411,7 @@ func (s *Server) serve(ctx context.Context, clientIP net.IP, clientID string, re
 	})
 	if err != nil {
 		s.cnt.AddUpErr()
-		s.notifyUpstreamError(client, domain, err.Error())
+		s.notifyUpstreamError(client, domain, upstreamErrText(upstreamLabel, err))
 		resp.Rcode = dns.RcodeServerFailure
 		return resp
 	}
@@ -489,6 +490,20 @@ func answersFor(req *dns.Msg, resp *dns.Msg) []control.Answer {
 		}
 	}
 	return out
+}
+
+// upstreamErrText renders a resolver failure for the Upstream Errors page.
+// Timeouts say so plainly (keeping which upstream) instead of leaking Go
+// http internals like "context deadline exceeded".
+func upstreamErrText(upstream string, err error) string {
+	var nerr net.Error
+	if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &nerr) && nerr.Timeout()) {
+		if upstream != "" {
+			return "timeout talking to " + upstream
+		}
+		return "upstream timeout"
+	}
+	return err.Error()
 }
 
 // notifyUpstreamError streams an upstream failure to the controller so it can

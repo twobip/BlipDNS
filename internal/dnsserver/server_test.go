@@ -571,6 +571,21 @@ func TestServeRecordsFallthroughToUpstream(t *testing.T) {
 	}
 }
 
+func TestUpstreamErrText(t *testing.T) {
+	// Real DoH timeout shape: wrapped context.DeadlineExceeded.
+	wrapped := fmt.Errorf("Post %q: %w", "https://dns.mullvad.net/dns-query", context.DeadlineExceeded)
+	if got := upstreamErrText("auto (Quad9)", wrapped); got != "timeout talking to auto (Quad9)" {
+		t.Errorf("wrapped timeout = %q", got)
+	}
+	if got := upstreamErrText("", context.DeadlineExceeded); got != "upstream timeout" {
+		t.Errorf("bare timeout = %q", got)
+	}
+	// Non-timeouts pass through verbatim.
+	if got := upstreamErrText("auto (Quad9)", fmt.Errorf("boom")); got != "boom" {
+		t.Errorf("passthrough = %q", got)
+	}
+}
+
 func TestServeRecordsNodataForMissingType(t *testing.T) {
 	srv, up := newTestServer(t)
 	srv.rec = NewRecordStore()
