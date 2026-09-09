@@ -135,10 +135,11 @@ button { font-family: var(--font); }
 body.sidebar-collapsed .sidebar { width: 60px; padding-inline: 10px; }
 body.sidebar-collapsed .brand-text, body.sidebar-collapsed .brand-sub,
 body.sidebar-collapsed .nav-item span:not(.nav-icon), body.sidebar-collapsed .nav-group,
-body.sidebar-collapsed .sidebar-footer .version, body.sidebar-collapsed .nav-badge { display: none; }
+body.sidebar-collapsed .sidebar-footer .version, body.sidebar-collapsed .sidebar-footer .spacer,
+body.sidebar-collapsed .nav-badge { display: none; }
 body.sidebar-collapsed .nav-item { justify-content: center; padding: 10px 0; }
-body.sidebar-collapsed .sidebar-brand { justify-content: center; padding-left: 0; }
-body.sidebar-collapsed .sidebar-footer { justify-content: center; }
+body.sidebar-collapsed .sidebar-brand { justify-content: center; padding-inline: 0; gap: 0; }
+body.sidebar-collapsed .sidebar-footer { justify-content: center; flex-direction: column; }
 body.sidebar-collapsed .sidebar-footer .minipill, body.sidebar-collapsed .sidebar-footer .dot { font-size: 0; }
 
 .main { flex: 1; margin-left: 236px; padding: 16px clamp(20px, 4vw, 44px) 120px; min-width: 0; }
@@ -641,7 +642,9 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
 
 @media (max-width: 700px) {
   .sidebar { width: 60px; padding-inline: 10px; }
-  .brand-text, .brand-sub, .nav-item span:not(.nav-icon), .nav-group, .sidebar-footer .version { display: none; }
+  .brand-text, .brand-sub, .nav-item span:not(.nav-icon), .nav-group, .sidebar-footer .version, .sidebar-footer .spacer { display: none; }
   .nav-item { justify-content: center; }
+  .sidebar-brand { justify-content: center; padding-inline: 0; gap: 0; }
+  .sidebar-footer { justify-content: center; flex-direction: column; }
   .main { margin-left: 60px; padding-inline: 14px; }
 }
