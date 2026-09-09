@@ -268,9 +268,25 @@ function renderDashInstances(perInstance) {
       </div>
       <div class="num" style="text-align:right">
         <div style="font-variant-numeric:tabular-nums;font-weight:600">${fmt(pi.queries ?? 0)}</div>
-        <div class="cell-sub"><span class="meter"><i style="width:${Math.min(100, rate)}%"></i></span> ${rate}% blk</div>
+        <div class="cell-sub"><span class="meter"><i style="width:${Math.min(100, rate)}%"></i></span> ${rate}% blocked</div>
       </div>
     </div>`;
+  }).join("");
+}
+
+function renderTopBlocked(domains) {
+  const el = $("d-topblocked");
+  const list = (Array.isArray(domains) ? domains : []).filter((d) => d.blocked > 0);
+  if (!list.length) {
+    el.innerHTML = `<div class="empty"><div class="empty-ic">${IC.shield}</div><h4>Nothing blocked</h4><p>No blocked queries in this window.</p></div>`;
+    return;
+  }
+  el.innerHTML = list.map((d, i) => {
+    return `<li>
+      <span class="mono" style="flex:none;width:22px;color:var(--faint);font-size:12px">${i + 1}</span>
+      <div class="grow q-dom" style="min-width:0" title="${esc(d.domain)}">${esc(d.domain)}</div>
+      <span class="mono muted" style="flex:none">${fmt(d.blocked)} blocked</span>
+    </li>`;
   }).join("");
 }
 
@@ -281,17 +297,11 @@ function renderTopDomains(domains) {
     el.innerHTML = `<div class="empty"><div class="empty-ic">${IC.globe}</div><h4>No queries yet</h4><p>Nothing resolved in this window.</p></div>`;
     return;
   }
-  const max = list[0].queries || 1;
   el.innerHTML = list.map((d, i) => {
-    const pct = Math.max(4, Math.round(d.queries / max * 100));
-    const blocked = d.blocked > 0 ? `<span class="badge off" style="flex:none" title="blocked queries">${fmt(d.blocked)} blk</span>` : "";
     return `<li>
       <span class="mono" style="flex:none;width:22px;color:var(--faint);font-size:12px">${i + 1}</span>
-      <div class="grow" style="min-width:0">
-        <div style="font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(d.domain)}">${esc(d.domain)}</div>
-        <div class="cell-sub"><span class="meter"><i style="width:${pct}%"></i></span> <span class="muted">${fmt(d.queries)} queries</span></div>
-      </div>
-      ${blocked}
+      <div class="grow q-dom" style="min-width:0" title="${esc(d.domain)}">${esc(d.domain)}</div>
+      <span class="mono muted" style="flex:none">${fmt(d.queries)} queries</span>
     </li>`;
   }).join("");
 }
@@ -312,9 +322,13 @@ async function fetchStats() {
     $("d-qps-range-hint").textContent = rng.label;
     $("d-range-hint").textContent = rng.label;
     renderDashInstances(d.per_instance);
-    API(`/api/top-domains?since=${rng.since}&limit=10`)
+    API(`/api/top-domains?since=${rng.since}&limit=10&action=PASS`)
       .then((r) => r.json())
       .then((t) => renderTopDomains(t.domains))
+      .catch(() => { /* best-effort */ });
+    API(`/api/top-domains?since=${rng.since}&limit=10&action=BLOCK`)
+      .then((r) => r.json())
+      .then((t) => renderTopBlocked(t.domains))
       .catch(() => { /* best-effort */ });
     if (!ctx) return;
     const gl = ctx.getContext("2d");

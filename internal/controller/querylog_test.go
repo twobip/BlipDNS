@@ -212,7 +212,7 @@ func TestQueryLogStoreTopDomains(t *testing.T) {
 		}
 	}
 
-	domains, err := store.TopDomains(ctx, "", now.Add(-24*time.Hour), 10)
+	domains, err := store.TopDomains(ctx, "", now.Add(-24*time.Hour), 10, "")
 	if err != nil {
 		t.Fatalf("TopDomains: %v", err)
 	}
@@ -228,14 +228,14 @@ func TestQueryLogStoreTopDomains(t *testing.T) {
 	}
 
 	// Limit truncates and an instance filter narrows the tally.
-	domains, err = store.TopDomains(ctx, "", now.Add(-24*time.Hour), 1)
+	domains, err = store.TopDomains(ctx, "", now.Add(-24*time.Hour), 1, "")
 	if err != nil {
 		t.Fatalf("TopDomains(limit=1): %v", err)
 	}
 	if len(domains) != 1 || domains[0].Domain != "example.com" {
 		t.Errorf("TopDomains(limit=1) = %+v, want only example.com", domains)
 	}
-	domains, err = store.TopDomains(ctx, "b", now.Add(-24*time.Hour), 10)
+	domains, err = store.TopDomains(ctx, "b", now.Add(-24*time.Hour), 10, "")
 	if err != nil {
 		t.Fatalf("TopDomains(b): %v", err)
 	}
@@ -244,12 +244,29 @@ func TestQueryLogStoreTopDomains(t *testing.T) {
 	}
 
 	// Empty window yields an empty, non-nil slice.
-	domains, err = store.TopDomains(ctx, "", now.Add(time.Hour), 10)
+	domains, err = store.TopDomains(ctx, "", now.Add(time.Hour), 10, "")
 	if err != nil {
 		t.Fatalf("TopDomains(since): %v", err)
 	}
 	if len(domains) != 0 || domains == nil {
 		t.Fatalf("TopDomains(since) = %#v, want empty slice", domains)
+	}
+
+	// Action filters split the ranking: PASS drops blocked queries, BLOCK
+	// ranks by blocked count only.
+	domains, err = store.TopDomains(ctx, "", now.Add(-24*time.Hour), 10, "PASS")
+	if err != nil {
+		t.Fatalf("TopDomains(PASS): %v", err)
+	}
+	if len(domains) != 2 || domains[0].Domain != "example.com" || domains[0].Queries != 3 || domains[0].Blocked != 0 {
+		t.Errorf("TopDomains(PASS) = %+v, want example.com with 3 queries / 0 blocked", domains)
+	}
+	domains, err = store.TopDomains(ctx, "", now.Add(-24*time.Hour), 10, "BLOCK")
+	if err != nil {
+		t.Fatalf("TopDomains(BLOCK): %v", err)
+	}
+	if len(domains) != 1 || domains[0].Domain != "example.com" || domains[0].Queries != 1 {
+		t.Errorf("TopDomains(BLOCK) = %+v, want only example.com with 1 blocked query", domains)
 	}
 }
 

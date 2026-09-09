@@ -1002,7 +1002,8 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleTopDomains returns the most-queried domains within the requested
-// range, most frequent first, for the dashboard's Top Queried Domains panel.
+// range, most frequent first, for the dashboard panels. action filters by
+// query outcome: "" (any), "PASS" (Top Queried) or "BLOCK" (Top Blocked).
 func (s *Server) handleTopDomains(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1015,7 +1016,12 @@ func (s *Server) handleTopDomains(w http.ResponseWriter, r *http.Request) {
 	instance := r.URL.Query().Get("instance")
 	limit := boundedLimit(r, 10, 100)
 	since := time.Now().Add(-boundedDuration(r, "since", 24*time.Hour, time.Minute, 30*24*time.Hour))
-	domains, err := s.fleet.queryLog.TopDomains(r.Context(), instance, since, limit)
+	// action: "" (any), "PASS" or "BLOCK"
+	action := strings.ToUpper(strings.TrimSpace(r.URL.Query().Get("action")))
+	if action != "" && action != "PASS" && action != "BLOCK" {
+		action = ""
+	}
+	domains, err := s.fleet.queryLog.TopDomains(r.Context(), instance, since, limit, action)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return

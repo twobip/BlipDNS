@@ -145,14 +145,20 @@ func (s *QueryLogStore) ClientStats(ctx context.Context, instance string, since 
 }
 
 // TopDomains returns the most-queried domains within the range, by total query
-// count, with the blocked subset of each. health_check probes and empty
-// (rate-limited before the domain was known) entries are excluded.
-func (s *QueryLogStore) TopDomains(ctx context.Context, instance string, since time.Time, limit int) ([]TopDomain, error) {
+// count, with the blocked subset of each. action filters by query outcome:
+// "" (any), "PASS" or "BLOCK" (anything else behaves as ""). health_check
+// probes and empty (rate-limited before the domain was known) entries are
+// excluded.
+func (s *QueryLogStore) TopDomains(ctx context.Context, instance string, since time.Time, limit int, action string) ([]TopDomain, error) {
 	query := `SELECT ql.domain, COUNT(*), SUM(CASE WHEN ql.action = 'BLOCK' THEN 1 ELSE 0 END) FROM query_log ql WHERE ql.timestamp >= ? AND ql.domain != 'health_check' AND ql.domain != ''`
 	args := []interface{}{since}
 	if instance != "" {
 		query += " AND ql.instance = ?"
 		args = append(args, instance)
+	}
+	if action == "PASS" || action == "BLOCK" {
+		query += " AND ql.action = ?"
+		args = append(args, action)
 	}
 	query += " GROUP BY ql.domain ORDER BY COUNT(*) DESC LIMIT ?"
 	args = append(args, limit)
