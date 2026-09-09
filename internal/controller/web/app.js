@@ -1738,9 +1738,50 @@ async function refreshSettings() {
     loadRlEditor();
     loadCacheEditor();
     loadQLEditor();
+    loadKeys();
     $("s-up-status").textContent = "";
   } catch {}
 }
+
+/* ---------- API keys (Settings → API Keys) ---------- */
+async function loadKeys() {
+  const tb = $("k-list");
+  try {
+    const r = await API("/api/keys");
+    const d = await r.json();
+    const keys = Array.isArray(d.keys) ? d.keys : [];
+    tb.innerHTML = keys.length ? keys.map((k) =>
+      `<tr><td>${esc(k.label)}</td><td><span class="t" data-t="${esc(k.expires_at)}">${esc(timeAgo(k.expires_at))}</span></td>` +
+      `<td style="text-align:right"><button class="btn btn-sm" data-key-revoke="${esc(k.id)}">Revoke</button></td></tr>`
+    ).join("") : `<tr><td colspan="3" class="muted">No keys — create one above.</td></tr>`;
+    tb.querySelectorAll("[data-key-revoke]").forEach((b) => b.onclick = () => revokeKey(b.dataset.keyRevoke));
+  } catch { tb.innerHTML = `<tr><td colspan="3" class="muted">Could not load keys.</td></tr>`; }
+}
+async function revokeKey(id) {
+  try {
+    await API("/api/keys?id=" + encodeURIComponent(id), { method: "DELETE" });
+    toast("key revoked");
+    loadKeys();
+  } catch (e) { toast("revoke failed: " + e.message, "err"); }
+}
+$("k-create").onclick = async () => {
+  const label = $("k-label").value.trim();
+  const ttl_hours = Number($("k-ttl").value);
+  if (!label) return toast("label is required", "err");
+  try {
+    const r = await API("/api/keys", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ label, ttl_hours }) });
+    const d = await r.json();
+    $("k-secret").textContent = d.key;
+    $("k-once").classList.remove("hidden");
+    $("k-label").value = "";
+    toast("key created — copy it now, it won't be shown again");
+    loadKeys();
+  } catch (e) { toast("create failed: " + e.message, "err"); }
+};
+$("k-copy").onclick = async () => {
+  try { await navigator.clipboard.writeText($("k-secret").textContent); toast("copied"); }
+  catch { toast("copy failed — select and copy manually", "err"); }
+};
 
 /* ---------- confirm dialog ---------- */
 let _cfOk = null;
@@ -2007,6 +2048,7 @@ function loadReleaseEditor() {
   const paneOf = {
     "Query Log": "ql", "Reset & destroy": "ql",
     "DoH (DNS over HTTPS)": "dns", "Rate Limit": "dns", "Cache": "dns",
+    "API Keys": "keys",
     "Release Channel": "about", "Controller Update": "about", "About": "about"
   };
   const tabs = Array.from(document.querySelectorAll("#settings-tabs .settings-tab"));

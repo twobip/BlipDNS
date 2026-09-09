@@ -76,6 +76,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/login", s.handleLogin)
 	mux.HandleFunc("/api/setup", s.handleSetup)
 	mux.HandleFunc("/api/logout", s.handleLogout)
+	// Key management is session-only (never bearer): a key must not mint keys.
+	mux.HandleFunc("/api/keys", s.handleAPIKeys)
 
 	// API (session-gated)
 	api := func(h func(http.ResponseWriter, *http.Request)) http.HandlerFunc {
@@ -148,13 +150,22 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 
 func (s *Server) requireAuth(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !s.auth.Authed(r) {
+		if !s.auth.Authed(r) && !s.auth.validAPIKey(bearerToken(r)) {
 			w.Header().Set("WWW-Authenticate", "Bearer realm=\"blipc\"")
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
 		h(w, r)
 	}
+}
+
+// bearerToken extracts a "Bearer <token>" API key from the request.
+func bearerToken(r *http.Request) string {
+	h := r.Header.Get("Authorization")
+	if len(h) > 7 && strings.EqualFold(h[:7], "Bearer ") {
+		return h[7:]
+	}
+	return ""
 }
 
 // handleLogin authenticates a username/password and mints a session cookie.
@@ -266,6 +277,50 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	s.auth.Destroy(r)
 	s.auth.ClearCookie(w, r)
 	writeJSON(w, map[string]bool{"ok": true})
+}
+
+// handleAPIKeys manages expiring bearer keys for /api/* (debug sharing
+// without sharing the password). Session-only: bearer keys are accepted on
+// every other /api/* route but never here, so a key cannot mint more keys.
+// Keys live in memory — a controller restart revokes them all.
+func (s *Server) handleAPIKeys(w http.ResponseWriter, r *http.Request) {
+	if !s.auth.Authed(r) {
+		w.Header().Set("WWW-Authenticate", "Bearer realm=\"blipc\"")
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		keys := s.auth.ListAPIKeys()
+		if keys == nil {
+			keys = []APIKeyInfo{}
+		}
+		writeJSON(w, map[string]interface{}{"keys": keys})
+	case http.MethodPost:
+		var req struct {
+			Label    string `json:"label"`
+			TTLHours int    `json:"ttl_hours"`
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		id, secret, expires, err := s.auth.CreateAPIKey(req.Label, time.Duration(req.TTLHours)*time.Hour)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, map[string]interface{}{"id": id, "key": secret, "expires_at": expires})
+	case http.MethodDelete:
+		if !s.auth.RevokeAPIKey(r.URL.Query().Get("id")) {
+			http.Error(w, "unknown key", http.StatusNotFound)
+			return
+		}
+		writeJSON(w, map[string]bool{"ok": true})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
 func writeJSON(w http.ResponseWriter, v interface{}) {
