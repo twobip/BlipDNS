@@ -521,23 +521,24 @@ let qlObserver = null;
 function queryRowHtml(r) {
   const action = (r.action || "").toUpperCase();
   const isBlock = action === "BLOCK";
+  const isLocal = !isBlock && r.upstream === "local";
   const inst = instances.find((i) => (i.label || i.id) === r.instance);
-  const actionLabel = isBlock ? "Blocked" : action === "PASS" ? "Allowed" : esc(action || "—");
-  const actionBadge = isBlock ? "err" : action === "PASS" ? "on" : "";
+  const actionLabel = isBlock ? "Blocked" : isLocal ? "Local" : action === "PASS" ? "Allowed" : esc(action || "—");
+  const actionBadge = isBlock ? "err" : isLocal ? "accent" : action === "PASS" ? "on" : "";
   // info icon tooltip: request type (qtype) above the upstream/block source.
-  const tipLabel = (r.q_type || "") + (r.q_type ? " · " : "") + (isBlock ? "Blocked by" : r.cached ? "Cache" : "Upstream");
+  const tipLabel = (r.q_type || "") + (r.q_type ? " · " : "") + (isBlock ? "Blocked by" : isLocal ? "Local record" : r.cached ? "Cache" : "Upstream");
   const tipValue = isBlock
     ? (r.blocklist || "blocklist")
-    : r.cached ? "Served from cache" : (r.upstream || "unknown");
+    : isLocal ? "Static DNS record" : r.cached ? "Served from cache" : (r.upstream || "unknown");
   return `<tr class="${isBlock ? "q-row-block" : ""}">
     <td class="q-time"><span class="t" data-t="${esc(r.timestamp)}" title="${esc(r.timestamp)}">…</span></td>
-    <td class="q-domain">
+    <td class="q-domain"><span class="q-domain-line">
       <span class="q-globe">${IC.globe}</span>
-      <span class="mono q-dom" title="${esc(r.domain)}">${esc(r.domain)}</span>
+      <span class="q-dom" title="${esc(r.domain)}">${esc(r.domain)}</span>
       <span class="q-info" data-tipl="${esc(tipLabel)}" data-tipv="${esc(tipValue)}">${IC.info}</span>
       <button class="icon-btn q-copy" data-copy="${esc(r.domain)}" title="Copy domain">${IC.copy}</button>
-    </td>
-    <td><span class="badge badge-action ${actionBadge}">${isBlock ? IC.block : action === "PASS" ? IC.arrow : ""}${actionLabel}</span></td>
+    </span></td>
+    <td><span class="badge badge-action ${actionBadge}">${isLocal ? IC.set : isBlock ? IC.block : action === "PASS" ? IC.arrow : ""}${actionLabel}</span></td>
     <td class="q-client">${clientCellHtml(r)}</td>
     <td class="q-ips">${resolvedHtml(r)}</td>
     <td class="q-lat">${latencyHtml(r)}</td>
@@ -622,8 +623,8 @@ function debounce(fn, ms) {
 function latencyHtml(r) {
   const dur = (r.duration_us == null) ? null : Number(r.duration_us);
   const lat = dur == null ? "—" : dur < 1000 ? dur + "µs" : (dur / 1000).toFixed(1) + "ms";
-  const badge = r.cached ? `<span class="badge badge-action on" title="Served from cache">cache</span>` : "";
-  return badge + `<span class="muted mono" title="${dur == null ? "no timing data" : dur + " µs"}">${lat}</span>`;
+  const badge = r.cached ? `<span class="q-cache" title="Served from cache">${IC.cache}</span>` : "";
+  return `<span class="q-lat">${badge}<span class="muted mono" title="${dur == null ? "no timing data" : dur + " µs"}">${lat}</span></span>`;
 }
 function propsInstanceOptions() {
   const sel = $("q-instance");
