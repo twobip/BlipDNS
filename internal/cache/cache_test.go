@@ -32,6 +32,19 @@ func TestSetGetDecrementsTTL(t *testing.T) {
 	}
 }
 
+func TestSetCapsAtRecordTTL(t *testing.T) {
+	c := New(time.Hour, 0)
+	c.now = func() time.Time { return time.Unix(1000, 0) }
+	k := Key(mkMsg("a.test", 60))
+	c.Set(k, mkMsg("a.test", 60))
+	// Past the record TTL the entry is gone: the cache never serves
+	// records past the TTL their owner published.
+	c.now = func() time.Time { return time.Unix(1061, 0) }
+	if _, ok := c.Get(k); ok {
+		t.Error("expected miss past the record TTL")
+	}
+}
+
 func TestPurge(t *testing.T) {
 	c := New(time.Hour, 0)
 	c.Set(Key(mkMsg("a.test", 60)), mkMsg("a.test", 60))
@@ -57,7 +70,7 @@ func TestPurge(t *testing.T) {
 func TestExpiry(t *testing.T) {
 	c := New(time.Hour, 0)
 	c.now = func() time.Time { return time.Unix(1000, 0) }
-	// inject an entry expiring at 1010
+	// inject an entry expiring at 1005
 	k := Key(mkMsg("a.test", 5))
 	m := mkMsg("a.test", 5)
 	c.Set(k, m)
@@ -185,118 +198,7 @@ func TestSetPreservesHits(t *testing.T) {
 	_, _ = c.Get(k)
 	_, _ = c.Get(k)
 	c.Set(k, mkMsg("a.test", 60)) // refresh, must keep hit count
-	if got := c.Popular(0); len(got) != 1 || c.items[k].hits.Load() != 2 {
-		t.Errorf("expected refreshed entry to keep 2 hits, got %d", c.items[k].hits.Load())
-	}
-}
-
-func TestPopularOrdering(t *testing.T) {
-	c := New(time.Hour, 0)
-	c.Set("k1", mkMsg("a.test", 60))
-	c.Set("k2", mkMsg("b.test", 60))
-	c.Set("k3", mkMsg("c.test", 60))
-	_, _ = c.Get("k1")
-	_, _ = c.Get("k1")
-	_, _ = c.Get("k1")
-	_, _ = c.Get("k2")
-	got := c.Popular(2)
-	if len(got) != 2 || got[0] != "k1" || got[1] != "k2" {
-		t.Errorf("expected [k1 k2], got %v", got)
-	}
-}
-
-func TestStaleLookahead(t *testing.T) {
-	c := New(time.Hour, 0)
-	c.now = func() time.Time { return time.Unix(1000, 0) }
-	k := Key(mkMsg("a.test", 5)) // expires at 1005
-	c.Set(k, mkMsg("a.test", 5))
-	if c.Stale(k, time.Second) {
-		t.Error("not stale yet: 4s left, lookahead 1s")
-	}
-	if !c.Stale(k, 10*time.Second) {
-		t.Error("should be stale: 4s left, lookahead 10s")
-	}
-	c.now = func() time.Time { return time.Unix(1010, 0) } // expired
-	if !c.Stale(k, 0) {
-		t.Error("should be stale once expired")
-	}
-	if c.Stale("missing", 0) {
-		t.Error("missing key is not stale")
-	}
-}
-
-func TestParseKey(t *testing.T) {
-	name, qtype, qclass, ok := ParseKey("example.com.|1|1")
-	if !ok || name != "example.com." || qtype != dns.TypeA || qclass != dns.ClassINET {
-		t.Errorf("bad ParseKey result: %q %d %d %v", name, qtype, qclass, ok)
-	}
-	if _, _, _, ok := ParseKey("garbage"); ok {
-		t.Error("expected parse failure on malformed key")
-	}
-}
-
-func TestParseKeyIgnoresUpstreamQualifier(t *testing.T) {
-	name, qtype, qclass, ok := ParseKey("example.com.|1|1|auto (DoH)")
-	if !ok || name != "example.com." || qtype != dns.TypeA || qclass != dns.ClassINET {
-		t.Errorf("bad qualified ParseKey result: %q %d %d %v", name, qtype, qclass, ok)
-	}
-}
-
-func TestTwoTierHold(t *testing.T) {
-	c := New(time.Hour, 0)
-	c.SetHold(2, time.Hour) // keep top-2 at record TTL, everyone else 1h
-	c.now = func() time.Time { return time.Unix(1000, 0) }
-
-	// Seed some entries with record TTL 5s.
-	for _, n := range []string{"a.test", "b.test", "c.test", "d.test"} {
-		c.Set(Key(mkMsg(n, 5)), mkMsg(n, 5))
-	}
-	// Make a and b clearly more popular than the rest (2 >= warm=2 higher-hit
-	// entries), so they rank in the top tier.
-	for i := 0; i < 5; i++ {
-		_, _ = c.Get(Key(mkMsg("a.test", 5)))
-		_, _ = c.Get(Key(mkMsg("b.test", 5)))
-	}
-	// Re-set a low-hit entry now that 2 others are more popular: it must fall
-	// into the regular-hold tier (1h), not its record TTL.
-	c.Set(Key(mkMsg("e.test", 5)), mkMsg("e.test", 5))
-
-	// 20s later: past every record TTL (5s).
-	c.now = func() time.Time { return time.Unix(1020, 0) }
-
-	// The non-top entry e stays cached for regularHold (may serve stale).
-	if _, ok := c.Get(Key(mkMsg("e.test", 5))); !ok {
-		t.Error("non-top entry should still be cached within regularHold")
-	}
-	// Top entries a,b expire at their own record TTL.
-	if _, ok := c.Get(Key(mkMsg("a.test", 5))); ok {
-		t.Error("top-2 entry should expire at its record TTL")
-	}
-	if _, ok := c.Get(Key(mkMsg("b.test", 5))); ok {
-		t.Error("top-2 entry should expire at its record TTL")
-	}
-}
-
-func TestTwoTierDefaultUsesRecordTTL(t *testing.T) {
-	c := New(time.Hour, 0)
-	c.SetHold(0, 0) // two-tier off -> record TTL everywhere
-	c.now = func() time.Time { return time.Unix(1000, 0) }
-	c.Set(Key(mkMsg("a.test", 5)), mkMsg("a.test", 5))
-	c.now = func() time.Time { return time.Unix(1006, 0) }
-	if _, ok := c.Get(Key(mkMsg("a.test", 5))); ok {
-		t.Error("without regularHold, entry should expire at its record TTL")
-	}
-}
-
-func TestServeTTLCappedAtSource(t *testing.T) {
-	c := New(time.Hour, 0)
-	c.SetHold(0, time.Hour) // non-top held 1h but source TTL is 60s
-	c.Set(Key(mkMsg("a.test", 60)), mkMsg("a.test", 60))
-	got, ok := c.Get(Key(mkMsg("a.test", 60)))
-	if !ok {
-		t.Fatal("expected hit")
-	}
-	if ttl := got.Answer[0].Header().Ttl; ttl > 60 {
-		t.Errorf("served TTL %d should not exceed source TTL 60", ttl)
+	if got := c.items[k].hits.Load(); got != 2 {
+		t.Errorf("expected refreshed entry to keep 2 hits, got %d", got)
 	}
 }

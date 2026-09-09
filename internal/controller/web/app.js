@@ -1553,8 +1553,6 @@ function loadRlEditor() {
 
 // Response-cache editor state
 let savedCacheSize = 0;          // fleet-wide max cached responses (0 = unlimited)
-let savedCacheWarm = 0;          // fleet-wide auto-refresh count (0 = off)
-let savedCacheRegular = 0;       // fleet-wide regular-hold seconds for non-top entries (0 = record TTL)
 let savedQLRetention = 720;      // how long query log entries are kept (hours)
 let savedReleaseChannel = "stable";
 let cacheScopeState = "default"; // "default" or an instance id
@@ -1568,7 +1566,7 @@ function renderCacheScopeSelect() {
   opt("default", "Fleet-wide default");
   for (const i of instances) {
     const o = savedOverrides[i.id] || {};
-    const has = o.cache_size != null || o.cache_warm != null || o.cache_regular != null;
+    const has = o.cache_size != null;
     opt(i.id, "instance: " + (i.label || i.id) + (has ? " (custom)" : ""));
   }
   if (!instances.some((i) => i.id === cacheScopeState)) cacheScopeState = "default";
@@ -1582,18 +1580,14 @@ function cacheLiveTotal() {
 function loadCacheEditor() {
   renderCacheScopeSelect();
   const sizeIn = $("s-cache-size");
-  const warmIn = $("s-cache-warm");
-  const regularIn = $("s-cache-regular");
   const cur = $("s-cache-cur");
   const badge = $("s-cache-badge");
   const hint = $("s-cache-scope-hint");
-  const hasOverride = (id) => { const o = savedOverrides[id] || {}; return o.cache_size != null || o.cache_warm != null || o.cache_regular != null; };
+  const hasOverride = (id) => { const o = savedOverrides[id] || {}; return o.cache_size != null; };
   if (cacheScopeState === "default") {
     badge.textContent = "fleet-wide";
     badge.className = "badge accent";
     sizeIn.value = savedCacheSize > 0 ? savedCacheSize : "";
-    warmIn.value = savedCacheWarm > 0 ? savedCacheWarm : "";
-    regularIn.value = savedCacheRegular > 0 ? savedCacheRegular : "";
     cur.textContent = cacheLiveTotal() ? cacheLiveTotal() + " entries cached now" : "nothing cached yet";
     hint.textContent = "Applies to every instance that doesn't have its own override.";
   } else {
@@ -1602,8 +1596,6 @@ function loadCacheEditor() {
     const o = savedOverrides[cacheScopeState] || {};
     const set = hasOverride(cacheScopeState);
     sizeIn.value = set && o.cache_size > 0 ? o.cache_size : "";
-    warmIn.value = set && o.cache_warm > 0 ? o.cache_warm : "";
-    regularIn.value = set && o.cache_regular > 0 ? o.cache_regular : "";
     cur.textContent = "Blank = inherit the fleet-wide default.";
     hint.textContent = "Only for this instance. Blank fields inherit the fleet-wide default.";
   }
@@ -1721,8 +1713,6 @@ async function refreshSettings() {
     savedFleetDoH = (d.doh_http_addr != null && d.doh_http_addr !== undefined) ? (d.doh_http_addr || "") : "";
     savedRLQPS = (d.rate_limit_qps != null && d.rate_limit_qps !== undefined) ? Number(d.rate_limit_qps || 0) : 0;
     savedCacheSize = (d.cache_size != null && d.cache_size !== undefined) ? Number(d.cache_size || 0) : 0;
-    savedCacheWarm = (d.cache_warm != null && d.cache_warm !== undefined) ? Number(d.cache_warm || 0) : 0;
-    savedCacheRegular = (d.cache_regular != null && d.cache_regular !== undefined) ? Number(d.cache_regular || 0) : 0;
     savedQLRetention = (d.query_log_retention_hours != null && d.query_log_retention_hours !== undefined) ? Number(d.query_log_retention_hours || 720) : 720;
     savedReleaseChannel = d.release_channel === "dev" ? "dev" : "stable";
     loadReleaseEditor();
@@ -2277,19 +2267,15 @@ $("s-cache-scope").addEventListener("change", (e) => {
 });
 function cacheValuesForSave() {
   const size = $("s-cache-size").value.trim();
-  const warm = $("s-cache-warm").value.trim();
-  const regular = $("s-cache-regular").value.trim();
-  return { size: size === "" ? null : Math.max(0, Number(size)), warm: warm === "" ? null : Math.max(0, Number(warm)), regular: regular === "" ? null : Math.max(0, Number(regular)) };
+  return { size: size === "" ? null : Math.max(0, Number(size)) };
 }
 $("s-save-cache").onclick = async () => {
   const st = $("s-cache-status");
   st.textContent = "saving…";
-  const { size, warm, regular } = cacheValuesForSave();
+  const { size } = cacheValuesForSave();
   const isDefault = cacheScopeState === "default";
   const body = isDefault ? {} : { scope: "instance", instance: cacheScopeState };
   if (size != null) body.cache_size = size;
-  if (warm != null) body.cache_warm = warm;
-  if (regular != null) body.cache_regular = regular;
   try {
     const r = await API("/api/settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
     const d = await r.json();
@@ -2302,12 +2288,8 @@ $("s-save-cache").onclick = async () => {
     const o = savedOverrides[cacheScopeState] || {};
     if (isDefault) {
       savedCacheSize = size != null ? size : savedCacheSize;
-      savedCacheWarm = warm != null ? warm : savedCacheWarm;
-      savedCacheRegular = regular != null ? regular : savedCacheRegular;
     } else {
       if (size != null) { if (size > 0) o.cache_size = size; else delete o.cache_size; }
-      if (warm != null) { if (warm > 0) o.cache_warm = warm; else delete o.cache_warm; }
-      if (regular != null) { if (regular > 0) o.cache_regular = regular; else delete o.cache_regular; }
       if (Object.keys(o).length) savedOverrides[cacheScopeState] = o;
       else delete savedOverrides[cacheScopeState];
     }

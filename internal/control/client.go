@@ -157,11 +157,10 @@ func (c *Client) SetRateLimit(ctx context.Context, qps, burst int) error {
 	return c.do(ctx, http.MethodPut, "/api/v1/ratelimit", &SetRateLimitRequest{QPS: qps, Burst: burst}, nil)
 }
 
-// SetCacheConfig tunes the instance's response cache: size is the max cached
-// responses (0 = unlimited), warm the auto-refresh count (0 = off), and regular
-// how long non-most-popular entries stay cached in seconds (0 = use record TTL).
-func (c *Client) SetCacheConfig(ctx context.Context, size, warm, regular int) error {
-	return c.do(ctx, http.MethodPut, "/api/v1/cache", &SetCacheRequest{Size: size, Warm: warm, Regular: regular}, nil)
+// SetCacheConfig tunes the instance's response cache size: the max cached
+// responses (0 = unlimited).
+func (c *Client) SetCacheConfig(ctx context.Context, size int) error {
+	return c.do(ctx, http.MethodPut, "/api/v1/cache", &SetCacheRequest{Size: size}, nil)
 }
 
 // SetUpstream replaces the instance's upstream pool, conditional-forwarding

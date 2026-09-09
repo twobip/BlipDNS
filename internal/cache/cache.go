@@ -1,15 +1,14 @@
 // Package cache provides a TTL-aware DNS response cache with request
 // coalescing (singleflight) to suppress cache stampedes. The cache is
-// size-bounded (LRU eviction) and tracks how often each response is served
-// so the most popular entries can be refreshed before they go stale.
+// size-bounded (LRU eviction). Entries expire at their record TTL, capped
+// by the configured maximum — the cache never serves records past the TTL
+// their owner published.
 package cache
 
 import (
 	"container/list"
 	"context"
-	"sort"
 	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -31,28 +30,19 @@ type entry struct {
 	expire time.Time
 	hits   atomic.Uint64
 	elem   *list.Element
-	srcTTL uint32 // source record min TTL in seconds (caps the TTL served)
 }
 
 // Cache stores DNS responses keyed by (name, type, class). When maxEntries
 // is exceeded the least-recently-used entry is evicted. Each entry records
-// the number of times it has been served (hits) for popularity tracking.
-//
-// Two-tier retention: the warmCount most-popular entries stay cached at their
-// record TTL (so the controller's warm loop can auto-refresh them before they
-// go stale), while every other entry is held for regularHold — a fixed
-// duration, possibly longer than the record's own TTL (serving possibly-stale
-// data). With regularHold == 0 every entry simply uses its record TTL.
+// how often it has been served (hits) to drive approximate-LRU promotion.
 type Cache struct {
-	mu          sync.RWMutex
-	items       map[string]*entry
-	lru         *list.List
-	ttlCap      time.Duration
-	maxEntries  int
-	warmCount   int           // top-N most-popular entries kept at their record TTL
-	regularHold time.Duration // how long non-top entries stay cached (0 = use record TTL)
-	group       singleflight.Group
-	now         func() time.Time
+	mu         sync.RWMutex
+	items      map[string]*entry
+	lru        *list.List
+	ttlCap     time.Duration
+	maxEntries int
+	group      singleflight.Group
+	now        func() time.Time
 }
 
 // New creates a Cache. ttlCap is the maximum time a response may be cached
@@ -72,22 +62,6 @@ func New(ttlCap time.Duration, maxEntries int) *Cache {
 	}
 }
 
-// SetHold tunes the two-tier cache retention at runtime: warm is the number
-// of most-popular entries kept at their record TTL for auto-refresh (0 = off),
-// and regular is how long every other entry stays cached (0 = use record TTL).
-func (c *Cache) SetHold(warm int, regular time.Duration) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if warm < 0 {
-		warm = 0
-	}
-	if regular < 0 {
-		regular = 0
-	}
-	c.warmCount = warm
-	c.regularHold = regular
-}
-
 // Key returns a stable cache key for the first question of m.
 func Key(m *dns.Msg) string {
 	if len(m.Question) == 0 {
@@ -95,22 +69,6 @@ func Key(m *dns.Msg) string {
 	}
 	q := m.Question[0]
 	return q.Name + "|" + strconv.Itoa(int(q.Qtype)) + "|" + strconv.Itoa(int(q.Qclass))
-}
-
-// ParseKey reconstructs the (name, qtype, qclass) triple from a Key string.
-// Keys may carry a "|<upstream>" qualifier appended by the DNS server so
-// answers from different upstreams don't share entries; it is ignored here.
-func ParseKey(k string) (name string, qtype, qclass uint16, ok bool) {
-	parts := strings.SplitN(k, "|", 4)
-	if len(parts) < 3 {
-		return "", 0, 0, false
-	}
-	t, errT := strconv.ParseUint(parts[1], 10, 16)
-	cl, errC := strconv.ParseUint(parts[2], 10, 16)
-	if errT != nil || errC != nil {
-		return "", 0, 0, false
-	}
-	return parts[0], uint16(t), uint16(cl), true
 }
 
 func minTTL(m *dns.Msg) time.Duration {
@@ -201,9 +159,6 @@ func (c *Cache) Get(k string) (*dns.Msg, bool) {
 copy:
 	remaining := e.expire.Sub(now)
 	ttl := uint32(remaining.Seconds())
-	if sTTL := e.srcTTL; sTTL > 0 && ttl > sTTL {
-		ttl = sTTL
-	}
 	if ttl < 1 {
 		ttl = 1
 	}
@@ -214,67 +169,31 @@ copy:
 	return out, true
 }
 
-// Set stores a response, capping its lifetime at ttlCap and evicting the
+// Set stores a response for its record TTL (capped at ttlCap), evicting the
 // least-recently-used entry if the cache is over its size limit. Setting an
 // existing key refreshes its value and TTL but preserves its hit count.
-//
-// The retention time depends on the two-tier configuration: if a non-zero
-// regularHold is set, entries rank among the warmCount most-popular keep their
-// record TTL while the rest are held for regularHold (possibly stale).
 func (c *Cache) Set(k string, m *dns.Msg) {
 	if k == "" || m == nil {
 		return
 	}
 	now := c.now()
-	srcTTL := uint32(minTTL(m).Seconds())
+	ttl := minTTL(m)
+	if ttl > c.ttlCap {
+		ttl = c.ttlCap
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if e, ok := c.items[k]; ok {
 		e.msg = m.Copy()
-		e.srcTTL = srcTTL
-		e.expire = now.Add(c.lifetimeForLocked(k, e.hits.Load(), srcTTL))
+		e.expire = now.Add(ttl)
 		c.lru.MoveToFront(e.elem)
 		return
 	}
-	e := &entry{key: k, msg: m.Copy(), srcTTL: srcTTL}
-	e.expire = now.Add(c.lifetimeForLocked(k, 0, srcTTL))
+	e := &entry{key: k, msg: m.Copy()}
+	e.expire = now.Add(ttl)
 	e.elem = c.lru.PushFront(e)
 	c.items[k] = e
 	c.evictLocked()
-}
-
-// lifetimeForLocked returns how long the entry for k should be cached, given
-// its current hit count and the source record's min TTL. Caller holds c.mu.
-func (c *Cache) lifetimeForLocked(k string, hits uint64, srcTTL uint32) time.Duration {
-	dnsTTL := time.Duration(srcTTL) * time.Second
-	if dnsTTL > c.ttlCap {
-		dnsTTL = c.ttlCap
-	}
-	if c.regularHold <= 0 {
-		return dnsTTL
-	}
-	if c.warmCount > 0 && c.isTopLocked(k, hits, c.warmCount) {
-		return dnsTTL
-	}
-	return c.regularHold
-}
-
-// isTopLocked reports whether an entry with the given hit count ranks within
-// the n most-popular cached entries. Caller holds c.mu.
-func (c *Cache) isTopLocked(k string, hits uint64, n int) bool {
-	ahead := 0
-	for key, other := range c.items {
-		if key == k {
-			continue
-		}
-		if other.hits.Load() > hits {
-			ahead++
-			if ahead >= n {
-				return false
-			}
-		}
-	}
-	return true
 }
 
 func (c *Cache) evictLocked() {
@@ -354,36 +273,5 @@ func (c *Cache) Purge() {
 func (c *Cache) Len() int {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.lru.Len()
-}
-
-// Popular returns the keys of the n most-served cached responses, most
-// popular first. Pass 0 or a negative n to get all keys.
-func (c *Cache) Popular(n int) []string {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	keys := make([]string, 0, len(c.items))
-	for k := range c.items {
-		keys = append(keys, k)
-	}
-	sort.Slice(keys, func(i, j int) bool {
-		return c.items[keys[i]].hits.Load() > c.items[keys[j]].hits.Load()
-	})
-	if n > 0 && n < len(keys) {
-		keys = keys[:n]
-	}
-	return keys
-}
-
-// Stale reports whether the entry for k is missing, already expired, or will
-// expire within lookahead — i.e. it should be refreshed now. It does not
-// count as a hit.
-func (c *Cache) Stale(k string, lookahead time.Duration) bool {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	e, ok := c.items[k]
-	if !ok {
-		return false
-	}
-	return c.now().Add(lookahead).After(e.expire)
+	return len(c.items)
 }

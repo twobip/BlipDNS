@@ -31,8 +31,6 @@ type config struct {
 	DoHHTTPAddr            string                                  `yaml:"doh_http_addr"`
 	RateLimitQPS           int                                     `yaml:"rate_limit_qps"`
 	CacheSize              int                                     `yaml:"cache_size"`
-	CacheWarm              int                                     `yaml:"cache_warm"`
-	CacheRegular           int                                     `yaml:"cache_regular"`
 	QueryLogRetentionHours int                                     `yaml:"query_log_retention_hours"`
 	UpstreamServers        []upstream.UpstreamServer               `yaml:"upstream_servers"`
 	UpstreamRoutes         []upstream.UpstreamRoute                `yaml:"upstream_routes"`
@@ -82,8 +80,8 @@ func main() {
 	if cfg.RateLimitQPS > 0 {
 		fleet.SetRateLimitQPSDefault(cfg.RateLimitQPS)
 	}
-	if cfg.CacheSize > 0 || cfg.CacheWarm > 0 || cfg.CacheRegular > 0 {
-		fleet.SetCacheDefault(cfg.CacheSize, cfg.CacheWarm, cfg.CacheRegular)
+	if cfg.CacheSize > 0 {
+		fleet.SetCacheDefault(cfg.CacheSize)
 	}
 	fleet.SetQueryLogRetentionDefault(cfg.QueryLogRetentionHours)
 	fleet.SetRecords(context.Background(), cfg.Records)

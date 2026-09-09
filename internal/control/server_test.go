@@ -11,7 +11,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/miekg/dns"
 	"github.com/twobip/BlipDNS/internal/blocklist"
@@ -431,20 +430,16 @@ func TestClaimCodeEntropy(t *testing.T) {
 type fakeCacheCtrl struct {
 	mu      sync.Mutex
 	size    int
-	warm    int
-	regular int // seconds
 	purged  int
 	counter int
 	c       *cache.Cache
 }
 
-func (f *fakeCacheCtrl) SetCacheConfig(size, warm int, regular time.Duration) error {
+func (f *fakeCacheCtrl) SetCacheConfig(size int) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.counter++
 	f.size = size
-	f.warm = warm
-	f.regular = int(regular.Seconds())
 	return nil
 }
 
@@ -452,18 +447,6 @@ func (f *fakeCacheCtrl) CacheSize() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.size
-}
-
-func (f *fakeCacheCtrl) CacheWarm() int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.warm
-}
-
-func (f *fakeCacheCtrl) CacheRegular() time.Duration {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return time.Duration(f.regular) * time.Second
 }
 
 func (f *fakeCacheCtrl) PurgeCache() {
@@ -478,7 +461,7 @@ func (f *fakeCacheCtrl) PurgeCache() {
 // TestCacheEndpoint exercises GET /api/v1/cache, PUT /api/v1/cache and
 // POST /api/v1/cache/purge with a wired cache controller.
 func TestCacheEndpoint(t *testing.T) {
-	cc := &fakeCacheCtrl{size: 123, warm: 4}
+	cc := &fakeCacheCtrl{size: 123}
 	store := filter.NewStore(nil)
 	c := cache.New(0, 0)
 	cc.c = c
@@ -505,7 +488,7 @@ func TestCacheEndpoint(t *testing.T) {
 	}
 
 	// unauth -> 401
-	ureq, _ := http.NewRequest(http.MethodPut, ts.URL+"/api/v1/cache", strings.NewReader(`{"size":500,"warm":10}`))
+	ureq, _ := http.NewRequest(http.MethodPut, ts.URL+"/api/v1/cache", strings.NewReader(`{"size":500}`))
 	uresp, err := http.DefaultClient.Do(ureq)
 	if err != nil {
 		t.Fatal(err)
@@ -519,24 +502,23 @@ func TestCacheEndpoint(t *testing.T) {
 	resp := authReq(http.MethodGet, "/api/v1/cache", "")
 	var got struct {
 		Size int `json:"size"`
-		Warm int `json:"warm"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
-	if got.Size != 123 || got.Warm != 4 {
-		t.Errorf("GET cache = %+v, want size=123 warm=4", got)
+	if got.Size != 123 {
+		t.Errorf("GET cache = %+v, want size=123", got)
 	}
 
 	// PUT tunes it and reports in stats (for controller reconcile)
-	resp = authReq(http.MethodPut, "/api/v1/cache", `{"size":500,"warm":10}`)
+	resp = authReq(http.MethodPut, "/api/v1/cache", `{"size":500}`)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("PUT status = %d", resp.StatusCode)
 	}
 	resp.Body.Close()
-	if cc.CacheSize() != 500 || cc.CacheWarm() != 10 {
-		t.Errorf("controller cache = %d/%d, want 500/10", cc.CacheSize(), cc.CacheWarm())
+	if cc.CacheSize() != 500 {
+		t.Errorf("controller cache = %d, want 500", cc.CacheSize())
 	}
 	sreq, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/v1/stats", nil)
 	sreq.Header.Set("Authorization", "Bearer tok")
@@ -549,12 +531,12 @@ func TestCacheEndpoint(t *testing.T) {
 		t.Fatal(err)
 	}
 	sresp.Body.Close()
-	if st.CacheSize != 500 || st.CacheWarm != 10 {
-		t.Errorf("stats cache = %d/%d, want 500/10", st.CacheSize, st.CacheWarm)
+	if st.CacheSize != 500 {
+		t.Errorf("stats cache = %d, want 500", st.CacheSize)
 	}
 
 	// negative values are rejected
-	resp = authReq(http.MethodPut, "/api/v1/cache", `{"size":-1,"warm":0}`)
+	resp = authReq(http.MethodPut, "/api/v1/cache", `{"size":-1}`)
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("negative size status = %d, want 400", resp.StatusCode)

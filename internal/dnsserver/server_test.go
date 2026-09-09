@@ -12,7 +12,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/miekg/dns"
 	"github.com/twobip/BlipDNS/internal/blocklist"
@@ -299,45 +298,6 @@ func TestUpstreamMultiConstruct(t *testing.T) {
 	_, err := upstream.FromSpec("https://1.1.1.1/dns-query https://8.8.8.8/dns-query")
 	if err != nil {
 		t.Fatal(err)
-	}
-}
-
-func TestRefreshPopularRefreshesStale(t *testing.T) {
-	srv, up := newTestServer(t)
-
-	// warm the cache from the live path (recUp answers carry TTL 60)
-	q := new(dns.Msg)
-	q.SetQuestion("allowed.test.", dns.TypeA)
-	resp := srv.serve(context.Background(), net.ParseIP("10.0.0.1"), "", q)
-	if resp.Rcode != dns.RcodeSuccess {
-		t.Fatalf("rc=%d", resp.Rcode)
-	}
-	up.mu.Lock()
-	before := up.calls
-	up.mu.Unlock()
-	resp = srv.serve(context.Background(), net.ParseIP("10.0.0.1"), "", q)
-	if up.calls != before {
-		t.Fatal("expected second serve to hit cache")
-	}
-
-	// a generous lookahead makes the (fresh) entry count as stale
-	srv.cfg.CacheWarmAhead = 2 * time.Minute
-	// auto-refresh is runtime-tuned and starts off; enable it for this test
-	if err := srv.SetCacheConfig(0, 1, 0); err != nil {
-		t.Fatal(err)
-	}
-	srv.refreshPopular()
-
-	// refreshPopular re-resolved via the default upstream and re-cached
-	up.mu.Lock()
-	refreshed := up.calls > before
-	up.mu.Unlock()
-	if !refreshed {
-		t.Fatal("expected refreshPopular to re-resolve the stale entry")
-	}
-	k := cache.Key(q)
-	if srv.cache.Stale(k, 0) {
-		t.Error("expected refreshed entry to no longer be stale")
 	}
 }
 

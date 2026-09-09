@@ -3,13 +3,10 @@ package control
 import (
 	"encoding/json"
 	"net/http"
-	"time"
 )
 
-// handleCache gets/sets the runtime response cache configuration (max size,
-// auto-refresh count, and regular-hold duration). The controller pushes this
-// from the Settings page; an absent value means "0" (unlimited / auto-refresh
-// off / use record TTL).
+// handleCache gets/sets the runtime response cache size limit. The controller
+// pushes this from the Settings page; an absent value means "0" (unlimited).
 func (s *Server) handleCache(w http.ResponseWriter, r *http.Request) {
 	cc := s.cacheController()
 	if cc == nil {
@@ -18,18 +15,18 @@ func (s *Server) handleCache(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodGet:
-		writeJSON(w, map[string]interface{}{"size": cc.CacheSize(), "warm": cc.CacheWarm(), "regular": int(cc.CacheRegular().Seconds())})
+		writeJSON(w, map[string]interface{}{"size": cc.CacheSize()})
 	case http.MethodPut, http.MethodPost:
 		var req SetCacheRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		if req.Size < 0 || req.Warm < 0 || req.Regular < 0 {
-			http.Error(w, "size, warm and regular must be >= 0", http.StatusBadRequest)
+		if req.Size < 0 {
+			http.Error(w, "size must be >= 0", http.StatusBadRequest)
 			return
 		}
-		if err := cc.SetCacheConfig(req.Size, req.Warm, time.Duration(req.Regular)*time.Second); err != nil {
+		if err := cc.SetCacheConfig(req.Size); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
