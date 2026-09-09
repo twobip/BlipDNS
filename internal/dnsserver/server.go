@@ -290,6 +290,7 @@ func (s *Server) serve(ctx context.Context, clientIP net.IP, clientID string, re
 			s.cnt.AddRateLimited()
 			resp := new(dns.Msg)
 			resp.SetReply(req)
+			resp.RecursionAvailable = true
 			resp.Rcode = dns.RcodeRefused
 			return resp
 		}
@@ -297,6 +298,7 @@ func (s *Server) serve(ctx context.Context, clientIP net.IP, clientID string, re
 	s.cnt.AddQuery()
 	resp := new(dns.Msg)
 	resp.SetReply(req)
+	resp.RecursionAvailable = true // locally-built replies must carry RA like relayed ones
 	if len(req.Question) == 0 {
 		resp.Rcode = dns.RcodeFormatError
 		return resp

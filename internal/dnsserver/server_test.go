@@ -586,8 +586,8 @@ func TestServeRecordsNodataForMissingType(t *testing.T) {
 		q := new(dns.Msg)
 		q.SetQuestion(name, dns.TypeAAAA)
 		resp := srv.serve(context.Background(), net.ParseIP("192.168.1.5"), "", q)
-		if resp.Rcode != dns.RcodeSuccess || len(resp.Answer) != 0 {
-			t.Errorf("%s AAAA: rc=%d answers=%d, want NOERROR with 0 (NODATA)", name, resp.Rcode, len(resp.Answer))
+		if resp.Rcode != dns.RcodeSuccess || len(resp.Answer) != 0 || !resp.RecursionAvailable {
+			t.Errorf("%s AAAA: rc=%d answers=%d ra=%v, want NOERROR with 0 (NODATA) + RA", name, resp.Rcode, len(resp.Answer), resp.RecursionAvailable)
 		}
 		if up.calls != 0 {
 			t.Errorf("%s AAAA: upstream calls = %d, want 0", name, up.calls)

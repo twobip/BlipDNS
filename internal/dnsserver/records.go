@@ -123,6 +123,7 @@ func (rs *RecordStore) Lookup(req *dns.Msg) (*dns.Msg, bool) {
 	resp := new(dns.Msg)
 	resp.SetReply(req)
 	resp.Authoritative = true
+	resp.RecursionAvailable = true // blipd recurses via upstream; nslookup warns without this
 
 	var matched, nameKnown bool
 	for _, r := range recs {
