@@ -2,6 +2,7 @@ package upstream
 
 import (
 	"context"
+	"crypto/tls"
 	"io"
 	"net"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
+	"github.com/twobip/BlipDNS/internal/certgen"
 )
 
 type fakeResolver struct{ msg *dns.Msg }
@@ -22,6 +24,58 @@ func (f *fakeResolver) Resolve(ctx context.Context, q *dns.Msg) (*dns.Msg, error
 	m.Id = q.Id
 	m.Question = q.Question
 	return m, nil
+}
+
+func TestTLSSpecAndResolver(t *testing.T) {
+	// tls:// defaults to port 853; explicit ports are kept; priority sorts.
+	specs, err := ParseSpec("tls://9.9.9.9|2 tls://1.1.1.1:8530|1")
+	if err != nil {
+		t.Fatalf("ParseSpec: %v", err)
+	}
+	if len(specs) != 2 || specs[0].Type != "tls" || specs[0].Address != "1.1.1.1:8530" || specs[1].Address != "9.9.9.9:853" {
+		t.Fatalf("specs = %+v", specs)
+	}
+
+	// Live loopback DoT exchange against a self-signed test server.
+	certPEM, keyPEM, err := certgen.Generate()
+	if err != nil {
+		t.Fatalf("certgen: %v", err)
+	}
+	cert, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		t.Fatalf("keypair: %v", err)
+	}
+	mux := dns.NewServeMux()
+	mux.HandleFunc("example.com.", func(w dns.ResponseWriter, req *dns.Msg) {
+		m := new(dns.Msg)
+		m.SetReply(req)
+		m.Answer = []dns.RR{&dns.A{Hdr: dns.RR_Header{Name: req.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60}, A: net.ParseIP("9.9.9.9").To4()}}
+		_ = w.WriteMsg(m)
+	})
+	srv := &dns.Server{Net: "tcp-tls", TLSConfig: &tls.Config{Certificates: []tls.Certificate{cert}}, Handler: mux}
+	l, err := tls.Listen("tcp", "127.0.0.1:0", srv.TLSConfig)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	srv.Listener = l
+	addr := l.Addr().String()
+	go func() { _ = srv.ActivateAndServe() }()
+	defer func() { _ = srv.Shutdown() }()
+	r, err := FromSpec("tls://" + addr)
+	if err != nil {
+		t.Fatalf("FromSpec: %v", err)
+	}
+	// Self-signed: skip verification (stdlib still does the TLS handshake).
+	r.(*TLSResolver).tls.TLSConfig = &tls.Config{InsecureSkipVerify: true}
+	q := new(dns.Msg)
+	q.SetQuestion("example.com.", dns.TypeA)
+	resp, err := r.Resolve(context.Background(), q)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(resp.Answer) != 1 {
+		t.Fatalf("answers = %d, want 1", len(resp.Answer))
+	}
 }
 
 func TestErrUpstreamStripsEphemeralSocket(t *testing.T) {
