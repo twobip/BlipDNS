@@ -531,6 +531,45 @@ func TestServeRecordsFallthroughToUpstream(t *testing.T) {
 	}
 }
 
+func TestUpstreamErrText(t *testing.T) {
+	// Real DoH timeout shape: wrapped context.DeadlineExceeded.
+	wrapped := fmt.Errorf("Post %q: %w", "https://dns.mullvad.net/dns-query", context.DeadlineExceeded)
+	if got := upstreamErrText("auto (Quad9)", wrapped); got != "timeout talking to auto (Quad9)" {
+		t.Errorf("wrapped timeout = %q", got)
+	}
+	if got := upstreamErrText("", context.DeadlineExceeded); got != "upstream timeout" {
+		t.Errorf("bare timeout = %q", got)
+	}
+	// Non-timeouts pass through verbatim.
+	if got := upstreamErrText("auto (Quad9)", fmt.Errorf("boom")); got != "boom" {
+		t.Errorf("passthrough = %q", got)
+	}
+}
+
+func TestServeRecordsNodataForMissingType(t *testing.T) {
+	srv, up := newTestServer(t)
+	srv.rec = NewRecordStore()
+	srv.rec.SetRecords([]control.RecordEntry{
+		{Domain: "galaxy.lan.", Type: "A", Value: "192.168.30.154", TTL: 60},
+		{Domain: "*.apps.lan.", Type: "A", Value: "192.168.30.155", TTL: 60},
+	})
+
+	// AAAA for an A-only name (and its wildcard sibling) is NODATA: NOERROR
+	// with no answers, served locally — never upstream NXDOMAIN.
+	for _, name := range []string{"galaxy.lan.", "www.apps.lan."} {
+		up.calls = 0
+		q := new(dns.Msg)
+		q.SetQuestion(name, dns.TypeAAAA)
+		resp := srv.serve(context.Background(), net.ParseIP("192.168.1.5"), "", q)
+		if resp.Rcode != dns.RcodeSuccess || len(resp.Answer) != 0 || !resp.RecursionAvailable {
+			t.Errorf("%s AAAA: rc=%d answers=%d ra=%v, want NOERROR with 0 (NODATA) + RA", name, resp.Rcode, len(resp.Answer), resp.RecursionAvailable)
+		}
+		if up.calls != 0 {
+			t.Errorf("%s AAAA: upstream calls = %d, want 0", name, up.calls)
+		}
+	}
+}
+
 func TestServeRecordsTypeSpecificMatch(t *testing.T) {
 	srv, up := newTestServer(t)
 	srv.rec = NewRecordStore()
@@ -566,12 +605,16 @@ func TestServeRecordsTypeSpecificMatch(t *testing.T) {
 		t.Errorf("AAAA answer = %v, want 2001:db8::1", resp.Answer[0])
 	}
 
-	// CNAME query for "dual.test." has no matching record -> upstream
+	// CNAME query for "dual.test." (A+AAAA only) is NODATA: NOERROR with
+	// no answers, served locally — never upstream.
 	up.calls = 0
 	q.SetQuestion("dual.test.", dns.TypeCNAME)
-	srv.serve(context.Background(), net.ParseIP("192.168.1.5"), "", q)
-	if up.calls != 1 {
-		t.Errorf("upstream calls for CNAME = %d, want 1", up.calls)
+	resp = srv.serve(context.Background(), net.ParseIP("192.168.1.5"), "", q)
+	if resp.Rcode != dns.RcodeSuccess || len(resp.Answer) != 0 {
+		t.Errorf("CNAME rc=%d answers=%d, want NOERROR with 0 (NODATA)", resp.Rcode, len(resp.Answer))
+	}
+	if up.calls != 0 {
+		t.Errorf("upstream calls for CNAME = %d, want 0", up.calls)
 	}
 }
 

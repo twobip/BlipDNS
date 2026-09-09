@@ -61,6 +61,32 @@ func (r *UDPResolver) Resolve(ctx context.Context, q *dns.Msg) (*dns.Msg, error)
 	return resp, nil
 }
 
+// TLSResolver forwards over DNS-over-TLS (RFC 7858, port 853).
+type TLSResolver struct {
+	addr string
+	tls  dns.Client // pre-built; reused across queries (no per-query alloc)
+}
+
+// NewTLS creates a DoT upstream resolver for addr (host:port) with the given
+// timeout (0 = 5 second default). TLS is verified against the system roots.
+func NewTLS(addr string, timeout time.Duration) *TLSResolver {
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+	return &TLSResolver{
+		addr: addr,
+		tls:  dns.Client{Net: "tcp-tls", Timeout: timeout},
+	}
+}
+
+func (r *TLSResolver) Resolve(ctx context.Context, q *dns.Msg) (*dns.Msg, error) {
+	resp, _, err := r.tls.Exchange(q, r.addr)
+	if err != nil {
+		return nil, errUpstream(r.addr, err)
+	}
+	return resp, nil
+}
+
 // errUpstream labels a network failure with the upstream address and strips
 // the ephemeral local socket that Go embeds in the message ("read udp
 // 127.0.0.1:50791->127.0.0.1:1: ..."), so the same failure always produces
@@ -269,14 +295,14 @@ func (m *MultiResolver) Resolve(ctx context.Context, q *dns.Msg) (*dns.Msg, erro
 
 // Spec describes a single upstream entry parsed from a spec string.
 type Spec struct {
-	Type     string // "udp" or "doh"
-	Address  string // host:port (udp) or host/path (doh), scheme stripped
+	Type     string // "udp", "tls" (DoT) or "doh"
+	Address  string // host:port (udp/tls) or host/path (doh), scheme stripped
 	Priority int    // lower = higher priority (tried first)
 }
 
 // ParseSpec splits a spec string into individual entries, sorted by priority.
-// Each token is a URL-style spec ("udp://host:port", "https://host/path" or
-// "doh://host/path") with an optional "|priority" suffix, e.g.
+// Each token is a URL-style spec ("udp://host:port", "tls://host[:port]" or
+// "https://host/path" / "doh://host/path") with an optional "|priority" suffix, e.g.
 // "udp://1.1.1.1:53|1". Tokens without a priority keep their position
 // (1-based) as priority, so plain space-separated lists still fail over
 // left to right. A token with no scheme is assumed to be UDP when it is a
@@ -296,14 +322,16 @@ func ParseSpec(spec string) ([]Spec, error) {
 		var s Spec
 		switch {
 		case strings.HasPrefix(raw, "udp://"):
-			s = Spec{Type: "udp", Address: ensurePort(raw[len("udp://"):]), Priority: prio}
+			s = Spec{Type: "udp", Address: ensurePort(raw[len("udp://"):], "53"), Priority: prio}
+		case strings.HasPrefix(raw, "tls://"):
+			s = Spec{Type: "tls", Address: ensurePort(raw[len("tls://"):], "853"), Priority: prio}
 		case strings.HasPrefix(raw, "doh://"):
 			s = Spec{Type: "doh", Address: raw[len("doh://"):], Priority: prio}
 		case strings.HasPrefix(raw, "https://"):
 			s = Spec{Type: "doh", Address: raw[len("https://"):], Priority: prio}
 		default:
 			if isBareUDP(raw) {
-				s = Spec{Type: "udp", Address: ensurePort(raw), Priority: prio}
+				s = Spec{Type: "udp", Address: ensurePort(raw, "53"), Priority: prio}
 				break
 			}
 			return nil, fmt.Errorf("upstream: unrecognized spec %q", tok)
@@ -331,10 +359,11 @@ func isBareUDP(tok string) bool {
 	return net.ParseIP(ip) != nil
 }
 
-// ensurePort appends ":53" to a UDP host when no port is present, so
-// "udp://192.168.30.221" resolves to 192.168.30.221:53 instead of failing to
-// dial. IPv6 hosts are bracketed correctly.
-func ensurePort(addr string) string {
+// ensurePort appends defaultPort to a host when no port is present, so
+// "udp://192.168.30.221" resolves to 192.168.30.221:53 and "tls://9.9.9.9"
+// to 9.9.9.9:853 instead of failing to dial. IPv6 hosts are bracketed
+// correctly.
+func ensurePort(addr, defaultPort string) string {
 	if addr == "" {
 		return addr
 	}
@@ -342,7 +371,7 @@ func ensurePort(addr string) string {
 		return addr
 	}
 	host := strings.TrimSuffix(strings.TrimPrefix(addr, "["), "]")
-	return net.JoinHostPort(host, "53")
+	return net.JoinHostPort(host, defaultPort)
 }
 
 // splitPriority separates an optional "|N" priority suffix from a spec token.
@@ -357,6 +386,7 @@ func splitPriority(tok string) (string, int) {
 
 // FromSpec builds a Resolver from a URL-style spec string:
 //   - "udp://host:port"  -> UDPResolver
+//   - "tls://host[:port]" -> TLSResolver (DoT, default port 853)
 //   - "https://host/dns-query" or "doh://host/dns-query" -> DoHResolver
 //   - an optional "|priority" suffix sets failover order
 //
@@ -372,6 +402,8 @@ func FromSpec(spec string) (Resolver, error) {
 		switch s.Type {
 		case "udp":
 			rs[i] = NewUDP(s.Address, 0)
+		case "tls":
+			rs[i] = NewTLS(s.Address, 0)
 		case "doh":
 			rs[i] = NewDoH("https://"+s.Address, 0)
 		}

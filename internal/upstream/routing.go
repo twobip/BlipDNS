@@ -14,7 +14,7 @@ import (
 // automatically, even when every Priority>0 server is down.
 type UpstreamServer struct {
 	Name       string `json:"name" yaml:"name"`
-	Address    string `json:"address" yaml:"address"` // single endpoint spec: "udp://host:port" or "https://host/dns-query"
+	Address    string `json:"address" yaml:"address"` // single endpoint spec: "udp://host:port", "tls://host[:port]" (DoT, default 853) or "https://host/dns-query"
 	Priority   int    `json:"priority" yaml:"priority"`
 	TimeoutSec int    `json:"timeout_sec,omitempty" yaml:"timeout_sec,omitempty"` // seconds to wait before failing over to next server (0 = 5s default)
 }
@@ -169,6 +169,8 @@ func fromServerSpecWithBootstrap(spec string, timeout time.Duration, bootstrap R
 	switch specs[0].Type {
 	case "udp":
 		return NewUDP(specs[0].Address, timeout), nil
+	case "tls":
+		return NewTLS(specs[0].Address, timeout), nil
 	case "doh":
 		return NewDoHWithBootstrap("https://"+specs[0].Address, timeout, bootstrap), nil
 	}

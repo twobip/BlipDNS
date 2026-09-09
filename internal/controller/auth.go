@@ -49,18 +49,24 @@ type Auth struct {
 
 	mu       sync.Mutex
 	sessions map[string]time.Time // sessionID -> expiry
+	keys     map[string]apiKey    // key ID -> expiring bearer key (debug sharing)
 
 	flMu sync.Mutex
 	fl   map[string]*loginFails // client IP -> failure state
 }
 
-// Sweep removes expired sessions and stale login-failure records.
+// Sweep removes expired sessions, expired API keys, and stale login-failure records.
 func (a *Auth) Sweep() {
 	now := time.Now()
 	a.mu.Lock()
 	for id, expiry := range a.sessions {
 		if now.After(expiry) {
 			delete(a.sessions, id)
+		}
+	}
+	for id, k := range a.keys {
+		if now.After(k.expires) {
+			delete(a.keys, id)
 		}
 	}
 	a.mu.Unlock()
@@ -81,6 +87,7 @@ func (a *Auth) Sweep() {
 func NewAuth(username, password string) *Auth {
 	a := &Auth{
 		sessions: make(map[string]time.Time),
+		keys:     make(map[string]apiKey),
 		fl:       make(map[string]*loginFails),
 	}
 	if username == "" || password == "" {
@@ -244,6 +251,93 @@ func (a *Auth) MintCookie(w http.ResponseWriter, r *http.Request, id string) {
 		MaxAge:   int(sessionTTL.Seconds()),
 		Expires:  time.Now().Add(sessionTTL),
 	})
+}
+
+const (
+	maxAPIKeyLabelLen = 64
+	maxAPIKeyTTL      = 30 * 24 * time.Hour
+)
+
+// APIKeyInfo is the list-safe view of a key — it never includes the secret,
+// which is shown once at creation time.
+type APIKeyInfo struct {
+	ID      string    `json:"id"`
+	Label   string    `json:"label"`
+	Created time.Time `json:"created_at"`
+	Expires time.Time `json:"expires_at"`
+}
+
+type apiKey struct {
+	secret  string
+	label   string
+	created time.Time
+	expires time.Time
+}
+
+// CreateAPIKey mints a bearer key for /api/* valid for ttl. ttl must be
+// positive and at most 30 days.
+func (a *Auth) CreateAPIKey(label string, ttl time.Duration) (id, secret string, expires time.Time, err error) {
+	label = strings.TrimSpace(label)
+	if label == "" || len(label) > maxAPIKeyLabelLen {
+		return "", "", time.Time{}, errors.New("label must be 1-64 characters")
+	}
+	if ttl <= 0 || ttl > maxAPIKeyTTL {
+		return "", "", time.Time{}, errors.New("ttl must be positive and at most 30 days")
+	}
+	raw, err := newSessionID() // 32 random bytes, hex — reuse the session secret shape
+	if err != nil {
+		return "", "", time.Time{}, err
+	}
+	idRaw := make([]byte, 6)
+	if _, err := rand.Read(idRaw); err != nil {
+		return "", "", time.Time{}, err
+	}
+	now := time.Now()
+	k := apiKey{secret: "blip_" + raw, label: label, created: now, expires: now.Add(ttl)}
+	id = hex.EncodeToString(idRaw)
+	a.mu.Lock()
+	a.keys[id] = k
+	a.mu.Unlock()
+	return id, k.secret, k.expires, nil
+}
+
+// ListAPIKeys returns live and expired-but-unswept keys without secrets.
+func (a *Auth) ListAPIKeys() []APIKeyInfo {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	out := make([]APIKeyInfo, 0, len(a.keys))
+	for id, k := range a.keys {
+		out = append(out, APIKeyInfo{ID: id, Label: k.label, Created: k.created, Expires: k.expires})
+	}
+	return out
+}
+
+// RevokeAPIKey deletes a key immediately. It reports whether one existed.
+func (a *Auth) RevokeAPIKey(id string) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if _, ok := a.keys[id]; !ok {
+		return false
+	}
+	delete(a.keys, id)
+	return true
+}
+
+// validAPIKey reports whether secret is a live key.
+// ponytail: O(n) scan, per-key map when keys number in the hundreds.
+func (a *Auth) validAPIKey(secret string) bool {
+	if secret == "" {
+		return false
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	now := time.Now()
+	for _, k := range a.keys {
+		if len(secret) == len(k.secret) && subtle.ConstantTimeCompare([]byte(secret), []byte(k.secret)) == 1 {
+			return now.Before(k.expires)
+		}
+	}
+	return false
 }
 
 // ---- brute-force guard (sliding window) ----

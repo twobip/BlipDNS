@@ -578,6 +578,7 @@
         <div class="settings-tabs" id="settings-tabs">
           <button class="settings-tab active" data-settings-tab="ql">Query Log</button>
           <button class="settings-tab" data-settings-tab="dns">DNS</button>
+          <button class="settings-tab" data-settings-tab="keys">API Keys</button>
           <button class="settings-tab" data-settings-tab="about">About</button>
         </div>
         <div class="grid grid-2">
@@ -694,6 +695,32 @@
                 <span class="hint" id="s-ctrl-up-status"></span>
               </div>
               <span class="hint">Updates the controller itself from the release channel selected above. The dashboard is briefly unavailable while it restarts.</span>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-head"><h3>API Keys</h3></div>
+            <div class="panel-body">
+              <span class="hint">Temporary bearer keys for the control API (<span class="mono">Authorization: Bearer …</span>) — share one for debugging instead of the password. Keys expire automatically, can be revoked anytime, and are cleared on controller restart. The secret is shown once.</span>
+              <div class="row mt" style="gap:8px; flex-wrap:wrap">
+                <input class="input" id="k-label" placeholder="Label (e.g. ai-debug)" maxlength="64" style="max-width:220px"/>
+                <select class="select" id="k-ttl" style="max-width:160px">
+                  <option value="1">1 hour</option>
+                  <option value="24" selected>24 hours</option>
+                  <option value="168">7 days</option>
+                  <option value="720">30 days</option>
+                </select>
+                <button class="btn btn-primary" id="k-create">Create key</button>
+              </div>
+              <div class="row mt hidden" id="k-once">
+                <span class="mono" id="k-secret" style="user-select:all"></span>
+                <button class="btn btn-sm" id="k-copy">Copy</button>
+              </div>
+              <div class="table-wrap mt">
+                <table class="tbl"><thead><tr><th>Label</th><th>Expires</th><th></th></tr></thead>
+                  <tbody id="k-list"></tbody>
+                </table>
+              </div>
             </div>
           </div>
 

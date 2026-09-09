@@ -123,8 +123,9 @@ func (rs *RecordStore) Lookup(req *dns.Msg) (*dns.Msg, bool) {
 	resp := new(dns.Msg)
 	resp.SetReply(req)
 	resp.Authoritative = true
+	resp.RecursionAvailable = true // blipd recurses via upstream; nslookup warns without this
 
-	var matched bool
+	var matched, nameKnown bool
 	for _, r := range recs {
 		rrType, ok := dns.StringToType[strings.ToUpper(r.Type)]
 		if !ok {
@@ -133,6 +134,7 @@ func (rs *RecordStore) Lookup(req *dns.Msg) (*dns.Msg, bool) {
 		if rrType != dns.TypeA && rrType != dns.TypeAAAA && rrType != dns.TypeCNAME {
 			continue
 		}
+		nameKnown = true
 		if rrType != q.Qtype {
 			continue
 		}
@@ -171,6 +173,12 @@ func (rs *RecordStore) Lookup(req *dns.Msg) (*dns.Msg, bool) {
 	}
 
 	if matched {
+		return resp, true
+	}
+	if nameKnown {
+		// The name exists locally but has no record of the queried type:
+		// NODATA (NOERROR, no answers), not a fallthrough to upstream
+		// NXDOMAIN. resp is already an authoritative empty reply.
 		return resp, true
 	}
 	return nil, false
