@@ -274,6 +274,22 @@ function renderDashInstances(perInstance) {
   }).join("");
 }
 
+function renderTopClients(rows) {
+  const el = $("d-topclients");
+  const list = Array.isArray(rows) ? rows.slice(0, 10) : [];
+  if (!list.length) {
+    el.innerHTML = `<div class="empty"><div class="empty-ic">${IC.device}</div><h4>No clients yet</h4><p>Nothing queried in this window.</p></div>`;
+    return;
+  }
+  el.innerHTML = list.map((r, i) => {
+    return `<li>
+      <span class="mono" style="flex:none;width:22px;color:var(--faint);font-size:12px">${i + 1}</span>
+      <div class="grow q-client" style="min-width:0">${clientCellHtml(r)}</div>
+      <span class="mono muted" style="flex:none">${fmt(r.queries)} queries</span>
+    </li>`;
+  }).join("");
+}
+
 function renderTopBlocked(domains) {
   const el = $("d-topblocked");
   const list = (Array.isArray(domains) ? domains : []).filter((d) => d.blocked > 0);
@@ -329,6 +345,10 @@ async function fetchStats() {
     API(`/api/top-domains?since=${rng.since}&limit=10&action=BLOCK`)
       .then((r) => r.json())
       .then((t) => renderTopBlocked(t.domains))
+      .catch(() => { /* best-effort */ });
+    API(`/api/clients?since=${rng.since}&limit=10`)
+      .then((r) => r.json())
+      .then((t) => renderTopClients(t))
       .catch(() => { /* best-effort */ });
     if (!ctx) return;
     const gl = ctx.getContext("2d");
