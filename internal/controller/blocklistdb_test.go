@@ -344,6 +344,44 @@ func TestBlocklistStoreMigratesNormalizedSchema(t *testing.T) {
 	}
 }
 
+func TestRestartSeedsSourcesWithoutImporting(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	store, err := NewBlocklistStore(filepath.Join(dir, "blocklist.db"))
+	if err != nil {
+		t.Fatalf("NewBlocklistStore: %v", err)
+	}
+	defer store.db.Close()
+	u := "https://example.invalid/list.txt"
+	last := time.Now().UTC().Truncate(time.Second).Add(-time.Hour)
+	if err := store.ReplaceSourceMeta(ctx, SourceMeta{URL: u, Domains: 3, LastUpdate: last}); err != nil {
+		t.Fatalf("ReplaceSourceMeta: %v", err)
+	}
+
+	fleet := NewFleet(filepath.Join(dir, "blipc.yaml"))
+	fleet.blocklistDB = store
+	fleet.SetBlocklistDisabled(nil)
+	fleet.SetBlocklistSourcesDefault([]string{u})
+	fleet.LoadSourceStats(ctx)
+
+	fleet.blMu.Lock()
+	running := fleet.blRunning
+	fleet.blMu.Unlock()
+	if running {
+		t.Fatal("startup seeding started a blocklist import")
+	}
+	st := fleet.BlocklistStatus()
+	if st.Running {
+		t.Error("BlocklistStatus reports a running import after startup seeding")
+	}
+	if !st.LastUpdate.Equal(last) {
+		t.Errorf("LastUpdate = %v, want seeded %v", st.LastUpdate, last)
+	}
+	if got := fleet.BlocklistSources(); !reflect.DeepEqual(got, []string{u}) {
+		t.Errorf("BlocklistSources() = %v", got)
+	}
+}
+
 func TestBlocklistStoreBlockSourceLabel(t *testing.T) {
 	store, err := NewBlocklistStore(filepath.Join(t.TempDir(), "blocklist.db"))
 	if err != nil {

@@ -1906,6 +1906,16 @@ func (f *Fleet) BlocklistStatus() BlocklistStatus {
 	return st
 }
 
+// SetBlocklistSourcesDefault loads the source URLs at startup without
+// persisting or importing. Restarts serve the persisted cache (pushed to
+// instances by the reconcile loop); refreshes come from the auto-updater when
+// due, or from an explicit operator action.
+func (f *Fleet) SetBlocklistSourcesDefault(urls []string) {
+	f.blMu.Lock()
+	f.blocklistSources = cleanURLs(urls)
+	f.blMu.Unlock()
+}
+
 // SetBlocklistSources replaces the source URLs, persists them to the config,
 // and starts a background import job. The HTTP caller returns immediately;
 // progress is visible via BlocklistStatus.
@@ -2038,9 +2048,13 @@ func (f *Fleet) LoadSourceStats(ctx context.Context) {
 	}
 	f.blMu.Lock()
 	ordered := make([]SourceStat, 0, len(m))
+	var last time.Time
 	for _, u := range f.blocklistSources {
 		if meta, ok := m[u]; ok {
 			ordered = append(ordered, SourceStat{URL: meta.URL, Domains: meta.Domains, LastUpdate: meta.LastUpdate, Error: meta.Error})
+			if meta.LastUpdate.After(last) {
+				last = meta.LastUpdate
+			}
 			delete(m, u)
 		}
 	}
@@ -2049,6 +2063,11 @@ func (f *Fleet) LoadSourceStats(ctx context.Context) {
 	}
 	sort.Slice(ordered, func(i, j int) bool { return ordered[i].URL < ordered[j].URL })
 	f.sourceStats = ordered
+	// Seed the last-import time from the persisted snapshots so a restart
+	// with fresh snapshots doesn't look like a due auto-update.
+	if !last.IsZero() {
+		f.blStatus.LastUpdate = last
+	}
 	f.blMu.Unlock()
 }
 
