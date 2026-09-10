@@ -703,7 +703,41 @@ async function copyText(s) {
 }
 
 /* ---------- upstream errors ---------- */
-let ueState = { inst: "", since: "24h" };
+let ueState = { inst: "", since: "24h", sort: null }; // sort: null = server order, else {k, dir}
+let ueRows = [];
+function paintUeRows() {
+  const tb = $("ue-tbody");
+  document.querySelectorAll('#view-upstream-errors th[data-k]').forEach((h) => {
+    h.removeAttribute("data-dir");
+    if (ueState.sort && h.dataset.k === ueState.sort.k) h.dataset.dir = ueState.sort.dir > 0 ? "asc" : "desc";
+  });
+  const rows = ueRows.slice();
+  if (ueState.sort) {
+    const { k, dir } = ueState.sort;
+    rows.sort((a, b) => k === "count"
+      ? ((a.count || 0) - (b.count || 0)) * dir
+      : String(a[k] || "").localeCompare(String(b[k] || "")) * dir);
+  }
+  tb.innerHTML = rows.map((r) => {
+    const inst = instances.find((i) => (i.label || i.id) === r.instance);
+    return `<tr>
+      <td class="q-domain"><span class="mono q-dom" title="${esc(r.message)}">${esc(r.message)}</span></td>
+      <td><span class="mono">${esc(r.domain)}</span></td>
+      <td class="num">${fmt(r.count)}</td>
+      <td class="q-time"><span class="t" data-t="${esc(r.first_seen)}" title="${esc(r.first_seen)}">…</span></td>
+      <td class="q-time"><span class="t" data-t="${esc(r.last_seen)}" title="${esc(r.last_seen)}">…</span></td>
+      <td class="q-inst"><span class="dot ${inst && inst.online ? "on" : "off"}"></span>${esc(inst ? (inst.label || inst.id) : r.instance)}</td>
+    </tr>`;
+  }).join("");
+  tb.querySelectorAll(".t").forEach((t) => { t.textContent = timeAgo(t.dataset.t); });
+}
+document.querySelectorAll('#view-upstream-errors th[data-k]').forEach((h) => h.onclick = () => {
+  const k = h.dataset.k;
+  ueState.sort = !ueState.sort || ueState.sort.k !== k
+    ? { k, dir: k === "count" ? -1 : 1 } // counts: biggest first; text/dates: A→Z
+    : { k, dir: -ueState.sort.dir };
+  paintUeRows();
+});
 function propsUeInstanceOptions() {
   const sel = $("ue-instance");
   const cur = sel.value;
@@ -716,24 +750,13 @@ async function renderUpstreamErrors() {
   try {
     const res = await API(`/api/upstream-errors?instance=${encodeURIComponent(ueState.inst)}&since=${ueState.since}&limit=200`);
     const d = await res.json();
-    const rows = d.errors || [];
+    ueRows = d.errors || [];
     $("ue-count").textContent = fmt(d.total ?? 0) + " errors";
-    if (!rows.length) {
+    if (!ueRows.length) {
       tb.innerHTML = `<tr class="empty-row"><td colspan="6"><div class="empty"><div class="empty-ic">${IC.warn}</div><h4>No upstream errors</h4><p>Nothing failed in the selected range.</p></div></td></tr>`;
       return;
     }
-    tb.innerHTML = rows.map((r) => {
-      const inst = instances.find((i) => (i.label || i.id) === r.instance);
-      return `<tr>
-        <td class="q-domain"><span class="mono q-dom" title="${esc(r.message)}">${esc(r.message)}</span></td>
-        <td><span class="mono">${esc(r.domain)}</span></td>
-        <td class="num">${fmt(r.count)}</td>
-        <td class="q-time"><span class="t" data-t="${esc(r.first_seen)}" title="${esc(r.first_seen)}">…</span></td>
-        <td class="q-time"><span class="t" data-t="${esc(r.last_seen)}" title="${esc(r.last_seen)}">…</span></td>
-        <td class="q-inst"><span class="dot ${inst && inst.online ? "on" : "off"}"></span>${esc(inst ? (inst.label || inst.id) : r.instance)}</td>
-      </tr>`;
-    }).join("");
-    tb.querySelectorAll(".t").forEach((t) => { t.textContent = timeAgo(t.dataset.t); });
+    paintUeRows();
   } catch (e) {
     tb.innerHTML = `<tr class="empty-row"><td colspan="6"><div class="empty"><div class="empty-ic">${IC.warn}</div><h4>Upstream errors unavailable</h4><p>${esc(e.message)}</p></div></td></tr>`;
   }
