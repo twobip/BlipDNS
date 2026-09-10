@@ -24,12 +24,12 @@ import (
 	"time"
 )
 
-// maxSourceBytes caps how much we read from a single source before giving up.
-// oisd-style lists are tens of MB; this is a hard safety bound.
-const maxSourceBytes = 1 << 30
+// maxSourceBytes caps a single source download. The management API itself
+// rejects received lists over 256 MiB, so a source bigger than that is useless.
+const maxSourceBytes = 256 << 20
 
-// maxLineLen bounds a single line in a list (hosts/ABP entries are short).
-const maxLineLen = 4 * 1024 * 1024
+// maxLineLen bounds a single list line; real hosts/ABP entries are <2 KiB.
+const maxLineLen = 64 * 1024
 
 // safeBlocklistTransport fetches only over plain HTTP(S) to publicly routable
 // destinations, blocking SSRF against loopback, link-local, private,
@@ -49,12 +49,16 @@ var safeBlocklistTransport = &http.Transport{
 		if err != nil {
 			return nil, err
 		}
+		_, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, err
+		}
 		d := net.Dialer{}
 		for _, ip := range ips {
 			if isPrivateIP(net.ParseIP(ip)) {
 				continue
 			}
-			c, err := d.DialContext(ctx, network, net.JoinHostPort(ip, mustPort(addr)))
+			c, err := d.DialContext(ctx, network, net.JoinHostPort(ip, port))
 			if err != nil {
 				return nil, err
 			}
@@ -71,36 +75,19 @@ var safeBlocklistTransport = &http.Transport{
 // maxSourceFetchers bounds how many blocklist sources are fetched concurrently.
 const maxSourceFetchers = 8
 
-func mustPort(addr string) string {
-	_, p, err := net.SplitHostPort(addr)
-	if err != nil || p == "" {
-		return addr
-	}
-	return p
-}
+// cgnatNet is the only private-use range net.IP.IsPrivate misses (RFC 6598).
+// ponytail: parsed once here; drop if stdlib IsPrivate ever covers CGNAT.
+var cgnatNet = func() *net.IPNet { _, n, _ := net.ParseCIDR("100.64.0.0/10"); return n }()
 
-// isPrivateIP reports whether ip is loopback, link-local, private,
-// multicast, unspecified, or in the cloud-metadata 169.254.0.0/16 range.
+// isPrivateIP reports whether ip is not publicly routable: loopback,
+// link-local (incl. cloud-metadata 169.254.0.0/16), multicast, unspecified,
+// RFC 1918/4193 private, or carrier-grade NAT. Stricter-or-equal to the old
+// hand-rolled CIDR list (ULA fc00::/7 now blocked too).
 func isPrivateIP(ip net.IP) bool {
 	if ip == nil {
 		return true
 	}
-	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() {
-		return true
-	}
-	// Private ranges (RFC 1918) and 100.64/10 (RFC 6598 carrier-grade NAT).
-	priv := []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10"}
-	for _, p := range priv {
-		_, n, _ := net.ParseCIDR(p)
-		if n != nil && n.Contains(ip) {
-			return true
-		}
-	}
-	// 169.254.0.0/16 (AWS/GCP/Azure metadata)
-	if _, n, _ := net.ParseCIDR("169.254.0.0/16"); n != nil && n.Contains(ip) {
-		return true
-	}
-	return false
+	return !ip.IsGlobalUnicast() || ip.IsPrivate() || cgnatNet.Contains(ip)
 }
 
 // ssrfEnabled gates the SSRF guard (literal-IP rejection + private-route dial
@@ -185,13 +172,12 @@ func New() *Blocklist {
 }
 
 // FromDomains replaces the current list with the given domains.
-// It normalizes each domain (lowercase, trim dot) and ignores invalid ones.
 func (b *Blocklist) FromDomains(list []string) {
-	exact, wild := make(map[string]struct{}), make(map[string]struct{})
+	set := make(map[string]struct{}, len(list))
 	for _, d := range list {
-		addEntry(d, exact, wild)
+		set[d] = struct{}{}
 	}
-	b.swap(exact, wild)
+	b.FromDomainsMap(set)
 }
 
 // FromDomainsMap replaces the current list with the given set of domains.

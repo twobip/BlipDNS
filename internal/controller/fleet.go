@@ -1947,14 +1947,6 @@ func (f *Fleet) SetBlocklistSources(ctx context.Context, urls []string) {
 	f.startBlocklistImport("sources-updated")
 }
 
-// BlocklistSourceEnabled reports whether the given source URL is enabled.
-// Unknown URLs are treated as enabled (they are not in the disabled set).
-func (f *Fleet) BlocklistSourceEnabled(url string) bool {
-	f.blMu.Lock()
-	defer f.blMu.Unlock()
-	return !f.blocklistDisabled[url]
-}
-
 // EnabledBlocklistSources returns the configured source URLs that are not in
 // the disabled set.
 func (f *Fleet) EnabledBlocklistSources() []string {
@@ -1965,17 +1957,6 @@ func (f *Fleet) EnabledBlocklistSources() []string {
 		if !f.blocklistDisabled[u] {
 			out = append(out, u)
 		}
-	}
-	return out
-}
-
-// DisabledBlocklistSources returns the source URLs that are currently disabled.
-func (f *Fleet) DisabledBlocklistSources() []string {
-	f.blMu.Lock()
-	defer f.blMu.Unlock()
-	out := make([]string, 0, len(f.blocklistDisabled))
-	for u := range f.blocklistDisabled {
-		out = append(out, u)
 	}
 	return out
 }
@@ -2093,7 +2074,7 @@ func (f *Fleet) LoadManualDomains(ctx context.Context) {
 	if f.blocklistDB == nil {
 		return
 	}
-	m, err := f.blocklistDB.LoadManualDomains(ctx)
+	m, err := f.blocklistDB.loadDomainSet(ctx, "blocklist_manual")
 	if err != nil {
 		log.Printf("blipc: warning: load manual blocklist: %v", err)
 		return
@@ -2185,7 +2166,7 @@ func (f *Fleet) persistManual() {
 		return
 	}
 	go func() {
-		if err := f.blocklistDB.ReplaceManualDomains(context.Background(), f.ManualDomains()); err != nil {
+		if err := f.blocklistDB.replaceDomainSet(context.Background(), "blocklist_manual", f.ManualDomains()); err != nil {
 			log.Printf("blipc: warning: persist manual blocklist: %v", err)
 		}
 	}()
@@ -2197,7 +2178,7 @@ func (f *Fleet) LoadAllowedDomains(ctx context.Context) {
 	if f.blocklistDB == nil {
 		return
 	}
-	m, err := f.blocklistDB.LoadManualAllowed(ctx)
+	m, err := f.blocklistDB.loadDomainSet(ctx, "blocklist_manual_allow")
 	if err != nil {
 		log.Printf("blipc: warning: load allowed blocklist: %v", err)
 		return
@@ -2275,7 +2256,7 @@ func (f *Fleet) persistAllowed() {
 		return
 	}
 	go func() {
-		if err := f.blocklistDB.ReplaceManualAllowed(context.Background(), f.AllowedDomains()); err != nil {
+		if err := f.blocklistDB.replaceDomainSet(context.Background(), "blocklist_manual_allow", f.AllowedDomains()); err != nil {
 			log.Printf("blipc: warning: persist allowed blocklist: %v", err)
 		}
 	}()
@@ -2589,6 +2570,8 @@ func (f *Fleet) runBlocklistImport(ctx context.Context, gen int) {
 		if err := f.blocklistDB.PruneSources(ctx, allURLs); err != nil {
 			log.Printf("blipc: warning: prune blocklist source data: %v", err)
 		}
+		// One WAL truncate per import, not per source.
+		_ = f.blocklistDB.checkpoint(ctx)
 	}
 	// Persist the merged list so a controller restart loads it into RAM
 	// instantly instead of re-fetching every source.
@@ -2781,7 +2764,11 @@ func (f *Fleet) saveConfig() error {
 	cfg.CacheSize = f.CacheConfig()
 	cfg.QueryLogRetentionHours = f.QueryLogRetentionHours()
 	cfg.BlocklistSources = blSources
-	cfg.BlocklistDisabled = f.DisabledBlocklistSources()
+	f.blMu.Lock()
+	for u := range f.blocklistDisabled {
+		cfg.BlocklistDisabled = append(cfg.BlocklistDisabled, u)
+	}
+	f.blMu.Unlock()
 	cfg.BlocklistUpdateHours = autoHours
 	cfg.Records = f.Records()
 	cfg.HACluster = f.HACluster()
