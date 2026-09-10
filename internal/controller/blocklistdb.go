@@ -53,7 +53,9 @@ CREATE TABLE IF NOT EXISTS blocklist_source_meta (
 	source_url TEXT PRIMARY KEY,
 	domains    INTEGER NOT NULL DEFAULT 0,
 	last_update TEXT,
-	error      TEXT
+	error      TEXT,
+	etag         TEXT NOT NULL DEFAULT '',
+	last_modified TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS blocklist_manual (
 	domain TEXT PRIMARY KEY
@@ -70,6 +72,14 @@ CREATE INDEX IF NOT EXISTS idx_blocklist_source_domains_domain ON blocklist_sour
 		return nil, fmt.Errorf("create blocklist source schema: %w", err)
 	}
 	s := &BlocklistStore{db: db}
+	// Validators for conditional refreshes predate this column pair on
+	// existing databases; backfill idempotently (duplicate-column is fine).
+	for _, col := range []string{`etag TEXT NOT NULL DEFAULT ''`, `last_modified TEXT NOT NULL DEFAULT ''`} {
+		if _, err := db.Exec(`ALTER TABLE blocklist_source_meta ADD COLUMN ` + col); err != nil &&
+			!strings.Contains(err.Error(), "duplicate column") {
+			return nil, fmt.Errorf("add blocklist source meta column: %w", err)
+		}
+	}
 	// One-time migration from the normalized snapshot tables back to the flat
 	// (source_url, domain) table; pre-normalization databases already have it.
 	if err := s.migrateNormalizedSourceDomains(context.Background()); err != nil {
@@ -211,12 +221,15 @@ func (s *BlocklistStore) loadDomainSet(ctx context.Context, table string) (map[s
 }
 
 // SourceMeta is the persisted per-source download metadata (count, last
-// successful update, latest error).
+// successful update, latest error, and the HTTP validators for a conditional
+// refresh).
 type SourceMeta struct {
-	URL        string
-	Domains    int
-	LastUpdate time.Time
-	Error      string
+	URL          string
+	Domains      int
+	LastUpdate   time.Time
+	Error        string
+	ETag         string
+	LastModified string
 }
 
 // ReplaceSourceDomains stores the parsed domain set for one source, replacing
@@ -282,19 +295,21 @@ func (s *BlocklistStore) ReplaceSourceMeta(ctx context.Context, m SourceMeta) er
 		lu = m.LastUpdate.Format(time.RFC3339)
 	}
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO blocklist_source_meta (source_url, domains, last_update, error)
-		VALUES (?, ?, ?, ?)
+		INSERT INTO blocklist_source_meta (source_url, domains, last_update, error, etag, last_modified)
+		VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT(source_url) DO UPDATE SET
 			domains = excluded.domains,
 			last_update = excluded.last_update,
-			error = excluded.error`,
-		m.URL, m.Domains, lu, m.Error)
+			error = excluded.error,
+			etag = excluded.etag,
+			last_modified = excluded.last_modified`,
+		m.URL, m.Domains, lu, m.Error, m.ETag, m.LastModified)
 	return err
 }
 
 // LoadSourceMeta returns all persisted source metadata keyed by URL.
 func (s *BlocklistStore) LoadSourceMeta(ctx context.Context) (map[string]SourceMeta, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT source_url, domains, last_update, error FROM blocklist_source_meta`)
+	rows, err := s.db.QueryContext(ctx, `SELECT source_url, domains, last_update, error, etag, last_modified FROM blocklist_source_meta`)
 	if err != nil {
 		return nil, err
 	}
@@ -303,7 +318,7 @@ func (s *BlocklistStore) LoadSourceMeta(ctx context.Context) (map[string]SourceM
 	for rows.Next() {
 		var m SourceMeta
 		var lu sql.NullString
-		if err := rows.Scan(&m.URL, &m.Domains, &lu, &m.Error); err != nil {
+		if err := rows.Scan(&m.URL, &m.Domains, &lu, &m.Error, &m.ETag, &m.LastModified); err != nil {
 			return nil, err
 		}
 		if lu.Valid && lu.String != "" {

@@ -262,7 +262,7 @@ func TestBlocklistStoreSourceSnapshots(t *testing.T) {
 	}
 
 	lu := time.Now().UTC().Truncate(time.Second)
-	if err := store.ReplaceSourceMeta(ctx, SourceMeta{URL: u1, Domains: 2, LastUpdate: lu, Error: ""}); err != nil {
+	if err := store.ReplaceSourceMeta(ctx, SourceMeta{URL: u1, Domains: 2, LastUpdate: lu, Error: "", ETag: `"abc"`, LastModified: "Wed, 01 Jan 2025 00:00:00 GMT"}); err != nil {
 		t.Fatalf("ReplaceSourceMeta: %v", err)
 	}
 	if err := store.ReplaceSourceMeta(ctx, SourceMeta{URL: u2, Domains: 1, LastUpdate: time.Time{}, Error: "boom"}); err != nil {
@@ -275,6 +275,9 @@ func TestBlocklistStoreSourceSnapshots(t *testing.T) {
 	}
 	if meta[u1].Domains != 2 || !meta[u1].LastUpdate.Equal(lu) || meta[u1].Error != "" {
 		t.Errorf("meta[u1] = %+v, want domains=2 / last_update=%v / no error", meta[u1], lu)
+	}
+	if meta[u1].ETag != `"abc"` || meta[u1].LastModified != "Wed, 01 Jan 2025 00:00:00 GMT" {
+		t.Errorf("meta[u1] validators = %q/%q, want persisted", meta[u1].ETag, meta[u1].LastModified)
 	}
 	if meta[u2].Error != "boom" || !meta[u2].LastUpdate.IsZero() {
 		t.Errorf("meta[u2] = %+v, want error=boom / zero last_update", meta[u2])

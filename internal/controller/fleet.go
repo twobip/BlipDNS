@@ -2452,9 +2452,11 @@ func (f *Fleet) runBlocklistImport(ctx context.Context, gen int) {
 	// serialize into an 8-minute download; results are merged in configured
 	// order so progress and per-source stats stay deterministic.
 	type blSourceResult struct {
-		set map[string]struct{}
-		err error
-		dur time.Duration
+		set         map[string]struct{}
+		err         error
+		dur         time.Duration
+		notModified bool
+		validators  blocklist.Validators
 	}
 	sem := make(chan struct{}, maxBlocklistFetchers)
 	results := make([]blSourceResult, len(urls))
@@ -2472,8 +2474,26 @@ func (f *Fleet) runBlocklistImport(ctx context.Context, gen int) {
 			defer func() { <-sem }()
 			t0 := f.now()
 			f.logImport("[%d/%d] fetching %s", idx+1, len(urls), u)
-			set, ferr := blocklist.FetchSource(ctx, u)
-			results[idx] = blSourceResult{set: set, err: ferr, dur: time.Since(t0)}
+			// Echo the stored validators so an unchanged list costs a 304
+			// instead of a full download.
+			var v blocklist.Validators
+			if pm, ok := prevMeta[u]; ok {
+				v = blocklist.Validators{ETag: pm.ETag, LastModified: pm.LastModified}
+			}
+			fr, ferr := blocklist.FetchSource(ctx, u, v)
+			if ferr != nil {
+				results[idx] = blSourceResult{err: ferr, dur: time.Since(t0), validators: v}
+				return
+			}
+			nv := fr.Validators
+			if nv.ETag == "" && nv.LastModified == "" {
+				nv = v // server sent none: keep echoing what we have
+			}
+			if fr.NotModified {
+				results[idx] = blSourceResult{notModified: true, dur: time.Since(t0), validators: nv}
+				return
+			}
+			results[idx] = blSourceResult{set: fr.Domains, dur: time.Since(t0), validators: nv}
 		}(i, u)
 	}
 	wg.Wait()
@@ -2510,6 +2530,24 @@ func (f *Fleet) runBlocklistImport(ctx context.Context, gen int) {
 			} else {
 				f.logImport("[%d/%d] no fallback snapshot available", i+1, len(urls))
 			}
+		} else if r.notModified {
+			// 304: the server confirms our snapshot is still current. Merge
+			// it without re-downloading or re-parsing anything.
+			f.logImport("[%d/%d] unchanged since last fetch, keeping snapshot", i+1, len(urls))
+			if f.blocklistDB != nil {
+				if dbSet, derr := f.blocklistDB.LoadSourceDomains(ctx, u); derr == nil && len(dbSet) > 0 {
+					for d := range dbSet {
+						merged[d] = struct{}{}
+					}
+					st.Domains = len(dbSet)
+				}
+			}
+			if st.Domains == 0 {
+				if prev, ok := prevMeta[u]; ok {
+					st.Domains = prev.Domains
+				}
+			}
+			st.LastUpdate = f.now()
 		} else {
 			f.logImport("[%d/%d] ok: %d domains in %s", i+1, len(urls), len(r.set), r.dur.Round(time.Millisecond))
 			for d := range r.set {
@@ -2529,10 +2567,12 @@ func (f *Fleet) runBlocklistImport(ctx context.Context, gen int) {
 		}
 		if f.blocklistDB != nil {
 			if err := f.blocklistDB.ReplaceSourceMeta(ctx, SourceMeta{
-				URL:        u,
-				Domains:    st.Domains,
-				LastUpdate: st.LastUpdate,
-				Error:      st.Error,
+				URL:          u,
+				Domains:      st.Domains,
+				LastUpdate:   st.LastUpdate,
+				Error:        st.Error,
+				ETag:         r.validators.ETag,
+				LastModified: r.validators.LastModified,
 			}); err != nil {
 				log.Printf("blipc: warning: persist blocklist source meta: %v", err)
 			}

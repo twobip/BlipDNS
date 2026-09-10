@@ -69,7 +69,7 @@ func BenchmarkFetchSource(b *testing.B) {
 	defer srv.Close()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if _, err := FetchSource(b.Context(), srv.URL); err != nil {
+		if _, err := FetchSource(b.Context(), srv.URL, Validators{}); err != nil {
 			b.Fatal(err)
 		}
 	}

@@ -456,9 +456,13 @@ func (b *Blocklist) LoadFromURLs(ctx context.Context, urls []string, opts *LoadO
 				return
 			}
 			defer func() { <-sem }()
-			set, err := FetchSource(ctx, raw)
-			results[idx].set = set
-			results[idx].err = err
+			// Standalone fetch: unconditional, so a 304 never happens; a
+			// NotModified result would carry no domains either way.
+			if fr, err := FetchSource(ctx, raw, Validators{}); err != nil {
+				results[idx].err = err
+			} else if !fr.NotModified {
+				results[idx].set = fr.Domains
+			}
 		}(i, u)
 	}
 	wg.Wait()
@@ -501,10 +505,27 @@ type LoadOptions struct {
 	Progress func(Progress)
 }
 
-// FetchSource fetches a single source (AdBlock Plus or hosts format) and
-// returns the parsed domains (and wildcard roots) as a set. An error is
-// returned only when the source could not be fetched or parsed at all.
-func FetchSource(ctx context.Context, rawURL string) (map[string]struct{}, error) {
+// Validators are a source's HTTP cache validators (ETag / Last-Modified).
+// The zero value fetches unconditionally.
+type Validators struct {
+	ETag         string
+	LastModified string
+}
+
+// FetchResult is one fetched source: the parsed domains plus the validators
+// the server sent back (echo them on the next refresh). NotModified reports
+// a 304: Domains is nil and the persisted snapshot is still current.
+type FetchResult struct {
+	Domains     map[string]struct{}
+	Validators  Validators
+	NotModified bool
+}
+
+// FetchSource fetches a single source (AdBlock Plus or hosts format),
+// sending v as If-None-Match / If-Modified-Since so an unchanged list costs
+// one small 304 instead of a full download. An error is returned only when
+// the source could not be fetched or parsed at all.
+func FetchSource(ctx context.Context, rawURL string, v Validators) (*FetchResult, error) {
 	if err := validateSourceURL(rawURL); err != nil {
 		return nil, err
 	}
@@ -513,6 +534,12 @@ func FetchSource(ctx context.Context, rawURL string) (map[string]struct{}, error
 		return nil, err
 	}
 	req.Header.Set("User-Agent", "blipdns-blocklist/1.0 (+https://blipdns.local)")
+	if v.ETag != "" {
+		req.Header.Set("If-None-Match", v.ETag)
+	}
+	if v.LastModified != "" {
+		req.Header.Set("If-Modified-Since", v.LastModified)
+	}
 
 	client := &http.Client{Transport: FetchTransport, Timeout: 2 * time.Minute}
 	resp, err := client.Do(req)
@@ -521,6 +548,14 @@ func FetchSource(ctx context.Context, rawURL string) (map[string]struct{}, error
 	}
 	defer resp.Body.Close()
 
+	out := &FetchResult{Validators: Validators{
+		ETag:         resp.Header.Get("ETag"),
+		LastModified: resp.Header.Get("Last-Modified"),
+	}}
+	if resp.StatusCode == http.StatusNotModified {
+		out.NotModified = true
+		return out, nil
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("unexpected status code %d", resp.StatusCode)
 	}
@@ -540,7 +575,8 @@ func FetchSource(ctx context.Context, rawURL string) (map[string]struct{}, error
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
-	return set, nil
+	out.Domains = set
+	return out, nil
 }
 
 // parseLine extracts a domain (or wildcard root) from a single list line and

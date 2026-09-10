@@ -43,7 +43,7 @@ func TestSSRFProtection(t *testing.T) {
 		"http://127.0.0.1/x", "http://localhost/x", "http://169.254.169.254/latest/x",
 		"http://10.0.0.1/x", "http://192.168.1.1/x", "ftp://example.com/x",
 	} {
-		if _, err := FetchSource(context.Background(), u); err == nil {
+		if _, err := FetchSource(context.Background(), u, Validators{}); err == nil {
 			t.Errorf("FetchSource(%q) should have been blocked", u)
 		}
 	}
@@ -223,6 +223,44 @@ func TestFromDomainsMap(t *testing.T) {
 	}
 	if b.IsBlocked("bad") {
 		t.Error("single-label domain should be rejected")
+	}
+}
+
+func TestFetchSourceNotModified(t *testing.T) {
+	var sawValidators string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("If-None-Match") == `"v1"` {
+			sawValidators = r.Header.Get("If-None-Match")
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		w.Header().Set("ETag", `"v1"`)
+		w.Header().Set("Last-Modified", "Wed, 01 Jan 2025 00:00:00 GMT")
+		io.WriteString(w, "||ads.example.com^\n")
+	}))
+	defer srv.Close()
+
+	ctx := context.Background()
+	first, err := FetchSource(ctx, srv.URL, Validators{})
+	if err != nil {
+		t.Fatalf("FetchSource: %v", err)
+	}
+	if first.NotModified || len(first.Domains) != 1 {
+		t.Fatalf("first fetch = %+v, want 1 domain", first)
+	}
+	if first.Validators.ETag != `"v1"` || first.Validators.LastModified == "" {
+		t.Errorf("validators not captured: %+v", first.Validators)
+	}
+
+	second, err := FetchSource(ctx, srv.URL, first.Validators)
+	if err != nil {
+		t.Fatalf("conditional FetchSource: %v", err)
+	}
+	if !second.NotModified || len(second.Domains) != 0 {
+		t.Fatalf("second fetch = %+v, want NotModified", second)
+	}
+	if sawValidators != `"v1"` {
+		t.Errorf("server saw If-None-Match %q, want %q", sawValidators, `"v1"`)
 	}
 }
 
