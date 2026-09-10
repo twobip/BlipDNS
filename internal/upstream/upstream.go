@@ -61,10 +61,15 @@ func (r *UDPResolver) Resolve(ctx context.Context, q *dns.Msg) (*dns.Msg, error)
 	return resp, nil
 }
 
-// TLSResolver forwards over DNS-over-TLS (RFC 7858, port 853).
+// TLSResolver forwards over DNS-over-TLS (RFC 7858, port 853) on one shared
+// connection, redialed when the server closes it.
 type TLSResolver struct {
 	addr string
 	tls  dns.Client // pre-built; reused across queries (no per-query alloc)
+	// mu serializes queries: a dns.Conn cannot serve concurrent exchanges.
+	// ponytail: one connection per upstream; pool them if this bottlenecks.
+	mu   sync.Mutex
+	conn *dns.Conn
 }
 
 // NewTLS creates a DoT upstream resolver for addr (host:port) with the given
@@ -80,11 +85,25 @@ func NewTLS(addr string, timeout time.Duration) *TLSResolver {
 }
 
 func (r *TLSResolver) Resolve(ctx context.Context, q *dns.Msg) (*dns.Msg, error) {
-	resp, _, err := r.tls.Exchange(q, r.addr)
-	if err != nil {
-		return nil, errUpstream(r.addr, err)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	// A server-closed idle connection only fails the exchange, never the
+	// dial — so drop a dead connection and redial once before giving up.
+	var err error
+	for attempt := 0; attempt < 2; attempt++ {
+		if r.conn == nil {
+			if r.conn, err = r.tls.Dial(r.addr); err != nil {
+				return nil, errUpstream(r.addr, err)
+			}
+		}
+		var resp *dns.Msg
+		if resp, _, err = r.tls.ExchangeWithConn(q, r.conn); err == nil {
+			return resp, nil
+		}
+		r.conn.Close()
+		r.conn = nil
 	}
-	return resp, nil
+	return nil, errUpstream(r.addr, err)
 }
 
 // errUpstream labels a network failure with the upstream address and strips

@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -37,6 +38,36 @@ func TestTLSSpecAndResolver(t *testing.T) {
 	}
 
 	// Live loopback DoT exchange against a self-signed test server.
+	r, _ := testDoT(t)
+	q := new(dns.Msg)
+	q.SetQuestion("example.com.", dns.TypeA)
+	resp, err := r.Resolve(context.Background(), q)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(resp.Answer) != 1 {
+		t.Fatalf("answers = %d, want 1", len(resp.Answer))
+	}
+}
+
+// countListener counts accepted connections.
+type countListener struct {
+	net.Listener
+	accepts *int64
+}
+
+func (l *countListener) Accept() (net.Conn, error) {
+	c, err := l.Listener.Accept()
+	if err == nil {
+		atomic.AddInt64(l.accepts, 1)
+	}
+	return c, err
+}
+
+// testDoT starts a loopback DoT server answering example.com and returns a
+// resolver for it plus its accepted-connection counter.
+func testDoT(t *testing.T) (*TLSResolver, *int64) {
+	t.Helper()
 	certPEM, keyPEM, err := certgen.Generate()
 	if err != nil {
 		t.Fatalf("certgen: %v", err)
@@ -52,29 +83,46 @@ func TestTLSSpecAndResolver(t *testing.T) {
 		m.Answer = []dns.RR{&dns.A{Hdr: dns.RR_Header{Name: req.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60}, A: net.ParseIP("9.9.9.9").To4()}}
 		_ = w.WriteMsg(m)
 	})
-	srv := &dns.Server{Net: "tcp-tls", TLSConfig: &tls.Config{Certificates: []tls.Certificate{cert}}, Handler: mux}
-	l, err := tls.Listen("tcp", "127.0.0.1:0", srv.TLSConfig)
+	tlsCfg := &tls.Config{Certificates: []tls.Certificate{cert}}
+	raw, err := tls.Listen("tcp", "127.0.0.1:0", tlsCfg)
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	srv.Listener = l
-	addr := l.Addr().String()
+	var accepts int64
+	srv := &dns.Server{Net: "tcp-tls", TLSConfig: tlsCfg, Handler: mux}
+	srv.Listener = &countListener{Listener: raw, accepts: &accepts}
 	go func() { _ = srv.ActivateAndServe() }()
-	defer func() { _ = srv.Shutdown() }()
-	r, err := FromSpec("tls://" + addr)
+	t.Cleanup(func() { _ = srv.Shutdown() })
+
+	r, err := FromSpec("tls://" + raw.Addr().String())
 	if err != nil {
 		t.Fatalf("FromSpec: %v", err)
 	}
 	// Self-signed: skip verification (stdlib still does the TLS handshake).
-	r.(*TLSResolver).tls.TLSConfig = &tls.Config{InsecureSkipVerify: true}
+	rr := r.(*TLSResolver)
+	rr.tls.TLSConfig = &tls.Config{InsecureSkipVerify: true}
+	return rr, &accepts
+}
+
+func TestTLSResolverReusesConnection(t *testing.T) {
+	r, accepts := testDoT(t)
 	q := new(dns.Msg)
 	q.SetQuestion("example.com.", dns.TypeA)
-	resp, err := r.Resolve(context.Background(), q)
-	if err != nil {
-		t.Fatalf("Resolve: %v", err)
+	for i := 0; i < 2; i++ {
+		if _, err := r.Resolve(context.Background(), q); err != nil {
+			t.Fatalf("Resolve %d: %v", i, err)
+		}
 	}
-	if len(resp.Answer) != 1 {
-		t.Fatalf("answers = %d, want 1", len(resp.Answer))
+	if n := atomic.LoadInt64(accepts); n != 1 {
+		t.Fatalf("server accepted %d connections for 2 queries, want 1 (reuse)", n)
+	}
+	// A server-closed idle connection redials transparently on next use.
+	r.conn.Close()
+	if _, err := r.Resolve(context.Background(), q); err != nil {
+		t.Fatalf("Resolve after close: %v", err)
+	}
+	if n := atomic.LoadInt64(accepts); n != 2 {
+		t.Fatalf("server accepted %d connections after redial, want 2", n)
 	}
 }
 
