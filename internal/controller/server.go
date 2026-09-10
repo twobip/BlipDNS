@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"mime"
 	"net"
 	"net/http"
 	"os"
@@ -105,13 +106,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/cache/purge", api(s.handleCachePurge))
 
 	// Blocklist (session-gated)
-	mux.HandleFunc("/api/blocklist", api(s.handleBlocklist))                     // GET list / POST add / DELETE remove
-	mux.HandleFunc("/api/blocklist/export", api(s.handleBlocklistExport))        // GET text
-	mux.HandleFunc("/api/blocklist/sources", api(s.handleBlocklistSources))      // PUT sources + import / GET status
-	mux.HandleFunc("/api/blocklist/source", api(s.handleBlocklistSource))        // POST enable/disable one source
-	mux.HandleFunc("/api/blocklist/status", api(s.handleBlocklistStatus))        // GET import progress
-	mux.HandleFunc("/api/blocklist/clear-log", api(s.handleBlocklistClearLog))   // POST clear import output
-	mux.HandleFunc("/api/blocklist/import-url", api(s.handleBlocklistImportURL)) // POST fetch from URL (legacy)
+	mux.HandleFunc("/api/blocklist", api(s.handleBlocklist))                   // GET list / POST add / DELETE remove
+	mux.HandleFunc("/api/blocklist/export", api(s.handleBlocklistExport))      // GET text
+	mux.HandleFunc("/api/blocklist/sources", api(s.handleBlocklistSources))    // PUT sources + import / GET status
+	mux.HandleFunc("/api/blocklist/source", api(s.handleBlocklistSource))      // POST enable/disable one source
+	mux.HandleFunc("/api/blocklist/status", api(s.handleBlocklistStatus))      // GET import progress
+	mux.HandleFunc("/api/blocklist/clear-log", api(s.handleBlocklistClearLog)) // POST clear import output
 
 	// UI: login page is public; static assets (js/css) are public; everything
 	// else requires a session. Assets hold no secrets and must load as relative
@@ -836,8 +836,6 @@ func (s *Server) handleHighAvailability(w http.ResponseWriter, r *http.Request) 
 		cluster := s.fleet.HACluster()
 		var err error
 		switch action {
-		case "install":
-			err = s.fleet.InstallHA(r.Context(), cluster)
 		case "validate":
 			err = s.fleet.ValidateHA(r.Context(), cluster)
 		case "apply":
@@ -1242,7 +1240,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 
 	for _, e := range backlog {
-		fmt.Fprintf(w, "data: %s\n\n", mustJSON(e))
+		fmt.Fprintf(w, "data: %s\n\n", control.MustJSON(e))
 	}
 	flusher.Flush()
 	for {
@@ -1250,7 +1248,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		case <-r.Context().Done():
 			return
 		case e := <-ch:
-			fmt.Fprintf(w, "data: %s\n\n", mustJSON(e))
+			fmt.Fprintf(w, "data: %s\n\n", control.MustJSON(e))
 			flusher.Flush()
 		case <-time.After(15 * time.Second):
 			fmt.Fprint(w, ": keepalive\n\n")
@@ -1328,28 +1326,6 @@ func (s *Server) handleBlocklistExport(w http.ResponseWriter, r *http.Request) {
 	for _, d := range s.fleet.Blocklist().List() {
 		fmt.Fprintln(w, d)
 	}
-}
-
-func (s *Server) handleBlocklistImportURL(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	var req struct {
-		URL string `json:"url"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	if req.URL == "" {
-		http.Error(w, "url required", http.StatusBadRequest)
-		return
-	}
-	// Treat the URL as the (sole) source, Pi-hole style, and import async so a
-	// huge list never blocks the request.
-	s.fleet.SetBlocklistSources(r.Context(), []string{req.URL})
-	writeJSON(w, map[string]interface{}{"ok": true, "running": true})
 }
 
 // handleBlocklistSources manages the Pi-hole style source URLs.
@@ -1441,13 +1417,7 @@ func (s *Server) handleBlocklistClearLog(w http.ResponseWriter, r *http.Request)
 // (session-gated) or the login page (public).
 func (s *Server) serveUI(w http.ResponseWriter, r *http.Request) {
 	if !s.auth.Configured() && (r.URL.Path == "/" || r.URL.Path == "/setup" || r.URL.Path == "/setup.html" || r.URL.Path == "/login" || r.URL.Path == "/login.html") {
-		b, err := fs.ReadFile(s.ui, "setup.html")
-		if err != nil {
-			http.Error(w, "not found", http.StatusNotFound)
-			return
-		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = w.Write(b)
+		s.serveUIFile(w, "setup.html")
 		return
 	}
 	// Public static assets: js/css/svg/ico/png embed token-free, served without
@@ -1459,25 +1429,13 @@ func (s *Server) serveUI(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
-		b, err := fs.ReadFile(s.ui, name)
-		if err != nil {
-			http.Error(w, "not found", http.StatusNotFound)
-			return
-		}
-		w.Header().Set("Content-Type", contentType(name))
-		_, _ = w.Write(b)
+		s.serveUIFile(w, name)
 		return
 	}
 
 	// Public login page (must be reachable without a session).
 	if r.URL.Path == "/login" || r.URL.Path == "/login.html" {
-		b, err := fs.ReadFile(s.ui, "login.html")
-		if err != nil {
-			http.Error(w, "not found", http.StatusNotFound)
-			return
-		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = w.Write(b)
+		s.serveUIFile(w, "login.html")
 		return
 	}
 
@@ -1486,12 +1444,17 @@ func (s *Server) serveUI(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/login", http.StatusFound)
 		return
 	}
-	b, err := fs.ReadFile(s.ui, "index.html")
+	s.serveUIFile(w, "index.html")
+}
+
+// serveUIFile writes one embedded UI file with its content type.
+func (s *Server) serveUIFile(w http.ResponseWriter, name string) {
+	b, err := fs.ReadFile(s.ui, name)
 	if err != nil {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Content-Type", contentType(name))
 	_, _ = w.Write(b)
 }
 
@@ -1506,17 +1469,11 @@ func isUIAsset(p string) bool {
 }
 
 func contentType(name string) string {
-	switch {
-	case strings.HasSuffix(name, ".js"):
-		return "application/javascript"
-	case strings.HasSuffix(name, ".css"):
-		return "text/css"
-	case strings.HasSuffix(name, ".html"):
-		return "text/html; charset=utf-8"
-	case strings.HasSuffix(name, ".svg"):
-		return "image/svg+xml"
-	case strings.HasSuffix(name, ".ico"):
-		return "image/x-icon"
+	if strings.HasSuffix(name, ".js") {
+		return "application/javascript" // historical; the mime DB says text/javascript
+	}
+	if t := mime.TypeByExtension(filepath.Ext(name)); t != "" {
+		return t
 	}
 	return "application/octet-stream"
 }
@@ -1585,9 +1542,4 @@ func persistCredentials(path, username, passwordHash string) error {
 		return err
 	}
 	return os.Chmod(path, 0600)
-}
-
-func mustJSON(v interface{}) string {
-	b, _ := json.Marshal(v)
-	return string(b)
 }

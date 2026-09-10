@@ -2,10 +2,13 @@ package controller
 
 import (
 	"context"
+	"database/sql"
 	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
+
+	_ "modernc.org/sqlite"
 )
 
 func TestBlocklistStoreRoundtrip(t *testing.T) {
@@ -58,97 +61,52 @@ func TestBlocklistStoreRoundtrip(t *testing.T) {
 	}
 }
 
-func TestBlocklistStoreManualDomains(t *testing.T) {
-	store, err := NewBlocklistStore(filepath.Join(t.TempDir(), "blocklist.db"))
-	if err != nil {
-		t.Fatalf("NewBlocklistStore: %v", err)
-	}
-	defer store.db.Close()
+func TestBlocklistStoreDomainSets(t *testing.T) {
+	for _, table := range []string{"blocklist_manual", "blocklist_manual_allow"} {
+		store, err := NewBlocklistStore(filepath.Join(t.TempDir(), "blocklist.db"))
+		if err != nil {
+			t.Fatalf("NewBlocklistStore: %v", err)
+		}
+		defer store.db.Close()
 
-	ctx := context.Background()
-	if err := store.ReplaceManualDomains(ctx, []string{"ads.example.com", "manual.net"}); err != nil {
-		t.Fatalf("ReplaceManualDomains: %v", err)
-	}
-	set, err := store.LoadManualDomains(ctx)
-	if err != nil {
-		t.Fatalf("LoadManualDomains: %v", err)
-	}
-	if len(set) != 2 {
-		t.Fatalf("LoadManualDomains returned %d, want 2", len(set))
-	}
-	if _, ok := set["ads.example.com"]; !ok {
-		t.Error("ads.example.com missing from manual set")
-	}
+		ctx := context.Background()
+		if err := store.replaceDomainSet(ctx, table, []string{"ads.example.com", "manual.net"}); err != nil {
+			t.Fatalf("replaceDomainSet(%s): %v", table, err)
+		}
+		set, err := store.loadDomainSet(ctx, table)
+		if err != nil {
+			t.Fatalf("loadDomainSet(%s): %v", table, err)
+		}
+		if len(set) != 2 {
+			t.Fatalf("loadDomainSet(%s) returned %d, want 2", table, len(set))
+		}
+		if _, ok := set["ads.example.com"]; !ok {
+			t.Errorf("ads.example.com missing from %s", table)
+		}
 
-	// Replacing must drop the previous set.
-	if err := store.ReplaceManualDomains(ctx, []string{"new.example.org"}); err != nil {
-		t.Fatalf("ReplaceManualDomains 2: %v", err)
-	}
-	set, err = store.LoadManualDomains(ctx)
-	if err != nil {
-		t.Fatalf("LoadManualDomains 2: %v", err)
-	}
-	if !reflect.DeepEqual(set, map[string]struct{}{"new.example.org": {}}) {
-		t.Errorf("unexpected manual set: %v", set)
-	}
+		// Replacing must drop the previous set.
+		if err := store.replaceDomainSet(ctx, table, []string{"new.example.org"}); err != nil {
+			t.Fatalf("replaceDomainSet(%s) 2: %v", table, err)
+		}
+		set, err = store.loadDomainSet(ctx, table)
+		if err != nil {
+			t.Fatalf("loadDomainSet(%s) 2: %v", table, err)
+		}
+		if !reflect.DeepEqual(set, map[string]struct{}{"new.example.org": {}}) {
+			t.Errorf("unexpected %s: %v", table, set)
+		}
 
-	// Empty clears.
-	if err := store.ReplaceManualDomains(ctx, nil); err != nil {
-		t.Fatalf("ReplaceManualDomains empty: %v", err)
-	}
-	set, err = store.LoadManualDomains(ctx)
-	if err != nil {
-		t.Fatalf("LoadManualDomains empty: %v", err)
-	}
-	if len(set) != 0 {
-		t.Errorf("manual set not cleared: %v", set)
-	}
-}
-
-func TestBlocklistStoreManualAllowed(t *testing.T) {
-	store, err := NewBlocklistStore(filepath.Join(t.TempDir(), "blocklist.db"))
-	if err != nil {
-		t.Fatalf("NewBlocklistStore: %v", err)
-	}
-	defer store.db.Close()
-
-	ctx := context.Background()
-	if err := store.ReplaceManualAllowed(ctx, []string{"keep.example.com", "wildcard.example.org"}); err != nil {
-		t.Fatalf("ReplaceManualAllowed: %v", err)
-	}
-	set, err := store.LoadManualAllowed(ctx)
-	if err != nil {
-		t.Fatalf("LoadManualAllowed: %v", err)
-	}
-	if len(set) != 2 {
-		t.Fatalf("LoadManualAllowed returned %d, want 2", len(set))
-	}
-	if _, ok := set["keep.example.com"]; !ok {
-		t.Error("keep.example.com missing from allowed set")
-	}
-
-	// Replacing must drop the previous set.
-	if err := store.ReplaceManualAllowed(ctx, []string{"other.example.io"}); err != nil {
-		t.Fatalf("ReplaceManualAllowed 2: %v", err)
-	}
-	set, err = store.LoadManualAllowed(ctx)
-	if err != nil {
-		t.Fatalf("LoadManualAllowed 2: %v", err)
-	}
-	if !reflect.DeepEqual(set, map[string]struct{}{"other.example.io": {}}) {
-		t.Errorf("unexpected allowed set: %v", set)
-	}
-
-	// Empty clears.
-	if err := store.ReplaceManualAllowed(ctx, nil); err != nil {
-		t.Fatalf("ReplaceManualAllowed empty: %v", err)
-	}
-	set, err = store.LoadManualAllowed(ctx)
-	if err != nil {
-		t.Fatalf("LoadManualAllowed empty: %v", err)
-	}
-	if len(set) != 0 {
-		t.Errorf("allowed set not cleared: %v", set)
+		// Empty clears.
+		if err := store.replaceDomainSet(ctx, table, nil); err != nil {
+			t.Fatalf("replaceDomainSet(%s) empty: %v", table, err)
+		}
+		set, err = store.loadDomainSet(ctx, table)
+		if err != nil {
+			t.Fatalf("loadDomainSet(%s) empty: %v", table, err)
+		}
+		if len(set) != 0 {
+			t.Errorf("%s not cleared: %v", table, set)
+		}
 	}
 }
 
@@ -345,6 +303,85 @@ func TestBlocklistStoreSourceSnapshots(t *testing.T) {
 	}
 }
 
+func TestBlocklistStoreMigratesNormalizedSchema(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "blocklist.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{
+		`CREATE TABLE blocklist_sources (source_id INTEGER PRIMARY KEY, url TEXT NOT NULL UNIQUE)`,
+		`CREATE TABLE blocklist_domains (domain_id INTEGER PRIMARY KEY, domain TEXT NOT NULL UNIQUE)`,
+		`CREATE TABLE blocklist_membership (source_id INTEGER NOT NULL, domain_id INTEGER NOT NULL, PRIMARY KEY (source_id, domain_id)) WITHOUT ROWID`,
+		`INSERT INTO blocklist_sources (source_id, url) VALUES (1, 'https://example.invalid/old.txt')`,
+		`INSERT INTO blocklist_domains (domain_id, domain) VALUES (1, 'a.example.com'), (2, 'b.example.net')`,
+		`INSERT INTO blocklist_membership (source_id, domain_id) VALUES (1, 1), (1, 2)`,
+	} {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db.Close()
+
+	store, err := NewBlocklistStore(path)
+	if err != nil {
+		t.Fatalf("NewBlocklistStore: %v", err)
+	}
+	defer store.db.Close()
+
+	ctx := context.Background()
+	set, err := store.LoadSourceDomains(ctx, "https://example.invalid/old.txt")
+	if err != nil {
+		t.Fatalf("LoadSourceDomains: %v", err)
+	}
+	if !reflect.DeepEqual(set, map[string]struct{}{"a.example.com": {}, "b.example.net": {}}) {
+		t.Errorf("migrated snapshot = %v", set)
+	}
+	var name string
+	if err := store.db.QueryRowContext(ctx,
+		`SELECT name FROM sqlite_master WHERE type='table' AND name='blocklist_membership'`).Scan(&name); err != sql.ErrNoRows {
+		t.Errorf("normalized tables not dropped (err=%v)", err)
+	}
+}
+
+func TestRestartSeedsSourcesWithoutImporting(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	store, err := NewBlocklistStore(filepath.Join(dir, "blocklist.db"))
+	if err != nil {
+		t.Fatalf("NewBlocklistStore: %v", err)
+	}
+	defer store.db.Close()
+	u := "https://example.invalid/list.txt"
+	last := time.Now().UTC().Truncate(time.Second).Add(-time.Hour)
+	if err := store.ReplaceSourceMeta(ctx, SourceMeta{URL: u, Domains: 3, LastUpdate: last}); err != nil {
+		t.Fatalf("ReplaceSourceMeta: %v", err)
+	}
+
+	fleet := NewFleet(filepath.Join(dir, "blipc.yaml"))
+	fleet.blocklistDB = store
+	fleet.SetBlocklistDisabled(nil)
+	fleet.SetBlocklistSourcesDefault([]string{u})
+	fleet.LoadSourceStats(ctx)
+
+	fleet.blMu.Lock()
+	running := fleet.blRunning
+	fleet.blMu.Unlock()
+	if running {
+		t.Fatal("startup seeding started a blocklist import")
+	}
+	st := fleet.BlocklistStatus()
+	if st.Running {
+		t.Error("BlocklistStatus reports a running import after startup seeding")
+	}
+	if !st.LastUpdate.Equal(last) {
+		t.Errorf("LastUpdate = %v, want seeded %v", st.LastUpdate, last)
+	}
+	if got := fleet.BlocklistSources(); !reflect.DeepEqual(got, []string{u}) {
+		t.Errorf("BlocklistSources() = %v", got)
+	}
+}
+
 func TestBlocklistStoreBlockSourceLabel(t *testing.T) {
 	store, err := NewBlocklistStore(filepath.Join(t.TempDir(), "blocklist.db"))
 	if err != nil {
@@ -371,8 +408,8 @@ func TestBlocklistStoreBlockSourceLabel(t *testing.T) {
 	}
 
 	// Manual domains take precedence over source URLs.
-	if err := store.ReplaceManualDomains(ctx, []string{"ads.example.com", "hand.added.net"}); err != nil {
-		t.Fatalf("ReplaceManualDomains: %v", err)
+	if err := store.replaceDomainSet(ctx, "blocklist_manual", []string{"ads.example.com", "hand.added.net"}); err != nil {
+		t.Fatalf("replaceDomainSet: %v", err)
 	}
 	got, err = store.BlockSourceLabel(ctx, "ads.example.com")
 	if err != nil {

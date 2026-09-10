@@ -122,10 +122,11 @@ func main() {
 		fleet.SetAutoUpdateHours(cfg.BlocklistUpdateHours)
 	}
 	if len(cfg.BlocklistSources) > 0 {
-		// Restore the disabled set first so the initial import (triggered by
-		// SetBlocklistSources) skips sources the operator turned off.
+		// Restore the lists without importing: restarts serve the persisted
+		// cache, and refreshes come from the auto-updater (when due) or an
+		// explicit operator action.
 		fleet.SetBlocklistDisabled(cfg.BlocklistDisabled)
-		fleet.SetBlocklistSources(ctx, cfg.BlocklistSources)
+		fleet.SetBlocklistSourcesDefault(cfg.BlocklistSources)
 	}
 	fleet.StartAutoUpdater()
 

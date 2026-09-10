@@ -4,10 +4,11 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/mod/semver"
 
 	"github.com/twobip/BlipDNS/internal/control"
 )
@@ -172,21 +173,8 @@ func validVersion(v string) bool {
 	return true
 }
 
-// semverLess reports whether version a is strictly older than b, comparing
-// numeric major.minor.patch components (missing components are treated as 0).
+// semverLess reports whether version a is strictly older than b ("1.2.3"
+// form, validated by extractVersion before comparing).
 func semverLess(a, b string) bool {
-	pa, pb := strings.Split(a, "."), strings.Split(b, ".")
-	for i := 0; i < 3; i++ {
-		na, nb := 0, 0
-		if i < len(pa) {
-			na, _ = strconv.Atoi(pa[i])
-		}
-		if i < len(pb) {
-			nb, _ = strconv.Atoi(pb[i])
-		}
-		if na != nb {
-			return na < nb
-		}
-	}
-	return false
+	return semver.Compare("v"+a, "v"+b) < 0
 }

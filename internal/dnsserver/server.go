@@ -157,28 +157,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/dns-query", s.handleDoH)
 	mux.HandleFunc("/dns-query/", s.handleDoH)
-	return s.withSecurityHeaders(mux)
-}
-
-// withSecurityHeaders attaches defense-in-depth headers to every DoH response,
-// including error paths. DoH is an API (binary, never HTML), so these are
-// safe defaults.
-func (s *Server) withSecurityHeaders(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		h := w.Header()
-		h.Set("X-Content-Type-Options", "nosniff")
-		h.Set("X-Frame-Options", "DENY")
-		h.Set("Referrer-Policy", "no-referrer")
-		// Defense-in-depth: DoH is binary (application/dns-message), never
-		// HTML, so a restrictive CSP makes any future error-page mistake inert.
-		h.Set("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'")
-		// HSTS is only meaningful (and RFC 6797 permits it) over TLS, so skip it
-		// on the optional plain-HTTP DoH listener.
-		if r.TLS != nil {
-			h.Set("Strict-Transport-Security", "max-age=31536000")
-		}
-		next.ServeHTTP(w, r)
-	})
+	return control.SecurityHeaders(mux)
 }
 
 func (s *Server) handleDoH(w http.ResponseWriter, r *http.Request) {
@@ -303,17 +282,7 @@ func (s *Server) serve(ctx context.Context, clientIP net.IP, clientID string, re
 	// blocked by the global blocklist (or any policy block list).
 	if s.cfg.Blocklist != nil && s.cfg.Blocklist.IsBlocked(domain) && !s.cfg.Store.Allowed(clientIP, clientID, domain) {
 		s.cnt.AddBlocked()
-		// Building the watch event renders every answer record; skip it
-		// entirely when nobody is streaming events.
-		if s.ctrl.HasWatchers() {
-			s.ctrl.Notify(control.WatchEvent{
-				Type: "block", At: time.Now(),
-				Client: client, Domain: domain,
-				QType: qType(req), Answers: answersFor(req, resp),
-				BlockList:  "global",
-				DurationUs: time.Since(start).Microseconds(),
-			})
-		}
+		s.notifyBlock(req, resp, client, domain, "global", start)
 		if s.logfn != nil {
 			s.logfn(client, domain)
 		}
@@ -324,15 +293,7 @@ func (s *Server) serve(ctx context.Context, clientIP net.IP, clientID string, re
 	blocked, action, upstreamOverride, log := s.cfg.Store.Classify(clientIP, clientID, domain)
 	if blocked {
 		s.cnt.AddBlocked()
-		if s.ctrl.HasWatchers() {
-			s.ctrl.Notify(control.WatchEvent{
-				Type: "block", At: time.Now(),
-				Client: client, Domain: domain,
-				QType: qType(req), Answers: answersFor(req, resp),
-				BlockList:  s.cfg.Store.BlockSource(clientIP, clientID, domain),
-				DurationUs: time.Since(start).Microseconds(),
-			})
-		}
+		s.notifyBlock(req, resp, client, domain, s.cfg.Store.BlockSource(clientIP, clientID, domain), start)
 		if log && s.logfn != nil {
 			s.logfn(client, domain)
 		}
@@ -436,6 +397,22 @@ func (s *Server) serve(ctx context.Context, clientIP net.IP, clientID string, re
 	return out
 }
 
+// notifyBlock streams a block event for the query log. Building the event
+// renders every answer record, so it is skipped entirely when nobody is
+// streaming events.
+func (s *Server) notifyBlock(req, resp *dns.Msg, client, domain, list string, start time.Time) {
+	if !s.ctrl.HasWatchers() {
+		return
+	}
+	s.ctrl.Notify(control.WatchEvent{
+		Type: "block", At: time.Now(),
+		Client: client, Domain: domain,
+		QType: qType(req), Answers: answersFor(req, resp),
+		BlockList:  list,
+		DurationUs: time.Since(start).Microseconds(),
+	})
+}
+
 // qType returns the textual RR-type mnemonic of the query question (e.g.
 // "A", "AAAA", "TXT"); falls back to the numeric code if unknown.
 func qType(req *dns.Msg) string {
@@ -533,10 +510,16 @@ func applyBlockAction(resp *dns.Msg, q dns.Question, action filter.BlockAction) 
 	}
 }
 
+// newHTTPServer builds an HTTP server with the timeouts used for every DoH
+// listener (TLS and plain).
+func newHTTPServer(addr string, h http.Handler) *http.Server {
+	return &http.Server{Addr: addr, Handler: h, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 1 << 20}
+}
+
 // Start launches UDP, TCP and DoH listeners (DoH blocks).
 func (s *Server) Start() error {
 	dh := s.Handler()
-	s.doch = &http.Server{Addr: s.cfg.DoHAddr, Handler: dh, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 1 << 20}
+	s.doch = newHTTPServer(s.cfg.DoHAddr, dh)
 
 	udpH := dns.NewServeMux()
 	udpH.Handle(".", s)
@@ -603,7 +586,7 @@ func (s *Server) SetDoHHTTPAddr(addr string) error {
 	if err != nil {
 		return fmt.Errorf("doh http listen %s: %w", addr, err)
 	}
-	srv := &http.Server{Addr: addr, Handler: s.Handler(), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 1 << 20}
+	srv := newHTTPServer(addr, s.Handler())
 	s.dohPlain = srv
 	s.dohPlainAddr = addr
 	go func() {
@@ -677,7 +660,6 @@ func (s *Server) stopDoHPlainLocked() {
 	s.dohPlainAddr = ""
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	_ = srv.Close()
 	_ = srv.Shutdown(ctx)
 }
 
@@ -717,14 +699,6 @@ func (s *Server) GetRecords() ([]control.RecordEntry, error) {
 		return nil, nil
 	}
 	return s.rec.GetRecords()
-}
-
-// ClearRecords removes all local DNS records.
-func (s *Server) ClearRecords() error {
-	if s.rec == nil {
-		return nil
-	}
-	return s.rec.ClearRecords()
 }
 
 // RecordsHash returns a checksum of the current local records for the management

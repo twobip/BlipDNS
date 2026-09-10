@@ -45,7 +45,6 @@ type HAStatus struct {
 type HAController interface {
 	SetHAConfig(HAConfig) error
 	HAStatus() HAStatus
-	InstallHA() error
 	ValidateHA() error
 	ApplyHA() error
 	DisableHA() error

@@ -601,13 +601,6 @@ func (f *fakeRecordController) GetRecords() ([]RecordEntry, error) {
 	return out, nil
 }
 
-func (f *fakeRecordController) ClearRecords() error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.records = nil
-	return nil
-}
-
 func TestRecordsEndpoint(t *testing.T) {
 	rc := &fakeRecordController{}
 	store := filter.NewStore(nil)

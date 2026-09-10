@@ -8,7 +8,7 @@ import (
 // handleCache gets/sets the runtime response cache size limit. The controller
 // pushes this from the Settings page; an absent value means "0" (unlimited).
 func (s *Server) handleCache(w http.ResponseWriter, r *http.Request) {
-	cc := s.cacheController()
+	cc := s.controllers().Cache
 	if cc == nil {
 		http.Error(w, "cache settings not available on this instance", http.StatusServiceUnavailable)
 		return
@@ -39,7 +39,7 @@ func (s *Server) handleCache(w http.ResponseWriter, r *http.Request) {
 // handleCachePurge drops every cached response on this instance and reports how
 // many entries were removed.
 func (s *Server) handleCachePurge(w http.ResponseWriter, r *http.Request) {
-	cc := s.cacheController()
+	cc := s.controllers().Cache
 	if cc == nil {
 		http.Error(w, "cache settings not available on this instance", http.StatusServiceUnavailable)
 		return

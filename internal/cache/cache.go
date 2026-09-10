@@ -240,14 +240,7 @@ func (c *Cache) SetMaxEntries(n int) {
 	c.evictLocked()
 }
 
-// Do returns a cached response if present, otherwise runs fn (coalescing
-// concurrent identical requests) and caches the result.
-func (c *Cache) Do(ctx context.Context, k Key, fn func() (*dns.Msg, error)) (*dns.Msg, error) {
-	m, _, err := c.DoHit(ctx, k, fn)
-	return m, err
-}
-
-// DoHit is like Do but also reports whether the response was served from a
+// DoHit returns a cached response if present, otherwise runs fn (coalescing
 // cache hit rather than fetched just now. Requests coalesced behind a
 // concurrent identical fetch count as cache hits: they were answered from
 // in-memory state (the in-flight singleflight result) without a fresh

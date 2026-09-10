@@ -22,11 +22,6 @@ import (
 	"github.com/twobip/BlipDNS/internal/filter"
 )
 
-// StatsCollector is the read-side the management API needs from the server.
-type StatsCollector interface {
-	Stats() *StatsResponse
-}
-
 // Server exposes the authenticated management API for a blipd instance.
 // It also exposes an unauthenticated claim-code adoption handshake so a
 // controller can bootstrap trust once without the operator copying tokens.
@@ -34,7 +29,7 @@ type Server struct {
 	token     string
 	store     *filter.Store
 	cache     *cache.Cache
-	stats     StatsCollector
+	stats     *Counters
 	blocklist *blocklist.Blocklist
 	started   time.Time
 	version   string
@@ -64,17 +59,28 @@ type Server struct {
 	// distributed guesser is still capped by the same small budget each).
 	adoptFails map[string]*adoptFail
 
-	// dohCtrl drives the optional plain-HTTP DoH listener at runtime.
-	dohCtrl DoHController
-	// rlCtrl drives the per-client DNS query rate limit at runtime.
-	rlCtrl RateLimitController
-	// cacheCtrl tunes the response cache at runtime.
-	cacheCtrl CacheController
-	// recCtrl drives the local DNS records at runtime.
-	recCtrl    RecordController
-	upCtrl     LocalResolverController
-	haCtrl     HAController
-	updateCtrl UpdateController
+	// ctrls are the runtime pieces of blipd the management API drives,
+	// wired incrementally (DNS pieces at construction, host pieces later).
+	ctrls Controllers
+}
+
+// Controllers bundles the runtime pieces of blipd the management API
+// reconfigures live. Each is nil until wired (e.g. API-only mode).
+type Controllers struct {
+	DoH       DoHController
+	RateLimit RateLimitController
+	Cache     CacheController
+	Records   RecordController
+	Upstream  LocalResolverController
+	HA        HAController
+	Update    UpdateController
+}
+
+// controllers snapshots the wired controllers.
+func (s *Server) controllers() Controllers {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.ctrls
 }
 
 // DoHController is the piece of the DNS server the management API can reconfigure
@@ -89,17 +95,8 @@ type DoHController interface {
 // the management API so Settings changes can toggle plain-HTTP DoH live.
 func (s *Server) SetDoHController(c DoHController) {
 	s.mu.Lock()
-	s.dohCtrl = c
+	s.ctrls.DoH = c
 	s.mu.Unlock()
-}
-
-// dohController returns the wired DoH controller (may be nil, e.g. when blipd
-// runs API-only without a DNS server).
-func (s *Server) dohController() DoHController {
-	s.mu.RLock()
-	c := s.dohCtrl
-	s.mu.RUnlock()
-	return c
 }
 
 // RateLimitController is the piece of the DNS server the management API can
@@ -115,16 +112,8 @@ type RateLimitController interface {
 // limit live.
 func (s *Server) SetRateLimitController(c RateLimitController) {
 	s.mu.Lock()
-	s.rlCtrl = c
+	s.ctrls.RateLimit = c
 	s.mu.Unlock()
-}
-
-// rateLimitController returns the wired rate-limit controller (may be nil).
-func (s *Server) rateLimitController() RateLimitController {
-	s.mu.RLock()
-	c := s.rlCtrl
-	s.mu.RUnlock()
-	return c
 }
 
 // CacheController is the piece of the DNS server the management API can tune
@@ -140,78 +129,41 @@ type CacheController interface {
 // the management API so Settings changes can tune it live.
 func (s *Server) SetCacheController(c CacheController) {
 	s.mu.Lock()
-	s.cacheCtrl = c
+	s.ctrls.Cache = c
 	s.mu.Unlock()
-}
-
-// cacheController returns the wired cache controller (may be nil).
-func (s *Server) cacheController() CacheController {
-	s.mu.RLock()
-	c := s.cacheCtrl
-	s.mu.RUnlock()
-	return c
 }
 
 // SetRecordController wires the DNS server's local-record store into the
 // management API so records can be managed at runtime by the controller.
 func (s *Server) SetRecordController(c RecordController) {
 	s.mu.Lock()
-	s.recCtrl = c
+	s.ctrls.Records = c
 	s.mu.Unlock()
-}
-
-// recordController returns the wired record controller (may be nil).
-func (s *Server) recordController() RecordController {
-	s.mu.RLock()
-	c := s.recCtrl
-	s.mu.RUnlock()
-	return c
 }
 
 func (s *Server) SetLocalResolverController(c LocalResolverController) {
 	s.mu.Lock()
-	s.upCtrl = c
+	s.ctrls.Upstream = c
 	s.mu.Unlock()
-}
-
-func (s *Server) localResolverController() LocalResolverController {
-	s.mu.RLock()
-	c := s.upCtrl
-	s.mu.RUnlock()
-	return c
 }
 
 // SetHAController wires the local keepalived/VRRP manager into the API.
 func (s *Server) SetHAController(c HAController) {
 	s.mu.Lock()
-	s.haCtrl = c
+	s.ctrls.HA = c
 	s.mu.Unlock()
-}
-
-func (s *Server) haController() HAController {
-	s.mu.RLock()
-	c := s.haCtrl
-	s.mu.RUnlock()
-	return c
 }
 
 // SetUpdateController wires the local updater into the management API.
 func (s *Server) SetUpdateController(c UpdateController) {
 	s.mu.Lock()
-	s.updateCtrl = c
+	s.ctrls.Update = c
 	s.mu.Unlock()
-}
-
-func (s *Server) updateController() UpdateController {
-	s.mu.RLock()
-	c := s.updateCtrl
-	s.mu.RUnlock()
-	return c
 }
 
 // NewServerWithBlocklist builds a management API server that can also receive
 // a controller-managed global blocklist (nil disables the endpoint).
-func NewServerWithBlocklist(token string, store *filter.Store, c *cache.Cache, stats StatsCollector, version string, bl *blocklist.Blocklist) *Server {
+func NewServerWithBlocklist(token string, store *filter.Store, c *cache.Cache, stats *Counters, version string, bl *blocklist.Blocklist) *Server {
 	return &Server{
 		token:     token,
 		store:     store,
@@ -351,7 +303,6 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/records", s.auth(s.handleRecords)) // local DNS records
 	mux.HandleFunc("/api/v1/ha/status", s.auth(s.handleHAStatus))
 	mux.HandleFunc("/api/v1/ha", s.auth(s.handleHAConfig))
-	mux.HandleFunc("/api/v1/ha/install", s.auth(s.handleHAInstall))
 	mux.HandleFunc("/api/v1/ha/validate", s.auth(s.handleHAValidate))
 	mux.HandleFunc("/api/v1/ha/apply", s.auth(s.handleHAApply))
 	mux.HandleFunc("/api/v1/ha/disable", s.auth(s.handleHADisable))
@@ -365,23 +316,37 @@ func (s *Server) Handler() http.Handler {
 	return s.withSecurityHeaders(mux)
 }
 
-// withSecurityHeaders attaches defense-in-depth headers to every blipd
-// management API response (including the DoH toggle endpoint). These are JSON
-// API responses (never HTML), so the headers are safe defaults.
-func (s *Server) withSecurityHeaders(next http.Handler) http.Handler {
+// SecurityHeaders attaches defense-in-depth headers to every response,
+// including error paths. Shared by the management API and the DoH handler:
+// both serve machine-readable bodies (JSON / binary DNS), never HTML, so
+// these are safe defaults.
+func SecurityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("X-Frame-Options", "DENY")
 		h.Set("Referrer-Policy", "no-referrer")
-		// Defense-in-depth: these are JSON/text API responses (never HTML), so a
-		// restrictive CSP makes any future HTML-rendering mistake inert.
+		// Defense-in-depth: a restrictive CSP makes any future HTML-rendering
+		// mistake inert.
 		h.Set("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'")
+		// HSTS is only meaningful (and RFC 6797 permits it) over TLS, so skip
+		// it on plain-HTTP listeners.
+		if r.TLS != nil {
+			h.Set("Strict-Transport-Security", "max-age=31536000")
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// withSecurityHeaders adds the shared headers plus a body-size cap for the
+// management API (the blocklist endpoint carries its own larger cap).
+func (s *Server) withSecurityHeaders(next http.Handler) http.Handler {
+	return SecurityHeaders(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Body != nil && r.Method != http.MethodGet && r.Method != http.MethodHead && r.URL.Path != "/api/v1/blocklist" {
 			r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
 		}
 		next.ServeHTTP(w, r)
-	})
+	}))
 }
 
 // checkToken compares the Authorization header against the bearer token in
@@ -442,22 +407,22 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		}
 		// Report the optional plain-HTTP DoH listener address so the
 		// controller can converge it (and surface it in the UI / health).
-		if dc := s.dohController(); dc != nil {
+		if dc := s.controllers().DoH; dc != nil {
 			st.DohHTTPAddr = dc.DoHHTTPAddr()
 		}
 		// Report the per-client rate limit so the controller can converge it
 		// and surface it in the UI.
-		if ifc := s.rateLimitController(); ifc != nil {
+		if ifc := s.controllers().RateLimit; ifc != nil {
 			st.RateLimitQPS = ifc.RateLimitQPS()
 		}
 		// Report the runtime cache size limit so the controller can converge
 		// it after a restart.
-		if cc := s.cacheController(); cc != nil {
+		if cc := s.controllers().Cache; cc != nil {
 			st.CacheSize = cc.CacheSize()
 		}
 		// Report the local DNS record hash so the controller can converge them
 		// (e.g. after a restart) by re-pushing on drift.
-		if rc := s.recordController(); rc != nil {
+		if rc := s.controllers().Records; rc != nil {
 			if recs, err := rc.GetRecords(); err == nil {
 				st.RecordsHash = RecordsHash(recs)
 			}
@@ -470,7 +435,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 // handleDoH toggles the optional plain-HTTP DoH listener at runtime. The
 // controller pushes this from the Settings page; an empty http_addr disables it.
 func (s *Server) handleDoH(w http.ResponseWriter, r *http.Request) {
-	dc := s.dohController()
+	dc := s.controllers().DoH
 	if dc == nil {
 		http.Error(w, "doh settings not available on this instance", http.StatusServiceUnavailable)
 		return
@@ -503,7 +468,7 @@ func (s *Server) handleDoH(w http.ResponseWriter, r *http.Request) {
 // handleRateLimit gets/sets the per-client DNS query rate limit (QPS). The
 // controller pushes this from the Settings page; an empty/qps=0 disables it.
 func (s *Server) handleRateLimit(w http.ResponseWriter, r *http.Request) {
-	rc := s.rateLimitController()
+	rc := s.controllers().RateLimit
 	if rc == nil {
 		http.Error(w, "rate limit control not available on this instance", http.StatusServiceUnavailable)
 		return
@@ -666,7 +631,7 @@ func RecordsHash(records []RecordEntry) uint64 {
 // handleRecords manages the instance's local DNS records (A/AAAA/CNAME) that are
 // answered directly instead of being forwarded upstream.
 func (s *Server) handleRecords(w http.ResponseWriter, r *http.Request) {
-	rc := s.recordController()
+	rc := s.controllers().Records
 	if rc == nil {
 		http.Error(w, "records not available on this instance", http.StatusServiceUnavailable)
 		return
@@ -691,7 +656,7 @@ func (s *Server) handleRecords(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, AckResponse{OK: true, Msg: "records set"})
 	case http.MethodDelete:
-		if err := rc.ClearRecords(); err != nil {
+		if err := rc.SetRecords(nil); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -702,7 +667,7 @@ func (s *Server) handleRecords(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleHAStatus(w http.ResponseWriter, r *http.Request) {
-	ctrl := s.haController()
+	ctrl := s.controllers().HA
 	if ctrl == nil {
 		http.Error(w, "high availability is not available", http.StatusServiceUnavailable)
 		return
@@ -715,7 +680,7 @@ func (s *Server) handleHAStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleHAConfig(w http.ResponseWriter, r *http.Request) {
-	ctrl := s.haController()
+	ctrl := s.controllers().HA
 	if ctrl == nil {
 		http.Error(w, "high availability is not available", http.StatusServiceUnavailable)
 		return
@@ -736,25 +701,8 @@ func (s *Server) handleHAConfig(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, AckResponse{OK: true, Msg: "high availability configuration saved"})
 }
 
-func (s *Server) handleHAInstall(w http.ResponseWriter, r *http.Request) {
-	ctrl := s.haController()
-	if ctrl == nil {
-		http.Error(w, "high availability is not available", http.StatusServiceUnavailable)
-		return
-	}
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	if err := ctrl.InstallHA(); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	writeJSON(w, AckResponse{OK: true, Msg: "keepalived installed"})
-}
-
 func (s *Server) handleHAValidate(w http.ResponseWriter, r *http.Request) {
-	ctrl := s.haController()
+	ctrl := s.controllers().HA
 	if ctrl == nil {
 		http.Error(w, "high availability is not available", http.StatusServiceUnavailable)
 		return
@@ -771,7 +719,7 @@ func (s *Server) handleHAValidate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleHAApply(w http.ResponseWriter, r *http.Request) {
-	ctrl := s.haController()
+	ctrl := s.controllers().HA
 	if ctrl == nil {
 		http.Error(w, "high availability is not available", http.StatusServiceUnavailable)
 		return
@@ -788,7 +736,7 @@ func (s *Server) handleHAApply(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleHADisable(w http.ResponseWriter, r *http.Request) {
-	ctrl := s.haController()
+	ctrl := s.controllers().HA
 	if ctrl == nil {
 		http.Error(w, "high availability is not available", http.StatusServiceUnavailable)
 		return
@@ -805,7 +753,7 @@ func (s *Server) handleHADisable(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
-	ctrl := s.updateController()
+	ctrl := s.controllers().Update
 	if ctrl == nil {
 		http.Error(w, "remote update is not available", http.StatusServiceUnavailable)
 		return
@@ -876,7 +824,7 @@ func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request) {
 		case <-r.Context().Done():
 			return
 		case e := <-ch:
-			fmt.Fprintf(w, "data: %s\n\n", mustJSON(e))
+			fmt.Fprintf(w, "data: %s\n\n", MustJSON(e))
 			flusher.Flush()
 		case <-ticker.C:
 			// Keepalive: a lightweight stats ping so the controller can
@@ -887,7 +835,7 @@ func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request) {
 				st.UpstreamServers = nil
 				st.UpstreamRoutes = nil
 			}
-			fmt.Fprintf(w, "data: %s\n\n", mustJSON(WatchEvent{Type: "stats", At: time.Now(), Stats: st}))
+			fmt.Fprintf(w, "data: %s\n\n", MustJSON(WatchEvent{Type: "stats", At: time.Now(), Stats: st}))
 			flusher.Flush()
 		}
 	}
@@ -1001,7 +949,9 @@ func adoptIP(r *http.Request) string {
 	return r.RemoteAddr
 }
 
-func mustJSON(v interface{}) string {
+// MustJSON renders v for SSE streams; encoding/json never fails on the
+// protocol structs passed here.
+func MustJSON(v interface{}) string {
 	b, _ := json.Marshal(v)
 	return string(b)
 }

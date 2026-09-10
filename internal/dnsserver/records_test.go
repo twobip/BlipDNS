@@ -252,7 +252,7 @@ func TestRecordStoreClearRemovesWildcards(t *testing.T) {
 	if _, ok := rs.Lookup(q(t, "host.lan.twobip.com.", dns.TypeA)); !ok {
 		t.Fatal("expected match before clear")
 	}
-	if err := rs.ClearRecords(); err != nil {
+	if err := rs.SetRecords(nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := rs.Lookup(q(t, "host.lan.twobip.com.", dns.TypeA)); ok {

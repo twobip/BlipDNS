@@ -24,12 +24,12 @@ import (
 	"time"
 )
 
-// maxSourceBytes caps how much we read from a single source before giving up.
-// oisd-style lists are tens of MB; this is a hard safety bound.
-const maxSourceBytes = 1 << 30
+// maxSourceBytes caps a single source download. The management API itself
+// rejects received lists over 256 MiB, so a source bigger than that is useless.
+const maxSourceBytes = 256 << 20
 
-// maxLineLen bounds a single line in a list (hosts/ABP entries are short).
-const maxLineLen = 4 * 1024 * 1024
+// maxLineLen bounds a single list line; real hosts/ABP entries are <2 KiB.
+const maxLineLen = 64 * 1024
 
 // safeBlocklistTransport fetches only over plain HTTP(S) to publicly routable
 // destinations, blocking SSRF against loopback, link-local, private,
@@ -49,12 +49,16 @@ var safeBlocklistTransport = &http.Transport{
 		if err != nil {
 			return nil, err
 		}
+		_, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, err
+		}
 		d := net.Dialer{}
 		for _, ip := range ips {
 			if isPrivateIP(net.ParseIP(ip)) {
 				continue
 			}
-			c, err := d.DialContext(ctx, network, net.JoinHostPort(ip, mustPort(addr)))
+			c, err := d.DialContext(ctx, network, net.JoinHostPort(ip, port))
 			if err != nil {
 				return nil, err
 			}
@@ -71,36 +75,19 @@ var safeBlocklistTransport = &http.Transport{
 // maxSourceFetchers bounds how many blocklist sources are fetched concurrently.
 const maxSourceFetchers = 8
 
-func mustPort(addr string) string {
-	_, p, err := net.SplitHostPort(addr)
-	if err != nil || p == "" {
-		return addr
-	}
-	return p
-}
+// cgnatNet is the only private-use range net.IP.IsPrivate misses (RFC 6598).
+// ponytail: parsed once here; drop if stdlib IsPrivate ever covers CGNAT.
+var cgnatNet = func() *net.IPNet { _, n, _ := net.ParseCIDR("100.64.0.0/10"); return n }()
 
-// isPrivateIP reports whether ip is loopback, link-local, private,
-// multicast, unspecified, or in the cloud-metadata 169.254.0.0/16 range.
+// isPrivateIP reports whether ip is not publicly routable: loopback,
+// link-local (incl. cloud-metadata 169.254.0.0/16), multicast, unspecified,
+// RFC 1918/4193 private, or carrier-grade NAT. Stricter-or-equal to the old
+// hand-rolled CIDR list (ULA fc00::/7 now blocked too).
 func isPrivateIP(ip net.IP) bool {
 	if ip == nil {
 		return true
 	}
-	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() {
-		return true
-	}
-	// Private ranges (RFC 1918) and 100.64/10 (RFC 6598 carrier-grade NAT).
-	priv := []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10"}
-	for _, p := range priv {
-		_, n, _ := net.ParseCIDR(p)
-		if n != nil && n.Contains(ip) {
-			return true
-		}
-	}
-	// 169.254.0.0/16 (AWS/GCP/Azure metadata)
-	if _, n, _ := net.ParseCIDR("169.254.0.0/16"); n != nil && n.Contains(ip) {
-		return true
-	}
-	return false
+	return !ip.IsGlobalUnicast() || ip.IsPrivate() || cgnatNet.Contains(ip)
 }
 
 // ssrfEnabled gates the SSRF guard (literal-IP rejection + private-route dial
@@ -167,8 +154,12 @@ type Blocklist struct {
 	mu    sync.RWMutex
 	exact map[string]struct{} // exact domains / ancestor blocks
 	wild  map[string]struct{} // roots of "*.root" entries (match strict subdomains only)
-	sum   uint64              // order-independent checksum of exact + wild + allow entries
-	count int
+	// Checksums are maintained incrementally (block vs allow separately) so
+	// reads and allow-set swaps never re-walk million-entry maps. Checksum is
+	// their sum, identical to the old full-recompute value.
+	blockSum uint64
+	allowSum uint64
+	count    int
 
 	allowExact map[string]struct{} // allowed exact domains
 	allowWild  map[string]struct{} // allowed "*.root" roots
@@ -185,69 +176,66 @@ func New() *Blocklist {
 }
 
 // FromDomains replaces the current list with the given domains.
-// It normalizes each domain (lowercase, trim dot) and ignores invalid ones.
 func (b *Blocklist) FromDomains(list []string) {
-	exact, wild := make(map[string]struct{}), make(map[string]struct{})
+	set := make(map[string]struct{}, len(list))
 	for _, d := range list {
-		addEntry(d, exact, wild)
+		set[d] = struct{}{}
 	}
-	b.swap(exact, wild)
+	b.FromDomainsMap(set)
 }
 
 // FromDomainsMap replaces the current list with the given set of domains.
 // Used by the streaming loader to avoid an extra copy of a large list.
 func (b *Blocklist) FromDomainsMap(set map[string]struct{}) {
-	exact, wild := make(map[string]struct{}, len(set)), make(map[string]struct{})
+	exact := make(map[string]struct{}, len(set))
+	wild := make(map[string]struct{})
+	var sum uint64
 	for d := range set {
-		addEntry(d, exact, wild)
+		if k := addEntry(d, exact, wild); k != "" {
+			sum += hashString(k)
+		}
 	}
-	b.swap(exact, wild)
+	b.swap(exact, wild, sum)
 }
 
 // swap installs a freshly built set atomically.
-func (b *Blocklist) swap(exact, wild map[string]struct{}) {
+func (b *Blocklist) swap(exact, wild map[string]struct{}, sum uint64) {
 	b.mu.Lock()
 	b.exact = exact
 	b.wild = wild
 	b.count = len(exact) + len(wild)
-	b.recomputeSumLocked()
+	b.blockSum = sum
 	b.mu.Unlock()
 }
 
-// recomputeSumLocked recalculates the order-independent checksum across the
-// block and allow sets. Callers must hold b.mu.
-func (b *Blocklist) recomputeSumLocked() {
-	sum := uint64(0)
-	for d := range b.exact {
-		sum += hashString(d)
-	}
-	for r := range b.wild {
-		sum += hashString("*." + r)
-	}
-	for d := range b.allowExact {
-		sum += hashString("allow:" + d)
-	}
-	for r := range b.allowWild {
-		sum += hashString("allow:*." + r)
-	}
-	b.sum = sum
-}
-
-// addEntry normalizes and inserts a single entry (either "domain" or "*.root").
-func addEntry(d string, exact, wild map[string]struct{}) {
-	d = strings.TrimSpace(strings.ToLower(d))
+// addEntry normalizes one entry and inserts it, returning the canonical form
+// to fold into the checksum, or "" when invalid or already present (so bulk
+// loaders hash each domain exactly once, with no second walk).
+func addEntry(d string, exact, wild map[string]struct{}) string {
+	d = strings.TrimSpace(d)
 	if d == "" {
-		return
+		return ""
 	}
 	if strings.HasPrefix(d, "*.") {
-		if root := normalizeDomain(d[2:]); root != "" {
-			wild[root] = struct{}{}
+		root := normalizeDomain(d[2:])
+		if root == "" {
+			return ""
 		}
-		return
+		if _, ok := wild[root]; ok {
+			return ""
+		}
+		wild[root] = struct{}{}
+		return "*." + root
 	}
-	if h := normalizeDomain(d); h != "" {
-		exact[h] = struct{}{}
+	h := normalizeDomain(d)
+	if h == "" {
+		return ""
 	}
+	if _, ok := exact[h]; ok {
+		return ""
+	}
+	exact[h] = struct{}{}
+	return h
 }
 
 // Add adds a domain to the blocklist.
@@ -256,7 +244,7 @@ func (b *Blocklist) Add(domain string) {
 		b.mu.Lock()
 		if _, ok := b.exact[d]; !ok {
 			b.exact[d] = struct{}{}
-			b.sum += hashString(d)
+			b.blockSum += hashString(d)
 			b.count++
 		}
 		b.mu.Unlock()
@@ -269,7 +257,7 @@ func (b *Blocklist) Remove(domain string) {
 		b.mu.Lock()
 		if _, ok := b.exact[d]; ok {
 			delete(b.exact, d)
-			b.sum -= hashString(d)
+			b.blockSum -= hashString(d)
 			b.count--
 		}
 		b.mu.Unlock()
@@ -280,13 +268,16 @@ func (b *Blocklist) Remove(domain string) {
 // never blocked, even when they appear in the block set or a source list.
 func (b *Blocklist) SetAllowed(list []string) {
 	exact, wild := make(map[string]struct{}), make(map[string]struct{})
+	var sum uint64
 	for _, d := range list {
-		addEntry(d, exact, wild)
+		if k := addEntry(d, exact, wild); k != "" {
+			sum += hashString("allow:" + k)
+		}
 	}
 	b.mu.Lock()
 	b.allowExact = exact
 	b.allowWild = wild
-	b.recomputeSumLocked()
+	b.allowSum = sum
 	b.mu.Unlock()
 }
 
@@ -296,7 +287,7 @@ func (b *Blocklist) AddAllowed(domain string) {
 		b.mu.Lock()
 		if _, ok := b.allowExact[d]; !ok {
 			b.allowExact[d] = struct{}{}
-			b.sum += hashString("allow:" + d)
+			b.allowSum += hashString("allow:" + d)
 		}
 		b.mu.Unlock()
 	}
@@ -308,7 +299,7 @@ func (b *Blocklist) RemoveAllowed(domain string) {
 		b.mu.Lock()
 		if _, ok := b.allowExact[d]; ok {
 			delete(b.allowExact, d)
-			b.sum -= hashString("allow:" + d)
+			b.allowSum -= hashString("allow:" + d)
 		}
 		b.mu.Unlock()
 	}
@@ -354,7 +345,7 @@ func (b *Blocklist) List() []string {
 func (b *Blocklist) Checksum() uint64 {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	return b.sum
+	return b.blockSum + b.allowSum
 }
 
 // IsBlocked reports whether the given host (e.g., from a DNS query) is blocked.
@@ -658,23 +649,30 @@ func NormalizeDomain(s string) string { return normalizeDomain(s) }
 
 // normalizeDomain returns a lowercase domain with trailing dot removed.
 // It returns empty string if the input is empty or not a valid domain.
+// Single pass, no per-label allocation: anything except the dot structure
+// goes (punycode is already ASCII by the time we see it).
 func normalizeDomain(s string) string {
+	s = strings.TrimSpace(s)
 	if s == "" {
 		return ""
 	}
-	s = strings.TrimSpace(s)
 	s = strings.ToLower(s)
 	s = strings.TrimSuffix(s, ".")
-	if strings.Count(s, ".") < 1 {
-		return ""
-	}
-	if s[0] == '.' || s[len(s)-1] == '.' {
-		return ""
-	}
-	for _, p := range strings.Split(s, ".") {
-		if p == "" {
-			return ""
+	dots := 0
+	prevDot := true // leading dot is invalid
+	for i := 0; i < len(s); i++ {
+		if s[i] == '.' {
+			if prevDot {
+				return ""
+			}
+			prevDot = true
+			dots++
+		} else {
+			prevDot = false
 		}
+	}
+	if prevDot || dots < 1 {
+		return ""
 	}
 	return s
 }
