@@ -240,10 +240,6 @@ func (c *Client) SetHAConfig(ctx context.Context, cfg HAConfig) error {
 	return c.do(ctx, http.MethodPut, "/api/v1/ha", &cfg, nil)
 }
 
-func (c *Client) InstallHA(ctx context.Context) error {
-	return c.do(ctx, http.MethodPost, "/api/v1/ha/install", nil, nil)
-}
-
 func (c *Client) ValidateHA(ctx context.Context) error {
 	return c.do(ctx, http.MethodPost, "/api/v1/ha/validate", nil, nil)
 }

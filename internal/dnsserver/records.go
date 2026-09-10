@@ -77,15 +77,6 @@ func (rs *RecordStore) GetRecords() ([]control.RecordEntry, error) {
 	return out, nil
 }
 
-// ClearRecords removes all local records.
-func (rs *RecordStore) ClearRecords() error {
-	rs.mu.Lock()
-	defer rs.mu.Unlock()
-	rs.records = make(map[string][]control.RecordEntry)
-	rs.wildcards = make(map[string][]control.RecordEntry)
-	return nil
-}
-
 // Lookup answers a query from the local record store. Returns the response
 // message (with the question set) and true if a local record matched, or
 // false otherwise. Only A, AAAA and CNAME queries are answered locally.

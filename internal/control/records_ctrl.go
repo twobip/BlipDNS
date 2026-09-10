@@ -12,6 +12,4 @@ type RecordController interface {
 	SetRecords(records []RecordEntry) error
 	// GetRecords returns the instance's current local DNS records.
 	GetRecords() ([]RecordEntry, error)
-	// ClearRecords removes all local DNS records.
-	ClearRecords() error
 }

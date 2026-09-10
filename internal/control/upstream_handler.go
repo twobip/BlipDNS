@@ -10,7 +10,7 @@ import (
 // Settings page (Servers + Conditional forwarding + Bootstrap DNS); an empty
 // request reverts to the instance's local (config-file) upstream.
 func (s *Server) handleUpstream(w http.ResponseWriter, r *http.Request) {
-	uc := s.localResolverController()
+	uc := s.controllers().Upstream
 	if uc == nil {
 		http.Error(w, "upstream control not available on this instance", http.StatusServiceUnavailable)
 		return
@@ -42,7 +42,7 @@ func (s *Server) addUpstreamStats(st *StatsResponse) {
 	if st == nil {
 		return
 	}
-	uc := s.localResolverController()
+	uc := s.controllers().Upstream
 	if uc == nil {
 		return
 	}

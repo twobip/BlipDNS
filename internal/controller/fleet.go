@@ -446,22 +446,6 @@ func (f *Fleet) setHAClusterPersisted(cluster control.HACluster) error {
 	return nil
 }
 
-func (f *Fleet) InstallHA(ctx context.Context, cluster control.HACluster) error {
-	if err := validateHACluster(cluster); err != nil {
-		return err
-	}
-	for _, id := range []string{cluster.PrimaryInstance, cluster.SecondaryInstance} {
-		inst, err := f.haNode(id)
-		if err != nil {
-			return err
-		}
-		if err := inst.ctl().InstallHA(ctx); err != nil {
-			return fmt.Errorf("%s: %w", id, err)
-		}
-	}
-	return nil
-}
-
 func (f *Fleet) ValidateHA(ctx context.Context, cluster control.HACluster) error {
 	if err := validateHACluster(cluster); err != nil {
 		return err

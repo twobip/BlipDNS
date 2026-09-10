@@ -438,25 +438,3 @@ func splitSpec(spec string) []string {
 		return r == ' ' || r == ',' || r == '\n' || r == '	'
 	})
 }
-
-// LookupIP is a convenience helper that resolves A/AAAA for host using r.
-func LookupIP(ctx context.Context, r Resolver, host string) ([]net.IP, error) {
-	var ips []net.IP
-	for _, t := range []uint16{dns.TypeA, dns.TypeAAAA} {
-		q := new(dns.Msg)
-		q.SetQuestion(dns.Fqdn(host), t)
-		resp, err := r.Resolve(ctx, q)
-		if err != nil {
-			return nil, err
-		}
-		for _, rr := range resp.Answer {
-			switch v := rr.(type) {
-			case *dns.A:
-				ips = append(ips, v.A)
-			case *dns.AAAA:
-				ips = append(ips, v.AAAA)
-			}
-		}
-	}
-	return ips, nil
-}

@@ -133,10 +133,6 @@ func (m *Manager) isUpdating() bool {
 	return m.updateController.UpdateStatus().Running
 }
 
-func (m *Manager) InstallHA() error {
-	return fmt.Errorf("keepalived installation is intentionally not performed through the API; install it with the host package manager")
-}
-
 // SetUpdateController wires the local update manager so HAStatus() can report
 // whether the node is mid-self-update. Safe to call at any time.
 func (m *Manager) SetUpdateController(c control.UpdateStatusReporter) {

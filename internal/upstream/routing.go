@@ -248,41 +248,26 @@ func fqdn(s string) string {
 // Auto returns the automatic failover resolver (Priority>0 servers or the
 // legacy upstream), or nil if there is none.
 func (p *ResolverPool) Auto() Resolver {
-	if p == nil {
-		return nil
-	}
 	return p.auto
 }
 
 // Servers and Routes expose the configured set (for stats readback).
 func (p *ResolverPool) Servers() []UpstreamServer {
-	if p == nil {
-		return nil
-	}
 	return p.servers
 }
 
 func (p *ResolverPool) Routes() []UpstreamRoute {
-	if p == nil {
-		return nil
-	}
 	return p.routes
 }
 
 // Bootstrap returns the configured bootstrap DNS servers (for stats readback).
 func (p *ResolverPool) Bootstrap() []UpstreamServer {
-	if p == nil {
-		return nil
-	}
 	return p.bootstrap
 }
 
 // Match returns the resolver for the best-matching route (longest qname suffix,
 // restricted to a matching client CIDR), or nil if no route matches.
 func (p *ResolverPool) Match(qname string, client net.IP) Resolver {
-	if p == nil {
-		return nil
-	}
 	q := fqdn(qname)
 	var best *routeRule
 	for i := range p.rules {
@@ -310,7 +295,7 @@ func (p *ResolverPool) Match(qname string, client net.IP) Resolver {
 // (e.g. a per-policy override built outside the pool). The label is used to
 // attribute a query to the upstream that answered it.
 func (p *ResolverPool) LabelFor(r Resolver) string {
-	if p == nil || r == nil {
+	if r == nil {
 		return ""
 	}
 	if r == p.auto {

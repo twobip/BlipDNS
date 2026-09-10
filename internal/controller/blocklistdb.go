@@ -39,6 +39,12 @@ func NewBlocklistStore(dbPath string) (*BlocklistStore, error) {
 	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
 		return nil, fmt.Errorf("enable WAL: %w", err)
 	}
+	// NORMAL is crash-safe under WAL (a power loss may drop the last commit,
+	// never corrupt) and skips an fsync per transaction during bulk imports.
+	// ponytail: the DB is a rebuildable cache; use FULL if it ever holds truth.
+	if _, err := db.Exec(`PRAGMA synchronous=NORMAL`); err != nil {
+		return nil, fmt.Errorf("set synchronous mode: %w", err)
+	}
 	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS blocklist (domain TEXT PRIMARY KEY)`); err != nil {
 		return nil, fmt.Errorf("create blocklist schema: %w", err)
 	}
@@ -90,17 +96,50 @@ func (s *BlocklistStore) ReplaceAll(ctx context.Context, domains []string) error
 	if _, err := tx.ExecContext(ctx, `DELETE FROM blocklist`); err != nil {
 		return err
 	}
-	stmt, err := tx.PrepareContext(ctx, `INSERT INTO blocklist (domain) VALUES (?)`)
+	err = insertChunked(ctx, tx, len(domains),
+		func(n int) string { return `INSERT INTO blocklist (domain) VALUES ` + placeholders(n, 1) },
+		func(start, end int) []interface{} {
+			args := make([]interface{}, 0, end-start)
+			for _, d := range domains[start:end] {
+				args = append(args, d)
+			}
+			return args
+		})
 	if err != nil {
 		return err
 	}
-	defer stmt.Close()
-	for _, d := range domains {
-		if _, err := stmt.ExecContext(ctx, d); err != nil {
+	return tx.Commit()
+}
+
+// insertBatch is the max rows per multi-row INSERT (500×2 bind vars stays
+// under SQLite's 999-variable limit on older builds).
+const insertBatch = 500
+
+// insertChunked runs multi-row INSERTs built by sqlFor in chunks of at most
+// insertBatch rows; args returns the row-major bind vars for [start, end).
+func insertChunked(ctx context.Context, tx *sql.Tx, n int, sqlFor func(int) string, args func(start, end int) []interface{}) error {
+	for start := 0; start < n; start += insertBatch {
+		end := min(start+insertBatch, n)
+		stmt, err := tx.PrepareContext(ctx, sqlFor(end-start))
+		if err != nil {
 			return err
 		}
+		_, err = stmt.ExecContext(ctx, args(start, end)...)
+		stmt.Close()
+		if err != nil {
+			return err
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 	}
-	return tx.Commit()
+	return nil
+}
+
+// placeholders returns "(?,..),(?,..)" for rows×cols bind vars.
+func placeholders(rows, cols int) string {
+	one := "(" + strings.TrimSuffix(strings.Repeat("?,", cols), ",") + "),"
+	return strings.TrimSuffix(strings.Repeat(one, rows), ",")
 }
 
 // LoadSet returns the stored domains as a set, ready for FromDomainsMap.
@@ -197,35 +236,21 @@ func (s *BlocklistStore) ReplaceSourceDomains(ctx context.Context, url string, d
 	// Batch the inserts so multi-million-domain snapshots (e.g. oisd.big)
 	// don't spend minutes in per-row SQLite calls. OR IGNORE covers legacy
 	// tables created without the primary key.
-	const batch = 500
-	for start := 0; start < len(domains); start += batch {
-		end := min(start+batch, len(domains))
-		chunk := domains[start:end]
-		stmt, err := tx.PrepareContext(ctx, sourceDomainsInsertSQL(len(chunk)))
-		if err != nil {
-			return err
-		}
-		args := make([]interface{}, 0, len(chunk)*2)
-		for _, d := range chunk {
-			args = append(args, url, d)
-		}
-		if _, err := stmt.ExecContext(ctx, args...); err != nil {
-			stmt.Close()
-			return err
-		}
-		stmt.Close()
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
+	err = insertChunked(ctx, tx, len(domains),
+		func(n int) string {
+			return `INSERT OR IGNORE INTO blocklist_source_domains (source_url, domain) VALUES ` + placeholders(n, 2)
+		},
+		func(start, end int) []interface{} {
+			args := make([]interface{}, 0, (end-start)*2)
+			for _, d := range domains[start:end] {
+				args = append(args, url, d)
+			}
+			return args
+		})
+	if err != nil {
+		return err
 	}
 	return tx.Commit()
-}
-
-// sourceDomainsInsertSQL builds a single-statement multi-row INSERT OR IGNORE
-// into blocklist_source_domains with n rows of (source_url, domain).
-func sourceDomainsInsertSQL(n int) string {
-	return "INSERT OR IGNORE INTO blocklist_source_domains (source_url, domain) VALUES " +
-		strings.TrimSuffix(strings.Repeat("(?,?),", n), ",")
 }
 
 // LoadSourceDomains returns the last successfully downloaded domain set for a

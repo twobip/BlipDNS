@@ -102,7 +102,7 @@ func TestCoalesce(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, _ = c.Do(context.Background(), Key{Name: "k"}, fn)
+			_, _, _ = c.DoHit(context.Background(), Key{Name: "k"}, fn)
 		}()
 	}
 	wg.Wait()

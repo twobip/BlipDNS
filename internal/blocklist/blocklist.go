@@ -154,8 +154,12 @@ type Blocklist struct {
 	mu    sync.RWMutex
 	exact map[string]struct{} // exact domains / ancestor blocks
 	wild  map[string]struct{} // roots of "*.root" entries (match strict subdomains only)
-	sum   uint64              // order-independent checksum of exact + wild + allow entries
-	count int
+	// Checksums are maintained incrementally (block vs allow separately) so
+	// reads and allow-set swaps never re-walk million-entry maps. Checksum is
+	// their sum, identical to the old full-recompute value.
+	blockSum uint64
+	allowSum uint64
+	count    int
 
 	allowExact map[string]struct{} // allowed exact domains
 	allowWild  map[string]struct{} // allowed "*.root" roots
@@ -183,57 +187,55 @@ func (b *Blocklist) FromDomains(list []string) {
 // FromDomainsMap replaces the current list with the given set of domains.
 // Used by the streaming loader to avoid an extra copy of a large list.
 func (b *Blocklist) FromDomainsMap(set map[string]struct{}) {
-	exact, wild := make(map[string]struct{}, len(set)), make(map[string]struct{})
+	exact := make(map[string]struct{}, len(set))
+	wild := make(map[string]struct{})
+	var sum uint64
 	for d := range set {
-		addEntry(d, exact, wild)
+		if k := addEntry(d, exact, wild); k != "" {
+			sum += hashString(k)
+		}
 	}
-	b.swap(exact, wild)
+	b.swap(exact, wild, sum)
 }
 
 // swap installs a freshly built set atomically.
-func (b *Blocklist) swap(exact, wild map[string]struct{}) {
+func (b *Blocklist) swap(exact, wild map[string]struct{}, sum uint64) {
 	b.mu.Lock()
 	b.exact = exact
 	b.wild = wild
 	b.count = len(exact) + len(wild)
-	b.recomputeSumLocked()
+	b.blockSum = sum
 	b.mu.Unlock()
 }
 
-// recomputeSumLocked recalculates the order-independent checksum across the
-// block and allow sets. Callers must hold b.mu.
-func (b *Blocklist) recomputeSumLocked() {
-	sum := uint64(0)
-	for d := range b.exact {
-		sum += hashString(d)
-	}
-	for r := range b.wild {
-		sum += hashString("*." + r)
-	}
-	for d := range b.allowExact {
-		sum += hashString("allow:" + d)
-	}
-	for r := range b.allowWild {
-		sum += hashString("allow:*." + r)
-	}
-	b.sum = sum
-}
-
-// addEntry normalizes and inserts a single entry (either "domain" or "*.root").
-func addEntry(d string, exact, wild map[string]struct{}) {
-	d = strings.TrimSpace(strings.ToLower(d))
+// addEntry normalizes one entry and inserts it, returning the canonical form
+// to fold into the checksum, or "" when invalid or already present (so bulk
+// loaders hash each domain exactly once, with no second walk).
+func addEntry(d string, exact, wild map[string]struct{}) string {
+	d = strings.TrimSpace(d)
 	if d == "" {
-		return
+		return ""
 	}
 	if strings.HasPrefix(d, "*.") {
-		if root := normalizeDomain(d[2:]); root != "" {
-			wild[root] = struct{}{}
+		root := normalizeDomain(d[2:])
+		if root == "" {
+			return ""
 		}
-		return
+		if _, ok := wild[root]; ok {
+			return ""
+		}
+		wild[root] = struct{}{}
+		return "*." + root
 	}
-	if h := normalizeDomain(d); h != "" {
-		exact[h] = struct{}{}
+	h := normalizeDomain(d)
+	if h == "" {
+		return ""
 	}
+	if _, ok := exact[h]; ok {
+		return ""
+	}
+	exact[h] = struct{}{}
+	return h
 }
 
 // Add adds a domain to the blocklist.
@@ -242,7 +244,7 @@ func (b *Blocklist) Add(domain string) {
 		b.mu.Lock()
 		if _, ok := b.exact[d]; !ok {
 			b.exact[d] = struct{}{}
-			b.sum += hashString(d)
+			b.blockSum += hashString(d)
 			b.count++
 		}
 		b.mu.Unlock()
@@ -255,7 +257,7 @@ func (b *Blocklist) Remove(domain string) {
 		b.mu.Lock()
 		if _, ok := b.exact[d]; ok {
 			delete(b.exact, d)
-			b.sum -= hashString(d)
+			b.blockSum -= hashString(d)
 			b.count--
 		}
 		b.mu.Unlock()
@@ -266,13 +268,16 @@ func (b *Blocklist) Remove(domain string) {
 // never blocked, even when they appear in the block set or a source list.
 func (b *Blocklist) SetAllowed(list []string) {
 	exact, wild := make(map[string]struct{}), make(map[string]struct{})
+	var sum uint64
 	for _, d := range list {
-		addEntry(d, exact, wild)
+		if k := addEntry(d, exact, wild); k != "" {
+			sum += hashString("allow:" + k)
+		}
 	}
 	b.mu.Lock()
 	b.allowExact = exact
 	b.allowWild = wild
-	b.recomputeSumLocked()
+	b.allowSum = sum
 	b.mu.Unlock()
 }
 
@@ -282,7 +287,7 @@ func (b *Blocklist) AddAllowed(domain string) {
 		b.mu.Lock()
 		if _, ok := b.allowExact[d]; !ok {
 			b.allowExact[d] = struct{}{}
-			b.sum += hashString("allow:" + d)
+			b.allowSum += hashString("allow:" + d)
 		}
 		b.mu.Unlock()
 	}
@@ -294,7 +299,7 @@ func (b *Blocklist) RemoveAllowed(domain string) {
 		b.mu.Lock()
 		if _, ok := b.allowExact[d]; ok {
 			delete(b.allowExact, d)
-			b.sum -= hashString("allow:" + d)
+			b.allowSum -= hashString("allow:" + d)
 		}
 		b.mu.Unlock()
 	}
@@ -340,7 +345,7 @@ func (b *Blocklist) List() []string {
 func (b *Blocklist) Checksum() uint64 {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	return b.sum
+	return b.blockSum + b.allowSum
 }
 
 // IsBlocked reports whether the given host (e.g., from a DNS query) is blocked.
@@ -644,23 +649,30 @@ func NormalizeDomain(s string) string { return normalizeDomain(s) }
 
 // normalizeDomain returns a lowercase domain with trailing dot removed.
 // It returns empty string if the input is empty or not a valid domain.
+// Single pass, no per-label allocation: anything except the dot structure
+// goes (punycode is already ASCII by the time we see it).
 func normalizeDomain(s string) string {
+	s = strings.TrimSpace(s)
 	if s == "" {
 		return ""
 	}
-	s = strings.TrimSpace(s)
 	s = strings.ToLower(s)
 	s = strings.TrimSuffix(s, ".")
-	if strings.Count(s, ".") < 1 {
-		return ""
-	}
-	if s[0] == '.' || s[len(s)-1] == '.' {
-		return ""
-	}
-	for _, p := range strings.Split(s, ".") {
-		if p == "" {
-			return ""
+	dots := 0
+	prevDot := true // leading dot is invalid
+	for i := 0; i < len(s); i++ {
+		if s[i] == '.' {
+			if prevDot {
+				return ""
+			}
+			prevDot = true
+			dots++
+		} else {
+			prevDot = false
 		}
+	}
+	if prevDot || dots < 1 {
+		return ""
 	}
 	return s
 }

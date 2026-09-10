@@ -156,9 +156,6 @@ func (f *Fleet) updateOne(inst *Instance, channel string) error {
 			phase = "updating"
 		} else if phase == "updating" || phase == "restart" {
 			phase = "restart"
-			if _, err := inst.ctl().Health(ctx); err == nil {
-				return nil
-			}
 		} else if status.LastError != "" {
 			return fmt.Errorf("remote updater: %s", status.LastError)
 		}
