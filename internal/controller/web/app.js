@@ -2493,6 +2493,19 @@ $("s-save-doh").onclick = async () => {
     loadDoHEditor();
   } catch (e) { st.textContent = ""; toast("save failed: " + e.message, "err"); }
 };
+/* Apple .mobileconfig download (DoH panel) */
+$("s-mc-dl").onclick = () => {
+  const host = $("s-mc-host").value.trim();
+  const st = $("s-mc-status");
+  if (!host) { st.textContent = "enter the DoH hostname first"; return; }
+  const p = new URLSearchParams({ host });
+  const port = $("s-mc-port").value.trim();
+  const cid = $("s-mc-client").value.trim();
+  if (port) p.set("port", port);
+  if (cid) p.set("client_id", cid);
+  st.textContent = "";
+  window.open("/api/doh-mobileconfig?" + p.toString(), "_blank");
+};
 if ($("s-fetch")) $("s-fetch").onclick = async () => {
   const urls = blSources.filter((u) => u.trim());
   if (!urls.length) return toast("no blocklist sources configured", "err");

@@ -655,6 +655,22 @@
                 <button class="btn btn-primary" id="s-save-doh">Save</button>
                 <span class="hint" id="s-doh-status"></span>
               </div>
+              <div class="row mt" style="gap:8px; align-items:flex-end">
+                <div class="field" style="margin-bottom:0; flex:2">
+                  <label>Apple profile hostname</label>
+                  <input class="input" id="s-mc-host" placeholder="dns.lan.example.com"/>
+                </div>
+                <div class="field" style="margin-bottom:0; flex:1">
+                  <label>HTTPS port</label>
+                  <input class="input" id="s-mc-port" type="number" min="1" max="65535" placeholder="443" inputmode="numeric"/>
+                </div>
+                <div class="field" style="margin-bottom:0; flex:1">
+                  <label>Client ID <span class="faint">(optional)</span></label>
+                  <input class="input" id="s-mc-client" placeholder="iphone" maxlength="64"/>
+                </div>
+                <button class="btn" id="s-mc-dl">Download .mobileconfig</button>
+              </div>
+              <span class="hint" id="s-mc-status">Installs this resolver as DoH on iPhone / iPad / Mac (iOS 14+).</span>
             </div>
           </div>
 

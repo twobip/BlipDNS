@@ -108,6 +108,7 @@ func (s *Server) Handler() http.Handler {
 	// Blocklist (session-gated)
 	mux.HandleFunc("/api/blocklist", api(s.handleBlocklist))                   // GET list / POST add / DELETE remove
 	mux.HandleFunc("/api/blocklist/export", api(s.handleBlocklistExport))      // GET text
+	mux.HandleFunc("/api/doh-mobileconfig", api(s.handleDoHMobileConfig))      // GET Apple .mobileconfig for DoH (host/port/client_id)
 	mux.HandleFunc("/api/blocklist/sources", api(s.handleBlocklistSources))    // PUT sources + import / GET status
 	mux.HandleFunc("/api/blocklist/source", api(s.handleBlocklistSource))      // POST enable/disable one source
 	mux.HandleFunc("/api/blocklist/status", api(s.handleBlocklistStatus))      // GET import progress
