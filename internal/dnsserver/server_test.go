@@ -546,6 +546,23 @@ func TestUpstreamErrText(t *testing.T) {
 	}
 }
 
+func TestServeRecordsQueryDuration(t *testing.T) {
+	srv, _ := newTestServer(t)
+	srv.cnt = new(control.Counters)
+	q := new(dns.Msg)
+	q.SetQuestion("duration.test.", dns.TypeA)
+	for i := 0; i < 1000; i++ {
+		srv.serve(context.Background(), net.ParseIP("192.168.1.5"), "", q)
+	}
+	st := srv.cnt.Stats()
+	if st.QueriesTotal != 1000 {
+		t.Fatalf("queries = %d, want 1000", st.QueriesTotal)
+	}
+	if st.DurationTotalUs == 0 {
+		t.Error("DurationTotalUs = 0 after 1000 served queries: answer time is not recorded")
+	}
+}
+
 func TestServeRecordsNodataForMissingType(t *testing.T) {
 	srv, up := newTestServer(t)
 	srv.rec = NewRecordStore()

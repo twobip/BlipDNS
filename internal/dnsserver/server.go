@@ -265,6 +265,10 @@ func (s *Server) serve(ctx context.Context, clientIP net.IP, clientID string, re
 		}
 	}
 	s.cnt.AddQuery()
+	// Answer time of every served query feeds the dashboard's average
+	// response-time stat; the deferred closure (a bare deferred call would
+	// evaluate time.Since at registration) covers every return path below.
+	defer func() { s.cnt.AddDuration(time.Since(start)) }()
 	resp := new(dns.Msg)
 	resp.SetReply(req)
 	resp.RecursionAvailable = true // locally-built replies must carry RA like relayed ones

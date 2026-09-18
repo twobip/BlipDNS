@@ -287,11 +287,12 @@ func (i *Instance) poll(ctx context.Context) {
 		// restarts of blipd or blipc (deltas are computed at query time).
 		if i.fleet.queryLog != nil {
 			_ = i.fleet.queryLog.AddStatsSample(ctx, StatsSample{
-				Timestamp: time.Now(),
-				Instance:  i.Config.ID,
-				Queries:   s.QueriesTotal,
-				Blocked:   s.BlockedTotal,
-				Errors:    s.UpstreamErr,
+				Timestamp:  time.Now(),
+				Instance:   i.Config.ID,
+				Queries:    s.QueriesTotal,
+				Blocked:    s.BlockedTotal,
+				Errors:     s.UpstreamErr,
+				DurationUs: s.DurationTotalUs,
 			})
 		}
 	}

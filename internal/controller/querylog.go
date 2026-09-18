@@ -312,6 +312,9 @@ type StatsSample struct {
 	Queries   uint64 // cumulative since instance (re)start
 	Blocked   uint64
 	Errors    uint64
+	// DurationUs is the cumulative answer time of all served queries in
+	// microseconds; deltas give the range's average response time.
+	DurationUs uint64
 }
 
 // PerInstanceStats is the aggregate of a single instance over a time range.
@@ -328,7 +331,10 @@ type StatsAggregate struct {
 	// AvgQPS is the fleet-wide average query rate over the sampled span of the
 	// range (total queries ÷ elapsed seconds), so it reflects actual coverage
 	// rather than the whole requested window.
-	AvgQPS      float64                      `json:"avg_qps"`
+	AvgQPS float64 `json:"avg_qps"`
+	// AvgUs is the fleet-wide mean answer time in microseconds over the same
+	// span, from the instances' cumulative duration counter deltas.
+	AvgUs       float64                      `json:"avg_us"`
 	PerInstance map[string]*PerInstanceStats `json:"per_instance"`
 	Series      []TimeSeriesPoint            `json:"series"`
 }
@@ -377,7 +383,8 @@ func NewQueryLogStore(dbPath string) (*QueryLogStore, error) {
 		instance TEXT NOT NULL,
 		queries INTEGER NOT NULL,
 		blocked INTEGER NOT NULL,
-		errors INTEGER NOT NULL
+		errors INTEGER NOT NULL,
+		duration_us INTEGER NOT NULL DEFAULT 0
 	);
 	CREATE INDEX IF NOT EXISTS idx_stats_samples_timestamp ON stats_samples(timestamp);
 	CREATE TABLE IF NOT EXISTS client_names (
@@ -412,6 +419,7 @@ func NewQueryLogStore(dbPath string) (*QueryLogStore, error) {
 		"ALTER TABLE query_log ADD COLUMN duration_us INTEGER",
 		"ALTER TABLE query_log ADD COLUMN cached INTEGER",
 		"ALTER TABLE query_log ADD COLUMN blocklist TEXT",
+		"ALTER TABLE stats_samples ADD COLUMN duration_us INTEGER NOT NULL DEFAULT 0",
 	} {
 		_, _ = db.Exec(col)
 	}
@@ -648,8 +656,8 @@ func (s *QueryLogStore) ClearUpstreamErrors(ctx context.Context, instance string
 // AddStatsSample records a snapshot of an instance's cumulative counters.
 func (s *QueryLogStore) AddStatsSample(ctx context.Context, e StatsSample) error {
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO stats_samples (timestamp, instance, queries, blocked, errors) VALUES (?, ?, ?, ?, ?)`,
-		e.Timestamp, e.Instance, e.Queries, e.Blocked, e.Errors)
+		`INSERT INTO stats_samples (timestamp, instance, queries, blocked, errors, duration_us) VALUES (?, ?, ?, ?, ?, ?)`,
+		e.Timestamp, e.Instance, e.Queries, e.Blocked, e.Errors, e.DurationUs)
 	return err
 }
 
@@ -658,7 +666,7 @@ func (s *QueryLogStore) AddStatsSample(ctx context.Context, e StatsSample) error
 // samples per instance, so a counter decrease (instance restart) is treated as
 // a reset whose full value counts as new activity.
 func (s *QueryLogStore) AggregateStats(ctx context.Context, instance string, bucketSize time.Duration, since time.Time) (*StatsAggregate, error) {
-	query := `SELECT timestamp, instance, queries, blocked, errors FROM stats_samples WHERE timestamp >= ?`
+	query := `SELECT timestamp, instance, queries, blocked, errors, duration_us FROM stats_samples WHERE timestamp >= ?`
 	args := []interface{}{since}
 	if instance != "" {
 		query += " AND instance = ?"
@@ -677,10 +685,11 @@ func (s *QueryLogStore) AggregateStats(ctx context.Context, instance string, buc
 	buckets := make(map[int64]*TimeSeriesPoint)
 	secs := int64(bucketSize.Seconds())
 	var first, lastTS time.Time // earliest / latest sample timestamp in the range
+	var totalDurUs uint64       // cumulative answer time delta over the range
 	for rows.Next() {
 		var tsStr, inst string
-		var q, b, e uint64
-		if err := rows.Scan(&tsStr, &inst, &q, &b, &e); err != nil {
+		var q, b, e, dur uint64
+		if err := rows.Scan(&tsStr, &inst, &q, &b, &e, &dur); err != nil {
 			return nil, err
 		}
 		ts := parseQueryTS(tsStr)
@@ -691,17 +700,19 @@ func (s *QueryLogStore) AggregateStats(ctx context.Context, instance string, buc
 			lastTS = ts
 		}
 
-		dq, db, de := uint64(0), uint64(0), uint64(0)
+		dq, db, de, ddur := uint64(0), uint64(0), uint64(0), uint64(0)
 		if prev, ok := last[inst]; ok {
 			dq = counterDelta(q, prev.Queries)
 			db = counterDelta(b, prev.Blocked)
 			de = counterDelta(e, prev.Errors)
+			ddur = counterDelta(dur, prev.DurationUs)
 		}
-		last[inst] = StatsSample{Timestamp: ts, Instance: inst, Queries: q, Blocked: b, Errors: e}
+		last[inst] = StatsSample{Timestamp: ts, Instance: inst, Queries: q, Blocked: b, Errors: e, DurationUs: dur}
 
 		agg.TotalQueries += int(dq)
 		agg.BlockedQueries += int(db)
 		agg.UpstreamErrors += int(de)
+		totalDurUs += ddur
 		pi := agg.PerInstance[inst]
 		if pi == nil {
 			pi = &PerInstanceStats{}
@@ -727,6 +738,10 @@ func (s *QueryLogStore) AggregateStats(ctx context.Context, instance string, buc
 	// seconds between the earliest and latest sample in the range.
 	if agg.TotalQueries > 0 && !lastTS.IsZero() && lastTS.After(first) {
 		agg.AvgQPS = float64(agg.TotalQueries) / lastTS.Sub(first).Seconds()
+	}
+	// Average response time over the same span: mean answer time per query.
+	if agg.TotalQueries > 0 {
+		agg.AvgUs = float64(totalDurUs) / float64(agg.TotalQueries)
 	}
 
 	for _, v := range buckets {

@@ -336,6 +336,8 @@ async function fetchStats() {
     $("d-blockrate").textContent = d.total_queries ? (d.blocked_queries / d.total_queries * 100).toFixed(1) + "%" : "0%";
     $("d-qps").textContent = fmtQPS(d.avg_qps);
     $("d-qps-range-hint").textContent = rng.label;
+    $("d-avg").textContent = fmtLat(d.avg_us || 0);
+    $("d-avg-range-hint").textContent = rng.label;
     $("d-range-hint").textContent = rng.label;
     renderDashInstances(d.per_instance);
     API(`/api/top-domains?since=${rng.since}&limit=10&action=PASS`)

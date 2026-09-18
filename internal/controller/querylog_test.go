@@ -74,11 +74,12 @@ func TestQueryLogStoreMaintenance(t *testing.T) {
 			t.Fatalf("Insert: %v", err)
 		}
 	}
-	// Two cumulative samples: 100 then 120 -> delta of 20.
-	if err := store.AddStatsSample(ctx, StatsSample{Timestamp: now, Instance: "a", Queries: 100, Blocked: 10, Errors: 1}); err != nil {
+	// Two cumulative samples: 100 -> 120 queries (delta 20) and
+	// 100000 -> 120000 µs (delta 20000) -> average 1000 µs per query.
+	if err := store.AddStatsSample(ctx, StatsSample{Timestamp: now, Instance: "a", Queries: 100, Blocked: 10, Errors: 1, DurationUs: 100000}); err != nil {
 		t.Fatalf("AddStatsSample: %v", err)
 	}
-	if err := store.AddStatsSample(ctx, StatsSample{Timestamp: now.Add(time.Minute), Instance: "a", Queries: 120, Blocked: 12, Errors: 1}); err != nil {
+	if err := store.AddStatsSample(ctx, StatsSample{Timestamp: now.Add(time.Minute), Instance: "a", Queries: 120, Blocked: 12, Errors: 1, DurationUs: 120000}); err != nil {
 		t.Fatalf("AddStatsSample 2: %v", err)
 	}
 
@@ -99,6 +100,9 @@ func TestQueryLogStoreMaintenance(t *testing.T) {
 	}
 	if agg.TotalQueries != 20 {
 		t.Fatalf("AggregateStats total = %d after query-log clear, want 20", agg.TotalQueries)
+	}
+	if agg.AvgUs != 1000 {
+		t.Fatalf("AggregateStats avg = %v µs, want 1000 (20000 µs / 20 queries)", agg.AvgUs)
 	}
 
 	// Reset stats: totals drop to zero; the next sample becomes a new baseline.

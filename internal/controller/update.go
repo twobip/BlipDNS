@@ -158,6 +158,13 @@ func (f *Fleet) updateOne(inst *Instance, channel string) error {
 			phase = "restart"
 		} else if status.LastError != "" {
 			return fmt.Errorf("remote updater: %s", status.LastError)
+		} else if phase == "start" {
+			// The updater finished before our first status poll observed it
+			// running. StartUpdate sets Running synchronously (before the
+			// POST response), so a successful start followed by "not
+			// running" means the update already completed — fall through to
+			// the health gate instead of polling until the full timeout.
+			phase = "restart"
 		}
 
 		if phase == "restart" {

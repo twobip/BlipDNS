@@ -52,6 +52,10 @@ type StatsResponse struct {
 	// RateLimited counts queries dropped because they exceeded the per-client
 	// rate limit.
 	RateLimited uint64 `json:"rate_limited,omitempty"`
+	// DurationTotalUs is the cumulative answer time of every served query, in
+	// microseconds. The controller deltas it across polls and divides by the
+	// query delta — the dashboard's average response time.
+	DurationTotalUs uint64 `json:"duration_total_us,omitempty"`
 	// CacheSize exposes the instance's runtime cache size limit so the
 	// controller can reconcile it (0 = unlimited).
 	CacheSize int `json:"cache_size,omitempty"`

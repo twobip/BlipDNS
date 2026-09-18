@@ -1,6 +1,9 @@
 package control
 
-import "sync/atomic"
+import (
+	"sync/atomic"
+	"time"
+)
 
 // Counters tracks server metrics. Every counter is an atomic so the per-query
 // hot path never contends on a mutex.
@@ -9,6 +12,15 @@ type Counters struct {
 	blocked     atomic.Uint64
 	upErr       atomic.Uint64
 	rateLimited atomic.Uint64
+	durNs       atomic.Uint64 // cumulative answer time of served queries
+}
+
+// AddDuration records how long a served query took to answer.
+func (c *Counters) AddDuration(d time.Duration) {
+	if c == nil {
+		return
+	}
+	c.durNs.Add(uint64(d))
 }
 
 // AddQuery records a query.
@@ -54,11 +66,12 @@ func (c *Counters) RateLimited() uint64 {
 // Stats returns a snapshot for the management API.
 func (c *Counters) Stats() *StatsResponse {
 	return &StatsResponse{
-		Cached:       0, // filled by caller (cache length)
-		QueriesTotal: c.queries.Load(),
-		BlockedTotal: c.blocked.Load(),
-		UpstreamErr:  c.upErr.Load(),
-		RateLimited:  c.rateLimited.Load(),
+		Cached:          0, // filled by caller (cache length)
+		QueriesTotal:    c.queries.Load(),
+		BlockedTotal:    c.blocked.Load(),
+		UpstreamErr:     c.upErr.Load(),
+		RateLimited:     c.rateLimited.Load(),
+		DurationTotalUs: c.durNs.Load() / uint64(time.Microsecond),
 	}
 }
 

@@ -22,6 +22,9 @@ type haUpdaterNode struct {
 	started   int
 	running   bool
 	stop      chan struct{}
+	// autoFinish makes the update complete before the POST /update response
+	// returns, modelling a node whose updater is never observed running.
+	autoFinish bool
 }
 
 func newHAUpdaterNode(token string) *haUpdaterNode {
@@ -105,7 +108,13 @@ func (n *haUpdaterNode) server(t *testing.T) *httptest.Server {
 		}
 		switch r.Method {
 		case http.MethodPost:
+			n.mu.Lock()
+			af := n.autoFinish
+			n.mu.Unlock()
 			n.start()
+			if af {
+				n.finish()
+			}
 			writeJSONH(w, map[string]bool{"ok": true})
 		case http.MethodGet:
 			n.mu.Lock()
@@ -125,6 +134,33 @@ func (n *haUpdaterNode) snapshot() ([]control.HAConfig, int) {
 	out := make([]control.HAConfig, len(n.haConfigs))
 	copy(out, n.haConfigs)
 	return out, n.started
+}
+
+// TestUpdateFastCompletion ensures a node whose update completes before the
+// controller's first status poll does not stall the serialized job: the
+// phase machine must fall through to the health gate. Regression: it once
+// sat in the "start" phase until the full 10-minute timeout.
+func TestUpdateFastCompletion(t *testing.T) {
+	node := newHAUpdaterNode("tok")
+	node.autoFinish = true
+	srv := node.server(t)
+	defer srv.Close()
+
+	fleet := NewFleet("")
+	originalWait := haFailoverWait
+	haFailoverWait = 100 * time.Millisecond
+	defer func() { haFailoverWait = originalWait }()
+	if err := fleet.Add(context.Background(), InstanceConfig{ID: "a", URL: srv.URL, Token: "tok"}); err != nil {
+		t.Fatal(err)
+	}
+	fleet.SetReleaseChannelDefault("stable")
+	if _, err := fleet.StartUpdates(context.Background(), "stable"); err != nil {
+		t.Fatalf("StartUpdates: %v", err)
+	}
+	waitFor(t, 30*time.Second, func() bool {
+		st := fleet.UpdateJob()
+		return !st.Running && st.Completed == 1
+	}, "instant-completion update stalled the job")
 }
 
 // TestUpdateDegradesHAPriority verifies that when an HA-enabled update starts
