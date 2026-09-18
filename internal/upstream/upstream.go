@@ -191,8 +191,15 @@ func NewDoHWithBootstrap(endpoint string, timeout time.Duration, bootstrap Resol
 		tr.DialContext = bootstrapDialContext(bootstrap, timeout)
 	}
 	return &DoHResolver{
-		endpoint:  endpoint,
-		client:    &http.Client{Timeout: timeout, Transport: tr},
+		endpoint: endpoint,
+		client: &http.Client{
+			Timeout:   timeout,
+			Transport: tr,
+			// Never follow a redirect: it would move the query to a host the
+			// operator never configured, and Go follows https->http. The
+			// configured endpoint must be the one that answers.
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		},
 		bootstrap: bootstrap,
 	}
 }
@@ -209,6 +216,9 @@ func bootstrapDialContext(bootstrap Resolver, timeout time.Duration) func(ctx co
 			return nil, err
 		}
 		if net.ParseIP(host) != nil {
+			if blockedUpstreamIP(net.ParseIP(host)) {
+				return nil, fmt.Errorf("refusing link-local/metadata upstream address %s", host)
+			}
 			return d.DialContext(ctx, network, addr)
 		}
 		ips := bootstrapLookupIP(ctx, bootstrap, host)
@@ -217,6 +227,12 @@ func bootstrapDialContext(bootstrap Resolver, timeout time.Duration) func(ctx co
 		}
 		var lastErr error
 		for _, ip := range ips {
+			// A name the bootstrap resolves into link-local space (metadata
+			// service, DNS rebinding) is never a legitimate DoH endpoint.
+			if blockedUpstreamIP(ip) {
+				lastErr = fmt.Errorf("refusing link-local/metadata upstream address %s", ip)
+				continue
+			}
 			c, derr := d.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
 			if derr == nil {
 				return c, nil
@@ -225,6 +241,18 @@ func bootstrapDialContext(bootstrap Resolver, timeout time.Duration) func(ctx co
 		}
 		return nil, lastErr
 	}
+}
+
+// blockedUpstreamIP reports whether ip must never be dialled as an upstream:
+// link-local (169.254.0.0/16 and fe80::/10, where cloud metadata services
+// live) and the unspecified address. Loopback and RFC1918 stay allowed — a
+// resolver legitimately forwards to a LAN or local upstream; the guard exists
+// to stop the control plane, a policy override or a DNS answer from aiming
+// blipd at the metadata service.
+// ponytail: spec-time check rejects literal IPs, dial-time check covers
+// resolved hostnames; an RFC1918 target stays allowed on purpose.
+func blockedUpstreamIP(ip net.IP) bool {
+	return ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified()
 }
 
 // bootstrapLookupIP resolves A and AAAA for host through r, tolerating a
@@ -395,10 +423,27 @@ func ParseSpec(spec string) ([]Spec, error) {
 			}
 			return nil, fmt.Errorf("upstream: unrecognized spec %q", tok)
 		}
+		// Reject literal link-local/metadata targets at config time so the
+		// failure names the spec instead of surfacing as a dial error later.
+		if ip := net.ParseIP(specHost(s.Address)); ip != nil && blockedUpstreamIP(ip) {
+			return nil, fmt.Errorf("upstream: %s: refusing link-local/metadata address %s", tok, ip)
+		}
 		out[i] = s
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Priority < out[j].Priority })
 	return out, nil
+}
+
+// specHost returns the host part of a Spec address: "host:port" for udp/tls,
+// "host/path" for doh.
+func specHost(addr string) string {
+	if i := strings.IndexByte(addr, '/'); i >= 0 {
+		addr = addr[:i]
+	}
+	if host, _, err := net.SplitHostPort(addr); err == nil {
+		return host
+	}
+	return strings.TrimSuffix(strings.TrimPrefix(addr, "["), "]")
 }
 
 // isBareUDP reports whether an un-schemed spec token is unambiguous as a UDP

@@ -9,6 +9,7 @@ import (
 	"container/list"
 	"context"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -67,7 +68,7 @@ func New(ttlCap time.Duration, maxEntries int) *Cache {
 // building it allocates nothing (unlike a formatted string) and lookups hash
 // a few fixed words instead of re-hashing the whole encoded name.
 type Key struct {
-	Name   string // FQDN, exactly as queried (case preserved)
+	Name   string // FQDN, lowercased (DNS names are case-insensitive; 0x20-mixed case must not mint extra entries)
 	Label  string // upstream partition ("" = default); never parsed, only compared
 	QType  uint16
 	QClass uint16
@@ -79,7 +80,7 @@ func KeyOf(m *dns.Msg) Key {
 		return Key{}
 	}
 	q := m.Question[0]
-	return Key{Name: q.Name, QType: q.Qtype, QClass: q.Qclass}
+	return Key{Name: strings.ToLower(q.Name), QType: q.Qtype, QClass: q.Qclass}
 }
 
 // String renders the key as "name|qtype|qclass|label". Not used on the cache
@@ -195,6 +196,13 @@ copy:
 // existing key refreshes its value and TTL but preserves its hit count.
 func (c *Cache) Set(k Key, m *dns.Msg) {
 	if k.Name == "" || m == nil {
+		return
+	}
+	// Only NOERROR and NXDOMAIN are cacheable. A transient SERVFAIL/REFUSED
+	// carries no TTL, so it would be pinned for minTTL's 30s fallback and keep
+	// every client on that upstream view broken for the whole window
+	// (RFC 9520 §5: do not cache SERVFAIL).
+	if m.Rcode != dns.RcodeSuccess && m.Rcode != dns.RcodeNameError {
 		return
 	}
 	now := c.now()

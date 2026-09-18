@@ -229,3 +229,43 @@ func TestCoalesceSeparatesUpstreamPartitions(t *testing.T) {
 		t.Errorf("expected one fetch per upstream partition, got %d", calls)
 	}
 }
+
+// A SERVFAIL/REFUSED answer carries no TTL: caching it would pin the failure
+// for minTTL's 30s fallback and keep every client on that upstream view broken
+// for the whole window (RFC 9520 §5).
+func TestSetSkipsFailureRcodes(t *testing.T) {
+	c := New(time.Hour, 0)
+	for _, rc := range []int{dns.RcodeServerFailure, dns.RcodeRefused, dns.RcodeNotImplemented} {
+		m := mkMsg("fail.test", 60)
+		m.Rcode = rc
+		k := KeyOf(m)
+		c.Set(k, m)
+		if _, ok := c.Get(k); ok {
+			t.Errorf("rcode %s must not be cached", dns.RcodeToString[rc])
+		}
+	}
+	for _, rc := range []int{dns.RcodeSuccess, dns.RcodeNameError} {
+		m := mkMsg("ok.test", 60)
+		m.Rcode = rc
+		k := KeyOf(m)
+		c.Set(k, m)
+		if _, ok := c.Get(k); !ok {
+			t.Errorf("rcode %s should still be cached", dns.RcodeToString[rc])
+		}
+	}
+}
+
+// DNS names are case-insensitive, so 0x20-mixed-case queries must share one
+// entry instead of minting a cache miss (and an upstream fetch) per casing.
+func TestKeyOfLowercasesName(t *testing.T) {
+	upper := KeyOf(mkMsg("Example.COM", 60))
+	lower := KeyOf(mkMsg("example.com", 60))
+	if upper != lower {
+		t.Fatalf("keys differ by case: %+v vs %+v", upper, lower)
+	}
+	c := New(time.Hour, 0)
+	c.Set(upper, mkMsg("Example.COM", 60))
+	if _, ok := c.Get(lower); !ok {
+		t.Error("mixed-case lookup should hit the lowercased entry")
+	}
+}

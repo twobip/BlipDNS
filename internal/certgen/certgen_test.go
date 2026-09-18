@@ -131,3 +131,55 @@ func TestEnsureFilesInMemoryFallback(t *testing.T) {
 		t.Fatalf("in-memory pair invalid: %v", err)
 	}
 }
+
+// A persisted pair that no longer covers the identity this node serves — a VIP
+// added later, a hostname change — must be regenerated rather than served
+// unverifiable for the rest of its 10-year life.
+func TestEnsureFilesRegeneratesOnMissingSAN(t *testing.T) {
+	dir := t.TempDir()
+	certPath := filepath.Join(dir, "doh-cert.pem")
+	keyPath := filepath.Join(dir, "doh-key.pem")
+
+	first, _, _, err := EnsureFiles(certPath, keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, _, persisted, err := EnsureFiles(certPath, keyPath)
+	if err != nil || !persisted {
+		t.Fatalf("reuse of the persisted pair failed: persisted=%v err=%v", persisted, err)
+	}
+	if string(again) != string(first) {
+		t.Fatal("unchanged identity must reuse the persisted pair")
+	}
+
+	third, _, _, err := EnsureFiles(certPath, keyPath, "192.0.2.77")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(third) == string(first) {
+		t.Fatal("expected regeneration when the configured SAN is not covered")
+	}
+	leaf := parseLeaf(t, third)
+	found := false
+	for _, ip := range leaf.IPAddresses {
+		if ip.String() == "192.0.2.77" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("regenerated cert SANs = %v, want 192.0.2.77", leaf.IPAddresses)
+	}
+}
+
+func parseLeaf(t *testing.T, certPEM []byte) *x509.Certificate {
+	t.Helper()
+	block, _ := pem.Decode(certPEM)
+	if block == nil {
+		t.Fatal("no certificate PEM")
+	}
+	leaf, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return leaf
+}

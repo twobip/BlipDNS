@@ -29,7 +29,7 @@ const DefaultAction = ActionNXDOMAIN
 type Policy struct {
 	ID          string      `json:"id" yaml:"id"`
 	Networks    []string    `json:"networks" yaml:"networks"` // CIDR strings
-	Clients     []string    `json:"clients" yaml:"clients"`   // DoH client IDs (exact match, e.g. "/dns-query/phone")
+	Clients     []string    `json:"clients" yaml:"clients"`   // DoH client IDs: exact match on the /dns-query/<id> segment (prefix optional); only applies to clients also inside Networks
 	Allow       []string    `json:"allow" yaml:"allow"`       // whitelist (exact/suffix/*.wild)
 	Block       []string    `json:"block" yaml:"block"`       // blacklist (exact/suffix/*.wild)
 	BlockAction BlockAction `json:"block_action" yaml:"block_action"`
@@ -211,6 +211,10 @@ func (s *Store) rebuildLocked() {
 			nets = append(nets, netEntry{net: ipnet, policy: cp})
 		}
 		for _, c := range cp.Clients {
+			// Accept the documented "/dns-query/<id>" form as well as the bare
+			// id: clientIDFromPath yields the bare path segment, so a policy
+			// written with the prefix would otherwise never match.
+			c = strings.TrimPrefix(strings.TrimSpace(c), "/dns-query/")
 			if c != "" {
 				byClient[c] = cp
 			}
@@ -268,13 +272,15 @@ func (s *Store) lookup(ip net.IP, clientID string) *compiledPolicy {
 		if p, ok := s.byClient[clientID]; ok {
 			// A DoH client-ID is self-asserted (no auth), so it only selects
 			// its policy when the source IP also falls inside that policy's
-			// networks (or the policy has none). Otherwise anyone could claim
-			// a permissive ID to escape their network's policy.
+			// networks. A policy with no networks never matches by ID alone:
+			// otherwise anyone could claim an ID whose policy carries an
+			// allowlist (escaping the global blocklist) or another client's
+			// identity. Scope an ID policy with Networks to use it.
 			nip := ip
 			if ip4 := ip.To4(); ip4 != nil {
 				nip = ip4
 			}
-			if len(p.nets) == 0 || netsContain(p.nets, nip) {
+			if len(p.nets) > 0 && netsContain(p.nets, nip) {
 				return p
 			}
 		}

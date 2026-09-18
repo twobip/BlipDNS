@@ -14,6 +14,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -171,7 +172,7 @@ func (s *Server) handleDoH(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if len(v) > maxDNSQueryParam {
-			http.Error(w, "dns parameter too large", http.StatusRequestEntityTooLarge)
+			http.Error(w, "dns parameter too large", http.StatusRequestURITooLong)
 			return
 		}
 		// RFC 4648 URL-safe base64; RawURLEncoding tolerates missing padding.
@@ -207,6 +208,7 @@ func (s *Server) handleDoH(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	default:
+		w.Header().Set("Allow", "GET, POST")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
@@ -220,9 +222,36 @@ func (s *Server) handleDoH(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/dns-message")
-	w.Header().Set("Cache-Control", "max-age=300")
+	// RFC 8484 §5.1: HTTP freshness must not exceed the smallest answer TTL.
+	// Answers here are per-client (policy/blocklist views), so they are also
+	// marked private — a shared intermediary cache must not hand one client's
+	// view to another.
+	if age := dohMaxAge(resp); age > 0 {
+		w.Header().Set("Cache-Control", "max-age="+strconv.FormatUint(uint64(age), 10)+", private")
+	} else {
+		w.Header().Set("Cache-Control", "no-store")
+	}
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(buf)
+}
+
+// dohMaxAge is the HTTP freshness (seconds) to advertise for a DoH response:
+// the smallest TTL in the answer section, or in the authority section for a
+// negative reply (the SOA of an NXDOMAIN). Zero means there is no TTL to
+// promise, so the caller answers "no-store" (RFC 8484 §5.1).
+func dohMaxAge(resp *dns.Msg) uint32 {
+	min, seen := uint32(0), false
+	for _, sec := range [][]dns.RR{resp.Answer, resp.Ns} {
+		for _, rr := range sec {
+			if t := rr.Header().Ttl; !seen || t < min {
+				min, seen = t, true
+			}
+		}
+	}
+	if !seen {
+		return 0
+	}
+	return min
 }
 
 // ServeDNS implements dns.Handler for classic DNS.
@@ -549,15 +578,19 @@ func (s *Server) Start() error {
 
 	if s.cfg.DoHTLS {
 		if s.cfg.TLSCert != nil {
-			tlsCfg := &tls.Config{
+			// Serve TLS through http.Server (not a hand-decorated tls.Listen)
+			// so HTTP/2 is set up and advertised via ALPN: a bare tls.Listen
+			// passes the raw conns to Serve() with no h2 support at all.
+			// certFile/keyFile are empty because TLSConfig carries the pair.
+			s.doch.TLSConfig = &tls.Config{
 				Certificates: []tls.Certificate{*s.cfg.TLSCert},
 				MinVersion:   tls.VersionTLS12,
 			}
-			ln, err := tls.Listen("tcp", s.cfg.DoHAddr, tlsCfg)
+			ln, err := net.Listen("tcp", s.cfg.DoHAddr)
 			if err != nil {
-				return fmt.Errorf("blipd: doh tls listen: %w", err)
+				return fmt.Errorf("blipd: doh listen: %w", err)
 			}
-			return s.doch.Serve(ln)
+			return s.doch.ServeTLS(ln, "", "")
 		}
 		if s.cfg.CertFile != "" && s.cfg.KeyFile != "" {
 			return s.doch.ListenAndServeTLS(s.cfg.CertFile, s.cfg.KeyFile)

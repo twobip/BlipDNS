@@ -124,7 +124,10 @@ func main() {
 		} else {
 			certPath := filepath.Join(cfg.TLSDir, "doh-cert.pem")
 			keyPath := filepath.Join(cfg.TLSDir, "doh-key.pem")
-			certPEM, keyPEM, persisted, err := certgen.EnsureFiles(certPath, keyPath)
+			// A persisted pair is reused only while it still covers the names
+			// this node serves (own addresses, hostname, cfg.DoHSANs), so a
+			// cert that predates an address change is regenerated on restart.
+			certPEM, keyPEM, persisted, err := certgen.EnsureFiles(certPath, keyPath, cfg.DoHSANs...)
 			if err != nil {
 				log.Printf("blipd: self-signed DoH cert: %v (serving with in-memory cert this session)", err)
 			} else if !persisted {

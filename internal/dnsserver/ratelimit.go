@@ -31,9 +31,10 @@ type rlShard struct {
 }
 
 // rateLimiter enforces a per-client QPS limit. A qps of 0 disables limiting.
-// Clients are keyed by their identity (DoH client-id if present, else IP).
-// Buckets are evicted after they go idle to bound memory against spoofed/
-// rotating source IPs.
+// Clients are keyed by their source IP (post trusted-proxy resolution), never
+// by the self-asserted DoH client-id: an attacker could rotate the id to mint
+// fresh buckets. Buckets are evicted after they go idle to bound memory
+// against spoofed/rotating source IPs.
 type rateLimiter struct {
 	qpsVal   atomic.Int64 // 0 = disabled
 	burstVal atomic.Int64

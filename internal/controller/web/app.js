@@ -1372,6 +1372,7 @@ function newPolicy() {
   $("pol-back").style.display = "";
   $("pol-new").style.display = "none";
   $("p-id").value = ""; $("p-networks").value = ""; $("p-block").value = ""; $("p-allow").value = ""; $("p-action").value = "nxdomain"; $("p-upstream").value = ""; $("p-log").checked = true;
+  polEditClients = [];
 }
 function editPolicy(inst, pid, isDefault) {
   const d = polCache[inst]; if (!d) return;
@@ -1388,8 +1389,12 @@ function editPolicy(inst, pid, isDefault) {
   polEditing = pid;
   $("pol-back").onclick = () => { openPolicyModal(polInstance); };
   polEditDefault = !!isDefault;
+  // The editor has no field for DoH client IDs yet, but save PUTs the whole
+  // policy: carry the loaded value through so saving does not silently drop
+  // the client bindings.
+  polEditClients = p.clients || [];
 }
-let polEditDefault = false;
+let polEditDefault = false, polEditClients = [];
 async function savePolicy() {
   if (!polInstance) return;
   const p = {
@@ -1400,6 +1405,7 @@ async function savePolicy() {
     block_action: $("p-action").value,
     log: $("p-log").checked,
     upstream: $("p-upstream").value.trim(),
+    clients: polEditClients,
   };
   if (!p.id) return toast("policy id required", "err");
   try {

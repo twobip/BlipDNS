@@ -196,9 +196,10 @@ func TestServePolicyAllowlistBeatsGlobalBlocklist(t *testing.T) {
 func TestServePolicyAllowlistBeatsGlobalBlocklistByClientID(t *testing.T) {
 	srv := blSrv(t, "")
 	if err := srv.cfg.Store.SetPolicy(&filter.Policy{
-		ID:      "phone",
-		Clients: []string{"phone"},
-		Allow:   []string{"ads.example.net"},
+		ID:       "phone",
+		Networks: []string{"192.168.1.0/24"},
+		Clients:  []string{"phone"},
+		Allow:    []string{"ads.example.net"},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -305,7 +306,7 @@ func TestUpstreamMultiConstruct(t *testing.T) {
 func TestServeClientIDPolicyAndIdentity(t *testing.T) {
 	srv, _ := newTestServer(t)
 	if err := srv.cfg.Store.SetPolicy(&filter.Policy{
-		ID: "kids", Clients: []string{"kids-tablet"}, Block: []string{"cid.test"}, Log: true,
+		ID: "kids", Networks: []string{"10.0.0.0/8"}, Clients: []string{"kids-tablet"}, Block: []string{"cid.test"}, Log: true,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -322,8 +323,9 @@ func TestServeClientIDPolicyAndIdentity(t *testing.T) {
 	if got != "kids-tablet" {
 		t.Errorf("logged client = %q, want %q", got, "kids-tablet")
 	}
-	// Without the client ID the same IP is not blocked.
-	resp = srv.serve(context.Background(), net.ParseIP("10.0.0.1"), "", q)
+	// From outside the policy's networks, the same query is not blocked: the
+	// policy is scoped by network, and without the ID nothing else matches it.
+	resp = srv.serve(context.Background(), net.ParseIP("192.168.1.5"), "", q)
 	if resp.Rcode == dns.RcodeNameError {
 		t.Error("expected query without client id to pass")
 	}
@@ -350,7 +352,7 @@ func TestClientIDFromPath(t *testing.T) {
 func TestDoHHandlerClientIDRouting(t *testing.T) {
 	srv, _ := newTestServer(t)
 	if err := srv.cfg.Store.SetPolicy(&filter.Policy{
-		ID: "kids", Clients: []string{"kids-tablet"}, Block: []string{"cid.test"},
+		ID: "kids", Networks: []string{"192.0.2.0/24"}, Clients: []string{"kids-tablet"}, Block: []string{"cid.test"},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -375,9 +377,12 @@ func TestDoHHandlerClientIDRouting(t *testing.T) {
 		t.Errorf("doh client-id rc=%d want NXDOMAIN", resp.Rcode)
 	}
 
-	// Plain /dns-query -> not blocked.
+	// Plain /dns-query from outside the policy's network -> default policy,
+	// not blocked.
 	w2 := httptest.NewRecorder()
-	h.ServeHTTP(w2, httptest.NewRequest("GET", "/dns-query?dns="+dnsQ, nil))
+	req2 := httptest.NewRequest("GET", "/dns-query?dns="+dnsQ, nil)
+	req2.RemoteAddr = "198.51.100.9:1234"
+	h.ServeHTTP(w2, req2)
 	resp2 := new(dns.Msg)
 	if err := resp2.Unpack(w2.Body.Bytes()); err != nil {
 		t.Fatalf("unpack 2: %v", err)
@@ -709,5 +714,54 @@ func TestDoHHandlerPostTooLarge(t *testing.T) {
 	h.ServeHTTP(w, req)
 	if w.Code != http.StatusRequestEntityTooLarge {
 		t.Errorf("oversized POST status = %d, want %d", w.Code, http.StatusRequestEntityTooLarge)
+	}
+}
+
+// The DoH surface follows RFC 9110/8484 for the small things: 405 carries
+// Allow, an oversized GET parameter is 414 (a URI problem, not a body one),
+// and Cache-Control reflects the answer TTL instead of a fixed 5 minutes.
+func TestDoHHandlerProtocolDetails(t *testing.T) {
+	srv, _ := newTestServer(t)
+	h := srv.Handler()
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodPut, "/dns-query", nil))
+	if w.Code != http.StatusMethodNotAllowed {
+		t.Errorf("PUT status = %d, want 405", w.Code)
+	}
+	if got := w.Header().Get("Allow"); got != "GET, POST" {
+		t.Errorf("405 Allow = %q, want \"GET, POST\"", got)
+	}
+
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/dns-query?dns="+strings.Repeat("A", maxDNSQueryParam+1), nil))
+	if w.Code != http.StatusRequestURITooLong {
+		t.Errorf("oversized dns param status = %d, want 414", w.Code)
+	}
+
+	q := new(dns.Msg)
+	q.SetQuestion("allowed.test.", dns.TypeA)
+	wire, err := q.Pack()
+	if err != nil {
+		t.Fatal(err)
+	}
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/dns-query?dns="+base64.RawURLEncoding.EncodeToString(wire), nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET status = %d, want 200", w.Code)
+	}
+	cc := w.Header().Get("Cache-Control")
+	if !strings.HasPrefix(cc, "max-age=") || !strings.HasSuffix(cc, ", private") {
+		t.Errorf("Cache-Control = %q, want max-age=<ttl>, private", cc)
+	}
+
+	// A reply with no TTL to promise (blocked, no SOA) is not cached at all.
+	q = new(dns.Msg)
+	q.SetQuestion("blocked.test.", dns.TypeA)
+	wire, _ = q.Pack()
+	w = httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/dns-query?dns="+base64.RawURLEncoding.EncodeToString(wire), nil))
+	if got := w.Header().Get("Cache-Control"); got != "no-store" {
+		t.Errorf("blocked reply Cache-Control = %q, want no-store", got)
 	}
 }

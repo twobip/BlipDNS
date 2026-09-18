@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"time"
 )
@@ -38,7 +39,7 @@ func Generate(extraHosts ...string) (certPEM, keyPEM []byte, err error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	hostname := hostname()
+	dnsNames, ipAddrs := expectedSANs(extraHosts)
 	tmpl := &x509.Certificate{
 		SerialNumber:          serial,
 		Subject:               pkix.Name{CommonName: "blipd", Organization: []string{"BlipDNS"}},
@@ -48,26 +49,9 @@ func Generate(extraHosts ...string) (certPEM, keyPEM []byte, err error) {
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		BasicConstraintsValid: true,
 		IsCA:                  false,
-		DNSNames:              []string{"localhost", hostname},
-		IPAddresses:           []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("::1")},
+		DNSNames:              dnsNames,
+		IPAddresses:           ipAddrs,
 	}
-	if hostname == "" {
-		tmpl.DNSNames = []string{"localhost"}
-	}
-	for _, h := range extraHosts {
-		h = strings.TrimSpace(h)
-		if h == "" {
-			continue
-		}
-		if ip := net.ParseIP(h); ip != nil {
-			tmpl.IPAddresses = append(tmpl.IPAddresses, ip)
-		} else {
-			tmpl.DNSNames = append(tmpl.DNSNames, h)
-		}
-	}
-	tmpl.IPAddresses = append(tmpl.IPAddresses, localIPs()...)
-	tmpl.DNSNames = dedupeStrings(tmpl.DNSNames)
-	tmpl.IPAddresses = dedupeIPs(tmpl.IPAddresses)
 
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
 	if err != nil {
@@ -82,19 +66,46 @@ func Generate(extraHosts ...string) (certPEM, keyPEM []byte, err error) {
 	return certPEM, keyPEM, nil
 }
 
+// expectedSANs returns the identities a self-signed DoH certificate must
+// cover: localhost, the machine hostname, any operator-configured extra hosts
+// (e.g. an HA VIP that whichever node is master serves) and the machine's own
+// non-loopback addresses. Generation and the on-disk reuse check both use it,
+// so a persisted cert that no longer covers the served identity is
+// regenerated instead of being served unverifiable for its whole lifetime.
+func expectedSANs(extraHosts []string) ([]string, []net.IP) {
+	names := []string{"localhost"}
+	if hn := hostname(); hn != "" {
+		names = append(names, hn)
+	}
+	ips := []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("::1")}
+	for _, h := range extraHosts {
+		h = strings.TrimSpace(h)
+		if h == "" {
+			continue
+		}
+		if ip := net.ParseIP(h); ip != nil {
+			ips = append(ips, ip)
+		} else {
+			names = append(names, h)
+		}
+	}
+	ips = append(ips, localIPs()...)
+	return dedupeStrings(names), dedupeIPs(ips)
+}
+
 // EnsureFiles returns a usable certificate/key pair, loading them from disk
 // when both paths exist and are valid, and otherwise generating a fresh pair
 // and persisting it (key written with 0600). persisted reports whether the
 // returned pair survives a restart. err is nil unless the pair is unusable
 // even after generation; a write failure returns the error alongside valid
 // in-memory PEMs so the caller can serve ephemerally instead of dying.
-func EnsureFiles(certPath, keyPath string) (certPEM, keyPEM []byte, persisted bool, err error) {
+func EnsureFiles(certPath, keyPath string, extraHosts ...string) (certPEM, keyPEM []byte, persisted bool, err error) {
 	if certPath != "" && keyPath != "" {
-		if c, k, lerr := load(certPath, keyPath); lerr == nil {
+		if c, k, lerr := load(certPath, keyPath, extraHosts); lerr == nil {
 			return c, k, true, nil
 		}
 	}
-	certPEM, keyPEM, gerr := Generate()
+	certPEM, keyPEM, gerr := Generate(extraHosts...)
 	if gerr != nil {
 		return nil, nil, false, gerr
 	}
@@ -111,12 +122,19 @@ func EnsureFiles(certPath, keyPath string) (certPEM, keyPEM []byte, persisted bo
 	if werr := os.WriteFile(keyPath, keyPEM, 0o600); werr != nil {
 		return certPEM, keyPEM, false, fmt.Errorf("self-signed key: write %s: %w", keyPath, werr)
 	}
+	// WriteFile does not change the mode of an existing file, so a key that
+	// predates this hardening would keep its loose bits after a regeneration.
+	if cerr := os.Chmod(keyPath, 0o600); cerr != nil {
+		return certPEM, keyPEM, false, fmt.Errorf("self-signed key: chmod %s: %w", keyPath, cerr)
+	}
 	return certPEM, keyPEM, true, nil
 }
 
 // load reads a persisted pair and validates it: both PEMs parse, the private
-// key matches the certificate, and the certificate is not expired.
-func load(certPath, keyPath string) ([]byte, []byte, error) {
+// key matches the certificate, the certificate is not expired, and it covers
+// the identity blipd serves today (hostname, own addresses, configured extra
+// hosts).
+func load(certPath, keyPath string, extraHosts []string) ([]byte, []byte, error) {
 	certPEM, err := os.ReadFile(certPath)
 	if err != nil {
 		return nil, nil, err
@@ -135,6 +153,9 @@ func load(certPath, keyPath string) ([]byte, []byte, error) {
 	}
 	if time.Now().After(cert.NotAfter) {
 		return nil, nil, fmt.Errorf("self-signed cert: expired")
+	}
+	if missing := missingSANs(cert, extraHosts); missing != "" {
+		return nil, nil, fmt.Errorf("self-signed cert: does not cover %s", missing)
 	}
 	keyBlock, _ := pem.Decode(keyPEM)
 	if keyBlock == nil {
@@ -167,6 +188,32 @@ func parsePrivateKey(der []byte) (privateKey, error) {
 		return nil, fmt.Errorf("unsupported private key type %T", k)
 	}
 	return nil, fmt.Errorf("unsupported private key encoding")
+}
+
+// missingSANs reports the first identity the persisted certificate fails to
+// cover, or "" when it covers them all. Without this check a cert generated
+// before an address existed (e.g. an HA VIP that only a master node holds)
+// would be served unverifiable for its entire multi-year lifetime.
+func missingSANs(cert *x509.Certificate, extraHosts []string) string {
+	wantNames, wantIPs := expectedSANs(extraHosts)
+	for _, n := range wantNames {
+		if !slices.Contains(cert.DNSNames, n) {
+			return n
+		}
+	}
+	for _, ip := range wantIPs {
+		found := false
+		for _, got := range cert.IPAddresses {
+			if got.Equal(ip) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return ip.String()
+		}
+	}
+	return ""
 }
 
 func hostname() string {

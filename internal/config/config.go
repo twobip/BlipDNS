@@ -23,6 +23,7 @@ type Config struct {
 	RateLimitQPS         int                       `yaml:"rate_limit_qps"`   // per-client DNS QPS limit (0 = unlimited; the controller can override live)
 	RateLimitBurst       int                       `yaml:"rate_limit_burst"` // per-client burst above QPS (0 = auto = QPS, min 1)
 	TLSDir               string                    `yaml:"tls_dir"`          // where a generated self-signed DoH cert/key are persisted
+	DoHSANs              []string                  `yaml:"doh_san"`          // extra DNS names/IPs the generated self-signed DoH cert must cover (e.g. an HA VIP); changing it regenerates the pair
 	AdminAddr            string                    `yaml:"admin_addr"`
 	AdminToken           string                    `yaml:"admin_token"`
 	TrustedProxies       []string                  `yaml:"trusted_proxies"` // CIDRs/IPs allowed to supply X-Forwarded-For to DoH

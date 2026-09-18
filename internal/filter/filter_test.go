@@ -93,11 +93,14 @@ func TestAllowed(t *testing.T) {
 		}
 	}
 
-	// A client-ID-scoped policy's allowlist applies only to its clients.
+	// A client-ID-scoped policy's allowlist applies only to its clients (and
+	// only from inside its networks — an ID is self-asserted, so it does not
+	// carry authority on its own).
 	cp := &Policy{
-		ID:      "phone",
-		Clients: []string{"phone", "tablet"},
-		Allow:   []string{"time.nist.gov"},
+		ID:       "phone",
+		Networks: []string{"10.0.0.0/8"},
+		Clients:  []string{"phone", "tablet"},
+		Allow:    []string{"time.nist.gov"},
 	}
 	if err := s.SetPolicy(cp); err != nil {
 		t.Fatal(err)
@@ -112,33 +115,64 @@ func TestAllowed(t *testing.T) {
 
 func TestClientIDPolicy(t *testing.T) {
 	p := &Policy{
-		ID:      "phone",
-		Clients: []string{"phone", "tablet"},
-		Block:   []string{"ads.example.com"},
+		ID:       "phone",
+		Networks: []string{"203.0.113.0/24"},
+		Clients:  []string{"phone", "tablet"},
+		Block:    []string{"ads.example.com"},
 	}
 	s := NewStore(nil)
 	if err := s.SetPolicy(p); err != nil {
 		t.Fatal(err)
 	}
-	// The client ID selects the policy regardless of the source IP.
+	// Inside the policy's networks the client ID selects the policy.
 	if blocked, _, _, _ := s.Classify(mustIP("203.0.113.7"), "phone", "ads.example.com"); !blocked {
 		t.Error("client 'phone' should be blocked")
 	}
 	if blocked, _, _, _ := s.Classify(mustIP("203.0.113.7"), "tablet", "ads.example.com"); !blocked {
 		t.Error("client 'tablet' should be blocked")
 	}
-	// An unknown client ID falls back to the default (no block).
-	if blocked, _, _, _ := s.Classify(mustIP("203.0.113.7"), "", "ads.example.com"); blocked {
+	// An unknown client ID from outside the policy's networks falls back to
+	// the default (no block).
+	if blocked, _, _, _ := s.Classify(mustIP("198.51.100.7"), "", "ads.example.com"); blocked {
 		t.Error("unknown client should not be blocked")
 	}
-	if blocked, _, _, _ := s.Classify(mustIP("203.0.113.7"), "desktop", "ads.example.com"); blocked {
+	if blocked, _, _, _ := s.Classify(mustIP("198.51.100.7"), "desktop", "ads.example.com"); blocked {
 		t.Error("unknown client id should not be blocked")
+	}
+}
+
+// A client-ID-only policy (no networks) must never match: the ID is
+// self-asserted, so honouring it would let any source claim that policy —
+// including an allowlist that overrides the global blocklist.
+func TestClientIDWithoutNetworksDoesNotMatch(t *testing.T) {
+	p := &Policy{ID: "kids", Clients: []string{"kids-tablet"}, Allow: []string{"ads.example.com"}, Block: []string{"games.example.com"}}
+	s := NewStore(nil)
+	if err := s.SetPolicy(p); err != nil {
+		t.Fatal(err)
+	}
+	if blocked, _, _, _ := s.Classify(mustIP("198.51.100.9"), "kids-tablet", "games.example.com"); blocked {
+		t.Error("nets-less client-ID policy must not select by ID alone")
+	}
+	if s.Allowed(mustIP("198.51.100.9"), "kids-tablet", "ads.example.com") {
+		t.Error("nets-less client-ID policy must not grant its allowlist by ID alone")
+	}
+}
+
+// The documented "/dns-query/<id>" spelling is accepted as well as the bare id.
+func TestClientIDAcceptsDnsQueryPrefix(t *testing.T) {
+	p := &Policy{ID: "kids", Networks: []string{"10.0.0.0/8"}, Clients: []string{"/dns-query/kids-tablet"}, Block: []string{"games.example.com"}}
+	s := NewStore(nil)
+	if err := s.SetPolicy(p); err != nil {
+		t.Fatal(err)
+	}
+	if blocked, _, _, _ := s.Classify(mustIP("10.0.0.5"), "kids-tablet", "games.example.com"); !blocked {
+		t.Error("client id written with the /dns-query/ prefix should still match")
 	}
 }
 
 func TestClientIDBeatsNetwork(t *testing.T) {
 	netp := &Policy{ID: "lan", Networks: []string{"192.168.1.0/24"}, Allow: []string{"ads.example.com"}}
-	idp := &Policy{ID: "kids", Clients: []string{"kids"}, Block: []string{"ads.example.com"}}
+	idp := &Policy{ID: "kids", Networks: []string{"192.168.1.128/25"}, Clients: []string{"kids"}, Block: []string{"ads.example.com"}}
 	s := NewStore(nil)
 	if err := s.SetPolicy(netp); err != nil {
 		t.Fatal(err)
@@ -146,10 +180,12 @@ func TestClientIDBeatsNetwork(t *testing.T) {
 	if err := s.SetPolicy(idp); err != nil {
 		t.Fatal(err)
 	}
-	// Same IP: the network policy allows, but the client-ID policy blocks.
-	if blocked, _, _, _ := s.Classify(mustIP("192.168.1.5"), "kids", "ads.example.com"); !blocked {
+	// Inside the ID policy's network: the client ID selects it and blocks,
+	// ahead of the wider network policy that would have allowed.
+	if blocked, _, _, _ := s.Classify(mustIP("192.168.1.200"), "kids", "ads.example.com"); !blocked {
 		t.Error("client ID should take precedence over network policy")
 	}
+	// Outside it, only the network policy applies (allow, no block).
 	if blocked, _, _, _ := s.Classify(mustIP("192.168.1.5"), "", "ads.example.com"); blocked {
 		t.Error("network policy should allow without client ID")
 	}

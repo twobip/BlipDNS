@@ -646,3 +646,46 @@ func TestDoHBootstrapResolve(t *testing.T) {
 		t.Errorf("bootstrap was never asked to resolve the DoH host; asked = %v", bs.asked)
 	}
 }
+
+// Literal link-local/metadata targets are refused when the spec is parsed, so a
+// bad config or a pushed upstream fails where the operator can see it.
+func TestParseSpecRejectsLinkLocal(t *testing.T) {
+	for _, spec := range []string{
+		"udp://169.254.169.254:53",
+		"udp://169.254.169.254",
+		"https://169.254.169.254/dns-query",
+		"tls://[fe80::1]:853",
+	} {
+		if _, err := ParseSpec(spec); err == nil {
+			t.Errorf("ParseSpec(%q) accepted a link-local/metadata address", spec)
+		}
+	}
+	// LAN, loopback and public upstreams stay allowed: forwarding to a local
+	// or internal resolver is a normal deployment, not an attack.
+	for _, spec := range []string{
+		"udp://192.168.30.1:53",
+		"udp://127.0.0.1:5353",
+		"https://dns.google/dns-query",
+	} {
+		if _, err := ParseSpec(spec); err != nil {
+			t.Errorf("ParseSpec(%q) = %v, want accepted", spec, err)
+		}
+	}
+}
+
+// The dial-time guard covers names (metadata service, DNS rebinding) that only
+// resolve into link-local space after the fact.
+func TestBlockedUpstreamIP(t *testing.T) {
+	blocked := []string{"169.254.169.254", "fe80::1", "0.0.0.0", "::"}
+	for _, s := range blocked {
+		if !blockedUpstreamIP(net.ParseIP(s)) {
+			t.Errorf("%s should be blocked as an upstream target", s)
+		}
+	}
+	allowed := []string{"1.1.1.1", "192.168.30.1", "127.0.0.1", "::1", "2001:4860:4860::8888"}
+	for _, s := range allowed {
+		if blockedUpstreamIP(net.ParseIP(s)) {
+			t.Errorf("%s should stay allowed as an upstream target", s)
+		}
+	}
+}
