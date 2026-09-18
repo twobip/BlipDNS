@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/miekg/dns"
@@ -82,6 +83,10 @@ type Server struct {
 	once         sync.Once
 	// rl enforces the per-client DNS query rate limit (configurable live).
 	rl *rateLimiter
+	// cert is the certificate the DoH listener serves. Held atomically so a
+	// re-derived pair (an HA VIP configured after startup) is picked up by the
+	// next handshake without a restart.
+	cert atomic.Pointer[tls.Certificate]
 	// rec holds static local DNS records (A/AAAA/CNAME) answered before cache/upstream.
 	rec *RecordStore
 	// overrides memoizes per-policy upstream resolvers by spec string.
@@ -123,6 +128,9 @@ func New(cfg Config) (*Server, error) {
 		cacheSize:      cfg.CacheSize,
 		trustedProxies: trusted,
 	}
+	if cfg.TLSCert != nil {
+		s.cert.Store(cfg.TLSCert)
+	}
 	// Let the management API toggle the optional plain-HTTP DoH listener, the
 	// per-client rate limit, the conditional-forwarding upstream config, and
 	// the response cache (size / purge) at runtime.
@@ -146,6 +154,14 @@ func (s *Server) ControlServer() *control.Server { return s.ctrl }
 
 // SetMgmtToken enables the management API with the given bearer token.
 func (s *Server) SetMgmtToken(tok string) { s.ctrl.SetToken(tok) }
+
+// SetTLSCert swaps the certificate served on the DoH listener. The next TLS
+// handshake uses it; no restart and no listener bounce. Nil is ignored.
+func (s *Server) SetTLSCert(c *tls.Certificate) {
+	if c != nil {
+		s.cert.Store(c)
+	}
+}
 
 // SetBlockLogger registers a callback invoked for blocked queries when the
 // matching policy has Log enabled.
@@ -577,14 +593,20 @@ func (s *Server) Start() error {
 	}
 
 	if s.cfg.DoHTLS {
-		if s.cfg.TLSCert != nil {
+		if s.cert.Load() != nil {
 			// Serve TLS through http.Server (not a hand-decorated tls.Listen)
 			// so HTTP/2 is set up and advertised via ALPN: a bare tls.Listen
 			// passes the raw conns to Serve() with no h2 support at all.
-			// certFile/keyFile are empty because TLSConfig carries the pair.
+			// GetCertificate reads the current pair, so a certificate re-derived
+			// at runtime (VIP configured after startup) is served immediately.
 			s.doch.TLSConfig = &tls.Config{
-				Certificates: []tls.Certificate{*s.cfg.TLSCert},
-				MinVersion:   tls.VersionTLS12,
+				MinVersion: tls.VersionTLS12,
+				GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+					if c := s.cert.Load(); c != nil {
+						return c, nil
+					}
+					return nil, fmt.Errorf("blipd: no DoH certificate loaded")
+				},
 			}
 			ln, err := net.Listen("tcp", s.cfg.DoHAddr)
 			if err != nil {

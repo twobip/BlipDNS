@@ -143,3 +143,34 @@ func TestHAStatusReportsUpdating(t *testing.T) {
 		t.Fatal("expected Updating=false after update completed")
 	}
 }
+
+// The VIP is a DoH identity: configuring HA must hand it to the certificate
+// refresher (so both nodes carry a VIP SAN, including the one that only holds
+// it after failover), and VirtualIP must expose it as a bare address.
+func TestSetHAConfigRefreshesCertAndExposesVIP(t *testing.T) {
+	dir := t.TempDir()
+	m := NewManager(filepath.Join(dir, "keepalived.conf"))
+
+	if got := m.VirtualIP(); got != "" {
+		t.Fatalf("VirtualIP() = %q before configuration, want empty", got)
+	}
+	calls := 0
+	m.SetCertRefresher(func() { calls++ })
+
+	cfg := control.HAConfig{Enabled: false, VirtualIP: "192.0.2.99/24"}
+	if err := m.SetHAConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Errorf("cert refresher called %d times, want 1", calls)
+	}
+	if got := m.VirtualIP(); got != "192.0.2.99" {
+		t.Errorf("VirtualIP() = %q, want 192.0.2.99", got)
+	}
+
+	// The VIP survives a restart: the refresher's startup path reads it back.
+	restored := NewManager(filepath.Join(dir, "keepalived.conf"))
+	if got := restored.VirtualIP(); got != "192.0.2.99" {
+		t.Errorf("restored VirtualIP() = %q, want 192.0.2.99", got)
+	}
+}

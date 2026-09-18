@@ -41,6 +41,9 @@ type Manager struct {
 	// updateController is checked by HAStatus() to report whether the local
 	// node is mid-self-update; nil-safe (no update controller wired).
 	updateController control.UpdateStatusReporter
+	// certRefresher, when set, re-derives the DoH certificate after the HA
+	// config changes (the VIP is a name the cert must cover). Nil-safe.
+	certRefresher func()
 }
 
 // NewManager creates a manager using the default persistent state path only
@@ -82,8 +85,35 @@ func (m *Manager) SetHAConfig(cfg control.HAConfig) error {
 	m.mu.Lock()
 	m.cfg = cfg
 	m.lastError = ""
+	refresh := m.certRefresher
 	m.mu.Unlock()
+	// The VIP is a DoH identity this node now serves, so the certificate must
+	// cover it — including on the node that never holds it until failover.
+	if refresh != nil {
+		refresh()
+	}
 	return nil
+}
+
+// SetCertRefresher registers a callback run whenever the node-local HA
+// configuration changes, so the DoH certificate can be re-derived for the VIP
+// without a restart.
+func (m *Manager) SetCertRefresher(fn func()) {
+	m.mu.Lock()
+	m.certRefresher = fn
+	m.mu.Unlock()
+}
+
+// VirtualIP returns the configured VIP as a bare address ("" when unset), for
+// callers that must include it in a certificate's SANs.
+func (m *Manager) VirtualIP() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	ip, _, err := net.ParseCIDR(m.cfg.VirtualIP)
+	if err != nil {
+		return ""
+	}
+	return ip.String()
 }
 
 func (m *Manager) HAStatus() control.HAStatus {

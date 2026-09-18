@@ -110,9 +110,21 @@ func main() {
 		blockAction = cfg.Default.BlockAction
 	}
 
+	// The HA manager owns only the local keepalived configuration and is
+	// reachable through the authenticated management API. It is built before
+	// the TLS material so a VIP restored from disk is in the certificate SANs
+	// from the first handshake, and it notifies the server when the config
+	// changes so a VIP set later needs no restart.
+	haMgr := ha.NewManagerWithState("", cfg.StateFile)
+
 	// Materialise the TLS material for DoH. When doh_tls is enabled and no
 	// explicit cert/key files are given, blipd generates a self-signed cert
 	// (persisted under tls_dir so the fingerprint is stable across restarts).
+	dohSANs := func() []string {
+		// The HA VIP is served by whichever node is master, so both nodes must
+		// carry it in the certificate: one node holds it only at failover.
+		return append(append([]string{}, cfg.DoHSANs...), haMgr.VirtualIP())
+	}
 	var tlsCert *tls.Certificate
 	if cfg.DoHTLS {
 		if cfg.CertFile != "" && cfg.KeyFile != "" {
@@ -125,9 +137,9 @@ func main() {
 			certPath := filepath.Join(cfg.TLSDir, "doh-cert.pem")
 			keyPath := filepath.Join(cfg.TLSDir, "doh-key.pem")
 			// A persisted pair is reused only while it still covers the names
-			// this node serves (own addresses, hostname, cfg.DoHSANs), so a
-			// cert that predates an address change is regenerated on restart.
-			certPEM, keyPEM, persisted, err := certgen.EnsureFiles(certPath, keyPath, cfg.DoHSANs...)
+			// this node serves (own addresses, hostname, cfg.DoHSANs, the HA
+			// VIP), so a cert that predates an address change regenerates here.
+			certPEM, keyPEM, persisted, err := certgen.EnsureFiles(certPath, keyPath, dohSANs()...)
 			if err != nil {
 				log.Printf("blipd: self-signed DoH cert: %v (serving with in-memory cert this session)", err)
 			} else if !persisted {
@@ -173,10 +185,22 @@ func main() {
 	srv.SetBlockLogger(func(client, domain string) {
 		log.Printf("[block] %s -> %s", client, domain)
 	})
-	// The HA manager owns only the local keepalived configuration and is
-	// reachable through the authenticated management API.
-	haMgr := ha.NewManagerWithState("", cfg.StateFile)
 	srv.ControlServer().SetHAController(haMgr)
+	// A VIP arriving from the controller must reach the certificate without a
+	// restart: re-derive the pair (all SANs, including the VIP) and swap it in.
+	if cfg.DoHTLS && cfg.CertFile == "" && cfg.KeyFile == "" {
+		certPath := filepath.Join(cfg.TLSDir, "doh-cert.pem")
+		keyPath := filepath.Join(cfg.TLSDir, "doh-key.pem")
+		haMgr.SetCertRefresher(func() {
+			pair, err := certgen.EnsurePair(certPath, keyPath, dohSANs()...)
+			if err != nil {
+				log.Printf("blipd: refresh DoH cert: %v", err)
+				return
+			}
+			srv.SetTLSCert(pair)
+			log.Printf("blipd: DoH certificate refreshed (vip %q)", haMgr.VirtualIP())
+		})
+	}
 	upMgr := update.NewManager()
 	srv.ControlServer().SetUpdateController(upMgr)
 	haMgr.SetUpdateController(upMgr)

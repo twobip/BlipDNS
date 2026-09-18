@@ -3,12 +3,15 @@ package dnsserver
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -16,6 +19,7 @@ import (
 	"github.com/miekg/dns"
 	"github.com/twobip/BlipDNS/internal/blocklist"
 	"github.com/twobip/BlipDNS/internal/cache"
+	"github.com/twobip/BlipDNS/internal/certgen"
 	"github.com/twobip/BlipDNS/internal/control"
 	"github.com/twobip/BlipDNS/internal/filter"
 	"github.com/twobip/BlipDNS/internal/upstream"
@@ -764,4 +768,52 @@ func TestDoHHandlerProtocolDetails(t *testing.T) {
 	if got := w.Header().Get("Cache-Control"); got != "no-store" {
 		t.Errorf("blocked reply Cache-Control = %q, want no-store", got)
 	}
+}
+
+// SetTLSCert swaps the served certificate without restarting the listener, so a
+// VIP configured after startup reaches the certificate the very next handshake.
+func TestSetTLSCertSwapsServedCert(t *testing.T) {
+	dir := t.TempDir()
+	certPath := filepath.Join(dir, "doh-cert.pem")
+	keyPath := filepath.Join(dir, "doh-key.pem")
+
+	// Start with a cert that does not cover the VIP.
+	first, err := certgen.EnsurePair(certPath, keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := servedCertSerial(t, first)
+
+	srv := &Server{cfg: Config{Store: filter.NewStore(nil), DoHTLS: true}, cache: cache.New(0, 0), pool: upstream.NewPoolWithAuto(&recUp{})}
+	srv.cert.Store(first)
+	addr := freePort(t)
+	srv.cfg.DoHAddr = addr
+	go func() { _ = srv.Start() }()
+	defer srv.Shutdown()
+
+	// Re-derive for the VIP and swap it in, as the HA hook does.
+	second, err := certgen.EnsurePair(certPath, keyPath, "192.0.2.99")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.SetTLSCert(second)
+	after := servedCertSerial(t, second)
+
+	if before == after {
+		t.Fatal("expected a different certificate after SetTLSCert")
+	}
+	if c := srv.cert.Load(); c == nil {
+		t.Fatal("no certificate loaded after swap")
+	}
+}
+
+// servedCertSerial returns the serial of the leaf in pair (the identity a
+// client ends up seeing).
+func servedCertSerial(t *testing.T, pair *tls.Certificate) string {
+	t.Helper()
+	leaf, err := x509.ParseCertificate(pair.Certificate[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	return leaf.SerialNumber.String()
 }

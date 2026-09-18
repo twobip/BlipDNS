@@ -56,7 +56,7 @@ Per-server failover timeout flows **blipc UI → controller.yaml → blipd**:
 ## Conventions
 - `control.Server` handlers are registered on a mux in `internal/control/server.go`; add routes there, not ad hoc.
 - A DoH client-ID (`/dns-query/<id>`, `filter.Policy.Clients`) is self-asserted: it only selects a policy when the source IP is also inside that policy's `Networks`. An ID-only policy (no networks) never matches — scope ID policies with CIDRs. The `/dns-query/` prefix is optional in `Clients` entries.
-- `doh_san` in `blipd.yaml` lists extra DNS names/IPs the generated self-signed DoH cert must cover (e.g. an HA VIP); a persisted pair that does not cover them is regenerated on restart.
+- `doh_san` in `blipd.yaml` lists extra DNS names/IPs the generated self-signed DoH cert must cover; a persisted pair that does not cover them is regenerated on restart. The HA VIP is added automatically (from `ha.json` at startup, and on every HA config push — the served cert is swapped live via `GetCertificate`), so `doh_san` is only for other names.
 - Controller fleet config persists through `Fleet.*` setters (they save+push) — do not mutate `fleet` fields directly; use `SetDoHDefault`/`SetRateLimitQPSDefault` for startup seeding.
 - Per-instance overrides (`InstanceOverride`) are sparse diffs over the fleet default; clearing an override is represented by setting the field to its zero/nil value so it falls through to the fleet default.
 - `UpstreamServer.TimeoutSec` of 0 means "use the 5 second default" — never set it to 0 to mean "no timeout".

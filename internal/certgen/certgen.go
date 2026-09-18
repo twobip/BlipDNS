@@ -9,6 +9,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
@@ -64,6 +65,22 @@ func Generate(extraHosts ...string) (certPEM, keyPEM []byte, err error) {
 	}
 	keyPEM = pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
 	return certPEM, keyPEM, nil
+}
+
+// EnsurePair is EnsureFiles plus the parsed key pair, ready for a TLS listener.
+// Callers that must re-derive the certificate while running (an HA VIP that
+// only arrives from the controller after startup) call it again and swap the
+// result in.
+func EnsurePair(certPath, keyPath string, extraHosts ...string) (*tls.Certificate, error) {
+	certPEM, keyPEM, _, err := EnsureFiles(certPath, keyPath, extraHosts...)
+	if err != nil {
+		return nil, err
+	}
+	pair, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		return nil, err
+	}
+	return &pair, nil
 }
 
 // expectedSANs returns the identities a self-signed DoH certificate must
