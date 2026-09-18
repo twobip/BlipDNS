@@ -58,6 +58,11 @@ type Server struct {
 	// attacker burning guesses can't lock out the real operator (and a
 	// distributed guesser is still capped by the same small budget each).
 	adoptFails map[string]*adoptFail
+	// adoptedBy pins the management API to the controller that claimed the
+	// instance (peer IP at adoption time, persisted in the state file).
+	// Empty = unpinned (pre-pin state files, static-token setups).
+	// Loopback peers always bypass the pin so box-local reset keeps working.
+	adoptedBy string
 
 	// ctrls are the runtime pieces of blipd the management API drives,
 	// wired incrementally (DNS pieces at construction, host pieces later).
@@ -194,13 +199,15 @@ func (s *Server) ConfigureAdoption(stateFile, instanceID string) {
 	if stateFile != "" {
 		if b, err := os.ReadFile(stateFile); err == nil {
 			var st struct {
-				Adopted    bool   `json:"adopted"`
-				InstanceID string `json:"instance_id"`
-				Token      string `json:"token,omitempty"`
+				Adopted      bool   `json:"adopted"`
+				InstanceID   string `json:"instance_id"`
+				Token        string `json:"token,omitempty"`
+				ControllerIP string `json:"controller_ip,omitempty"`
 			}
 			if json.Unmarshal(b, &st) == nil && st.Adopted {
 				s.adopted = true
 				s.claimCode = ""
+				s.adoptedBy = st.ControllerIP
 				if st.Token != "" {
 					s.token = st.Token
 				}
@@ -242,11 +249,12 @@ func (s *Server) persistAdopted(adopted bool) {
 		return
 	}
 	b, _ := json.Marshal(struct {
-		Adopted    bool      `json:"adopted"`
-		InstanceID string    `json:"instance_id"`
-		Token      string    `json:"token,omitempty"`
-		AdoptedAt  time.Time `json:"adopted_at"`
-	}{true, s.instanceID, s.token, time.Now()})
+		Adopted      bool      `json:"adopted"`
+		InstanceID   string    `json:"instance_id"`
+		Token        string    `json:"token,omitempty"`
+		ControllerIP string    `json:"controller_ip,omitempty"`
+		AdoptedAt    time.Time `json:"adopted_at"`
+	}{Adopted: true, InstanceID: s.instanceID, Token: s.token, ControllerIP: s.adoptedBy, AdoptedAt: time.Now()})
 	// 0600: state holds the management token, so no group/world access.
 	if err := os.WriteFile(s.stateFile, b, 0600); err != nil {
 		log.Printf("blipd: warning: cannot persist adoption state to %s: %v", s.stateFile, err)
@@ -367,6 +375,12 @@ func (s *Server) auth(h http.HandlerFunc) http.HandlerFunc {
 		}
 		if !checkToken(r.Header.Get("Authorization"), s.token) {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		// Controller pin (set at claim-code adoption): only the adopting
+		// controller — or box-local access — may drive the management API.
+		if peer := adoptIP(r); s.adoptedBy != "" && peer != s.adoptedBy && !net.ParseIP(peer).IsLoopback() {
+			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
 		h(w, r)
@@ -914,7 +928,8 @@ func (s *Server) handleAdopt(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.adopted = true
-	s.claimCode = "" // one-time: invalidate immediately
+	s.claimCode = ""  // one-time: invalidate immediately
+	s.adoptedBy = src // pin the management API to the adopting controller
 	s.persistAdopted(true)
 	log.Printf("blipd: instance adopted via claim code")
 	writeJSON(w, AdoptResponse{Adopted: true, Token: s.token})
@@ -927,6 +942,7 @@ func (s *Server) handleAdoptReset(w http.ResponseWriter, r *http.Request) {
 	}
 	s.adoptMu.Lock()
 	s.adopted = false
+	s.adoptedBy = "" // unpin: the next adoption pins the new controller
 	s.adoptFails = make(map[string]*adoptFail)
 	s.persistAdopted(false)
 	s.genClaim()

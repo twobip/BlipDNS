@@ -403,6 +403,10 @@ if [ ! -f "$CONFIG_DIR/blipd.yaml" ]; then
 # dns_addr: address for classic DNS (UDP + TCP)
 # doh_addr: address for DNS-over-HTTPS (HTTPS)
 # admin_addr / admin_token: management API (used by the controller)
+# NOTE: give this host and your controller static IPs (or DHCP reservations).
+# Claim-code adoption pins the management API to the adopting controller's IP;
+# if the controller's IP later changes, reset adoption box-locally
+# (POST /api/v1/adopt/reset via 127.0.0.1) and re-adopt.
 dns_addr: "0.0.0.0:53"
 doh_addr: "0.0.0.0:443"
 doh_tls: true

@@ -714,3 +714,43 @@ func TestRecordsEndpoint(t *testing.T) {
 		t.Errorf("nil controller status = %d, want 503", resp.StatusCode)
 	}
 }
+
+// TestAdoptControllerPin verifies the management API is pinned to the
+// adopting controller: a valid token from any other non-loopback peer gets
+// 403, while the pinned controller, loopback, and unpinned instances pass.
+func TestAdoptControllerPin(t *testing.T) {
+	srv := NewServerWithBlocklist("tok", filter.NewStore(nil), cache.New(0, 0), &Counters{}, "blipd/test", blocklist.New())
+	h := srv.Handler()
+	// httptest.NewRequest fakes a non-loopback peer (192.0.2.1).
+	remote := func() int {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/stats", nil)
+		req.Header.Set("Authorization", "Bearer tok")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec.Code
+	}
+	if got := remote(); got != http.StatusOK {
+		t.Fatalf("unpinned status = %d, want 200", got)
+	}
+	srv.adoptedBy = "10.9.9.9" // a remote controller adopted us
+	if got := remote(); got != http.StatusForbidden {
+		t.Errorf("pinned non-controller status = %d, want 403", got)
+	}
+	srv.adoptedBy = "192.0.2.1" // the pinned controller itself
+	if got := remote(); got != http.StatusOK {
+		t.Errorf("pinned controller status = %d, want 200", got)
+	}
+	// Loopback always bypasses the pin (box-local reset keeps working).
+	ts := httptest.NewServer(h)
+	defer ts.Close()
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/v1/stats", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("loopback status = %d, want 200", resp.StatusCode)
+	}
+}
