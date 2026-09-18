@@ -17,7 +17,9 @@ const defaultRecordTTL = 60
 const maxRecordTTL = 7 * 24 * 3600
 
 // RecordStore holds static DNS records (A, AAAA, CNAME) answered locally by
-// blipd instead of being forwarded upstream. It implements control.RecordController.
+// blipd instead of being forwarded upstream. PTR queries for an IP present in
+// the records are synthesized locally from the matching A/AAAA entry, so LAN
+// reverse lookups never need to leave the box. It implements control.RecordController.
 //
 // Records whose domain begins with "*." are treated as wildcards: e.g.
 // "*.lan.twobip.com" answers any subdomain of lan.twobip.com (host.lan.twobip.com,
@@ -79,7 +81,8 @@ func (rs *RecordStore) GetRecords() ([]control.RecordEntry, error) {
 
 // Lookup answers a query from the local record store. Returns the response
 // message (with the question set) and true if a local record matched, or
-// false otherwise. Only A, AAAA and CNAME queries are answered locally.
+// false otherwise. A, AAAA and CNAME queries are answered locally; PTR
+// queries are synthesized from the A/AAAA entries (see lookupPTR).
 func (rs *RecordStore) Lookup(req *dns.Msg) (*dns.Msg, bool) {
 	if len(req.Question) == 0 {
 		return nil, false
@@ -88,6 +91,9 @@ func (rs *RecordStore) Lookup(req *dns.Msg) (*dns.Msg, bool) {
 	domain := strings.ToLower(strings.TrimSuffix(q.Name, "."))
 	if domain == "" {
 		return nil, false
+	}
+	if q.Qtype == dns.TypePTR {
+		return rs.lookupPTR(req, q.Name)
 	}
 
 	// An exact record always wins; otherwise fall back to the most specific
@@ -171,6 +177,89 @@ func (rs *RecordStore) Lookup(req *dns.Msg) (*dns.Msg, bool) {
 		// NODATA (NOERROR, no answers), not a fallthrough to upstream
 		// NXDOMAIN. resp is already an authoritative empty reply.
 		return resp, true
+	}
+	return nil, false
+}
+
+// lookupPTR synthesizes a PTR answer from the A/AAAA records already held: a
+// reverse query for an IP present in the local records returns the record
+// name(s). Unknown IPs and non-arpa names fall through (nil, false) so the
+// caller decides — serve() NXDOMAINs non-public reverse locally and forwards
+// the rest. Only exact records participate; a wildcard (*.lan) has no single
+// name to return, so it is skipped.
+// ponytail: linear scan over records per PTR query; build an IP index if the
+// local record set ever grows large.
+func (rs *RecordStore) lookupPTR(req *dns.Msg, qname string) (*dns.Msg, bool) {
+	ip, ok := ptrIPFromArpa(qname)
+	if !ok {
+		return nil, false
+	}
+	rs.mu.RLock()
+	defer rs.mu.RUnlock()
+	resp := new(dns.Msg)
+	resp.SetReply(req)
+	resp.Authoritative = true
+	resp.RecursionAvailable = true
+	for _, recs := range rs.records {
+		for _, r := range recs {
+			if t := strings.ToUpper(r.Type); t != "A" && t != "AAAA" {
+				continue
+			}
+			if rip := net.ParseIP(r.Value); rip == nil || !rip.Equal(ip) {
+				continue
+			}
+			ttl := uint32(defaultRecordTTL)
+			if r.TTL > 0 {
+				ttl = uint32(r.TTL)
+				if ttl > maxRecordTTL {
+					ttl = maxRecordTTL
+				}
+			}
+			resp.Answer = append(resp.Answer, &dns.PTR{
+				Hdr: dns.RR_Header{Name: qname, Rrtype: dns.TypePTR, Class: dns.ClassINET, Ttl: ttl},
+				Ptr: dns.Fqdn(strings.ToLower(strings.TrimSuffix(r.Domain, "."))),
+			})
+		}
+	}
+	if len(resp.Answer) == 0 {
+		return nil, false
+	}
+	return resp, true
+}
+
+// ptrIPFromArpa parses a reverse-DNS name ("4.30.168.192.in-addr.arpa.") into
+// the IP it denotes. Both v4 (in-addr.arpa) and v6 (ip6.arpa, 32 nibbles) are
+// handled; anything else returns false.
+func ptrIPFromArpa(name string) (net.IP, bool) {
+	n := strings.ToLower(strings.TrimSuffix(name, "."))
+	if rest, ok := strings.CutSuffix(n, ".in-addr.arpa"); ok {
+		parts := strings.Split(rest, ".")
+		if len(parts) != 4 {
+			return nil, false
+		}
+		for i, j := 0, len(parts)-1; i < j; i, j = i+1, j-1 {
+			parts[i], parts[j] = parts[j], parts[i]
+		}
+		if ip := net.ParseIP(strings.Join(parts, ".")); ip != nil && ip.To4() != nil {
+			return ip, true
+		}
+		return nil, false
+	}
+	if rest, ok := strings.CutSuffix(n, ".ip6.arpa"); ok {
+		nibbles := strings.Split(rest, ".")
+		if len(nibbles) != 32 {
+			return nil, false
+		}
+		for i, j := 0, len(nibbles)-1; i < j; i, j = i+1, j-1 {
+			nibbles[i], nibbles[j] = nibbles[j], nibbles[i]
+		}
+		var groups [8]string
+		for i := range groups {
+			groups[i] = strings.Join(nibbles[i*4:(i+1)*4], "")
+		}
+		if ip := net.ParseIP(strings.Join(groups[:], ":")); ip != nil {
+			return ip, true
+		}
 	}
 	return nil, false
 }

@@ -284,3 +284,56 @@ func TestRecordStoreWildcardAnswerOwnerIsQueriedName(t *testing.T) {
 		t.Errorf("A = %v, want 10.0.0.5", a.A)
 	}
 }
+
+func TestRecordStorePTRSynthesis(t *testing.T) {
+	rs := NewRecordStore()
+	if err := rs.SetRecords([]control.RecordEntry{
+		{Domain: "nas.lan.", Type: "A", Value: "192.168.30.10", TTL: 300},
+		{Domain: "nas6.lan.", Type: "AAAA", Value: "fd00::10", TTL: 300},
+		{Domain: "*.lan.", Type: "A", Value: "192.168.30.99", TTL: 300},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	ptrTarget := func(t *testing.T, resp *dns.Msg) string {
+		t.Helper()
+		if len(resp.Answer) != 1 {
+			t.Fatalf("answers = %d, want 1", len(resp.Answer))
+		}
+		ptr, ok := resp.Answer[0].(*dns.PTR)
+		if !ok {
+			t.Fatalf("answer type = %T, want *dns.PTR", resp.Answer[0])
+		}
+		return ptr.Ptr
+	}
+	// v4 reverse synthesizes from the A record.
+	resp, ok := rs.Lookup(q(t, "10.30.168.192.in-addr.arpa.", dns.TypePTR))
+	if !ok {
+		t.Fatal("expected v4 PTR synthesis")
+	}
+	if got := ptrTarget(t, resp); got != "nas.lan." {
+		t.Errorf("v4 PTR = %q, want nas.lan.", got)
+	}
+	// v6 reverse synthesizes from the AAAA record.
+	resp, ok = rs.Lookup(q(t, "0.1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.d.f.ip6.arpa.", dns.TypePTR))
+	if !ok {
+		t.Fatal("expected v6 PTR synthesis")
+	}
+	if got := ptrTarget(t, resp); got != "nas6.lan." {
+		t.Errorf("v6 PTR = %q, want nas6.lan.", got)
+	}
+	// Wildcard IPs have no single name: no synthesis, caller decides.
+	if _, ok := rs.Lookup(q(t, "99.30.168.192.in-addr.arpa.", dns.TypePTR)); ok {
+		t.Error("wildcard IP PTR should not synthesize")
+	}
+	// Unknown IP: no synthesis (serve() NXDOMAINs non-public ranges locally).
+	if _, ok := rs.Lookup(q(t, "11.30.168.192.in-addr.arpa.", dns.TypePTR)); ok {
+		t.Error("unknown IP PTR should fall through")
+	}
+	// Garbage: no synthesis.
+	if _, ok := rs.Lookup(q(t, "not-an-arpa-name.", dns.TypePTR)); ok {
+		t.Error("non-arpa PTR should fall through")
+	}
+	if _, ok := rs.Lookup(q(t, "1.2.in-addr.arpa.", dns.TypePTR)); ok {
+		t.Error("short arpa PTR should fall through")
+	}
+}

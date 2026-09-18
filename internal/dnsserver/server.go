@@ -385,6 +385,16 @@ func (s *Server) serve(ctx context.Context, clientIP net.IP, clientID string, re
 		}
 	}
 	resolver, matchedRoute := s.upstreamFor(q.Name, clientIP)
+	// Private reverse lookups never leave the box: a non-public IP has no
+	// public PTR, so forwarding it only burns upstream quota (and leaks LAN
+	// structure). An explicit conditional-forwarding route or per-policy
+	// upstream override still wins — the operator asked for it.
+	if q.Qtype == dns.TypePTR && !matchedRoute && upstreamOverride == "" {
+		if ip, ok := ptrIPFromArpa(q.Name); ok && !ip.IsGlobalUnicast() {
+			resp.Rcode = dns.RcodeNameError
+			return resp
+		}
+	}
 	if upstreamOverride != "" && !matchedRoute {
 		var err error
 		resolver, err = s.overrideResolver(upstreamOverride)
