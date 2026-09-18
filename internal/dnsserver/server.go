@@ -322,6 +322,13 @@ func (s *Server) serve(ctx context.Context, clientIP net.IP, clientID string, re
 		return resp
 	}
 	q := req.Question[0]
+	// Never forward CHAOS-class queries (version.bind, hostname.bind, …)
+	// upstream: they disclose the upstream's identity (PoP names) and a
+	// resolver has no CHAOS data of its own to give.
+	if q.Qclass == dns.ClassCHAOS {
+		resp.Rcode = dns.RcodeRefused
+		return resp
+	}
 	// The DNS wire format always carries the root dot ("google.com."); strip it
 	// so logs and the query log show the bare domain name.
 	domain := strings.TrimSuffix(q.Name, ".")

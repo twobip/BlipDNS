@@ -817,3 +817,20 @@ func servedCertSerial(t *testing.T, pair *tls.Certificate) string {
 	}
 	return leaf.SerialNumber.String()
 }
+
+// TestServeChaosRefused verifies CHAOS-class queries (version.bind, …) are
+// refused locally instead of being forwarded upstream, where they would
+// disclose the upstream's identity (PoP names).
+func TestServeChaosRefused(t *testing.T) {
+	srv, up := newTestServer(t)
+	q := new(dns.Msg)
+	q.SetQuestion("version.bind.", dns.TypeTXT)
+	q.Question[0].Qclass = dns.ClassCHAOS
+	resp := srv.serve(context.Background(), net.ParseIP("10.0.0.9"), "", q)
+	if resp.Rcode != dns.RcodeRefused {
+		t.Fatalf("CHAOS query rc=%d want REFUSED", resp.Rcode)
+	}
+	if up.calls != 0 {
+		t.Errorf("CHAOS query reached the upstream (%d calls)", up.calls)
+	}
+}
