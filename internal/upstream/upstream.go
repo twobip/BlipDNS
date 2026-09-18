@@ -106,19 +106,53 @@ func (r *TLSResolver) Resolve(ctx context.Context, q *dns.Msg) (*dns.Msg, error)
 	return nil, errUpstream(r.addr, err)
 }
 
-// errUpstream labels a network failure with the upstream address and strips
-// the ephemeral local socket that Go embeds in the message ("read udp
-// 127.0.0.1:50791->127.0.0.1:1: ..."), so the same failure always produces
-// the same string and can be grouped on the errors page.
-func errUpstream(addr string, err error) error {
-	msg := err.Error()
+// upErr labels an upstream failure with its endpoint and gives it a stable
+// message: the ephemeral local socket Go embeds in transport errors ("read
+// udp 127.0.0.1:50791->127.0.0.1:1: ...") is stripped so identical failures
+// group on the errors page, while the original error stays reachable through
+// Unwrap so callers can still classify it (timeouts, resets) with errors.Is
+// and errors.As.
+type upErr struct {
+	addr string
+	err  error
+}
+
+func (e *upErr) Error() string {
+	msg := e.err.Error()
+	if cleaned, ok := stripLocalSocket(msg); ok {
+		return cleaned
+	}
+	// No local socket to strip: keep the message as-is (it may already name
+	// the endpoint, e.g. a dial error or a *url.Error), only prepend the
+	// endpoint label when it is missing.
+	if e.addr == "" || strings.Contains(msg, e.addr) {
+		return msg
+	}
+	return e.addr + ": " + msg
+}
+
+func (e *upErr) Unwrap() error { return e.err }
+
+// stripLocalSocket removes Go's "op net LOCAL->REMOTE: " address prefix from a
+// transport error message, wherever it appears — bare, or wrapped in a
+// *url.Error whose text reads `Post "https://…": read tcp …`. Text before the
+// socket phrase (the request line) and the remote address after the arrow are
+// kept; only the ephemeral local port is dropped.
+func stripLocalSocket(msg string) (string, bool) {
+	arrow := strings.Index(msg, "->")
+	if arrow < 0 {
+		return msg, false
+	}
 	for _, p := range []string{"read udp ", "write udp ", "read tcp ", "write tcp ", "dial udp ", "dial tcp "} {
-		if i := strings.Index(msg, "->"); strings.HasPrefix(msg, p) && i >= 0 {
-			// The remainder already carries the remote (upstream) address.
-			return fmt.Errorf("%s", msg[i+2:])
+		if i := strings.LastIndex(msg[:arrow], p); i >= 0 {
+			return msg[:i] + msg[arrow+2:], true
 		}
 	}
-	return fmt.Errorf("%s: %s", addr, msg)
+	return msg, false
+}
+
+func errUpstream(addr string, err error) error {
+	return &upErr{addr: addr, err: err}
 }
 
 // DoHResolver forwards over DNS-over-HTTPS (RFC 8484).
@@ -231,7 +265,9 @@ func (r *DoHResolver) Resolve(ctx context.Context, q *dns.Msg) (*dns.Msg, error)
 
 	resp, err := r.client.Do(req)
 	if err != nil {
-		return nil, err // url.Error already embeds the endpoint URL
+		// A *url.Error embeds the endpoint URL but also the local ephemeral
+		// socket; errUpstream strips the socket and keeps the URL.
+		return nil, errUpstream(r.endpoint, err)
 	}
 	defer resp.Body.Close()
 	const maxDNSResponseBytes = 65535
@@ -258,10 +294,10 @@ func (r *DoHResolver) Resolve(ctx context.Context, q *dns.Msg) (*dns.Msg, error)
 //
 // downUntil holds unix-nanos per resolver, accessed atomically: the hot path
 // (all resolvers healthy) never takes a lock, it only loads the cooldown
-// stamps. The mutex guards only the rare all-down reset.
+// stamps, and the rare all-down reset clears them in place with atomic stores
+// — the slice is never replaced, so lock-free readers always see a valid one.
 type MultiResolver struct {
 	resolvers []Resolver
-	mu        sync.Mutex
 	downUntil []int64 // unix nanos; 0 = up
 	cooldown  time.Duration
 }
@@ -287,29 +323,33 @@ func (m *MultiResolver) Resolve(ctx context.Context, q *dns.Msg) (*dns.Msg, erro
 		}
 	}
 	if allDown { // everything tripped: retry all in order this pass
-		m.mu.Lock()
-		m.downUntil = make([]int64, len(m.resolvers))
-		m.mu.Unlock()
+		for i := range m.downUntil {
+			atomic.StoreInt64(&m.downUntil[i], 0)
+		}
 		order = make([]int, len(m.resolvers))
 		for i := range order {
 			order[i] = i
 		}
 	}
 
-	var lastErr error
+	var firstErr error
 	for _, i := range order {
 		resp, err := m.resolvers[i].Resolve(ctx, q)
 		if err == nil {
 			atomic.StoreInt64(&m.downUntil[i], 0)
 			return resp, nil
 		}
-		lastErr = err
+		if firstErr == nil {
+			// Report the first (highest-priority) failure: the last tried
+			// resolver would misattribute a multi-upstream outage.
+			firstErr = err
+		}
 		atomic.StoreInt64(&m.downUntil[i], now+m.cooldown.Nanoseconds())
 	}
-	if lastErr == nil {
-		lastErr = fmt.Errorf("upstream: no resolvers configured")
+	if firstErr == nil {
+		firstErr = fmt.Errorf("upstream: no resolvers configured")
 	}
-	return nil, lastErr
+	return nil, firstErr
 }
 
 // Spec describes a single upstream entry parsed from a spec string.

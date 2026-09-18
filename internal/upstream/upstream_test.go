@@ -3,10 +3,12 @@ package upstream
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"reflect"
 	"strings"
 	"sync"
@@ -138,15 +140,82 @@ func TestErrUpstreamStripsEphemeralSocket(t *testing.T) {
 	if got != "[::1]:53: i/o timeout" {
 		t.Errorf("errUpstream ipv6 = %q, want %q", got, "[::1]:53: i/o timeout")
 	}
-	// Dial errors have no local socket; only the address label is added.
+	// Dial errors have no local socket; the message already names the
+	// address, so no duplicate label is added.
 	got = errUpstream("1.1.1.1:53", &simpleErr{"dial tcp 1.1.1.1:53: connect: network is unreachable"}).Error()
-	if got != "1.1.1.1:53: dial tcp 1.1.1.1:53: connect: network is unreachable" {
+	if got != "dial tcp 1.1.1.1:53: connect: network is unreachable" {
 		t.Errorf("errUpstream dial = %q", got)
 	}
 	// Non-network errors pass through with just the address label.
 	if got := errUpstream("https://1.1.1.1/dns-query", &simpleErr{"doh: upstream returned 500"}).Error(); got != "https://1.1.1.1/dns-query: doh: upstream returned 500" {
 		t.Errorf("errUpstream doh = %q", got)
 	}
+	// Wrapped DoH transport errors (*url.Error) keep the endpoint but lose
+	// the local socket, so every reset from one endpoint groups into one row.
+	urlErr := &url.Error{Op: "Post", URL: "https://dns.quad9.net/dns-query", Err: &simpleErr{"read tcp 10.0.0.5:52611->9.9.9.9:853: read: connection reset by peer"}}
+	if got := errUpstream("https://dns.quad9.net/dns-query", urlErr).Error(); got != `Post "https://dns.quad9.net/dns-query": 9.9.9.9:853: read: connection reset by peer` {
+		t.Errorf("errUpstream url = %q", got)
+	}
+}
+
+// timeoutErr is a minimal net.Error with Timeout() = true, the shape
+// upstreamErrText classifies on.
+type timeoutErr struct{ msg string }
+
+func (e *timeoutErr) Error() string   { return e.msg }
+func (e *timeoutErr) Timeout() bool   { return true }
+func (e *timeoutErr) Temporary() bool { return false }
+
+func TestErrUpstreamKeepsChain(t *testing.T) {
+	// The wrapper must not flatten the error chain: dnsserver's timeout
+	// rendering ("timeout talking to X") classifies via errors.As/Is on the
+	// original error.
+	err := errUpstream("9.9.9.9:853", &timeoutErr{msg: "read tcp 10.0.0.5:52611->9.9.9.9:853: i/o timeout"})
+	if err.Error() != "9.9.9.9:853: i/o timeout" {
+		t.Errorf("message = %q, want stripped socket", err.Error())
+	}
+	var ne net.Error
+	if !errors.As(err, &ne) || !ne.Timeout() {
+		t.Errorf("errors.As did not reach the timeout error through the wrapper: %v", err)
+	}
+}
+
+// errResolver always fails with its own error.
+type errResolver struct{ err error }
+
+func (r errResolver) Resolve(ctx context.Context, q *dns.Msg) (*dns.Msg, error) { return nil, r.err }
+
+func TestMultiResolverReportsFirstFailure(t *testing.T) {
+	// With every resolver down, the reported error must be the first
+	// (highest-priority) failure, not whichever was tried last.
+	m := NewMulti(errResolver{err: &simpleErr{"primary down"}}, errResolver{err: &simpleErr{"backup down"}})
+	q := new(dns.Msg)
+	q.SetQuestion("a.test.", dns.TypeA)
+	_, err := m.Resolve(context.Background(), q)
+	if err == nil || err.Error() != "primary down" {
+		t.Fatalf("err = %v, want the first-tried resolver's failure", err)
+	}
+}
+
+func TestMultiResolverAllDownConcurrent(t *testing.T) {
+	// The all-down path resets the cooldown stamps on the hot path's slice;
+	// hammer it concurrently so -race catches any unsynchronized swap.
+	m := NewMulti(errResolver{err: &errBoom{}}, errResolver{err: &errBoom{}})
+	q := new(dns.Msg)
+	q.SetQuestion("a.test.", dns.TypeA)
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 20; j++ {
+				if _, err := m.Resolve(context.Background(), q); err == nil {
+					t.Error("expected error from an all-down rotation")
+				}
+			}
+		}()
+	}
+	wg.Wait()
 }
 
 // TestDoHResolveLabelsEndpoint verifies DoH failures name the endpoint, so the

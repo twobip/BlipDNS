@@ -1422,11 +1422,22 @@ function serverRow(u) {
   row.querySelector(".up-del").onclick = () => { row.remove(); refreshRouteServerOptions(); };
   return row;
 }
-function renderServerList(list) {
+function renderServerList(list, effective) {
   const wrap = $("s-upstream-list");
   wrap.innerHTML = "";
   for (const u of list) wrap.appendChild(serverRow(u));
-  if (!list.length) wrap.innerHTML = `<div class="hint" style="padding:2px 0 6px">No named resolvers — the automatic rotation is disabled.</div>`;
+  const eff = effective || list;
+  if (!list.length) {
+    wrap.innerHTML = eff.length
+      ? `<div class="hint" style="padding:2px 0 6px">No instance override — this instance uses the inherited fleet-wide servers: ${eff.map((u) => esc(u.name || u.address)).join(", ")}. Saving a list here replaces them for this instance.</div>`
+      : `<div class="hint" style="padding:2px 0 6px">No named resolvers — the automatic rotation is disabled.</div>`;
+  }
+  const auto = eff.filter((u) => (u.priority || 0) > 0).length;
+  if (auto === 1) {
+    wrap.insertAdjacentHTML("beforeend", `<div class="hint" style="padding:0 0 6px;color:var(--amber)">Only one server in the automatic rotation (priority 1+) — no failover partner: while it is unreachable, every query that does not match a route fails. Add a second server from a different provider.</div>`);
+  } else if (auto === 0 && eff.length) {
+    wrap.insertAdjacentHTML("beforeend", `<div class="hint" style="padding:0 0 6px;color:var(--amber)">No server has priority 1+ — the automatic rotation is off, so queries without a matching route have no upstream. Give the public servers a priority (1, 2, …).</div>`);
+  }
 }
 function collectServers() {
   return [...document.querySelectorAll("#s-upstream-list .up-row")].map((row) => ({
@@ -1751,7 +1762,8 @@ function loadScopeEditor() {
     upHint.textContent = "Blank = inherit the fleet-wide server pool.";
     bootHint.textContent = "Only for this instance. Blank = inherit the fleet-wide bootstrap resolvers.";
     const o = savedOverrides[scopeState] || {};
-    renderServerList(Array.isArray(o.upstream_servers) ? o.upstream_servers : []);
+    const own = Array.isArray(o.upstream_servers) ? o.upstream_servers : [];
+    renderServerList(own, own.length ? own : savedUpServers);
     const routes = Array.isArray(o.upstream_routes) ? o.upstream_routes : [];
     renderRouteList(routes, effectiveUpServers(scopeState));
     renderBootstrapList(Array.isArray(o.upstream_bootstrap) ? o.upstream_bootstrap : []);

@@ -202,3 +202,30 @@ func TestSetPreservesHits(t *testing.T) {
 		t.Errorf("expected refreshed entry to keep 2 hits, got %d", got)
 	}
 }
+
+// Queries routed to different upstreams (Label) must not coalesce: one fetch
+// would answer both partitions from a single upstream.
+func TestCoalesceSeparatesUpstreamPartitions(t *testing.T) {
+	c := New(time.Hour, 0)
+	var calls int
+	var mu sync.Mutex
+	fn := func() (*dns.Msg, error) {
+		mu.Lock()
+		calls++
+		mu.Unlock()
+		time.Sleep(20 * time.Millisecond)
+		return mkMsg("a.test", 60), nil
+	}
+	var wg sync.WaitGroup
+	for _, label := range []string{"up-a", "up-b"} {
+		wg.Add(1)
+		go func(label string) {
+			defer wg.Done()
+			_, _, _ = c.DoHit(context.Background(), Key{Name: "k", Label: label}, fn)
+		}(label)
+	}
+	wg.Wait()
+	if calls != 2 {
+		t.Errorf("expected one fetch per upstream partition, got %d", calls)
+	}
+}

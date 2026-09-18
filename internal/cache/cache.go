@@ -82,11 +82,13 @@ func KeyOf(m *dns.Msg) Key {
 	return Key{Name: q.Name, QType: q.Qtype, QClass: q.Qclass}
 }
 
-// String renders the key as "name|qtype|qclass". Not used on the cache read
-// path — it exists for the singleflight coalescing key (string-keyed) and
-// for logs.
+// String renders the key as "name|qtype|qclass|label". Not used on the cache
+// read path — it exists for the singleflight coalescing key (string-keyed)
+// and for logs. The label (upstream partition) is included so concurrent
+// identical queries routed to different upstreams are not coalesced onto one
+// fetch that would answer both partitions from a single upstream.
 func (k Key) String() string {
-	return k.Name + "|" + strconv.Itoa(int(k.QType)) + "|" + strconv.Itoa(int(k.QClass))
+	return k.Name + "|" + strconv.Itoa(int(k.QType)) + "|" + strconv.Itoa(int(k.QClass)) + "|" + k.Label
 }
 
 func minTTL(m *dns.Msg) time.Duration {
