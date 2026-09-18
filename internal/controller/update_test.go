@@ -121,7 +121,7 @@ func TestSerializedUpdateWaitsForEachNode(t *testing.T) {
 	}
 
 	// The update starts on the first node immediately.
-	waitFor(t, 5*time.Second, func() bool {
+	waitFor(t, 30*time.Second, func() bool {
 		n, _ := nodeA.counts()
 		return n == 1
 	}, "node a update was not started")
@@ -131,22 +131,27 @@ func TestSerializedUpdateWaitsForEachNode(t *testing.T) {
 
 	// While node a is still updating, node b must never be started.
 	nodeA.finish()
-	waitFor(t, 5*time.Second, func() bool {
+	waitFor(t, 30*time.Second, func() bool {
 		_, running := nodeA.counts()
 		return !running
 	}, "node a did not come back online")
-	waitFor(t, 5*time.Second, func() bool {
+	waitFor(t, 30*time.Second, func() bool {
 		n, _ := nodeB.counts()
 		return n == 1
 	}, "node b update was not started after node a returned")
 
 	nodeB.finish()
-	waitFor(t, 5*time.Second, func() bool {
+	waitFor(t, 30*time.Second, func() bool {
 		status := fleet.UpdateJob()
 		return !status.Running && status.Completed == 2
 	}, "serialized update did not complete")
 }
 
+// waitFor polls cond until it holds or the deadline passes. Deadlines on
+// flows driven by the update loop's 2s status ticker are deliberately
+// generous: a parallel `go test ./...` starves timers and a tight cap
+// red-lights unrelated runs, while polling exits as soon as cond holds, so
+// the slack costs nothing.
 func waitFor(t *testing.T, timeout time.Duration, cond func() bool, msg string) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)

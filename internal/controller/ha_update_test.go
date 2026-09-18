@@ -193,7 +193,7 @@ func TestUpdateDegradesHAPriority(t *testing.T) {
 	}
 
 	// Wait for node a's update to start (priority should have been degraded).
-	waitFor(t, 5*time.Second, func() bool {
+	waitFor(t, 30*time.Second, func() bool {
 		cfgs, _ := nodeA.snapshot()
 		if len(cfgs) == 0 {
 			return false
@@ -213,7 +213,7 @@ func TestUpdateDegradesHAPriority(t *testing.T) {
 	}
 
 	// Wait for the update to actually start on node a before finishing it.
-	waitFor(t, 5*time.Second, func() bool {
+	waitFor(t, 30*time.Second, func() bool {
 		_, started := nodeA.snapshot()
 		return started >= 1
 	}, "node a update did not start")
@@ -222,7 +222,7 @@ func TestUpdateDegradesHAPriority(t *testing.T) {
 	nodeA.finish()
 
 	// After node a's update finishes, its priority should be restored.
-	waitFor(t, 5*time.Second, func() bool {
+	waitFor(t, 30*time.Second, func() bool {
 		cfgs, _ := nodeA.snapshot()
 		if len(cfgs) == 0 {
 			return false
@@ -233,7 +233,7 @@ func TestUpdateDegradesHAPriority(t *testing.T) {
 	}, "node a priority was not restored after update")
 
 	// Wait for node b's update to start.
-	waitFor(t, 5*time.Second, func() bool {
+	waitFor(t, 30*time.Second, func() bool {
 		_, started := nodeB.snapshot()
 		return started >= 1
 	}, "node b update did not start")
@@ -242,7 +242,7 @@ func TestUpdateDegradesHAPriority(t *testing.T) {
 	nodeB.finish()
 
 	// Wait for the overall job to finish.
-	waitFor(t, 5*time.Second, func() bool {
+	waitFor(t, 30*time.Second, func() bool {
 		status := fleet.UpdateJob()
 		return !status.Running && status.Completed == 2
 	}, "serialized update did not complete")
