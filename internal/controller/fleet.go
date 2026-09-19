@@ -357,7 +357,7 @@ func (f *Fleet) degradeHAPriority(ctx context.Context, instanceID string) error 
 		return nil
 	}
 	if cluster.PrimaryInstance == instanceID {
-		cluster.Primary.Priority = reducePriority(cluster.Primary.Priority)
+		cluster.Primary.Priority = reducePriority(cluster.Primary.Priority, cluster.Secondary.Priority)
 		inst, err := f.haNode(cluster.PrimaryInstance)
 		if err != nil {
 			return err
@@ -370,7 +370,7 @@ func (f *Fleet) degradeHAPriority(ctx context.Context, instanceID string) error 
 		return nil
 	}
 	if cluster.SecondaryInstance == instanceID {
-		cluster.Secondary.Priority = reducePriority(cluster.Secondary.Priority)
+		cluster.Secondary.Priority = reducePriority(cluster.Secondary.Priority, cluster.Primary.Priority)
 		inst, err := f.haNode(cluster.SecondaryInstance)
 		if err != nil {
 			return err
@@ -421,12 +421,17 @@ func (f *Fleet) restoreHAPriority(ctx context.Context, instanceID string) error 
 }
 
 // reducePriority lowers a VRRP priority by haPriorityDelta, clamped to a
-// minimum of 1.
-func reducePriority(p int) int {
+// minimum of 1 — and always strictly below the peer, so the VIP actually
+// moves even when the configured priorities differ by more than the delta.
+// (A peer at 1 ties at 1: a degenerate config with no room to yield.)
+func reducePriority(p, peer int) int {
 	if p <= 0 {
 		return p
 	}
 	p -= haPriorityDelta
+	if q := peer - 1; q < p {
+		p = q
+	}
 	if p < 1 {
 		p = 1
 	}

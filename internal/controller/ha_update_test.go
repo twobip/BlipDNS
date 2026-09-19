@@ -283,3 +283,17 @@ func TestUpdateDegradesHAPriority(t *testing.T) {
 		return !status.Running && status.Completed == 2
 	}, "serialized update did not complete")
 }
+
+func TestReducePriorityYieldsToPeer(t *testing.T) {
+	for _, tc := range []struct{ p, peer, want int }{
+		{101, 100, 81}, // normal gap: flat delta
+		{150, 100, 99}, // wide gap: clamped strictly below peer
+		{30, 100, 10},  // updating node already lower stays low
+		{10, 1, 1},     // degenerate: peer at 1 ties at floor
+		{0, 100, 0},    // unset priority untouched
+	} {
+		if got := reducePriority(tc.p, tc.peer); got != tc.want {
+			t.Errorf("reducePriority(%d, %d) = %d, want %d", tc.p, tc.peer, got, tc.want)
+		}
+	}
+}
