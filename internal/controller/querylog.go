@@ -51,7 +51,10 @@ type QueryLogEntry struct {
 	Name      string    `json:"name,omitempty"` // friendly display name, if set
 	Domain    string    `json:"domain"`
 	Action    string    `json:"action"`
-	Upstream  string    `json:"upstream,omitempty"`
+	// Proto is the receiving listener ("doh" or "dns"); "" for rows written
+	// before transport tracking.
+	Proto    string `json:"proto,omitempty"`
+	Upstream string `json:"upstream,omitempty"`
 	// BlockList names the list/policy that blocked this query ("" when the
 	// query was not blocked).
 	BlockList string `json:"blocklist,omitempty"`
@@ -373,7 +376,8 @@ func NewQueryLogStore(dbPath string) (*QueryLogStore, error) {
 		ips TEXT,
 		answers TEXT,
 		duration_us INTEGER,
-		cached INTEGER
+		cached INTEGER,
+		proto TEXT
 	);
 	CREATE INDEX IF NOT EXISTS idx_query_log_timestamp ON query_log(timestamp);
 	CREATE INDEX IF NOT EXISTS idx_query_log_instance ON query_log(instance);
@@ -419,6 +423,7 @@ func NewQueryLogStore(dbPath string) (*QueryLogStore, error) {
 		"ALTER TABLE query_log ADD COLUMN duration_us INTEGER",
 		"ALTER TABLE query_log ADD COLUMN cached INTEGER",
 		"ALTER TABLE query_log ADD COLUMN blocklist TEXT",
+		"ALTER TABLE query_log ADD COLUMN proto TEXT",
 		"ALTER TABLE stats_samples ADD COLUMN duration_us INTEGER NOT NULL DEFAULT 0",
 	} {
 		_, _ = db.Exec(col)
@@ -453,8 +458,8 @@ func (e QueryLogEntry) row() (ips, ans string, cached int) {
 func (s *QueryLogStore) Insert(ctx context.Context, e QueryLogEntry) error {
 	ips, ans, cached := e.row()
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO query_log (timestamp, instance, client, domain, action, upstream, q_type, blocklist, ips, answers, duration_us, cached) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		e.Timestamp, e.Instance, e.Client, e.Domain, e.Action, e.Upstream, e.QType, e.BlockList, ips, ans, e.DurationUs, cached)
+		`INSERT INTO query_log (timestamp, instance, client, domain, action, upstream, q_type, blocklist, ips, answers, duration_us, cached, proto) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		e.Timestamp, e.Instance, e.Client, e.Domain, e.Action, e.Upstream, e.QType, e.BlockList, ips, ans, e.DurationUs, cached, e.Proto)
 	return err
 }
 
@@ -466,7 +471,7 @@ func (s *QueryLogStore) Insert(ctx context.Context, e QueryLogEntry) error {
 // logFilter appends the shared instance/action/cached/text predicates. Query
 // and QueryCount must build them in one place: the page and its total can
 // never disagree (e.g. a friendly-name filter matching rows but counting 0).
-func logFilter(query string, args []interface{}, instance, action, cached, filter string) (string, []interface{}) {
+func logFilter(query string, args []interface{}, instance, action, cached, filter, proto string) (string, []interface{}) {
 	if instance != "" {
 		query += " AND ql.instance = ?"
 		args = append(args, instance)
@@ -474,6 +479,10 @@ func logFilter(query string, args []interface{}, instance, action, cached, filte
 	if action != "" {
 		query += " AND ql.action = ?"
 		args = append(args, action)
+	}
+	if proto == "dns" || proto == "doh" {
+		query += " AND ql.proto = ?"
+		args = append(args, proto)
 	}
 	if cached != "" {
 		query += " AND ql.cached = ?"
@@ -487,10 +496,10 @@ func logFilter(query string, args []interface{}, instance, action, cached, filte
 	return query, args
 }
 
-func (s *QueryLogStore) Query(ctx context.Context, instance, filter, action, cached string, since time.Time, offset, limit int) ([]QueryLogEntry, error) {
-	query := `SELECT ql.id, ql.timestamp, ql.instance, ql.client, COALESCE(cn.name, ''), ql.domain, ql.action, ql.upstream, ql.q_type, ql.blocklist, ql.ips, ql.answers, ql.duration_us, ql.cached FROM query_log ql LEFT JOIN client_names cn ON cn.client = ql.client WHERE ql.timestamp >= ? AND ql.domain != 'health_check' AND ql.domain != ''`
+func (s *QueryLogStore) Query(ctx context.Context, instance, filter, action, cached, proto string, since time.Time, offset, limit int) ([]QueryLogEntry, error) {
+	query := `SELECT ql.id, ql.timestamp, ql.instance, ql.client, COALESCE(cn.name, ''), ql.domain, ql.action, ql.proto, ql.upstream, ql.q_type, ql.blocklist, ql.ips, ql.answers, ql.duration_us, ql.cached FROM query_log ql LEFT JOIN client_names cn ON cn.client = ql.client WHERE ql.timestamp >= ? AND ql.domain != 'health_check' AND ql.domain != ''`
 	args := []interface{}{since}
-	query, args = logFilter(query, args, instance, action, cached, filter)
+	query, args = logFilter(query, args, instance, action, cached, filter, proto)
 
 	query += " ORDER BY ql.timestamp DESC, ql.id DESC LIMIT ? OFFSET ?"
 	args = append(args, limit, offset)
@@ -505,12 +514,15 @@ func (s *QueryLogStore) Query(ctx context.Context, instance, filter, action, cac
 	for rows.Next() {
 		var e QueryLogEntry
 		var ts string
-		var qType, bl, ips, ans sql.NullString
+		var qProto, qType, bl, ips, ans sql.NullString
 		var dur, cached sql.NullInt64
-		if err := rows.Scan(&e.ID, &ts, &e.Instance, &e.Client, &e.Name, &e.Domain, &e.Action, &e.Upstream, &qType, &bl, &ips, &ans, &dur, &cached); err != nil {
+		if err := rows.Scan(&e.ID, &ts, &e.Instance, &e.Client, &e.Name, &e.Domain, &e.Action, &qProto, &e.Upstream, &qType, &bl, &ips, &ans, &dur, &cached); err != nil {
 			return nil, err
 		}
 		e.Timestamp = parseQueryTS(ts)
+		if qProto.Valid {
+			e.Proto = qProto.String
+		}
 		if qType.Valid {
 			e.QType = qType.String
 		}
@@ -533,12 +545,12 @@ func (s *QueryLogStore) Query(ctx context.Context, instance, filter, action, cac
 // QueryCount returns the total number of query log entries that match the
 // (instance, filter, action, cached, since) constraints, regardless of any
 // limit/offset paging.
-func (s *QueryLogStore) QueryCount(ctx context.Context, instance, filter, action, cached string, since time.Time) (int, error) {
+func (s *QueryLogStore) QueryCount(ctx context.Context, instance, filter, action, cached, proto string, since time.Time) (int, error) {
 	// Same FROM/JOIN as Query (client is the join key, so COUNT(*) is exact)
 	// with the shared predicates, so the total always matches the pages.
 	query := `SELECT COUNT(*) FROM query_log ql LEFT JOIN client_names cn ON cn.client = ql.client WHERE ql.timestamp >= ? AND ql.domain != 'health_check' AND ql.domain != ''`
 	args := []interface{}{since}
-	query, args = logFilter(query, args, instance, action, cached, filter)
+	query, args = logFilter(query, args, instance, action, cached, filter, proto)
 	var n int
 	if err := s.db.QueryRowContext(ctx, query, args...).Scan(&n); err != nil {
 		return 0, err
@@ -860,7 +872,7 @@ func (s *QueryLogStore) insertBatch(ctx context.Context, entries []QueryLogEntry
 	if err != nil {
 		return
 	}
-	stmt, err := tx.Prepare(`INSERT INTO query_log (timestamp, instance, client, domain, action, upstream, q_type, blocklist, ips, answers, duration_us, cached) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+	stmt, err := tx.Prepare(`INSERT INTO query_log (timestamp, instance, client, domain, action, upstream, q_type, blocklist, ips, answers, duration_us, cached, proto) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		_ = tx.Rollback()
 		return
@@ -868,7 +880,7 @@ func (s *QueryLogStore) insertBatch(ctx context.Context, entries []QueryLogEntry
 	defer stmt.Close()
 	for _, e := range entries {
 		ips, ans, cached := e.row()
-		if _, err := stmt.Exec(e.Timestamp, e.Instance, e.Client, e.Domain, e.Action, e.Upstream, e.QType, e.BlockList, ips, ans, e.DurationUs, cached); err != nil {
+		if _, err := stmt.Exec(e.Timestamp, e.Instance, e.Client, e.Domain, e.Action, e.Upstream, e.QType, e.BlockList, ips, ans, e.DurationUs, cached, e.Proto); err != nil {
 			_ = tx.Rollback()
 			return
 		}

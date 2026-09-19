@@ -149,6 +149,8 @@ type WatchEvent struct {
 	Stats  *StatsResponse `json:"stats,omitempty"`
 	Client string         `json:"client,omitempty"`
 	Domain string         `json:"domain,omitempty"`
+	// Proto is the listener that received the query: ProtoDoH or ProtoDNS.
+	Proto string `json:"proto,omitempty"`
 	// QType is the queried RR type as a textual mnemonic (e.g. "A", "AAAA",
 	// "TXT", "MX", "CNAME", "SRV"); derived from the DNS question.
 	QType string   `json:"q_type,omitempty"`
@@ -170,6 +172,13 @@ type WatchEvent struct {
 	// merged blocklist, "policy:<id>" for a per-client policy, or "".
 	BlockList string `json:"blocklist,omitempty"`
 }
+
+// Query transport identities shared by blipd (producer) and blipc
+// (query-log filter): the listener that received the query.
+const (
+	ProtoDNS = "dns" // classic DNS (UDP/TCP)
+	ProtoDoH = "doh" // DNS-over-HTTPS
+)
 
 // ---- adoption (claim-code bootstrap) ----
 

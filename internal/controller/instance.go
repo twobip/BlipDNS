@@ -375,6 +375,7 @@ func (i *Instance) watch(ctx context.Context) {
 					Client:     e.Client,
 					Domain:     e.Domain,
 					Action:     strings.ToUpper(e.Type), // "BLOCK" or "PASS"
+					Proto:      e.Proto,                 // "doh" or "dns"
 					QType:      e.QType,
 					Upstream:   e.Upstream,
 					BlockList:  blockList,

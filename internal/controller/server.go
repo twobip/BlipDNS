@@ -537,10 +537,14 @@ func (s *Server) handleInstance(w http.ResponseWriter, r *http.Request) {
 		if cached != "" && cached != "0" && cached != "1" {
 			cached = ""
 		}
+		proto := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("proto")))
+		if proto != "dns" && proto != "doh" {
+			proto = ""
+		}
 		limit := boundedLimit(r, 100, 500)
 		offset := boundedOffset(r)
 		since := time.Now().Add(-boundedDuration(r, "since", 24*time.Hour, time.Minute, 30*24*time.Hour))
-		entries, err := s.fleet.queryLog.Query(ctx, instance, filter, action, cached, since, offset, limit)
+		entries, err := s.fleet.queryLog.Query(ctx, instance, filter, action, cached, proto, since, offset, limit)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
@@ -888,15 +892,20 @@ func (s *Server) handleQueries(w http.ResponseWriter, r *http.Request) {
 	if cached != "" && cached != "0" && cached != "1" {
 		cached = ""
 	}
+	// proto: "" (any), "dns" (classic only), "doh" (DoH only)
+	proto := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("proto")))
+	if proto != "dns" && proto != "doh" {
+		proto = ""
+	}
 	limit := boundedLimit(r, 100, 500)
 	offset := boundedOffset(r)
 	since := time.Now().Add(-boundedDuration(r, "since", 24*time.Hour, time.Minute, 30*24*time.Hour))
-	entries, err := s.fleet.queryLog.Query(r.Context(), instance, filter, action, cached, since, offset, limit)
+	entries, err := s.fleet.queryLog.Query(r.Context(), instance, filter, action, cached, proto, since, offset, limit)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
-	total, err := s.fleet.queryLog.QueryCount(r.Context(), instance, filter, action, cached, since)
+	total, err := s.fleet.queryLog.QueryCount(r.Context(), instance, filter, action, cached, proto, since)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return

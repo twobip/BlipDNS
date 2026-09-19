@@ -231,7 +231,7 @@ func (s *Server) handleDoH(w http.ResponseWriter, r *http.Request) {
 
 	clientIP := clientIPFromReq(r, s.trustedProxies)
 	clientID := clientIDFromPath(r.URL.Path)
-	resp := s.serve(ctx, clientIP, clientID, req)
+	resp := s.serve(ctx, clientIP, clientID, control.ProtoDoH, req)
 	buf, err := resp.Pack()
 	if err != nil {
 		http.Error(w, "pack error", http.StatusInternalServerError)
@@ -273,14 +273,15 @@ func dohMaxAge(resp *dns.Msg) uint32 {
 // ServeDNS implements dns.Handler for classic DNS.
 func (s *Server) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
 	clientIP, _, _ := net.SplitHostPort(w.RemoteAddr().String())
-	resp := s.serve(context.Background(), net.ParseIP(clientIP), "", req)
+	resp := s.serve(context.Background(), net.ParseIP(clientIP), "", control.ProtoDNS, req)
 	_ = w.WriteMsg(resp)
 }
 
 // serve is the unified query path: filter -> cache -> upstream. clientID is
 // the optional DoH client identity from /dns-query/{client-id}; it overrides
-// the IP as the log identity and can select a per-client policy.
-func (s *Server) serve(ctx context.Context, clientIP net.IP, clientID string, req *dns.Msg) *dns.Msg {
+// the IP as the log identity and can select a per-client policy. proto is the
+// receiving listener (control.ProtoDoH or control.ProtoDNS) for query-log events.
+func (s *Server) serve(ctx context.Context, clientIP net.IP, clientID, proto string, req *dns.Msg) *dns.Msg {
 	start := time.Now()
 	client := clientID
 	if client == "" {
@@ -338,7 +339,7 @@ func (s *Server) serve(ctx context.Context, clientIP net.IP, clientID string, re
 	// blocked by the global blocklist (or any policy block list).
 	if s.cfg.Blocklist != nil && s.cfg.Blocklist.IsBlocked(domain) && !s.cfg.Store.Allowed(clientIP, clientID, domain) {
 		s.cnt.AddBlocked()
-		s.notifyBlock(req, resp, client, domain, "global", start)
+		s.notifyBlock(req, resp, client, domain, "global", proto, start)
 		if s.logfn != nil {
 			s.logfn(client, domain)
 		}
@@ -349,7 +350,7 @@ func (s *Server) serve(ctx context.Context, clientIP net.IP, clientID string, re
 	blocked, action, upstreamOverride, log := s.cfg.Store.Classify(clientIP, clientID, domain)
 	if blocked {
 		s.cnt.AddBlocked()
-		s.notifyBlock(req, resp, client, domain, s.cfg.Store.BlockSource(clientIP, clientID, domain), start)
+		s.notifyBlock(req, resp, client, domain, s.cfg.Store.BlockSource(clientIP, clientID, domain), proto, start)
 		if log && s.logfn != nil {
 			s.logfn(client, domain)
 		}
@@ -370,6 +371,7 @@ func (s *Server) serve(ctx context.Context, clientIP net.IP, clientID string, re
 			if s.ctrl.HasWatchers() {
 				s.ctrl.Notify(control.WatchEvent{
 					Type:       "pass",
+					Proto:      proto,
 					At:         time.Now(),
 					Client:     client,
 					Domain:     domain,
@@ -449,6 +451,7 @@ func (s *Server) serve(ctx context.Context, clientIP net.IP, clientID string, re
 		}
 		s.ctrl.Notify(control.WatchEvent{
 			Type:       "pass",
+			Proto:      proto,
 			At:         time.Now(),
 			Client:     client,
 			Domain:     domain,
@@ -466,13 +469,13 @@ func (s *Server) serve(ctx context.Context, clientIP net.IP, clientID string, re
 // notifyBlock streams a block event for the query log. Building the event
 // renders every answer record, so it is skipped entirely when nobody is
 // streaming events.
-func (s *Server) notifyBlock(req, resp *dns.Msg, client, domain, list string, start time.Time) {
+func (s *Server) notifyBlock(req, resp *dns.Msg, client, domain, list, proto string, start time.Time) {
 	if !s.ctrl.HasWatchers() {
 		return
 	}
 	s.ctrl.Notify(control.WatchEvent{
 		Type: "block", At: time.Now(),
-		Client: client, Domain: domain,
+		Client: client, Domain: domain, Proto: proto,
 		QType: qType(req), Answers: answersFor(req, resp),
 		BlockList:  list,
 		DurationUs: time.Since(start).Microseconds(),

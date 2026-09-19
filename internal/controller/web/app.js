@@ -546,7 +546,7 @@ function confirmRemove(id) {
 }
 
 /* ---------- queries ---------- */
-let qState = { action: "", filter: "", inst: "", cached: "" };
+let qState = { action: "", filter: "", inst: "", cached: "", proto: "" };
 // Paginated query-log state. The log is fetched 25 rows at a time, newest
 // first, and appended on scroll. Filtering (text + action + instance) is done
 // server-side so the total and the pages are consistent.
@@ -562,7 +562,8 @@ function queryRowHtml(r) {
   const actionLabel = isBlock ? "Blocked" : isLocal ? "Local" : action === "PASS" ? "Allowed" : esc(action || "—");
   const actionBadge = isBlock ? "err" : isLocal ? "accent" : action === "PASS" ? "on" : "";
   // info icon tooltip: request type (qtype) above the upstream/block source.
-  const tipLabel = (r.q_type || "") + (r.q_type ? " · " : "") + (isBlock ? "Blocked by" : isLocal ? "Local record" : r.cached ? "Cache" : "Upstream");
+  const protoLabel = r.proto === "doh" ? "DoH" : r.proto === "dns" ? "DNS" : "";
+  const tipLabel = (r.q_type || "") + (r.q_type ? " · " : "") + (protoLabel ? protoLabel + " · " : "") + (isBlock ? "Blocked by" : isLocal ? "Local record" : r.cached ? "Cache" : "Upstream");
   const tipValue = isBlock
     ? (r.blocklist || "blocklist")
     : isLocal ? "Static DNS record" : r.cached ? "Served from cache" : (r.upstream || "unknown");
@@ -596,6 +597,7 @@ async function fetchQueryPage(tb) {
   const base = "/api/queries?instance=" + encodeURIComponent(qState.inst)
     + "&action=" + encodeURIComponent(qState.action)
     + "&cached=" + encodeURIComponent(qState.cached)
+    + "&proto=" + encodeURIComponent(qState.proto)
     + "&filter=" + encodeURIComponent(qState.filter)
     + "&since=24h&offset=" + qPage.offset + "&limit=" + QL_PAGE;
   try {
@@ -2032,6 +2034,7 @@ function setQueryAction(action) {
 }
 document.querySelectorAll("#q-action-seg button").forEach((b) => b.onclick = () => setQueryAction(b.dataset.a));
 $("q-cached").addEventListener("change", (e) => { qState.cached = e.target.value; renderQueries(); });
+$("q-proto").addEventListener("change", (e) => { qState.proto = e.target.value; renderQueries(); });
 
 /* clients */
 $("c-instance").addEventListener("change", (e) => { cState.inst = e.target.value; renderClients(); });
