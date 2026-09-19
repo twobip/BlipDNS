@@ -26,7 +26,7 @@ type Config struct {
 	DoHSANs              []string                  `yaml:"doh_san"`          // extra DNS names/IPs the generated self-signed DoH cert must cover (e.g. an HA VIP); changing it regenerates the pair
 	AdminAddr            string                    `yaml:"admin_addr"`
 	AdminToken           string                    `yaml:"admin_token"`
-	TrustedProxies       []string                  `yaml:"trusted_proxies"` // CIDRs/IPs allowed to supply X-Forwarded-For to DoH
+	TrustedProxies       []string                  `yaml:"trusted_proxies"` // CIDRs/IPs allowed to supply X-Forwarded-For / CF-Connecting-IP to DoH
 	StateFile            string                    `yaml:"state_file"`      // persists "adopted" so the claim code isn't regenerated
 	InstanceID           string                    `yaml:"instance_id"`     // stable id shown to the controller
 	Upstream             string                    `yaml:"upstream"`

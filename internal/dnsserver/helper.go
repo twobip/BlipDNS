@@ -20,11 +20,18 @@ func clientIDFromPath(p string) string {
 	return p
 }
 
-// clientIPFromReq trusts X-Forwarded-For only when the immediate peer belongs
-// to an explicitly configured trusted proxy network. An empty list means that
-// forwarded headers are never trusted.
+// clientIPFromReq trusts Cloudflare/forwarded headers only when the immediate
+// peer belongs to an explicitly configured trusted proxy network. An empty
+// list means that forwarded headers are never trusted. CF-Connecting-IP (set
+// authoritatively by Cloudflare Tunnel) wins over X-Forwarded-For when both
+// are present.
 func clientIPFromReq(r *http.Request, trusted []*net.IPNet) net.IP {
 	if isTrustedPeer(r, trusted) {
+		if cf := r.Header.Get("CF-Connecting-IP"); cf != "" {
+			if ip := net.ParseIP(firstToken(cf)); ip != nil {
+				return ip
+			}
+		}
 		if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
 			if ip := net.ParseIP(firstToken(fwd)); ip != nil {
 				return ip
