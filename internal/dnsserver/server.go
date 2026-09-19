@@ -231,6 +231,12 @@ func (s *Server) handleDoH(w http.ResponseWriter, r *http.Request) {
 
 	clientIP := clientIPFromReq(r, s.trustedProxies)
 	clientID := clientIDFromPath(r.URL.Path)
+	if clientID == "" {
+		// Cloudflare Worker edge cache normalizes /dns-query/<id> to the
+		// bare path (one cache entry per query) and forwards the identity
+		// in X-Device-ID instead. Same validation as the path form.
+		clientID = clientIDFromPath("/dns-query/" + r.Header.Get("X-Device-ID"))
+	}
 	resp := s.serve(ctx, clientIP, clientID, control.ProtoDoH, req)
 	buf, err := resp.Pack()
 	if err != nil {

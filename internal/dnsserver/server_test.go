@@ -396,6 +396,53 @@ func TestDoHHandlerClientIDRouting(t *testing.T) {
 	}
 }
 
+// Bare /dns-query with X-Device-ID (edge cache normalized the path away) ->
+// blocked, same as the /dns-query/kids-tablet path form.
+func TestDoHHandlerDeviceIDHeaderFallback(t *testing.T) {
+	srv, _ := newTestServer(t)
+	if err := srv.cfg.Store.SetPolicy(&filter.Policy{
+		ID: "kids", Networks: []string{"192.0.2.0/24"}, Clients: []string{"kids-tablet"}, Block: []string{"cid.test"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	h := srv.Handler()
+
+	msg := new(dns.Msg)
+	msg.SetQuestion("cid.test.", dns.TypeA)
+	wire, err := msg.Pack()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dnsQ := base64.RawURLEncoding.EncodeToString(wire)
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/dns-query?dns="+dnsQ, nil)
+	req.Header.Set("X-Device-ID", "kids-tablet")
+	h.ServeHTTP(w, req)
+	resp := new(dns.Msg)
+	if err := resp.Unpack(w.Body.Bytes()); err != nil {
+		t.Fatalf("unpack: %v", err)
+	}
+	if resp.Rcode != dns.RcodeNameError {
+		t.Errorf("doh X-Device-ID rc=%d want NXDOMAIN", resp.Rcode)
+	}
+
+	// Junk header value (path separators) must not select the ID policy; from
+	// outside its network the network fallback misses too.
+	w2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest("GET", "/dns-query?dns="+dnsQ, nil)
+	req2.RemoteAddr = "198.51.100.9:1234"
+	req2.Header.Set("X-Device-ID", "kids-tablet/evil")
+	h.ServeHTTP(w2, req2)
+	resp2 := new(dns.Msg)
+	if err := resp2.Unpack(w2.Body.Bytes()); err != nil {
+		t.Fatalf("unpack 2: %v", err)
+	}
+	if resp2.Rcode == dns.RcodeNameError {
+		t.Error("junk X-Device-ID must not select the policy")
+	}
+}
+
 func freePort(t *testing.T) string {
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
