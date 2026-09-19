@@ -251,10 +251,11 @@ func (c *Cache) SetMaxEntries(n int) {
 }
 
 // DoHit returns a cached response if present, otherwise runs fn (coalescing
-// cache hit rather than fetched just now. Requests coalesced behind a
-// concurrent identical fetch count as cache hits: they were answered from
-// in-memory state (the in-flight singleflight result) without a fresh
-// upstream round trip.
+// concurrent identical fetches onto one upstream call). The bool reports
+// whether the answer came from cache without waiting: requests coalesced
+// behind an in-flight fetch report false — they waited out the full upstream
+// latency, so counting them as hits would bill upstream time to the cache
+// averages on the dashboard.
 func (c *Cache) DoHit(ctx context.Context, k Key, fn func() (*dns.Msg, error)) (*dns.Msg, bool, error) {
 	if m, ok := c.Get(k); ok {
 		return m, true, nil
@@ -280,7 +281,9 @@ func (c *Cache) DoHit(ctx context.Context, k Key, fn func() (*dns.Msg, error)) (
 		// in Set, so this does not touch cached state.
 		m = m.Copy()
 	}
-	return m, shared, nil
+	// ponytail: coalesced waiters report a miss (they waited out the fetch);
+	// per-waiter latency truthfulness wins over counting deduplicated trips.
+	return m, false, nil
 }
 
 // Purge drops every cached response. It is used when the blocklist changes so

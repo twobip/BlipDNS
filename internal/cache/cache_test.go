@@ -133,7 +133,7 @@ func TestDoHitReportsCacheSource(t *testing.T) {
 	}
 }
 
-func TestDoHitCoalescedWaiterIsHit(t *testing.T) {
+func TestDoHitCoalescedWaiterIsMiss(t *testing.T) {
 	c := New(time.Hour, 0)
 	calls := 0
 	fn := func() (*dns.Msg, error) {
@@ -156,8 +156,8 @@ func TestDoHitCoalescedWaiterIsHit(t *testing.T) {
 	}
 	wg.Wait()
 	for _, cached := range cacheds {
-		if !cached {
-			t.Error("coalesced waiter reported as cache miss, want hit")
+		if cached {
+			t.Error("coalesced waiter reported as cache hit, want miss (it waited out the upstream fetch)")
 		}
 	}
 	if calls != 1 {
