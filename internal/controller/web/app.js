@@ -1956,7 +1956,7 @@ async function pollUpdateJob() {
   }
 }
 $("i-save").onclick = saveInstance;
-$("inst-filter").addEventListener("input", renderInstances);
+$("inst-filter").addEventListener("input", debounce(renderInstances, 150));
 
 /* instance row actions (event delegation) */
 $("inst-tbody").addEventListener("click", (e) => {
@@ -2115,8 +2115,8 @@ $("bl-auto-save").onclick = async () => {
     loadBlocklist();
   } catch (e) { toast("save failed: " + e.message, "err"); }
 };
-$("bl-filter").addEventListener("input", () => { blPage = 0; renderBlocklist(); });
-$("bl-filter-allow").addEventListener("input", () => { blAllowPage = 0; renderAllowList(); });
+$("bl-filter").addEventListener("input", debounce(() => { blPage = 0; renderBlocklist(); }, 150));
+$("bl-filter-allow").addEventListener("input", debounce(() => { blAllowPage = 0; renderAllowList(); }, 150));
 $("bl-export").onclick = () => window.open("/api/blocklist/export", "_blank");
 $("bl-clear").onclick = () => {
   confirmDialog("Clear entire blocklist?", "This removes every blocked domain, drops all sources, and deletes custom domains. This cannot be undone.", async () => {
@@ -2572,7 +2572,8 @@ refresh();
 startClock();
 refreshSettings();
 pollTimer = setInterval(() => { if (current === "dashboard" || current === "instances" || current === "cache-stats" || current === "upstream-errors") refresh(); }, 5000);
-setInterval(() => { if (current === "dashboard") fetchStats(); }, 60000); // refresh chart/stats periodically
+// ponytail: no separate fetchStats timer — the 5s refresh() above already runs
+// fetchStats on the dashboard, so a second timer was pure duplicate requests.
 
 /* ---------- cleanup on unload ---------- */
 // Close the SSE stream and clear timers when the page is unloaded or the
