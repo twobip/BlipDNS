@@ -3,8 +3,10 @@ package controller
 import (
 	"context"
 	"database/sql"
+	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -429,5 +431,28 @@ func TestBlocklistStoreBlockSourceLabel(t *testing.T) {
 	}
 	if got != "" {
 		t.Errorf("BlockSourceLabel(nope.test) = %q, want empty", got)
+	}
+}
+
+func TestSaveConfigDoesNotDuplicateDisabled(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "blipc.yaml")
+	fleet := NewFleet(cfgPath)
+	u := "https://example.invalid/list.txt"
+	fleet.SetBlocklistDisabled([]string{u})
+	// saveConfig twice (as any two settings changes would): the
+	// disabled list must not accumulate duplicates.
+	if err := fleet.saveConfig(); err != nil {
+		t.Fatalf("saveConfig: %v", err)
+	}
+	if err := fleet.saveConfig(); err != nil {
+		t.Fatalf("saveConfig: %v", err)
+	}
+	b, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if n := strings.Count(string(b), u); n != 1 {
+		t.Errorf("disabled URL appears %d times in saved config, want 1:\n%s", n, b)
 	}
 }

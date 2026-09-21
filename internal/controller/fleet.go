@@ -2812,6 +2812,10 @@ func (f *Fleet) saveConfig() error {
 	cfg.CacheSize = f.CacheConfig()
 	cfg.QueryLogRetentionHours = f.QueryLogRetentionHours()
 	cfg.BlocklistSources = blSources
+	// ponytail: reset, not append — cfg was unmarshaled from the file on
+	// disk, so appending re-added the stored entries on every save and the
+	// disabled list grew with duplicates forever.
+	cfg.BlocklistDisabled = nil
 	f.blMu.Lock()
 	for u := range f.blocklistDisabled {
 		cfg.BlocklistDisabled = append(cfg.BlocklistDisabled, u)
