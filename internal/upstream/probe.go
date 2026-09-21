@@ -125,9 +125,9 @@ func warmDoHEndpoint(ctx context.Context, doh *DoHResolver, timeout time.Duratio
 		return nil, nil
 	}
 	pinned := NewDoHWithBootstrap(doh.endpoint, timeout, &staticResolver{host: host, ips: ips})
-		defer pinned.CloseIdleConnections()
-		return pinned, nil
-	}
+	defer pinned.CloseIdleConnections()
+	return pinned, nil
+}
 
 // resolveWithRetry sends one A query for fqdn via r, retrying once on a
 // mid-connection TCP reset. Fresh TLS handshakes against throttling upstreams

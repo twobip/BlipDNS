@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -104,8 +103,7 @@ type Fleet struct {
 	mu                sync.RWMutex
 	instances         map[string]*Instance
 	bus               *Bus
-	http              *http.Client
-	saveMu            sync.Mutex // serializes saveConfig (atomic tmp+rename)
+	saveMu            sync.Mutex    // serializes saveConfig (atomic tmp+rename)
 	allowGen          atomic.Uint64 // bumps on manual allow edits; gates syncAllowed
 	allowSyncedGen    atomic.Uint64 // last allowGen mirrored into blocklist
 	now               func() time.Time
@@ -635,7 +633,6 @@ func NewFleet(configPath string) *Fleet {
 	return &Fleet{
 		instances:         make(map[string]*Instance),
 		bus:               NewBus(500),
-		http:              &http.Client{Timeout: 10 * time.Second},
 		now:               time.Now,
 		queryLog:          queryLog,
 		blocklistDB:       blocklistDB,
@@ -1720,10 +1717,30 @@ func (f *Fleet) pushInstance(ctx context.Context, id string) map[string]string {
 		mu.Unlock()
 	}
 	wg.Add(6)
-	go func() { defer wg.Done(); if err := i.ctl().SetDoHHTTPAddr(ctx, wantDoH); err != nil { setRes("doh: " + err.Error()) } }()
-	go func() { defer wg.Done(); if err := i.ctl().SetCacheConfig(ctx, wantSize); err != nil { setRes("cache: " + err.Error()) } }()
-	go func() { defer wg.Done(); if err := i.ctl().SetRateLimit(ctx, wantQPS, 0); err != nil { setRes("rate_limit: " + err.Error()) } }()
-	go func() { defer wg.Done(); if err := i.ctl().SetRecords(ctx, wantRecs); err != nil { setRes("records: " + err.Error()) } }()
+	go func() {
+		defer wg.Done()
+		if err := i.ctl().SetDoHHTTPAddr(ctx, wantDoH); err != nil {
+			setRes("doh: " + err.Error())
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		if err := i.ctl().SetCacheConfig(ctx, wantSize); err != nil {
+			setRes("cache: " + err.Error())
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		if err := i.ctl().SetRateLimit(ctx, wantQPS, 0); err != nil {
+			setRes("rate_limit: " + err.Error())
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		if err := i.ctl().SetRecords(ctx, wantRecs); err != nil {
+			setRes("records: " + err.Error())
+		}
+	}()
 	go func() {
 		defer wg.Done()
 		if eff != nil {
@@ -2087,11 +2104,20 @@ func (f *Fleet) SetAutoUpdateHours(h int) {
 // StartAutoUpdater runs a background loop that refreshes the blocklist sources
 // on the configured interval. It never cancels an in-flight import and skips
 // while one is running, so manual and automatic refreshes can't collide.
+// Uses a timer until the next due time instead of a 1-minute poll wake.
 func (f *Fleet) StartAutoUpdater() {
 	go func() {
-		t := time.NewTicker(1 * time.Minute)
-		defer t.Stop()
-		for range t.C {
+		for {
+			next := f.nextAutoUpdateIn()
+			if next <= 0 {
+				// Not configured: recheck hourly for config changes.
+				next = time.Hour
+			}
+			t := time.NewTimer(next)
+			select {
+			case <-t.C:
+			}
+			t.Stop()
 			due := false
 			f.blMu.Lock()
 			if f.autoUpdateHours > 0 && len(f.blocklistSources) > 0 && !f.blRunning {
@@ -2106,6 +2132,23 @@ func (f *Fleet) StartAutoUpdater() {
 			}
 		}
 	}()
+}
+
+func (f *Fleet) nextAutoUpdateIn() time.Duration {
+	f.blMu.Lock()
+	defer f.blMu.Unlock()
+	if f.autoUpdateHours <= 0 || len(f.blocklistSources) == 0 {
+		return 0
+	}
+	if f.blStatus.LastUpdate.IsZero() {
+		return time.Minute
+	}
+	due := f.blStatus.LastUpdate.Add(time.Duration(f.autoUpdateHours) * time.Hour)
+	d := time.Until(due)
+	if d < time.Minute {
+		d = time.Minute
+	}
+	return d
 }
 
 // LoadSourceStats restores the persisted per-source download metadata into

@@ -1,6 +1,7 @@
 package control
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
@@ -854,7 +855,7 @@ func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request) {
 		case <-r.Context().Done():
 			return
 		case e := <-ch:
-			fmt.Fprintf(w, "data: %s\n\n", MustJSON(e))
+			writeSSEEvent(w, e)
 			flusher.Flush()
 		case <-ticker.C:
 			// Keepalive: a lightweight stats ping so the controller can
@@ -865,7 +866,7 @@ func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request) {
 				st.UpstreamServers = nil
 				st.UpstreamRoutes = nil
 			}
-			fmt.Fprintf(w, "data: %s\n\n", MustJSON(WatchEvent{Type: "stats", At: time.Now(), Stats: st}))
+			writeSSEEvent(w, WatchEvent{Type: "stats", At: time.Now(), Stats: st})
 			flusher.Flush()
 		}
 	}
@@ -982,10 +983,36 @@ func adoptIP(r *http.Request) string {
 }
 
 // MustJSON renders v for SSE streams; encoding/json never fails on the
-// protocol structs passed here.
+// protocol structs passed here. Pooled buffer avoids a bytes->string->wire
+// double copy per event.
+var mustJSONPool = sync.Pool{New: func() any { return new(bytes.Buffer) }}
+
 func MustJSON(v interface{}) string {
-	b, _ := json.Marshal(v)
-	return string(b)
+	buf := mustJSONPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	_ = json.NewEncoder(buf).Encode(v)
+	// Encoder appends a trailing newline; strip it for SSE data: framing.
+	b := buf.Bytes()
+	if len(b) > 0 && b[len(b)-1] == '\n' {
+		b = b[:len(b)-1]
+	}
+	s := string(b)
+	buf.Reset()
+	mustJSONPool.Put(buf)
+	return s
+}
+
+// writeSSEEvent writes one SSE data frame without the MustJSON string copy.
+func writeSSEEvent(w io.Writer, v interface{}) {
+	buf := mustJSONPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	_ = json.NewEncoder(buf).Encode(v)
+	b := buf.Bytes()
+	_, _ = w.Write([]byte("data: "))
+	_, _ = w.Write(b)
+	_, _ = w.Write([]byte("\n"))
+	buf.Reset()
+	mustJSONPool.Put(buf)
 }
 
 func fromFilter(p *filter.Policy) *Policy {

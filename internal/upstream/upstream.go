@@ -132,9 +132,9 @@ func (r *UDPResolver) Resolve(ctx context.Context, q *dns.Msg) (*dns.Msg, error)
 // conn + single mutex capped throughput at 1/RTT; pooling K conns lets K
 // queries proceed concurrently.
 type TLSResolver struct {
-	addr string
-	tls  dns.Client // pre-built; reused across queries (no per-query alloc)
-	mu   sync.Mutex
+	addr  string
+	tls   dns.Client // pre-built; reused across queries (no per-query alloc)
+	mu    sync.Mutex
 	conns []*dns.Conn // idle TLS conns, LIFO
 }
 

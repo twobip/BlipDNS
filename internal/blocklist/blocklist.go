@@ -126,6 +126,19 @@ func validateSourceURL(rawURL string) error {
 // httptest (127.0.0.1) servers swap it for http.DefaultTransport in TestMain.
 var FetchTransport http.RoundTripper = safeBlocklistTransport
 
+// sharedFetchClient reuses one Transport for all source fetches in production.
+// FetchTransport is swapped by tests (httptest needs http.DefaultTransport),
+// so fetchClientFor returns the shared client on the fast path and a throwaway
+// only when the transport was swapped.
+var sharedFetchClient = &http.Client{Transport: safeBlocklistTransport, Timeout: 2 * time.Minute}
+
+func fetchClientFor() *http.Client {
+	if FetchTransport == sharedFetchClient.Transport {
+		return sharedFetchClient
+	}
+	return &http.Client{Transport: FetchTransport, Timeout: 2 * time.Minute}
+}
+
 // Progress reports incremental fetch/parse progress while loading sources.
 type Progress struct {
 	URL         string // source currently being fetched
@@ -544,7 +557,7 @@ func FetchSource(ctx context.Context, rawURL string, v Validators) (*FetchResult
 		req.Header.Set("If-Modified-Since", v.LastModified)
 	}
 
-	client := &http.Client{Transport: FetchTransport, Timeout: 2 * time.Minute}
+	client := fetchClientFor()
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err

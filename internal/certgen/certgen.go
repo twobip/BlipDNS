@@ -19,8 +19,8 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"slices"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -133,18 +133,39 @@ func EnsureFiles(certPath, keyPath string, extraHosts ...string) (certPEM, keyPE
 	if mkerr := os.MkdirAll(dir, 0o750); mkerr != nil {
 		return certPEM, keyPEM, false, fmt.Errorf("self-signed cert: mkdir %s: %w", dir, mkerr)
 	}
-	if werr := os.WriteFile(certPath, certPEM, 0o644); werr != nil {
+	// Atomic writes (tmp+rename, 0600 directly) so a crash never leaves a
+	// half-written PEM.
+	if werr := writeFileAtomic(certPath, certPEM, 0o644); werr != nil {
 		return certPEM, keyPEM, false, fmt.Errorf("self-signed cert: write %s: %w", certPath, werr)
 	}
-	if werr := os.WriteFile(keyPath, keyPEM, 0o600); werr != nil {
+	if werr := writeFileAtomic(keyPath, keyPEM, 0o600); werr != nil {
 		return certPEM, keyPEM, false, fmt.Errorf("self-signed key: write %s: %w", keyPath, werr)
 	}
-	// WriteFile does not change the mode of an existing file, so a key that
-	// predates this hardening would keep its loose bits after a regeneration.
-	if cerr := os.Chmod(keyPath, 0o600); cerr != nil {
-		return certPEM, keyPEM, false, fmt.Errorf("self-signed key: chmod %s: %w", keyPath, cerr)
-	}
 	return certPEM, keyPEM, true, nil
+}
+
+func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".cert-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return err
+	}
+	if err := tmp.Chmod(mode); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return err
+	}
+	return os.Rename(tmpName, path)
 }
 
 // load reads a persisted pair and validates it: both PEMs parse, the private
@@ -210,40 +231,87 @@ func parsePrivateKey(der []byte) (privateKey, error) {
 // missingSANs reports the first identity the persisted certificate fails to
 // cover, or "" when it covers them all. Without this check a cert generated
 // before an address existed (e.g. an HA VIP that only a master node holds)
-// would be served unverifiable for its entire multi-year lifetime.
+// would be served unverifiable for its entire multi-year lifetime. Membership
+// is via maps (was O(N·M) slices.Contains/nested Equal per check) and the
+// want-lists are computed once (load called expectedSANs twice before).
 func missingSANs(cert *x509.Certificate, extraHosts []string) string {
 	wantNames, wantIPs := expectedSANs(extraHosts)
+	return missingSANsWithWant(cert, wantNames, wantIPs)
+}
+
+func missingSANsWithWant(cert *x509.Certificate, wantNames []string, wantIPs []net.IP) string {
+	haveNames := make(map[string]struct{}, len(cert.DNSNames))
+	for _, n := range cert.DNSNames {
+		haveNames[n] = struct{}{}
+	}
 	for _, n := range wantNames {
-		if !slices.Contains(cert.DNSNames, n) {
+		if _, ok := haveNames[n]; !ok {
 			return n
 		}
 	}
+	haveIPs := make(map[string]struct{}, len(cert.IPAddresses))
+	for _, ip := range cert.IPAddresses {
+		haveIPs[ip.String()] = struct{}{}
+	}
 	for _, ip := range wantIPs {
-		found := false
-		for _, got := range cert.IPAddresses {
-			if got.Equal(ip) {
-				found = true
-				break
-			}
-		}
-		if !found {
+		if _, ok := haveIPs[ip.String()]; !ok {
 			return ip.String()
 		}
 	}
 	return ""
 }
 
+// hostCache memoizes hostname()+localIPs() (net.Interfaces syscalls) for 5m:
+// every cert check (startup + every HA VIP refresh) enumerated interfaces.
+var hostCache = struct {
+	sync.Mutex
+	host   string
+	ips    []net.IP
+	expire time.Time
+}{}
+
 func hostname() string {
+	hostCache.Lock()
+	defer hostCache.Unlock()
+	if time.Now().Before(hostCache.expire) && hostCache.expire.Unix() != 0 {
+		return hostCache.host
+	}
 	h, err := os.Hostname()
 	if err != nil {
-		return ""
+		h = ""
 	}
+	// Refresh IPs under the same lock to keep one syscall burst per 5m.
+	ips := localIPsUncached()
+	hostCache.host = h
+	hostCache.ips = ips
+	hostCache.expire = time.Now().Add(5 * time.Minute)
 	return h
 }
 
 // localIPs returns the machine's non-loopback IPv4/IPv6 addresses, so the
 // generated certificate stays valid for clients that reach blipd by LAN IP.
+// Cached 5m alongside hostname() (was net.Interfaces syscalls per check).
 func localIPs() []net.IP {
+	hostCache.Lock()
+	defer hostCache.Unlock()
+	if time.Now().Before(hostCache.expire) && hostCache.expire.Unix() != 0 && hostCache.ips != nil {
+		out := make([]net.IP, len(hostCache.ips))
+		copy(out, hostCache.ips)
+		return out
+	}
+	ips := localIPsUncached()
+	// Refresh hostname too if expired (one burst per 5m).
+	if h, err := os.Hostname(); err == nil {
+		hostCache.host = h
+	}
+	hostCache.ips = ips
+	hostCache.expire = time.Now().Add(5 * time.Minute)
+	out := make([]net.IP, len(ips))
+	copy(out, ips)
+	return out
+}
+
+func localIPsUncached() []net.IP {
 	out := []net.IP{}
 	ifaces, err := net.Interfaces()
 	if err != nil {

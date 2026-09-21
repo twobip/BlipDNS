@@ -39,7 +39,7 @@ type RecordStore struct {
 // compiledRecord is a RecordEntry with its hot-path parsing done once at
 // SetRecords: resolved RR type, pre-parsed IP and pre-computed TTL/target.
 type compiledRecord struct {
-	entry control.RecordEntry
+	entry  control.RecordEntry
 	rrType uint16
 	ip     net.IP
 	target string // FQDN for CNAME / PTR owner
