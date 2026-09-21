@@ -283,56 +283,52 @@ func (i *Instance) poll(ctx context.Context) {
 	if serr == nil {
 		i.stats = s
 		i.lastUpstr = s.Upstream
-		// Persist cumulative counters so the dashboard statistics survive
-		// restarts of blipd or blipc (deltas are computed at query time).
-		if i.fleet.queryLog != nil {
-			_ = i.fleet.queryLog.AddStatsSample(ctx, StatsSample{
-				Timestamp:  time.Now(),
-				Instance:   i.Config.ID,
-				Queries:    s.QueriesTotal,
-				Blocked:    s.BlockedTotal,
-				Errors:     s.UpstreamErr,
-				DurationUs: s.DurationTotalUs,
-			})
+	}
+	// Snapshot what the DB write needs, then release the lock before any I/O:
+	// holding i.mu across SQLite Exec blocked status()/ctl()/hasToken().
+	var sample *StatsSample
+	if serr == nil && i.fleet.queryLog != nil {
+		sample = &StatsSample{
+			Timestamp:  time.Now(),
+			Instance:   i.Config.ID,
+			Queries:    s.QueriesTotal,
+			Blocked:    s.BlockedTotal,
+			Errors:     s.UpstreamErr,
+			DurationUs: s.DurationTotalUs,
 		}
 	}
+	instanceID := i.Config.ID
+	instanceLabel := i.Config.Label
 	i.mu.Unlock()
+	if sample != nil {
+		// Persist cumulative counters so the dashboard statistics survive
+		// restarts of blipd or blipc (deltas are computed at query time).
+		// Batched through the writer channel where available; direct Exec is
+		// the fallback (never under i.mu).
+		_ = i.fleet.queryLog.AddStatsSample(ctx, *sample)
+	}
 	if herr == nil {
 		// The bus event carries the polled stats to the browser via SSE.
 		i.fleet.bus.Publish(Event{
-			InstanceID: i.Config.ID, Instance: i.Config.Label,
+			InstanceID: instanceID, Instance: instanceLabel,
 			Type: "health", At: i.fleet.now(), Health: h, Stats: s,
 		})
-		// Converge the instance to the fleet default config if it is behind
-		// (newly added/adopted, restarted, or reverted to its own config).
-		i.fleet.maybePushConfig(ctx, i, s)
-		// Converge the optional plain-HTTP DoH listener the same way.
-		i.fleet.maybePushDoH(ctx, i, s)
-		// Converge the per-client DNS rate limit the same way.
-		i.fleet.maybePushRateLimit(ctx, i, s)
-		// Converge the response cache config (size / auto-refresh) the same way.
-		i.fleet.maybePushCache(ctx, i, s)
-		// Converge the upstream pool + routes the same way.
-		i.fleet.maybePushUpstream(ctx, i, s)
-		// Converge the instance's global blocklist the same way.
-		i.fleet.maybePushBlocklist(ctx, i, s)
-		// Converge the instance's local DNS records the same way.
-		i.fleet.maybePushRecords(ctx, i, s)
-		// Converge the HA/keepalived config the same way: retry a previously
-		// failed keepalived reload so a transient sudoers issue or update-
-		// time priority degradation is corrected automatically.
+		// Converge reconcilers concurrently per tick (was 8 sequential RTTs).
+		// Blocklist/HA stay on their own cadence inside maybePush*.
+		var wg sync.WaitGroup
+		wg.Add(7)
+		go func() { defer wg.Done(); i.fleet.maybePushConfig(ctx, i, s) }()
+		go func() { defer wg.Done(); i.fleet.maybePushDoH(ctx, i, s) }()
+		go func() { defer wg.Done(); i.fleet.maybePushRateLimit(ctx, i, s) }()
+		go func() { defer wg.Done(); i.fleet.maybePushCache(ctx, i, s) }()
+		go func() { defer wg.Done(); i.fleet.maybePushUpstream(ctx, i, s) }()
+		go func() { defer wg.Done(); i.fleet.maybePushBlocklist(ctx, i, s) }()
+		go func() { defer wg.Done(); i.fleet.maybePushRecords(ctx, i, s) }()
+		wg.Wait()
 		i.fleet.maybePushHA(ctx, i)
-		// Also log to query log
-		if i.fleet.queryLog != nil && s != nil {
-			_ = i.fleet.queryLog.Insert(ctx, QueryLogEntry{
-				Timestamp: time.Now(),
-				Instance:  i.Config.Label,
-				Client:    "controller",
-				Domain:    "health_check",
-				Action:    "POLL",
-				Upstream:  "",
-			})
-		}
+		// NOTE: the synthetic health_check/POLL query-log row was removed: it
+		// cost one SQLite write per instance per 5s and polluted the log.
+		// Liveness derives from stats_samples.
 	}
 }
 
@@ -452,7 +448,9 @@ func (i *Instance) status() *InstanceStatus {
 	}
 	// Blocklist is synced when the checksum the instance reports matches the
 	// fleet's (trust what the instance actually has, not what we pushed).
-	st.BlocklistSynced = i.fleet.Blocklist().Checksum() != 0 && i.fleet.Blocklist().Checksum() == repBlHash
+	// Single Checksum() call (was two RLocks per status poll).
+	fleetChecksum := i.fleet.Blocklist().Checksum()
+	st.BlocklistSynced = fleetChecksum != 0 && fleetChecksum == repBlHash
 	// Adoption state is local (hasToken): reading it here avoids a blocking
 	// per-instance network call (10s timeout) that would stall the instances
 	// list whenever a node is unreachable. The remote status is fetched

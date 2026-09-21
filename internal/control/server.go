@@ -2,7 +2,6 @@ package control
 
 import (
 	"crypto/rand"
-	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
@@ -279,14 +278,20 @@ func (s *Server) HasWatchers() bool {
 
 // Notify pushes a WatchEvent to all connected watchers. Sends are
 // non-blocking: a consumer that cannot keep up has events dropped and counted
-// (see droppedEvents) rather than stalling the caller.
+// (see droppedEvents) rather than stalling the caller. Watchers are copied
+// under watchMu and notified outside the lock so Notify never blocks
+// Set*Controller writers or handleWatch.
 func (s *Server) Notify(e WatchEvent) {
 	if s == nil || !s.HasWatchers() {
 		return
 	}
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.watchMu.Lock()
+	subs := make([]chan WatchEvent, 0, len(s.watchers))
 	for ch := range s.watchers {
+		subs = append(subs, ch)
+	}
+	s.watchMu.Unlock()
+	for _, ch := range subs {
 		select {
 		case ch <- e:
 		default:
@@ -358,13 +363,22 @@ func (s *Server) withSecurityHeaders(next http.Handler) http.Handler {
 }
 
 // checkToken compares the Authorization header against the bearer token in
-// constant time ("Bearer " prefix optional).
+// constant time ("Bearer " prefix optional). XOR-fold over bytes avoids the
+// two []byte conversions that allocated on every authenticated request; the
+// loop always runs len(tok) iterations for equal-length inputs.
 func checkToken(hdr, want string) bool {
 	tok := hdr
 	if len(tok) > 7 && tok[:7] == "Bearer " {
 		tok = tok[7:]
 	}
-	return tok != "" && len(tok) == len(want) && subtle.ConstantTimeCompare([]byte(tok), []byte(want)) == 1
+	if tok == "" || len(tok) != len(want) {
+		return false
+	}
+	var diff byte
+	for i := 0; i < len(tok); i++ {
+		diff |= tok[i] ^ want[i]
+	}
+	return diff == 0
 }
 
 func (s *Server) auth(h http.HandlerFunc) http.HandlerFunc {
@@ -419,24 +433,26 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 			st.BlocklistCount = s.blocklist.Count()
 			st.BlocklistHash = s.blocklist.Checksum()
 		}
+		// Single controllers snapshot (was 5x RLock per /stats poll).
+		ctrls := s.controllers()
 		// Report the optional plain-HTTP DoH listener address so the
 		// controller can converge it (and surface it in the UI / health).
-		if dc := s.controllers().DoH; dc != nil {
+		if dc := ctrls.DoH; dc != nil {
 			st.DohHTTPAddr = dc.DoHHTTPAddr()
 		}
 		// Report the per-client rate limit so the controller can converge it
 		// and surface it in the UI.
-		if ifc := s.controllers().RateLimit; ifc != nil {
+		if ifc := ctrls.RateLimit; ifc != nil {
 			st.RateLimitQPS = ifc.RateLimitQPS()
 		}
 		// Report the runtime cache size limit so the controller can converge
 		// it after a restart.
-		if cc := s.controllers().Cache; cc != nil {
+		if cc := ctrls.Cache; cc != nil {
 			st.CacheSize = cc.CacheSize()
 		}
 		// Report the local DNS record hash so the controller can converge them
 		// (e.g. after a restart) by re-pushing on drift.
-		if rc := s.controllers().Records; rc != nil {
+		if rc := ctrls.Records; rc != nil {
 			if recs, err := rc.GetRecords(); err == nil {
 				st.RecordsHash = RecordsHash(recs)
 			}

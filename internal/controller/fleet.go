@@ -105,6 +105,9 @@ type Fleet struct {
 	instances         map[string]*Instance
 	bus               *Bus
 	http              *http.Client
+	saveMu            sync.Mutex // serializes saveConfig (atomic tmp+rename)
+	allowGen          atomic.Uint64 // bumps on manual allow edits; gates syncAllowed
+	allowSyncedGen    atomic.Uint64 // last allowGen mirrored into blocklist
 	now               func() time.Time
 	logfn             func(Event)
 	queryLog          *QueryLogStore       // persistent query log
@@ -256,23 +259,40 @@ func validateHACluster(c control.HACluster) error {
 	return nil
 }
 
-// HAStatuses reads the local keepalived status from every managed node.
+// HAStatuses reads the local keepalived status from every managed node in
+// parallel (was Σ RTTs serially).
 func (f *Fleet) HAStatuses(ctx context.Context) map[string]*control.HAStatus {
-	f.mu.RLock()
-	insts := make([]*Instance, 0, len(f.instances))
-	for _, inst := range f.instances {
-		insts = append(insts, inst)
-	}
-	f.mu.RUnlock()
+	insts := f.snapshotInstances()
 	out := make(map[string]*control.HAStatus, len(insts))
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 8)
 	for _, inst := range insts {
-		st, err := inst.ctl().HAStatus(ctx)
-		if err != nil {
-			out[inst.Config.ID] = &control.HAStatus{State: "UNAVAILABLE", LastError: err.Error()}
-			continue
-		}
-		out[inst.Config.ID] = st
+		wg.Add(1)
+		go func(in *Instance) {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+			case <-ctx.Done():
+				mu.Lock()
+				out[in.Config.ID] = &control.HAStatus{State: "UNAVAILABLE", LastError: ctx.Err().Error()}
+				mu.Unlock()
+				return
+			}
+			ictx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			defer cancel()
+			st, err := in.ctl().HAStatus(ictx)
+			mu.Lock()
+			if err != nil {
+				out[in.Config.ID] = &control.HAStatus{State: "UNAVAILABLE", LastError: err.Error()}
+			} else {
+				out[in.Config.ID] = st
+			}
+			mu.Unlock()
+		}(inst)
 	}
+	wg.Wait()
 	return out
 }
 
@@ -455,13 +475,29 @@ func (f *Fleet) ValidateHA(ctx context.Context, cluster control.HACluster) error
 	if err := validateHACluster(cluster); err != nil {
 		return err
 	}
-	for _, id := range []string{cluster.PrimaryInstance, cluster.SecondaryInstance} {
-		inst, err := f.haNode(id)
+	ids := []string{cluster.PrimaryInstance, cluster.SecondaryInstance}
+	errs := make([]error, len(ids))
+	var wg sync.WaitGroup
+	for idx, id := range ids {
+		wg.Add(1)
+		go func(k int, nodeID string) {
+			defer wg.Done()
+			inst, err := f.haNode(nodeID)
+			if err != nil {
+				errs[k] = err
+				return
+			}
+			ictx, cancel := context.WithTimeout(ctx, 15*time.Second)
+			defer cancel()
+			if err := inst.ctl().ValidateHA(ictx); err != nil {
+				errs[k] = fmt.Errorf("%s: %w", nodeID, err)
+			}
+		}(idx, id)
+	}
+	wg.Wait()
+	for _, err := range errs {
 		if err != nil {
 			return err
-		}
-		if err := inst.ctl().ValidateHA(ctx); err != nil {
-			return fmt.Errorf("%s: %w", id, err)
 		}
 	}
 	return nil
@@ -471,21 +507,48 @@ func (f *Fleet) ApplyHA(ctx context.Context, cluster control.HACluster) error {
 	if err := f.ValidateHA(ctx, cluster); err != nil {
 		return err
 	}
-	for _, id := range []string{cluster.PrimaryInstance, cluster.SecondaryInstance} {
-		inst, err := f.haNode(id)
-		if err != nil {
-			return err
+	ids := []string{cluster.PrimaryInstance, cluster.SecondaryInstance}
+	type res struct {
+		id  string
+		cfg control.HAConfig
+		err error
+	}
+	out := make([]res, len(ids))
+	var wg sync.WaitGroup
+	for idx, id := range ids {
+		wg.Add(1)
+		go func(k int, nodeID string) {
+			defer wg.Done()
+			inst, err := f.haNode(nodeID)
+			if err != nil {
+				out[k] = res{id: nodeID, err: err}
+				return
+			}
+			var nodeCfg control.HAConfig
+			if nodeID == cluster.PrimaryInstance {
+				nodeCfg = cluster.Primary
+			} else {
+				nodeCfg = cluster.Secondary
+			}
+			ictx, cancel := context.WithTimeout(ctx, 15*time.Second)
+			defer cancel()
+			if err := inst.ctl().ApplyHA(ictx); err != nil {
+				out[k] = res{id: nodeID, cfg: nodeCfg, err: fmt.Errorf("%s apply failed after earlier node(s) may have applied: %w", nodeID, err)}
+				return
+			}
+			out[k] = res{id: nodeID, cfg: nodeCfg}
+		}(idx, id)
+	}
+	wg.Wait()
+	for _, r := range out {
+		if r.err != nil {
+			return r.err
 		}
-		var nodeCfg control.HAConfig
-		if id == cluster.PrimaryInstance {
-			nodeCfg = cluster.Primary
-		} else {
-			nodeCfg = cluster.Secondary
+	}
+	for _, r := range out {
+		if inst := f.get(r.id); inst != nil {
+			inst.markHAApplied(haConfigHash(&r.cfg))
 		}
-		if err := inst.ctl().ApplyHA(ctx); err != nil {
-			return fmt.Errorf("%s apply failed after earlier node(s) may have applied: %w", id, err)
-		}
-		inst.markHAApplied(haConfigHash(&nodeCfg))
 	}
 	return nil
 }
@@ -495,18 +558,37 @@ func (f *Fleet) DisableHA(ctx context.Context, cluster control.HACluster) error 
 		cluster.Enabled = false
 		return f.setHAClusterPersisted(cluster)
 	}
+	ids := []string{}
 	for _, id := range []string{cluster.PrimaryInstance, cluster.SecondaryInstance} {
-		if id == "" {
-			continue
+		if id != "" {
+			ids = append(ids, id)
 		}
-		inst, err := f.haNode(id)
+	}
+	errs := make([]error, len(ids))
+	var wg sync.WaitGroup
+	for idx, id := range ids {
+		wg.Add(1)
+		go func(k int, nodeID string) {
+			defer wg.Done()
+			inst, err := f.haNode(nodeID)
+			if err != nil {
+				errs[k] = err
+				return
+			}
+			ictx, cancel := context.WithTimeout(ctx, 15*time.Second)
+			defer cancel()
+			if err := inst.ctl().DisableHA(ictx); err != nil {
+				errs[k] = fmt.Errorf("%s: %w", nodeID, err)
+				return
+			}
+			inst.markHAApplied("")
+		}(idx, id)
+	}
+	wg.Wait()
+	for _, err := range errs {
 		if err != nil {
 			return err
 		}
-		if err := inst.ctl().DisableHA(ctx); err != nil {
-			return fmt.Errorf("%s: %w", id, err)
-		}
-		inst.markHAApplied("")
 	}
 	cluster.Enabled = false
 	return f.setHAClusterPersisted(cluster)
@@ -1067,31 +1149,65 @@ func upstreamHash(servers []upstream.UpstreamServer, routes []upstream.UpstreamR
 // the fleet default nor a per-instance override sets any servers or routes) are
 // skipped: the fleet is not managing upstream for them, so they keep whatever
 // they currently have (config-file or previously pushed).
-func (f *Fleet) pushUpstream(ctx context.Context) map[string]string {
+func (f *Fleet) snapshotInstances() []*Instance {
 	f.mu.RLock()
+	defer f.mu.RUnlock()
 	insts := make([]*Instance, 0, len(f.instances))
 	for _, i := range f.instances {
 		insts = append(insts, i)
 	}
-	f.mu.RUnlock()
+	return insts
+}
+
+// fanOut runs fn against every instance with bounded parallelism (8) and a
+// per-instance timeout, so one slow/offline node never head-of-line-blocks the
+// fleet. Results map instance ID -> "ok" or error text.
+func (f *Fleet) fanOut(ctx context.Context, fn func(ctx context.Context, inst *Instance) string) map[string]string {
+	insts := f.snapshotInstances()
 	results := make(map[string]string, len(insts))
-	for _, i := range insts {
-		if !i.hasToken() {
-			results[i.Config.ID] = "not adopted"
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 8)
+	for _, inst := range insts {
+		if !inst.hasToken() {
+			results[inst.Config.ID] = "not adopted"
 			continue
 		}
+		wg.Add(1)
+		go func(in *Instance) {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+			case <-ctx.Done():
+				mu.Lock()
+				results[in.Config.ID] = ctx.Err().Error()
+				mu.Unlock()
+				return
+			}
+			ictx, cancel := context.WithTimeout(ctx, 15*time.Second)
+			defer cancel()
+			res := fn(ictx, in)
+			mu.Lock()
+			results[in.Config.ID] = res
+			mu.Unlock()
+		}(inst)
+	}
+	wg.Wait()
+	return results
+}
+
+func (f *Fleet) pushUpstream(ctx context.Context) map[string]string {
+	return f.fanOut(ctx, func(ictx context.Context, i *Instance) string {
 		wantServers, wantRoutes, wantBootstrap := f.effectiveUpstream(i.Config.ID)
 		if len(wantServers) == 0 && len(wantRoutes) == 0 {
-			results[i.Config.ID] = "no upstream configured"
-			continue
+			return "no upstream configured"
 		}
-		if err := i.ctl().SetUpstream(ctx, wantServers, wantRoutes, wantBootstrap); err != nil {
-			results[i.Config.ID] = err.Error()
-			continue
+		if err := i.ctl().SetUpstream(ictx, wantServers, wantRoutes, wantBootstrap); err != nil {
+			return err.Error()
 		}
-		results[i.Config.ID] = "ok"
-	}
-	return results
+		return "ok"
+	})
 }
 
 // maybePushUpstream converges an instance's upstream pool + routes + bootstrap
@@ -1188,50 +1304,24 @@ func (f *Fleet) SetRateLimitQPS(ctx context.Context, qps int) map[string]string 
 
 // pushRateLimit distributes the effective DNS rate limit to every instance.
 func (f *Fleet) pushRateLimit(ctx context.Context) map[string]string {
-	f.mu.RLock()
-	insts := make([]*Instance, 0, len(f.instances))
-	for _, i := range f.instances {
-		insts = append(insts, i)
-	}
-	f.mu.RUnlock()
-	results := make(map[string]string, len(insts))
-	for _, i := range insts {
-		if !i.hasToken() {
-			results[i.Config.ID] = "not adopted"
-			continue
-		}
+	return f.fanOut(ctx, func(ictx context.Context, i *Instance) string {
 		qps := f.effectiveRateLimitQPS(i.Config.ID)
-		if err := i.ctl().SetRateLimit(ctx, qps, 0); err != nil {
-			results[i.Config.ID] = err.Error()
-			continue
+		if err := i.ctl().SetRateLimit(ictx, qps, 0); err != nil {
+			return err.Error()
 		}
-		results[i.Config.ID] = "ok"
-	}
-	return results
+		return "ok"
+	})
 }
 
 // pushDoH distributes the effective plain-HTTP DoH address to every instance.
 func (f *Fleet) pushDoH(ctx context.Context) map[string]string {
-	f.mu.RLock()
-	insts := make([]*Instance, 0, len(f.instances))
-	for _, i := range f.instances {
-		insts = append(insts, i)
-	}
-	f.mu.RUnlock()
-	results := make(map[string]string, len(insts))
-	for _, i := range insts {
-		if !i.hasToken() {
-			results[i.Config.ID] = "not adopted"
-			continue
-		}
+	return f.fanOut(ctx, func(ictx context.Context, i *Instance) string {
 		want := f.effectiveDoHHTTPAddr(i.Config.ID)
-		if err := i.ctl().SetDoHHTTPAddr(ctx, want); err != nil {
-			results[i.Config.ID] = err.Error()
-			continue
+		if err := i.ctl().SetDoHHTTPAddr(ictx, want); err != nil {
+			return err.Error()
 		}
-		results[i.Config.ID] = "ok"
-	}
-	return results
+		return "ok"
+	})
 }
 
 // maybePushDoH converges an instance's plain-HTTP DoH listener to its fleet
@@ -1450,26 +1540,13 @@ func (f *Fleet) SetCache(ctx context.Context, size int) map[string]string {
 
 // pushCache distributes the effective cache size to every adopted instance.
 func (f *Fleet) pushCache(ctx context.Context) map[string]string {
-	f.mu.RLock()
-	insts := make([]*Instance, 0, len(f.instances))
-	for _, i := range f.instances {
-		insts = append(insts, i)
-	}
-	f.mu.RUnlock()
-	results := make(map[string]string, len(insts))
-	for _, i := range insts {
-		if !i.hasToken() {
-			results[i.Config.ID] = "not adopted"
-			continue
-		}
+	return f.fanOut(ctx, func(ictx context.Context, i *Instance) string {
 		size := f.effectiveCacheConfig(i.Config.ID)
-		if err := i.ctl().SetCacheConfig(ctx, size); err != nil {
-			results[i.Config.ID] = err.Error()
-			continue
+		if err := i.ctl().SetCacheConfig(ictx, size); err != nil {
+			return err.Error()
 		}
-		results[i.Config.ID] = "ok"
-	}
-	return results
+		return "ok"
+	})
 }
 
 // maybePushCache converges an instance's cache size to its fleet default (or
@@ -1497,28 +1574,16 @@ func (f *Fleet) maybePushCache(ctx context.Context, i *Instance, reported *contr
 // PurgeCache drops every cached response on every adopted instance and returns
 // the per-instance outcome, including how many entries were purged.
 func (f *Fleet) PurgeCache(ctx context.Context) (map[string]string, int) {
-	f.mu.RLock()
-	insts := make([]*Instance, 0, len(f.instances))
-	for _, i := range f.instances {
-		insts = append(insts, i)
-	}
-	f.mu.RUnlock()
-	results := make(map[string]string, len(insts))
-	total := 0
-	for _, i := range insts {
-		if !i.hasToken() {
-			results[i.Config.ID] = "not adopted"
-			continue
-		}
-		n, err := i.ctl().PurgeCache(ctx)
+	var total atomic.Int64
+	results := f.fanOut(ctx, func(ictx context.Context, i *Instance) string {
+		n, err := i.ctl().PurgeCache(ictx)
 		if err != nil {
-			results[i.Config.ID] = err.Error()
-			continue
+			return err.Error()
 		}
-		total += n
-		results[i.Config.ID] = "ok"
-	}
-	return results, total
+		total.Add(int64(n))
+		return "ok"
+	})
+	return results, int(total.Load())
 }
 
 // Records returns the fleet-wide local DNS records.
@@ -1565,26 +1630,13 @@ func (f *Fleet) effectiveRecords(instID string) []control.RecordEntry {
 // pushRecords distributes the effective local DNS records to every adopted
 // instance.
 func (f *Fleet) pushRecords(ctx context.Context) map[string]string {
-	f.mu.RLock()
-	insts := make([]*Instance, 0, len(f.instances))
-	for _, i := range f.instances {
-		insts = append(insts, i)
-	}
-	f.mu.RUnlock()
-	results := make(map[string]string, len(insts))
-	for _, i := range insts {
-		if !i.hasToken() {
-			results[i.Config.ID] = "not adopted"
-			continue
-		}
+	return f.fanOut(ctx, func(ictx context.Context, i *Instance) string {
 		want := f.effectiveRecords(i.Config.ID)
-		if err := i.ctl().SetRecords(ctx, want); err != nil {
-			results[i.Config.ID] = err.Error()
-			continue
+		if err := i.ctl().SetRecords(ictx, want); err != nil {
+			return err.Error()
 		}
-		results[i.Config.ID] = "ok"
-	}
-	return results
+		return "ok"
+	})
 }
 
 // maybePushRecords converges an instance's local DNS records to its fleet
@@ -1607,35 +1659,41 @@ func (f *Fleet) maybePushRecords(ctx context.Context, i *Instance, reported *con
 
 // pushInstance sends one instance's effective config to it.
 func (f *Fleet) pushConfigs(ctx context.Context) map[string]string {
+	// Snapshot effective policies once under a single RLock instead of per
+	// instance inside the loop (which blocked Set* writers across N hashes).
+	type want struct {
+		id  string
+		eff *control.Policy
+	}
 	f.mu.RLock()
-	insts := make([]*Instance, 0, len(f.instances))
+	wants := make([]want, 0, len(f.instances))
 	for _, i := range f.instances {
-		insts = append(insts, i)
+		eff, _ := f.effectivePolicy(i.Config.ID)
+		wants = append(wants, want{id: i.Config.ID, eff: eff})
 	}
 	f.mu.RUnlock()
-	results := make(map[string]string, len(insts))
-	for _, i := range insts {
-		f.mu.RLock()
-		eff, _ := f.effectivePolicy(i.Config.ID)
-		f.mu.RUnlock()
+	byID := make(map[string]*control.Policy, len(wants))
+	for _, w := range wants {
+		byID[w.id] = w.eff
+	}
+	return f.fanOut(ctx, func(ictx context.Context, i *Instance) string {
+		eff := byID[i.Config.ID]
 		if eff == nil {
-			results[i.Config.ID] = "no config"
-			continue
+			return "no config"
 		}
-		if err := i.ctl().SetPolicy(ctx, eff); err != nil {
-			results[i.Config.ID] = err.Error()
-			continue
+		if err := i.ctl().SetPolicy(ictx, eff); err != nil {
+			return err.Error()
 		}
 		i.markConfigAppliedWith(f.appliedHashFor(i.Config.ID), eff.Upstream)
-		results[i.Config.ID] = "ok"
-	}
-	return results
+		return "ok"
+	})
 }
 
 // pushInstance sends one instance's effective config to it. Used when a
 // per-instance override is saved. Returns a single-entry result map. The DoH
 // address is always pushed (it can override even with no policy set); the
-// policy is pushed only when an effective one exists.
+// policy is pushed only when an effective one exists. Independent scopes push
+// concurrently (was 6 serial RTTs).
 func (f *Fleet) pushInstance(ctx context.Context, id string) map[string]string {
 	i := f.get(id)
 	if i == nil {
@@ -1645,42 +1703,49 @@ func (f *Fleet) pushInstance(ctx context.Context, id string) map[string]string {
 	eff, _ := f.effectivePolicy(id)
 	wantDoH := f.effectiveDoHHTTPAddr(id)
 	wantSize := f.effectiveCacheConfig(id)
+	wantQPS := f.effectiveRateLimitQPS(id)
+	wantRecs := f.effectiveRecords(id)
+	wantServers, wantRoutes, wantBootstrap := f.effectiveUpstream(id)
 	f.mu.RUnlock()
 	res := map[string]string{id: "ok"}
 	if !i.hasToken() {
 		res[id] = "not adopted"
 		return res
 	}
-	if err := i.ctl().SetDoHHTTPAddr(ctx, wantDoH); err != nil {
-		res[id] = "doh: " + err.Error()
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	setRes := func(msg string) {
+		mu.Lock()
+		res[id] = msg
+		mu.Unlock()
 	}
-	if err := i.ctl().SetCacheConfig(ctx, wantSize); err != nil {
-		res[id] = "cache: " + err.Error()
-	}
-	if err := i.ctl().SetRateLimit(ctx, f.effectiveRateLimitQPS(id), 0); err != nil {
-		res[id] = "rate_limit: " + err.Error()
-	}
-	if err := i.ctl().SetRecords(ctx, f.effectiveRecords(id)); err != nil {
-		res[id] = "records: " + err.Error()
-	}
+	wg.Add(6)
+	go func() { defer wg.Done(); if err := i.ctl().SetDoHHTTPAddr(ctx, wantDoH); err != nil { setRes("doh: " + err.Error()) } }()
+	go func() { defer wg.Done(); if err := i.ctl().SetCacheConfig(ctx, wantSize); err != nil { setRes("cache: " + err.Error()) } }()
+	go func() { defer wg.Done(); if err := i.ctl().SetRateLimit(ctx, wantQPS, 0); err != nil { setRes("rate_limit: " + err.Error()) } }()
+	go func() { defer wg.Done(); if err := i.ctl().SetRecords(ctx, wantRecs); err != nil { setRes("records: " + err.Error()) } }()
+	go func() {
+		defer wg.Done()
+		if eff != nil {
+			if err := i.ctl().SetPolicy(ctx, eff); err != nil {
+				setRes(err.Error())
+				return
+			}
+			i.markConfigAppliedWith(f.appliedHashFor(id), eff.Upstream)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		if len(wantServers) > 0 || len(wantRoutes) > 0 {
+			if err := i.ctl().SetUpstream(ctx, wantServers, wantRoutes, wantBootstrap); err != nil {
+				setRes("upstream: " + err.Error())
+			}
+		}
+	}()
+	wg.Wait()
 	// No blocklist push here: it is a multi-MB upload that belongs in the
 	// poll-loop reconciler, which short-circuits on the reported hash and
 	// backs off while a push is in flight.
-	if eff != nil {
-		if err := i.ctl().SetPolicy(ctx, eff); err != nil {
-			res[id] = err.Error()
-			return res
-		}
-		i.markConfigAppliedWith(f.appliedHashFor(id), eff.Upstream)
-	}
-	// Push the effective upstream pool + routes + bootstrap when the fleet is
-	// managing upstream for this instance (non-empty server pool or routes).
-	wantServers, wantRoutes, wantBootstrap := f.effectiveUpstream(id)
-	if len(wantServers) > 0 || len(wantRoutes) > 0 {
-		if err := i.ctl().SetUpstream(ctx, wantServers, wantRoutes, wantBootstrap); err != nil {
-			res[id] = "upstream: " + err.Error()
-		}
-	}
 	return res
 }
 
@@ -1768,8 +1833,12 @@ func (f *Fleet) Adopt(ctx context.Context, id, code string) error {
 		inst.mu.Lock()
 		inst.Config.Token = resp.Token
 		inst.claimCode = ""
+		old := inst.client
 		inst.client = control.NewClient(inst.Config.URL, resp.Token)
 		inst.mu.Unlock()
+		if old != nil {
+			old.CloseIdleConnections()
+		}
 		if f.configPath != "" {
 			if err := f.saveConfig(); err != nil {
 				log.Printf("blipc: warning: failed to persist adopted token: %v", err)
@@ -2208,6 +2277,7 @@ func (f *Fleet) AddAllowedDomain(domain string) {
 	f.blMu.Lock()
 	f.manualAllowed[d] = struct{}{}
 	f.blMu.Unlock()
+	f.allowGen.Add(1)
 	f.blocklist.AddAllowed(d)
 	f.persistAllowed()
 }
@@ -2225,6 +2295,7 @@ func (f *Fleet) RemoveAllowedDomain(domain string) {
 	}
 	delete(f.manualAllowed, d)
 	f.blMu.Unlock()
+	f.allowGen.Add(1)
 	f.blocklist.RemoveAllowed(d)
 	f.persistAllowed()
 }
@@ -2243,9 +2314,15 @@ func (f *Fleet) AllowedDomains() []string {
 
 // syncAllowed mirrors the manual whitelist into the merged in-memory list so
 // the checksum (and therefore the hash distributed to instances) covers both
-// blocked and allowed domains.
+// blocked and allowed domains. Gated on allowGen: the old code rebuilt + sorted
+// the allow set on every poll per instance (N rebuilds per 5s).
 func (f *Fleet) syncAllowed() {
+	gen := f.allowGen.Load()
+	if f.allowSyncedGen.Load() == gen {
+		return
+	}
 	f.blocklist.SetAllowed(f.AllowedDomains())
+	f.allowSyncedGen.Store(gen)
 }
 
 // ClearAllowedDomains removes every hand-added whitelist entry.
@@ -2253,7 +2330,9 @@ func (f *Fleet) ClearAllowedDomains() {
 	f.blMu.Lock()
 	f.manualAllowed = make(map[string]struct{})
 	f.blMu.Unlock()
+	f.allowGen.Add(1)
 	f.blocklist.SetAllowed(nil)
+	f.allowSyncedGen.Store(f.allowGen.Load())
 	f.persistAllowed()
 }
 
@@ -2676,37 +2755,57 @@ func (f *Fleet) runBlocklistImport(ctx context.Context, gen int) {
 
 // pushBlocklist sends the controller's merged blocklist (plus whitelist) to
 // every instance and records the applied checksum on success. An empty list
-// clears the instances.
+// clears the instances. Uploads fan out with bounded parallelism so one slow
+// node (10min budget) never stalls the fleet.
 func (f *Fleet) pushBlocklist(ctx context.Context) map[string]string {
 	f.syncAllowed()
 	domains := f.blocklist.List()
 	allowed := f.blocklist.Allowed()
 	hash := f.blocklist.Checksum()
 
-	f.mu.RLock()
-	insts := make([]*Instance, 0, len(f.instances))
-	for _, i := range f.instances {
-		insts = append(insts, i)
-	}
-	f.mu.RUnlock()
+	insts := f.snapshotInstances()
 
 	log.Printf("blipc: distributing blocklist to %d instance(s): domains=%d allowed=%d hash=%016x", len(insts), len(domains), len(allowed), hash)
 	results := make(map[string]string, len(insts))
-	for _, i := range insts {
-		if !i.hasToken() {
-			results[i.Config.ID] = "not adopted"
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 8)
+	for _, inst := range insts {
+		if !inst.hasToken() {
+			results[inst.Config.ID] = "not adopted"
 			continue
 		}
-		t0 := f.now()
-		if err := i.ctl().SetBlocklist(ctx, domains, allowed); err != nil {
-			log.Printf("blipc: distribute blocklist instance=%s FAILED after %s: %v", i.Config.ID, f.now().Sub(t0).Round(time.Millisecond), err)
-			results[i.Config.ID] = err.Error()
-			continue
-		}
-		i.markBlocklistApplied(hash)
-		log.Printf("blipc: distribute blocklist instance=%s ok in %s (domains=%d)", i.Config.ID, f.now().Sub(t0).Round(time.Millisecond), len(domains))
-		results[i.Config.ID] = "ok"
+		wg.Add(1)
+		go func(in *Instance) {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+			case <-ctx.Done():
+				mu.Lock()
+				results[in.Config.ID] = ctx.Err().Error()
+				mu.Unlock()
+				return
+			}
+			t0 := f.now()
+			// Per-instance budget: blocklist uploads are multi-MB.
+			ictx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+			defer cancel()
+			if err := in.ctl().SetBlocklist(ictx, domains, allowed); err != nil {
+				log.Printf("blipc: distribute blocklist instance=%s FAILED after %s: %v", in.Config.ID, f.now().Sub(t0).Round(time.Millisecond), err)
+				mu.Lock()
+				results[in.Config.ID] = err.Error()
+				mu.Unlock()
+				return
+			}
+			in.markBlocklistApplied(hash)
+			log.Printf("blipc: distribute blocklist instance=%s ok in %s (domains=%d)", in.Config.ID, f.now().Sub(t0).Round(time.Millisecond), len(domains))
+			mu.Lock()
+			results[in.Config.ID] = "ok"
+			mu.Unlock()
+		}(inst)
 	}
+	wg.Wait()
 	return results
 }
 
@@ -2769,10 +2868,15 @@ func cleanURLs(urls []string) []string {
 }
 
 // saveConfig writes the current fleet config (including updated tokens) to the config file.
+// Serialized via saveMu and written atomically (tmp+rename 0600) so bursty UI
+// saves can't interleave read-modify-writes (lost update) or leave a truncated
+// controller.yaml on crash. The file is re-read to preserve unknown fields.
 func (f *Fleet) saveConfig() error {
 	if f.configPath == "" {
 		return nil
 	}
+	f.saveMu.Lock()
+	defer f.saveMu.Unlock()
 
 	b, err := os.ReadFile(f.configPath)
 	if err != nil {
@@ -2852,7 +2956,28 @@ func (f *Fleet) saveConfig() error {
 		return err
 	}
 	// 0600: config holds admin tokens for every instance, so no group/world access.
-	return os.WriteFile(f.configPath, out, 0600)
+	// Atomic write: tmp in same dir + rename so a crash never truncates.
+	dir := filepath.Dir(f.configPath)
+	tmp, err := os.CreateTemp(dir, ".controller-*.yaml")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	if _, err := tmp.Write(out); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return err
+	}
+	if err := tmp.Chmod(0600); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return err
+	}
+	return os.Rename(tmpName, f.configPath)
 }
 
 // ResolveTokenFile expands token paths like "@/path" or an absolute file path

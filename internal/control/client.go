@@ -20,6 +20,12 @@ type Client struct {
 	base  string
 	token string
 	http  *http.Client
+	// slow reuses one Transport for large blocklist uploads (tens of MB) with
+	// a per-request deadline instead of minting a Transport per push.
+	slow *http.Client
+	// watch reuses one Transport across SSE reconnects (the old code built a
+	// fresh Transport per Watch call, churning pools on every 1s reconnect).
+	watch *http.Client
 }
 
 // newTransport returns the tuned *http.Transport used by all control clients.
@@ -45,6 +51,28 @@ func NewClient(baseURL, token string) *Client {
 			Timeout:   10 * time.Second,
 			Transport: newTransport(false),
 		},
+		slow: &http.Client{
+			Transport: newTransport(true), // blocklist payloads are already large; no point negotiating gzip
+		},
+		watch: &http.Client{
+			Transport: newTransport(false),
+		},
+	}
+}
+
+// CloseIdleConnections drains pooled keepalives (fleet re-adopt path).
+func (c *Client) CloseIdleConnections() {
+	if c == nil {
+		return
+	}
+	if c.http != nil {
+		c.http.CloseIdleConnections()
+	}
+	if c.slow != nil {
+		c.slow.CloseIdleConnections()
+	}
+	if c.watch != nil {
+		c.watch.CloseIdleConnections()
 	}
 }
 
@@ -111,13 +139,16 @@ func (c *Client) SetPolicy(ctx context.Context, p *Policy) error {
 
 // SetBlocklist replaces the instance's global blocklist and its whitelist.
 // Large lists (e.g. oisd.big, ~2M domains) produce payloads of tens of MB, so
-// this uses a much longer timeout than the default client.
+// this uses a much longer timeout than the default client. The shared slow
+// client (one Transport) is reused with a per-request deadline.
 func (c *Client) SetBlocklist(ctx context.Context, domains, allowed []string) error {
 	req := SetBlocklistRequest{Domains: domains, Allowed: allowed}
 	body, err := json.Marshal(req)
 	if err != nil {
 		return err
 	}
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	defer cancel()
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPut, c.base+"/api/v1/blocklist", bytes.NewReader(body))
 	if err != nil {
 		return err
@@ -125,11 +156,7 @@ func (c *Client) SetBlocklist(ctx context.Context, domains, allowed []string) er
 	httpReq.Header.Set("Authorization", "Bearer "+c.token)
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	slow := &http.Client{
-		Timeout:   10 * time.Minute,
-		Transport: newTransport(true), // blocklist payloads are already large; no point negotiating gzip
-	}
-	resp, err := slow.Do(httpReq)
+	resp, err := c.slow.Do(httpReq)
 	if err != nil {
 		return err
 	}
@@ -275,16 +302,15 @@ func (c *Client) UpdateStatus(ctx context.Context) (*UpdateStatus, error) {
 // cancelled. It deliberately uses a client without an overall timeout: the
 // stream is long-lived and an absolute deadline would kill it (and silently
 // lose events) every few seconds. Cancellation is handled via ctx; blipd
-// sends periodic stats keepalives to keep the connection healthy.
+// sends periodic stats keepalives to keep the connection healthy. The shared
+// watch client reuses one Transport across reconnects.
 func (c *Client) Watch(ctx context.Context, fn func(WatchEvent)) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+"/api/v1/watch", nil)
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
-	resp, err := (&http.Client{
-		Transport: newTransport(false),
-	}).Do(req)
+	resp, err := c.watch.Do(req)
 	if err != nil {
 		return err
 	}
