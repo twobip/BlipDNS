@@ -2,6 +2,7 @@ package control
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 )
 
@@ -19,7 +20,8 @@ func (s *Server) handleCache(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPut, http.MethodPost:
 		var req SetCacheRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			log.Printf("blipd: management: bad request body: %v", err)
+			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
 		if req.Size < 0 {

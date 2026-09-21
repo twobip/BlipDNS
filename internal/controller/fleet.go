@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -18,6 +19,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -540,8 +542,28 @@ type SourceStat struct {
 	Error      string    `json:"error,omitempty"`
 }
 
+// Controller-side resource caps.
+const (
+	// maxBlocklistSources caps how many source URLs an operator can configure.
+	// Each source is a full download + parse; unbounded lists serialize into
+	// very long imports and unbounded RAM during the merge.
+	maxBlocklistSources = 16
+	// maxMergedBlocklistDomains caps the merged in-memory blocklist. Beyond
+	// this the import is refused with a clear error instead of OOMing the
+	// controller or shipping a multi-hundred-MB payload to every instance.
+	// Per-import budget: the merge holds one map entry per domain plus one
+	// snapshot row per (source, domain) in SQLite; keep imports under this.
+	maxMergedBlocklistDomains = 5_000_000
+	// maxInstanceLabelLen caps instance display labels (UI + events + config).
+	maxInstanceLabelLen = 128
+)
+
 // NewFleet creates an empty fleet with a default event buffer.
 func NewFleet(configPath string) *Fleet {
+	// Defense-in-depth: controller files (config YAML with instance tokens,
+	// SQLite DBs) must never be group/world-readable, even if created through
+	// a path that ignores the mode argument. Best-effort; logs nothing.
+	syscall.Umask(0o077)
 	queryLog, err := NewQueryLogStore("/var/lib/blipc/querylog.db")
 	if err != nil {
 		log.Printf("blipc: query log unavailable: %v", err)
@@ -569,13 +591,40 @@ func NewFleet(configPath string) *Fleet {
 
 func (f *Fleet) OnEvent(fn func(Event)) { f.logfn = fn }
 
-// Add registers an instance and starts its poll/watch loops.
+// validateInstanceURL rejects non-HTTP(S) URLs, URLs with userinfo, and URLs
+// with an empty host, so a malicious or mistyped instance entry cannot turn
+// blipc into an open proxy / credential leak (e.g. file://, gopher://, or
+// http://user:pass@host).
+func validateInstanceURL(raw string) error {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return fmt.Errorf("instance url required")
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("invalid instance url: %v", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("invalid instance url: scheme must be http or https")
+	}
+	if u.User != nil {
+		return fmt.Errorf("invalid instance url: userinfo not allowed")
+	}
+	if u.Host == "" || u.Hostname() == "" {
+		return fmt.Errorf("invalid instance url: host required")
+	}
+	return nil
+}
+
 func (f *Fleet) Add(ctx context.Context, cfg InstanceConfig) error {
 	if cfg.ID == "" {
 		return fmt.Errorf("controller: instance requires id")
 	}
 	if cfg.URL == "" {
 		return fmt.Errorf("controller: instance %s requires url", cfg.ID)
+	}
+	if err := validateInstanceURL(cfg.URL); err != nil {
+		return err
 	}
 	if cfg.Label == "" {
 		cfg.Label = cfg.ID
@@ -1337,12 +1386,13 @@ func (f *Fleet) maybePushHA(ctx context.Context, i *Instance) {
 }
 
 // QueryLogRetentionHours returns how long query log entries are kept on blipc.
-// 0 in the field means "unset": the 30-day default applies.
+// 0 in the field means "unset": the 7-day (168h) privacy-preserving default
+// applies. Longer windows are opt-in via the controller settings.
 func (f *Fleet) QueryLogRetentionHours() int {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
 	if f.qlRetentionHours <= 0 {
-		return 720
+		return 168
 	}
 	return f.qlRetentionHours
 }
@@ -1363,7 +1413,7 @@ func ValidQueryLogRetentionHours(h int) bool {
 
 // SetQueryLogRetentionDefault records the query log retention without
 // persisting it. Used at startup from the controller config; 0 resets to the
-// 24h default.
+// 7-day default.
 func (f *Fleet) SetQueryLogRetentionDefault(hours int) {
 	f.mu.Lock()
 	f.qlRetentionHours = hours
@@ -1651,35 +1701,41 @@ func (f *Fleet) pushInstance(ctx context.Context, id string) map[string]string {
 		res[id] = "not adopted"
 		return res
 	}
+	// Collect per-step errors instead of last-wins overwriting, so a partial
+	// failure is surfaced honestly (e.g. "doh: …; upstream: …").
+	var errs []string
 	if err := i.ctl().SetDoHHTTPAddr(ctx, wantDoH); err != nil {
-		res[id] = "doh: " + err.Error()
+		errs = append(errs, "doh: "+err.Error())
 	}
 	if err := i.ctl().SetCacheConfig(ctx, wantSize); err != nil {
-		res[id] = "cache: " + err.Error()
+		errs = append(errs, "cache: "+err.Error())
 	}
 	if err := i.ctl().SetRateLimit(ctx, f.effectiveRateLimitQPS(id), 0); err != nil {
-		res[id] = "rate_limit: " + err.Error()
+		errs = append(errs, "rate_limit: "+err.Error())
 	}
 	if err := i.ctl().SetRecords(ctx, f.effectiveRecords(id)); err != nil {
-		res[id] = "records: " + err.Error()
+		errs = append(errs, "records: "+err.Error())
 	}
 	// No blocklist push here: it is a multi-MB upload that belongs in the
 	// poll-loop reconciler, which short-circuits on the reported hash and
 	// backs off while a push is in flight.
 	if eff != nil {
 		if err := i.ctl().SetPolicy(ctx, eff); err != nil {
-			res[id] = err.Error()
-			return res
+			errs = append(errs, "policy: "+err.Error())
+		} else {
+			i.markConfigAppliedWith(f.appliedHashFor(id), eff.Upstream)
 		}
-		i.markConfigAppliedWith(f.appliedHashFor(id), eff.Upstream)
 	}
 	// Push the effective upstream pool + routes + bootstrap when the fleet is
 	// managing upstream for this instance (non-empty server pool or routes).
 	wantServers, wantRoutes, wantBootstrap := f.effectiveUpstream(id)
 	if len(wantServers) > 0 || len(wantRoutes) > 0 {
 		if err := i.ctl().SetUpstream(ctx, wantServers, wantRoutes, wantBootstrap); err != nil {
-			res[id] = "upstream: " + err.Error()
+			errs = append(errs, "upstream: "+err.Error())
 		}
+	}
+	if len(errs) > 0 {
+		res[id] = strings.Join(errs, "; ")
 	}
 	return res
 }
@@ -1816,11 +1872,16 @@ func (f *Fleet) ResetAdoption(ctx context.Context, id string) error {
 	return nil
 }
 
-// SetLabel updates the label of a managed instance.
+// SetLabel updates the label of a managed instance. Labels are capped at
+// maxInstanceLabelLen chars to bound config/UI/event payloads.
 func (f *Fleet) SetLabel(ctx context.Context, id, label string) error {
 	inst := f.get(id)
 	if inst == nil {
 		return fmt.Errorf("controller: unknown instance %s", id)
+	}
+	label = strings.TrimSpace(label)
+	if len(label) > maxInstanceLabelLen {
+		label = label[:maxInstanceLabelLen]
 	}
 	inst.mu.Lock()
 	inst.Config.Label = label
@@ -2621,6 +2682,17 @@ func (f *Fleet) runBlocklistImport(ctx context.Context, gen int) {
 	f.blMu.Unlock()
 	f.logImport("merged %d domains from %d source(s)", len(merged), len(urls))
 
+	// Memory/time budget: refuse absurd merges instead of OOMing the
+	// controller or shipping a multi-hundred-MB payload to every instance.
+	if len(merged) > maxMergedBlocklistDomains {
+		msg := fmt.Sprintf("merged list too large: %d domains exceeds cap of %d — keeping previous list", len(merged), maxMergedBlocklistDomains)
+		f.blMu.Lock()
+		f.blStatus.Errors = append(f.blStatus.Errors, msg)
+		f.blMu.Unlock()
+		f.logImport("%s", msg)
+		return // keep the last good merged list untouched
+	}
+
 	prevHash := f.blocklist.Checksum()
 	f.blocklist.FromDomainsMap(merged)
 	blocklistChanged := f.blocklist.Checksum() != prevHash
@@ -2851,36 +2923,83 @@ func (f *Fleet) saveConfig() error {
 	if err != nil {
 		return err
 	}
-	// 0600: config holds admin tokens for every instance, so no group/world access.
-	return os.WriteFile(f.configPath, out, 0600)
+	// 0600: config holds admin tokens for every instance, so no group/world
+	// access. Atomic write: tmp file in the same directory + 0600 + rename, so
+	// a crash mid-write never leaves a truncated config behind.
+	dir := filepath.Dir(f.configPath)
+	tmp, err := os.CreateTemp(dir, ".blipc-config-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	// Best-effort cleanup; a successful rename removes it anyway.
+	defer os.Remove(tmpName)
+	if err := tmp.Chmod(0600); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(out); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	// Flush content to disk before the rename (fsync-ish best-effort).
+	_ = tmp.Sync()
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, f.configPath); err != nil {
+		return err
+	}
+	// Rename preserves the tmp mode on most filesystems, but re-apply 0600 on
+	// the destination best-effort in case the file pre-existed with wider
+	// permissions or the umask interfered.
+	if err := os.Chmod(f.configPath, 0600); err != nil {
+		log.Printf("blipc: warning: chmod config: %v", err)
+	}
+	return nil
 }
 
-// ResolveTokenFile expands token paths like "@/path" or an absolute file path
-// (no-op if the token isn't a path reference). This is a deliberate feature:
-// operators can keep instance management tokens in a separate file (e.g. a
-// file populated by a secret manager / init container) instead of inlining them
-// in the YAML config.
+// ResolveTokenFile expands "@/path" token references (startup config-file
+// loads only). Bare "/" values are treated literally and never read: only an
+// explicit "@" prefix opts into file expansion, so a literal token that
+// happens to look like a path can never trigger a filesystem read.
 //
 // Security note: the config file is trusted (it is loaded once at startup and
 // controls which instances blipc talks to). If an attacker can tamper with the
 // config they already have far greater leverage, so expansion is not treated as
 // a privilege boundary. As defense-in-depth, path traversal (`..`) is rejected
-// before any file is read.
+// before any file is read. The management API never expands tokens (see
+// ResolveTokenFileAllow with allowFile=false); use startup config for secrets.
 func ResolveTokenFile(cfg InstanceConfig) InstanceConfig {
-	if len(cfg.Token) <= 1 || (cfg.Token[0] != '@' && cfg.Token[0] != '/') {
+	return ResolveTokenFileAllow(cfg, true)
+}
+
+// ResolveTokenFileAllow is ResolveTokenFile with an explicit gate: when
+// allowFile is false no filesystem read happens and the token is returned
+// as-is. The API layer passes false so "@..." / "/..." values submitted over
+// HTTP are stored literally (and rejected upfront by the handler).
+func ResolveTokenFileAllow(cfg InstanceConfig, allowFile bool) InstanceConfig {
+	if !allowFile {
 		return cfg
 	}
-	p := cfg.Token
-	if p[0] == '@' {
-		p = p[1:]
+	if len(cfg.Token) < 2 || cfg.Token[0] != '@' {
+		return cfg
 	}
+	p := cfg.Token[1:]
 	// Reject path-traversal attempts (e.g. "@/../../etc/shadow").
 	if hasTraversal(p) {
 		log.Printf("blipc: refusing token path with traversal: %q", cfg.Token)
 		return cfg
 	}
 	if b, err := os.ReadFile(p); err == nil {
-		cfg.Token = string(b)
+		trimmed := strings.TrimSpace(string(b))
+		if trimmed == "" {
+			// Empty file: keep the original reference so the failure is
+			// visible instead of silently adopting with an empty token.
+			log.Printf("blipc: token file %q is empty", p)
+			return cfg
+		}
+		cfg.Token = trimmed
 	}
 	return cfg
 }

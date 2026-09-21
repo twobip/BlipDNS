@@ -5,3 +5,12 @@
 .playwright-mcp/
 server.log
 *.log
+# Local secrets / runtime state — never commit (M13).
+blipd.yaml
+blipc.yaml
+controller.yaml
+adopted.json
+ha.json
+*.pem
+*.key
+.env

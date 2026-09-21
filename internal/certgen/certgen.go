@@ -24,8 +24,15 @@ import (
 	"time"
 )
 
-// validity is how long generated certificates are good for (10 years).
-const validity = 10 * 365 * 24 * time.Hour
+// validity is how long generated certificates are good for (398 days, the
+// longest widely-accepted lifetime). A decade-long self-signed cert turns a
+// key compromise into a decade-long impersonation with no revocation channel.
+const validity = 398 * 24 * time.Hour
+
+// renewAfter is the age at which a persisted certificate is regenerated even
+// though it has not expired yet (2/3 of validity), so fingerprints rotate
+// before the hard expiry instead of all at once on expiry day.
+const renewAfter = validity * 2 / 3
 
 // Generate creates a self-signed ECDSA (P-256) server certificate. The
 // certificate names localhost plus every non-loopback address on the host, so
@@ -84,11 +91,11 @@ func EnsurePair(certPath, keyPath string, extraHosts ...string) (*tls.Certificat
 }
 
 // expectedSANs returns the identities a self-signed DoH certificate must
-// cover: localhost, the machine hostname, any operator-configured extra hosts
-// (e.g. an HA VIP that whichever node is master serves) and the machine's own
-// non-loopback addresses. Generation and the on-disk reuse check both use it,
-// so a persisted cert that no longer covers the served identity is
-// regenerated instead of being served unverifiable for its whole lifetime.
+// cover: localhost, loopback IPs, the machine hostname, and any
+// operator-configured extra hosts (e.g. an HA VIP). Deliberately NOT every
+// interface address: embedding LAN/link-local/docker IPs discloses topology
+// to anyone completing a handshake and churns the fingerprint on every DHCP
+// change. Operators that serve by LAN IP should list it in doh_san.
 func expectedSANs(extraHosts []string) ([]string, []net.IP) {
 	names := []string{"localhost"}
 	if hn := hostname(); hn != "" {
@@ -106,7 +113,7 @@ func expectedSANs(extraHosts []string) ([]string, []net.IP) {
 			names = append(names, h)
 		}
 	}
-	ips = append(ips, localIPs()...)
+	ips = append(ips, stableLocalIPs()...)
 	return dedupeStrings(names), dedupeIPs(ips)
 }
 
@@ -170,6 +177,11 @@ func load(certPath, keyPath string, extraHosts []string) ([]byte, []byte, error)
 	}
 	if time.Now().After(cert.NotAfter) {
 		return nil, nil, fmt.Errorf("self-signed cert: expired")
+	}
+	// Rotate before the hard expiry so clients see a planned renewal, not a
+	// flag-day fingerprint change. Regeneration also picks up SAN changes.
+	if time.Now().After(cert.NotBefore.Add(renewAfter)) {
+		return nil, nil, fmt.Errorf("self-signed cert: past renewal age")
 	}
 	if missing := missingSANs(cert, extraHosts); missing != "" {
 		return nil, nil, fmt.Errorf("self-signed cert: does not cover %s", missing)
@@ -241,8 +253,26 @@ func hostname() string {
 	return h
 }
 
-// localIPs returns the machine's non-loopback IPv4/IPv6 addresses, so the
-// generated certificate stays valid for clients that reach blipd by LAN IP.
+// stableLocalIPs returns the machine's LAN addresses for the SAN set,
+// excluding ephemeral/disclosing ones: link-local (fe80::/10, 169.254/16),
+// multicast, and unspecified. Global-unicast and private (RFC1918) addresses
+// stay covered so clients reaching blipd by LAN IP keep verifying; operators
+// with stricter needs should list exact names in doh_san.
+func stableLocalIPs() []net.IP {
+	out := []net.IP{}
+	for _, ip := range localIPs() {
+		if ip == nil || ip.IsUnspecified() || ip.IsMulticast() ||
+			ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+			continue
+		}
+		out = append(out, ip)
+	}
+	return out
+}
+
+// localIPs returns the machine's non-loopback IPv4/IPv6 addresses. Kept for
+// diagnostics/tests; NOT part of the certificate SAN set (see
+// stableLocalIPs).
 func localIPs() []net.IP {
 	out := []net.IP{}
 	ifaces, err := net.Interfaces()

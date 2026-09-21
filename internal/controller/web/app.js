@@ -1032,7 +1032,7 @@ function clientRowHtml(r) {
     <td class="q-count">${fmt(r.blocked)}</td>
     <td class="q-count">${rate}%</td>
     <td class="q-time"><span class="t" data-t="${esc(r.last_seen)}" title="${esc(r.last_seen)}">…</span></td>
-    <td class="q-rename"><button class="icon-btn" data-rename="${esc(r.client)}" data-kind="${r.kind}" title="Rename client">${IC.edit}</button></td>
+    <td class="q-rename"><button class="icon-btn" data-rename="${esc(r.client)}" data-kind="${esc(r.kind)}" title="Rename client">${IC.edit}</button></td>
   </tr>`;
 }
 async function renderClients() {
@@ -1839,11 +1839,11 @@ async function loadKeys() {
     const d = await r.json();
     const keys = Array.isArray(d.keys) ? d.keys : [];
     tb.innerHTML = keys.length ? keys.map((k) =>
-      `<tr><td>${esc(k.label)}</td><td><span class="t" data-t="${esc(k.expires_at)}">${esc(timeAgo(k.expires_at))}</span></td>` +
+      `<tr><td>${esc(k.label)}</td><td>${esc(k.scope || "admin")}</td><td><span class="t" data-t="${esc(k.expires_at)}">${esc(timeAgo(k.expires_at))}</span></td>` +
       `<td style="text-align:right"><button class="btn btn-sm" data-key-revoke="${esc(k.id)}">Revoke</button></td></tr>`
-    ).join("") : `<tr><td colspan="3" class="muted">No keys — create one above.</td></tr>`;
+    ).join("") : `<tr><td colspan="4" class="muted">No keys — create one above.</td></tr>`;
     tb.querySelectorAll("[data-key-revoke]").forEach((b) => b.onclick = () => revokeKey(b.dataset.keyRevoke));
-  } catch { tb.innerHTML = `<tr><td colspan="3" class="muted">Could not load keys.</td></tr>`; }
+  } catch { tb.innerHTML = `<tr><td colspan="4" class="muted">Could not load keys.</td></tr>`; }
 }
 async function revokeKey(id) {
   try {
@@ -1855,9 +1855,11 @@ async function revokeKey(id) {
 $("k-create").onclick = async () => {
   const label = $("k-label").value.trim();
   const ttl_hours = Number($("k-ttl").value);
+  const scopeEl = $("k-scope");
+  const scope = scopeEl ? scopeEl.value : "admin";
   if (!label) return toast("label is required", "err");
   try {
-    const r = await API("/api/keys", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ label, ttl_hours }) });
+    const r = await API("/api/keys", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ label, ttl_hours, scope }) });
     const d = await r.json();
     $("k-secret").textContent = d.key;
     $("k-once").classList.remove("hidden");

@@ -305,6 +305,28 @@ func (s *Store) lookup(ip net.IP, clientID string) *compiledPolicy {
 	return s.defaults
 }
 
+// ClientIDSelected reports whether clientID actually selected its policy for
+// ip: the ID is known and the source IP falls inside that policy's networks.
+// A self-asserted DoH client-ID must only be attributed in logs and query-log
+// events when it really selected the policy; otherwise the query is logged as
+// "unverified-id" so one client cannot impersonate another's identity.
+func (s *Store) ClientIDSelected(ip net.IP, clientID string) bool {
+	if clientID == "" || ip == nil {
+		return false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	p, ok := s.byClient[clientID]
+	if !ok || len(p.nets) == 0 {
+		return false
+	}
+	nip := ip
+	if ip4 := ip.To4(); ip4 != nil {
+		nip = ip4
+	}
+	return netsContain(p.nets, nip)
+}
+
 // Classify reports whether name from clientIP (or DoH clientID) should be
 // blocked. A matching client ID takes precedence over the IP network.
 // Allowlist takes precedence over blocklist. Returns the matched policy's

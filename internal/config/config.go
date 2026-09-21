@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/twobip/BlipDNS/internal/filter"
@@ -51,7 +52,7 @@ func Default() *Config {
 		DoHAddr:            "127.0.0.1:8443",
 		DoHTLS:             true,
 		TLSDir:             "/var/lib/blipd",
-		AdminAddr:          "127.0.0.1:8443",
+		AdminAddr:          "127.0.0.1:8444",
 		Upstream:           "udp://1.1.1.1:53 https://1.1.1.1/dns-query",
 		CacheCap:           1 * time.Hour,
 		CacheSize:          10000,
@@ -73,6 +74,13 @@ func Load(path string) (*Config, error) {
 	}
 	if c.CacheCap <= 0 {
 		c.CacheCap = time.Hour
+	}
+	// Fail closed on copy-pasted placeholder tokens: an operator who copies
+	// the example config verbatim would otherwise run with a publicly known
+	// management token. Empty is fine (claim-code bootstrap / ephemeral).
+	if c.AdminToken == "test-token" || c.AdminToken == "replace-me-with-a-secret-token" ||
+		c.AdminToken == "__BLIP_ADMIN_TOKEN__" || strings.HasPrefix(c.AdminToken, "REPLACE-ME") {
+		return nil, fmt.Errorf("config: admin_token is a placeholder; generate one with: openssl rand -hex 32")
 	}
 	return c, nil
 }

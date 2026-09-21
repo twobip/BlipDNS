@@ -31,7 +31,7 @@ if [[ -f "$CFG_DST" ]]; then
 else
   TOKEN="$(openssl rand -hex 16)"
   sed "s/__BLIP_ADMIN_TOKEN__/$TOKEN/" "$TPL" > "$CFG_DST"
-  chmod 0640 "$CFG_DST"
+  chmod 0600 "$CFG_DST"
   chown root:"$SVC_USER" "$CFG_DST"
   echo "   admin token: $TOKEN   (use with: blipctl --token $TOKEN http://127.0.0.1:8444 ...)"
   echo "   claim code is printed to the journal on first start: journalctl -u blipd | grep ADOPTION"

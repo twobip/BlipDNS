@@ -433,22 +433,23 @@ func (c *countFailResolver) Resolve(ctx context.Context, q *dns.Msg) (*dns.Msg, 
 }
 
 func TestMultiFailoverBreaker(t *testing.T) {
-	down := &countFailResolver{fail: 1, resp: new(dns.Msg)}
+	// Cooldown trips after 3 consecutive transport failures; the failed
+	// resolver is then skipped while in cooldown.
+	down := &countFailResolver{fail: 100, resp: new(dns.Msg)}
 	ok := &fakeResolver{msg: new(dns.Msg)}
 	m := NewMulti(down, ok)
 	q := new(dns.Msg)
 	q.SetQuestion("a.test.", dns.TypeA)
 	ctx := context.Background()
 
-	for i := 0; i < 3; i++ {
+	for i := 0; i < 5; i++ {
 		if _, err := m.Resolve(ctx, q); err != nil {
 			t.Fatalf("call %d: %v", i+1, err)
 		}
 	}
-	// The failed resolver must have been skipped on calls 2 and 3 while in
-	// cooldown, otherwise it would have been tried and failed again.
-	if down.calls != 1 {
-		t.Errorf("down resolver tried %d times, want 1 (circuit breaker)", down.calls)
+	// 3 consecutive failures trip the breaker; calls 4-5 skip it.
+	if down.calls != 3 {
+		t.Errorf("down resolver tried %d times, want 3 (circuit breaker)", down.calls)
 	}
 }
 
@@ -549,8 +550,8 @@ func TestPoolWithBootstrap(t *testing.T) {
 	if r2.bootstrap != nil {
 		t.Error("nil bootstrap should leave no bootstrap resolver")
 	}
-	if tr, ok := r2.client.Transport.(*http.Transport); ok && tr.DialContext != nil {
-		t.Error("nil bootstrap should not install a DialContext")
+	if tr, ok := r2.client.Transport.(*http.Transport); ok && tr.DialContext == nil {
+		t.Error("nil bootstrap should still install the validating guard DialContext")
 	}
 }
 

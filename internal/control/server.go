@@ -64,6 +64,17 @@ type Server struct {
 	// Loopback peers always bypass the pin so box-local reset keeps working.
 	adoptedBy string
 
+	// authFails tracks bad bearer-token guesses per source IP (brute-force
+	// guard on the management API): 5 fails => 5min 429. Reset on success.
+	// Guarded by authMu (hot path: every authenticated request).
+	authMu    sync.Mutex
+	authFails map[string]*adoptFail
+
+	// lastRestart tracks the last successful /api/v1/restart so rapid
+	// double-clicks (or a retry loop) cannot reboot-loop the node: 30s
+	// cooldown, 429 when too soon.
+	lastRestart atomic.Int64 // unix nanos; 0 = never
+
 	// ctrls are the runtime pieces of blipd the management API drives,
 	// wired incrementally (DNS pieces at construction, host pieces later).
 	ctrls Controllers
@@ -373,10 +384,40 @@ func (s *Server) auth(h http.HandlerFunc) http.HandlerFunc {
 			http.Error(w, "management API disabled", http.StatusServiceUnavailable)
 			return
 		}
+		src := adoptIP(r)
+		// Brute-force guard: 5 bad tokens from one IP => 5min 429.
+		s.authMu.Lock()
+		if f := s.authFails[src]; f != nil && time.Now().Before(f.until) {
+			s.authMu.Unlock()
+			http.Error(w, "too many attempts; try again later", http.StatusTooManyRequests)
+			return
+		}
+		s.authMu.Unlock()
 		if !checkToken(r.Header.Get("Authorization"), s.token) {
+			s.authMu.Lock()
+			if s.authFails == nil {
+				s.authFails = make(map[string]*adoptFail)
+			}
+			f := s.authFails[src]
+			if f == nil {
+				f = &adoptFail{}
+				s.authFails[src] = f
+			}
+			f.count++
+			if f.count >= 5 {
+				f.until = time.Now().Add(5 * time.Minute)
+				f.count = 0
+			}
+			s.authMu.Unlock()
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
+		// Success: clear this IP's failure state.
+		s.authMu.Lock()
+		if s.authFails != nil {
+			delete(s.authFails, src)
+		}
+		s.authMu.Unlock()
 		// Controller pin (set at claim-code adoption): only the adopting
 		// controller — or box-local access — may drive the management API.
 		if peer := adoptIP(r); s.adoptedBy != "" && peer != s.adoptedBy && !net.ParseIP(peer).IsLoopback() {
@@ -460,7 +501,8 @@ func (s *Server) handleDoH(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPut, http.MethodPost:
 		var req SetDoHRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			log.Printf("blipd: management: bad request body: %v", err)
+			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
 		if req.HTTPAddr != "" {
@@ -493,7 +535,8 @@ func (s *Server) handleRateLimit(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPut, http.MethodPost:
 		var req SetRateLimitRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			log.Printf("blipd: management: bad request body: %v", err)
+			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
 		if req.QPS < 0 {
@@ -530,7 +573,8 @@ func (s *Server) handlePolicy(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPut, http.MethodPost:
 		var req SetPolicyRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			log.Printf("blipd: management: bad request body: %v", err)
+			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
 		fp := toFilter(&req.Policy)
@@ -542,6 +586,11 @@ func (s *Server) handlePolicy(w http.ResponseWriter, r *http.Request) {
 		} else if err := s.store.SetPolicy(fp); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
+		}
+		// Policy edits can flip blocked/allowed state: purge responses cached
+		// under the previous policy (mirrors the blocklist handler).
+		if s.cache != nil {
+			s.cache.Purge()
 		}
 		s.Notify(WatchEvent{Type: "policy", At: time.Now(), Domain: req.Policy.ID})
 		writeJSON(w, AckResponse{OK: true, Msg: "policy set"})
@@ -557,6 +606,12 @@ func (s *Server) handlePolicy(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.store.RemovePolicy(req.ID)
+		// A policy change can flip domains between blocked and allowed, so
+		// drop cached responses resolved under the old policy (mirrors the
+		// blocklist handler below).
+		if s.cache != nil {
+			s.cache.Purge()
+		}
 		writeJSON(w, AckResponse{OK: true, Msg: "policy deleted"})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -661,7 +716,8 @@ func (s *Server) handleRecords(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPut, http.MethodPost:
 		var req SetRecordsRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			log.Printf("blipd: management: bad request body: %v", err)
+			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
 		if err := rc.SetRecords(req.Records); err != nil {
@@ -800,6 +856,13 @@ func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	// 30s cooldown: a stolen token or retry loop must not reboot-loop the
+	// node into a DNS outage.
+	if last := s.lastRestart.Load(); last != 0 && time.Since(time.Unix(0, last)) < 30*time.Second {
+		http.Error(w, "restart too soon; try again later", http.StatusTooManyRequests)
+		return
+	}
+	s.lastRestart.Store(time.Now().UnixNano())
 	writeJSON(w, AckResponse{OK: true, Msg: "restarting blipd"})
 	go func() {
 		_ = exec.Command("sudo", "-n", "/usr/bin/systemctl", "restart", "blipd.service").Run()
@@ -814,6 +877,13 @@ func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request) {
 	}
 	ch := make(chan WatchEvent, 4096)
 	s.watchMu.Lock()
+	// Cap concurrent watchers so one client cannot exhaust fds/memory with
+	// thousands of SSE streams.
+	if len(s.watchers) >= 100 {
+		s.watchMu.Unlock()
+		http.Error(w, "too many watchers", http.StatusTooManyRequests)
+		return
+	}
 	s.watchers[ch] = struct{}{}
 	s.watchCount.Store(int64(len(s.watchers)))
 	s.watchMu.Unlock()

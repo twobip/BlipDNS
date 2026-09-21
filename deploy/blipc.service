@@ -26,7 +26,7 @@ UMask=0077
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
-ReadWritePaths=/etc/blipc /var/lib/blipc /var/cache/blipc-update /usr/local/bin
+ReadWritePaths=/etc/blipc /var/lib/blipc /var/cache/blipc-update
 LimitNOFILE=65536
 
 StandardOutput=journal

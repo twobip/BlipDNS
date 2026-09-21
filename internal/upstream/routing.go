@@ -70,6 +70,16 @@ func NewPoolWithBootstrap(servers []UpstreamServer, routes []UpstreamRoute, lega
 	p := &ResolverPool{named: make(map[string]Resolver), bootstrap: bootstrap}
 	p.servers = servers
 	p.routes = routes
+	for _, sv := range servers {
+		if err := validateTimeoutSec(sv.TimeoutSec); err != nil {
+			return nil, fmt.Errorf("upstream: server %q: %w", sv.Name, err)
+		}
+	}
+	for _, sv := range bootstrap {
+		if err := validateTimeoutSec(sv.TimeoutSec); err != nil {
+			return nil, fmt.Errorf("upstream: bootstrap server %q: %w", sv.Address, err)
+		}
+	}
 	bootstrapResolver, err := BuildBootstrapResolver(bootstrap)
 	if err != nil {
 		return nil, err
@@ -186,6 +196,9 @@ func fromServerSpecWithBootstrap(spec string, timeout time.Duration, bootstrap R
 func BuildBootstrapResolver(bootstrap []UpstreamServer) (Resolver, error) {
 	var rs []Resolver
 	for _, sv := range bootstrap {
+		if err := validateTimeoutSec(sv.TimeoutSec); err != nil {
+			return nil, fmt.Errorf("upstream: bootstrap server %q: %w", sv.Address, err)
+		}
 		r, err := fromServerSpec(sv.Address, timeoutForServer(sv))
 		if err != nil {
 			return nil, fmt.Errorf("upstream: bootstrap server %q: %w", sv.Address, err)
@@ -203,12 +216,30 @@ func BuildBootstrapResolver(bootstrap []UpstreamServer) (Resolver, error) {
 }
 
 // timeoutForServer returns the resolver timeout for an UpstreamServer, defaulting
-// to 5 seconds when TimeoutSec is unset (0).
+// to 5 seconds when TimeoutSec is unset (0). Valid range is 1-30s; values
+// outside are rejected by validateTimeoutSec at pool-build and control time.
+// Callers that bypass validation still get a sane value (clamped).
 func timeoutForServer(s UpstreamServer) time.Duration {
-	if s.TimeoutSec > 0 {
-		return time.Duration(s.TimeoutSec) * time.Second
+	if s.TimeoutSec == 0 {
+		return 5 * time.Second
 	}
-	return 5 * time.Second
+	if s.TimeoutSec < 0 {
+		return 5 * time.Second
+	}
+	if s.TimeoutSec > 30 {
+		return 30 * time.Second
+	}
+	return time.Duration(s.TimeoutSec) * time.Second
+}
+
+// validateTimeoutSec rejects per-server failover timeouts outside 0-30s.
+// 0 means "use the 5s default"; negative or >30 is a config error (400 at the
+// control layer, build error at pool time) — never "no timeout".
+func validateTimeoutSec(sec int) error {
+	if sec < 0 || sec > 30 {
+		return fmt.Errorf("timeout_sec must be 0-30 (0 = 5s default), got %d", sec)
+	}
+	return nil
 }
 
 func makeRouteRule(rt UpstreamRoute, named map[string]Resolver) (routeRule, error) {
@@ -222,7 +253,14 @@ func makeRouteRule(rt UpstreamRoute, named map[string]Resolver) (routeRule, erro
 	if rt.QnameSuffix == "" {
 		return routeRule{}, fmt.Errorf("upstream: route %q has empty qname_suffix", rt.Name)
 	}
-	rule.suffix = fqdn(rt.QnameSuffix)
+	suffix := fqdn(rt.QnameSuffix)
+	// Normalize to leading-dot label-boundary form (".corp.") so
+	// "evilcorp." does not match a "corp" rule via a bare suffix check.
+	// Root "." stays "." (matches all, subject to CIDR).
+	if suffix != "." && !strings.HasPrefix(suffix, ".") {
+		suffix = "." + suffix
+	}
+	rule.suffix = suffix
 	if rt.ClientCIDR != "" && rt.ClientCIDR != "0.0.0.0/0" {
 		_, n, err := net.ParseCIDR(rt.ClientCIDR)
 		if err != nil {
@@ -272,11 +310,19 @@ func (p *ResolverPool) Match(qname string, client net.IP) Resolver {
 	var best *routeRule
 	for i := range p.rules {
 		rt := &p.rules[i]
-		if !strings.HasSuffix(q, rt.suffix) {
+		// Label-boundary suffix match: exact ("corp." vs ".corp.") or
+		// subdomain ("host.corp." has suffix ".corp."); root "." matches all.
+		if rt.suffix == "." {
+			// match all (CIDR still applies below)
+		} else if q == strings.TrimPrefix(rt.suffix, ".") || strings.HasSuffix(q, rt.suffix) {
+			// match
+		} else {
 			continue
 		}
-		if rt.network != nil && client != nil {
-			if !rt.network.Contains(client) {
+		// A CIDR-restricted route never matches a nil client: without a
+		// source IP there is no proof the client is inside the network.
+		if rt.network != nil {
+			if client == nil || !rt.network.Contains(client) {
 				continue
 			}
 		}

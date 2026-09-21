@@ -9,12 +9,29 @@ import (
 
 // clientIDFromPath extracts an optional DoH client identity from a request
 // path of the form "/dns-query/{client-id}". The bare "/dns-query" path (or a
-// malformed one) yields "". The identifier may be a DNS label, IP, or any
-// short printable token up to 64 characters.
+// malformed one) yields "". The identifier must match
+// ^[A-Za-z0-9._-]{1,64}$: control characters, CR/LF, spaces and /?# are
+// rejected (the latter also prevents path traversal into extra segments).
 func clientIDFromPath(p string) string {
 	p = strings.TrimPrefix(p, "/dns-query")
 	p = strings.Trim(p, "/")
-	if p == "" || len(p) > 64 || strings.ContainsAny(p, "/?# \t") {
+	if p == "" || len(p) > 64 {
+		return ""
+	}
+	for i := 0; i < len(p); i++ {
+		c := p[i]
+		if c >= 'A' && c <= 'Z' {
+			continue
+		}
+		if c >= 'a' && c <= 'z' {
+			continue
+		}
+		if c >= '0' && c <= '9' {
+			continue
+		}
+		if c == '.' || c == '_' || c == '-' {
+			continue
+		}
 		return ""
 	}
 	return p

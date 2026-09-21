@@ -1,5 +1,8 @@
 dns_addr: "0.0.0.0:53"
-doh_addr: "0.0.0.0:8443"
+# H4: loopback-first defaults. dns_addr stays wildcard (DNS must serve the
+# LAN), but DoH + management API bind to loopback. Change to 0.0.0.0 only
+# behind an isolated mgmt VLAN + set insecure_lan ack.
+doh_addr: "127.0.0.1:8443"
 admin_addr: "127.0.0.1:8444"
 admin_token: "__BLIP_ADMIN_TOKEN__"
 # Persists "adopted" so the one-time claim code isn't regenerated on restart.

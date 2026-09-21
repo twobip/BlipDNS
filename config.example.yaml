@@ -1,7 +1,10 @@
 dns_addr: "127.0.0.1:5353"
 doh_addr: "127.0.0.1:8443"
 admin_addr: "127.0.0.1:8444"
-admin_token: "test-token"
+# H4: never ship a real token here. Generate one with:
+#   openssl rand -hex 32
+# and keep the config file at 0600 (it controls the management API).
+admin_token: "REPLACE-ME-generate-with-openssl-rand-hex-32"
 # Only trust X-Forwarded-For / CF-Connecting-IP from explicitly listed reverse proxies. Empty/off
 # means use the direct peer address (recommended unless behind a proxy).
 # trusted_proxies: ["127.0.0.1/32"]

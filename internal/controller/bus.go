@@ -23,6 +23,10 @@ func NewBus(cap int) *Bus {
 	}
 }
 
+// maxESSSubscribers caps concurrent /api/events SSE streams so browsers that
+// never close EventSource connections cannot exhaust the controller.
+const maxESSSubscribers = 100
+
 // Subscribe registers a channel and returns the recent backlog (oldest first).
 func (b *Bus) Subscribe() (chan Event, []Event) {
 	ch := make(chan Event, 64)
@@ -32,6 +36,28 @@ func (b *Bus) Subscribe() (chan Event, []Event) {
 	copy(backlog, b.buffer)
 	b.mu.Unlock()
 	return ch, backlog
+}
+
+// TrySubscribe is Subscribe with a subscriber cap: it returns ok=false when
+// maxESSSubscribers streams are already open, so the handler can answer 429.
+func (b *Bus) TrySubscribe() (ch chan Event, backlog []Event, ok bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if len(b.subs) >= maxESSSubscribers {
+		return nil, nil, false
+	}
+	ch = make(chan Event, 64)
+	b.subs[ch] = struct{}{}
+	backlog = make([]Event, len(b.buffer))
+	copy(backlog, b.buffer)
+	return ch, backlog, true
+}
+
+// SubscriberCount returns the number of live SSE subscribers.
+func (b *Bus) SubscriberCount() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return len(b.subs)
 }
 
 // Unsubscribe removes a channel.

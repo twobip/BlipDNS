@@ -2,6 +2,7 @@ package control
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 )
 
@@ -22,11 +23,25 @@ func (s *Server) handleUpstream(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPut, http.MethodPost:
 		var req SetUpstreamRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			log.Printf("blipd: management: bad request body: %v", err)
+			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
+		for _, sv := range req.Servers {
+			if sv.TimeoutSec < 0 || sv.TimeoutSec > 30 {
+				http.Error(w, "timeout_sec must be 0-30 (0 = 5s default)", http.StatusBadRequest)
+				return
+			}
+		}
+		for _, sv := range req.Bootstrap {
+			if sv.TimeoutSec < 0 || sv.TimeoutSec > 30 {
+				http.Error(w, "timeout_sec must be 0-30 (0 = 5s default)", http.StatusBadRequest)
+				return
+			}
+		}
 		if err := uc.SetUpstream(req.Servers, req.Routes, req.Bootstrap); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			log.Printf("blipd: management: set upstream: %v", err)
+			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
 		writeJSON(w, AckResponse{OK: true, Msg: "upstream set"})

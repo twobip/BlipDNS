@@ -740,7 +740,7 @@
           <div class="panel">
             <div class="panel-head"><h3>API Keys</h3></div>
             <div class="panel-body">
-              <span class="hint">Temporary bearer keys for the control API (<span class="mono">Authorization: Bearer …</span>) — share one for debugging instead of the password. Keys expire automatically, can be revoked anytime, and are cleared on controller restart. The secret is shown once.</span>
+              <span class="hint">Temporary bearer keys for the control API (<span class="mono">Authorization: Bearer …</span>) — share one for debugging instead of the password. Scopes: <span class="mono">admin</span> (full API access) or <span class="mono">read</span> (GET/HEAD reads only; mutating calls are rejected). Keys expire automatically, can be revoked anytime, and are cleared on controller restart. The secret is shown once.</span>
               <div class="row mt" style="gap:8px; flex-wrap:wrap">
                 <input class="input" id="k-label" placeholder="Label (e.g. ai-debug)" maxlength="64" style="max-width:220px"/>
                 <select class="select" id="k-ttl" style="max-width:160px">
@@ -749,6 +749,10 @@
                   <option value="168">7 days</option>
                   <option value="720">30 days</option>
                 </select>
+                <select class="select" id="k-scope" style="max-width:140px">
+                  <option value="admin" selected>admin</option>
+                  <option value="read">read</option>
+                </select>
                 <button class="btn btn-primary" id="k-create">Create key</button>
               </div>
               <div class="row mt hidden" id="k-once">
@@ -756,7 +760,7 @@
                 <button class="btn btn-sm" id="k-copy">Copy</button>
               </div>
               <div class="table-wrap mt">
-                <table class="tbl"><thead><tr><th>Label</th><th>Expires</th><th></th></tr></thead>
+                <table class="tbl"><thead><tr><th>Label</th><th>Scope</th><th>Expires</th><th></th></tr></thead>
                   <tbody id="k-list"></tbody>
                 </table>
               </div>

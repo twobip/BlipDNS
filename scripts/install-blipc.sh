@@ -214,10 +214,10 @@ install_go_from_archive() {
   archive="$tmp/$archive_name"
   metadata="$tmp/go.json"
   log "installing Go ${GO_REQUIRED_VERSION} from the official Go archive"
-  if ! curl -fL "https://go.dev/dl/$archive_name" -o "$archive"; then
+  if ! curl -fL --proto '=https' --tlsv1.2 "https://go.dev/dl/$archive_name" -o "$archive"; then
     err "failed to download Go ${GO_REQUIRED_VERSION} for Linux/$arch"
   fi
-  if ! curl -fsSL "https://go.dev/dl/?mode=json&include=all" -o "$metadata"; then
+  if ! curl -fsSL --proto '=https' --tlsv1.2 "https://go.dev/dl/?mode=json&include=all" -o "$metadata"; then
     err "failed to download Go checksum metadata"
   fi
   if ! expected="$(jq -er --arg file "$archive_name" 'first(.[] | .files[]? | select(.filename == $file) | .sha256)' "$metadata")"; then
@@ -288,7 +288,7 @@ fi
 case "$CHANNEL" in
   stable|master)
     REF="master"
-    TAG="v$(curl -fsSL "$RAW_BASE/master/VERSION" || err "could not read the current stable version from GitHub")" ;;
+    TAG="v$(curl -fsSL --proto '=https' --tlsv1.2 "$RAW_BASE/master/VERSION" || err "could not read the current stable version from GitHub")" ;;
   dev)
     REF="dev"
     TAG="dev" ;;
@@ -310,8 +310,8 @@ export GOPATH="$CACHE_DIR/gopath"
 # fetch_verified <tag> <asset> <destfile> — download and SHA256-verify one asset.
 fetch_verified() {
   local tag="$1" asset="$2" dest="$3" expected actual
-  curl -fL "$BASE_URL/$tag/$asset" -o "$TMPDIR/$asset" || err "download failed: $BASE_URL/$tag/$asset"
-  curl -fsSL "$BASE_URL/$tag/SHA256SUMS" -o "$TMPDIR/SHA256SUMS" || err "download failed: SHA256SUMS"
+  curl -fL --proto '=https' --tlsv1.2 "$BASE_URL/$tag/$asset" -o "$TMPDIR/$asset" || err "download failed: $BASE_URL/$tag/$asset"
+  curl -fsSL --proto '=https' --tlsv1.2 "$BASE_URL/$tag/SHA256SUMS" -o "$TMPDIR/SHA256SUMS" || err "download failed: SHA256SUMS"
   expected="$(awk -v a="$asset" '$2==a {print $1; exit}' "$TMPDIR/SHA256SUMS")"
   [ -n "$expected" ] || err "no checksum entry for $asset in SHA256SUMS"
   actual="$(sha256sum "$TMPDIR/$asset" | awk '{print $1}')"
@@ -333,10 +333,23 @@ if [ "$LOCAL" -eq 1 ]; then
   go build -v -o "$TMPDIR/blipctl" ./cmd/blipctl
 elif [ "$BUILD_FROM_SOURCE" -eq 1 ]; then
   SRC_DIR="$TMPDIR/src"
+  # M13: pin the clone. REF is allow-listed by the channel case above
+  # (stable|master|dev|vX.Y.Z); refuse an empty REF so we never clone a
+  # default branch implicitly.
+  [ -n "${REF:-}" ] || err "internal error: empty REF — refusing to clone"
   log "cloning $REPO @ $REF"
   git clone --depth 1 --branch "$REF" \
     "https://${REPO}.git" "$SRC_DIR" || \
     git clone "https://${REPO}.git" "$SRC_DIR"
+  # Log the pinned commit so installs are auditable.
+  log "pinned to commit $(git -C "$SRC_DIR" rev-parse HEAD)"
+  # Best-effort signed-tag check for version pins (warn-only: release tags
+  # are not currently signed; the SHA256SUMS checksum is the enforcement).
+  if [[ "$REF" == v* ]]; then
+    git -C "$SRC_DIR" verify-tag "$REF" 2>/dev/null \
+      && log "verified tag signature for $REF" \
+      || log "warning: tag $REF has no verifiable signature (checksum verification still applies)"
+  fi
   cd "$SRC_DIR"
   log "building blipc and blipctl (first build can take a few minutes — package list below shows progress)"
   go build -v -ldflags "-X github.com/twobip/BlipDNS/internal/controller.version=$(cat VERSION)" -o "$TMPDIR/blipc" ./cmd/blipc
@@ -363,15 +376,15 @@ if [ "$BUILD_FROM_SOURCE" -eq 1 ] || [ "$LOCAL" -eq 1 ]; then
   install -m 0755 "$SRC_DIR/scripts/blipc-update.sh" /usr/local/sbin/blipc-update
   install -m 0755 "$SRC_DIR/scripts/blipc-install.sh" /usr/local/sbin/blipc-install
 else
-  curl -fsSL "$RAW_BASE/$REF/scripts/blipc-update.sh" -o /usr/local/sbin/blipc-update \
+  curl -fsSL --proto '=https' --tlsv1.2 "$RAW_BASE/$REF/scripts/blipc-update.sh" -o /usr/local/sbin/blipc-update \
     || err "failed to fetch blipc-update.sh"
-  curl -fsSL "$RAW_BASE/$REF/scripts/blipc-install.sh" -o /usr/local/sbin/blipc-install \
+  curl -fsSL --proto '=https' --tlsv1.2 "$RAW_BASE/$REF/scripts/blipc-install.sh" -o /usr/local/sbin/blipc-install \
     || err "failed to fetch blipc-install.sh"
   chmod 0755 /usr/local/sbin/blipc-update /usr/local/sbin/blipc-install
 fi
 # Only the install helper runs as root; the download (blipc-update) runs as blipc.
 cat > /etc/sudoers.d/blipc-install <<'EOF'
-blipc ALL=(root) NOPASSWD: /usr/local/sbin/blipc-install
+blipc ALL=(root) NOPASSWD: /usr/local/sbin/blipc-install /var/lib/blipc/update/blipc.new
 EOF
 chmod 0440 /etc/sudoers.d/blipc-install
 visudo -cf /etc/sudoers.d/blipc-install
@@ -388,7 +401,9 @@ if [ ! -f "$CONFIG_DIR/blipc.yaml" ]; then
   cat > "$CONFIG_DIR/blipc.yaml" <<'EOF'
 # BlipDNS controller configuration
 # See: https://github.com/twobip/BlipDNS
-listen: "0.0.0.0:8500"
+# H4: loopback-first default. To expose the dashboard, change to 0.0.0.0:8500
+# only behind an isolated mgmt VLAN (or reverse proxy with auth/TLS).
+listen: "127.0.0.1:8500"
 # username / password_hash can also be set via BLIPC_USER / BLIPC_PASS_HASH env vars.
 # username: blip
 # password_hash: $2b$12$...   # bcrypt hash from: blipctl hash <password>
@@ -436,7 +451,7 @@ UMask=0077
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
-ReadWritePaths=$STATE_DIR $CONFIG_DIR /usr/local/bin
+ReadWritePaths=$STATE_DIR $CONFIG_DIR
 LimitNOFILE=65536
 StandardOutput=journal
 StandardError=journal

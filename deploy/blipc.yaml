@@ -1,4 +1,6 @@
-listen: "0.0.0.0:8500"
+# H4: loopback-first default. Change to 0.0.0.0:8500 only behind an isolated
+# mgmt VLAN (or reverse proxy with auth/TLS).
+listen: "127.0.0.1:8500"
 # Auth for the web UI / API. blipc uses username/password session auth: you log
 # in once via the web UI (or /api/login) and receive an HttpOnly + SameSite=Strict
 # Empty credentials keep the controller CLOSED until the one-time setup flow

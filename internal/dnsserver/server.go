@@ -279,35 +279,155 @@ func dohMaxAge(resp *dns.Msg) uint32 {
 // ServeDNS implements dns.Handler for classic DNS.
 func (s *Server) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
 	clientIP, _, _ := net.SplitHostPort(w.RemoteAddr().String())
-	resp := s.serve(context.Background(), net.ParseIP(clientIP), "", control.ProtoDNS, req)
+	isUDP := false
+	// The mux serves both UDP and TCP on the same handler; only UDP needs
+	// truncation to 1232 (DNS flag day) to avoid IP fragmentation. TCP can
+	// carry the full response.
+	if la := w.LocalAddr(); la != nil && la.Network() == "udp" {
+		isUDP = true
+	} else if ra := w.RemoteAddr(); ra != nil && ra.Network() == "udp" {
+		isUDP = true
+	}
+	ctx, cancel := queryCtx()
+	defer cancel()
+	resp := s.serveInner(ctx, net.ParseIP(clientIP), "", control.ProtoDNS, isUDP, req)
+	// Safety net for every early-return path (blocked/local/refused): a large
+	// local answer over UDP must still fit the path MTU.
+	if isUDP && resp != nil && resp.Len() > 1232 {
+		resp.Truncate(1232)
+	}
 	_ = w.WriteMsg(resp)
 }
 
 // serve is the unified query path: filter -> cache -> upstream. clientID is
-// the optional DoH client identity from /dns-query/{client-id}; it overrides
-// the IP as the log identity and can select a per-client policy. proto is the
-// receiving listener (control.ProtoDoH or control.ProtoDNS) for query-log events.
+// the optional DoH client identity from /dns-query/{client-id}; it is only
+// attributed in logs and query-log events when it actually selected its
+// policy (see ClientIDSelected), otherwise the query is logged as
+// "unverified-id". proto is the receiving listener (control.ProtoDoH or
+// control.ProtoDNS) for query-log events. Classic-DNS callers that go through
+// ServeDNS use serveInner directly with a precise UDP flag; direct serve()
+// calls assume classic DNS is UDP so large responses are still truncated.
+// queryCtx bounds one classic-DNS query (filter+cache+upstream) so a stalled
+// upstream with a large TimeoutSec cannot park goroutines/FDs indefinitely.
+// DoH callers already inherit the HTTP request context; classic DNS has none.
+func queryCtx() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), 10*time.Second)
+}
+
 func (s *Server) serve(ctx context.Context, clientIP net.IP, clientID, proto string, req *dns.Msg) *dns.Msg {
+	isUDP := proto == control.ProtoDNS
+	return s.serveInner(ctx, clientIP, clientID, proto, isUDP, req)
+}
+
+// chainBlockedError carries a CNAME/DNAME chain block out of the cache
+// singleflight fetch so every coalesced waiter returns the blocked response
+// instead of the poisoned upstream answer (which is never cached).
+type chainBlockedError struct {
+	target    string
+	action    filter.BlockAction
+	source    string
+	shouldLog bool
+}
+
+func (e *chainBlockedError) Error() string { return "blipd: cname target blocked: " + e.target }
+
+// chainBlocked inspects up to 8 CNAME/DNAME targets in m's answer section and
+// reports whether any of them is blocked per classify (the same
+// policy/blocklist function used for the qname).
+func chainBlocked(m *dns.Msg, classify func(string) bool) bool {
+	if m == nil {
+		return false
+	}
+	checked := 0
+	for _, rr := range m.Answer {
+		if checked >= 8 {
+			break
+		}
+		var target string
+		switch v := rr.(type) {
+		case *dns.CNAME:
+			target = v.Target
+		case *dns.DNAME:
+			target = v.Target
+		default:
+			continue
+		}
+		if target == "" {
+			continue
+		}
+		if classify(target) {
+			return true
+		}
+		checked++
+	}
+	return false
+}
+
+// stripSubnet removes the EDNS0 client-subnet option (RFC 7871) from req so a
+// client subnet is never forwarded upstream. Other OPT options (e.g. DO) are
+// preserved.
+func stripSubnet(req *dns.Msg) {
+	if req == nil {
+		return
+	}
+	opt := req.IsEdns0()
+	if opt == nil {
+		return
+	}
+	kept := make([]dns.EDNS0, 0, len(opt.Option))
+	for _, o := range opt.Option {
+		if o.Option() == dns.EDNS0SUBNET {
+			continue
+		}
+		kept = append(kept, o)
+	}
+	opt.Option = kept
+}
+
+func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, proto string, isUDP bool, req *dns.Msg) *dns.Msg {
 	start := time.Now()
-	client := clientID
-	if client == "" {
-		// No DoH client-id: the rendered IP is both the log identity and the
-		// rate-limit key, so render it once (IP.String() allocates).
+	// A nil source IP must never be routed, cached or rate-bucketed: refuse
+	// immediately. (DoH with an unparseable RemoteAddr, or a spoofed classic
+	// query, would otherwise mint a "<nil>" bucket or bypass policy CIDRs.)
+	if clientIP == nil {
+		resp := new(dns.Msg)
+		if req != nil {
+			resp.SetReply(req)
+		}
+		resp.RecursionAvailable = true
+		resp.Rcode = dns.RcodeRefused
+		return resp
+	}
+	// Only attribute the self-asserted DoH client-ID when it actually
+	// selected its policy (IP inside that policy's networks). Otherwise the
+	// query is logged as "unverified-id" so one client cannot impersonate
+	// another's identity to escape its own policy.
+	verifiedID := ""
+	if clientID != "" && s.cfg.Store != nil && s.cfg.Store.ClientIDSelected(clientIP, clientID) {
+		verifiedID = clientID
+	}
+	client := ""
+	if verifiedID != "" {
+		client = verifiedID
+	} else if clientID != "" {
+		log.Printf("blipd: unverified client-id %q from %s", clientID, clientIP.String())
+		client = "unverified-id"
+	} else {
+		// No DoH client-id: the rendered IP is the log identity. The
+		// rate-limit key is derived separately (masked /64 for IPv6).
 		client = clientIP.String()
 	}
 	// Per-client rate limit is keyed by the SOURCE IP (post trusted-proxy
-	// resolution), never the DoH client-id path segment, so an attacker can't
-	// rotate /dns-query/{client-id} to get a fresh bucket. Excess queries are
-	// dropped with REFUSED so abusive clients can't exhaust upstream. REFUSED
-	// queries are tracked separately (AddRateLimited) and excluded from the
-	// query totals / query log: only queries that actually get resolved count
-	// toward throughput, cache and top-domain stats.
+	// resolution, masked to /64 for IPv6), never the DoH client-id path
+	// segment, so an attacker can't rotate /dns-query/{client-id} to get a
+	// fresh bucket. The full IP is kept for policy lookup; only the bucket
+	// key is masked. Excess queries are dropped with REFUSED so abusive
+	// clients can't exhaust upstream. REFUSED queries are tracked separately
+	// (AddRateLimited) and excluded from the query totals / query log: only
+	// queries that actually get resolved count toward throughput, cache and
+	// top-domain stats.
 	if s.rl != nil {
-		rlKey := client // classic-DNS / no-id case: already the rendered IP
-		if clientID != "" {
-			rlKey = clientIP.String() // separate allocation, keyed by IP only
-		}
-		if !s.rl.allow(rlKey) {
+		if !s.rl.allow(rateLimitKey(clientIP)) {
 			s.cnt.AddRateLimited()
 			resp := new(dns.Msg)
 			resp.SetReply(req)
@@ -333,6 +453,12 @@ func (s *Server) serve(ctx context.Context, clientIP net.IP, clientID, proto str
 	// upstream: they disclose the upstream's identity (PoP names) and a
 	// resolver has no CHAOS data of its own to give.
 	if q.Qclass == dns.ClassCHAOS {
+		resp.Rcode = dns.RcodeRefused
+		return resp
+	}
+	// ANY (255) and AXFR (252) are refused: ANY amplifies reflection attacks
+	// and AXFR is a zone transfer, never a resolver query.
+	if q.Qtype == dns.TypeANY || q.Qtype == dns.TypeAXFR {
 		resp.Rcode = dns.RcodeRefused
 		return resp
 	}
@@ -421,6 +547,11 @@ func (s *Server) serve(ctx context.Context, clientIP net.IP, clientID, proto str
 	}
 	upstreamLabel := s.upstreamLabel(resolver, matchedRoute, upstreamOverride)
 
+	// Never forward the client subnet upstream (RFC 7871 privacy): strip the
+	// EDNS0_SUBNET option from the query OPT before it is cached or resolved.
+	// KeyOf already partitions on the DO bit, and the subnet option is not
+	// part of the key, so distinct subnets share one cache entry.
+	stripSubnet(req)
 	key := cache.KeyOf(req)
 	if upstreamLabel != "" {
 		// Partition the cache by the resolver that will answer: routes and
@@ -430,17 +561,136 @@ func (s *Server) serve(ctx context.Context, clientIP net.IP, clientID, proto str
 		// no sanitizing.
 		key.Label = upstreamLabel
 	}
-	out, cached, err := s.cache.DoHit(ctx, key, func() (*dns.Msg, error) {
-		return resolver.Resolve(ctx, req)
-	})
+	// classifyTarget applies the same policy/blocklist decision used for the
+	// qname to a CNAME/DNAME target.
+	classifyTarget := func(target string) (bool, filter.BlockAction, string, bool) {
+		bare := strings.TrimSuffix(target, ".")
+		if s.cfg.Blocklist != nil && s.cfg.Blocklist.IsBlocked(bare) && !s.cfg.Store.Allowed(clientIP, clientID, bare) {
+			return true, s.cfg.BlockAction, "global", true
+		}
+		blocked, action, _, lg := s.cfg.Store.Classify(clientIP, clientID, bare)
+		if blocked {
+			return true, action, s.cfg.Store.BlockSource(clientIP, clientID, bare), lg
+		}
+		return false, "", "", false
+	}
+	fetch := func() (*dns.Msg, error) {
+		m, err := resolver.Resolve(ctx, req)
+		if err != nil {
+			return nil, err
+		}
+		if m == nil {
+			return nil, fmt.Errorf("upstream returned nil response")
+		}
+		// CNAME/DNAME chain inspection before the response is cached: a
+		// qname that is allowed but aliases to a blocked domain must be
+		// blocked the same way, without poisoning the cache with the
+		// upstream's alias.
+		if chainBlocked(m, func(target string) bool {
+			ok, _, _, _ := classifyTarget(target)
+			return ok
+		}) {
+			// Find the first blocked target to attribute the block.
+			for _, rr := range m.Answer {
+				var target string
+				switch v := rr.(type) {
+				case *dns.CNAME:
+					target = v.Target
+				case *dns.DNAME:
+					target = v.Target
+				default:
+					continue
+				}
+				if target == "" {
+					continue
+				}
+				if ok, act, src, lg := classifyTarget(target); ok {
+					return nil, &chainBlockedError{target: strings.TrimSuffix(target, "."), action: act, source: src, shouldLog: lg}
+				}
+			}
+			return nil, &chainBlockedError{target: domain, action: "", source: "", shouldLog: false}
+		}
+		return m, nil
+	}
+	out, cached, err := s.cache.DoHit(ctx, key, fetch)
 	if err != nil {
+		var cbe *chainBlockedError
+		if errors.As(err, &cbe) {
+			s.cnt.AddBlocked()
+			blockedResp := new(dns.Msg)
+			blockedResp.SetReply(req)
+			blockedResp.RecursionAvailable = true
+			notifyDomain := cbe.target
+			if notifyDomain == "" {
+				notifyDomain = domain
+			}
+			s.notifyBlock(req, blockedResp, client, notifyDomain, cbe.source, proto, start)
+			if s.logfn != nil && (cbe.shouldLog || cbe.source == "global") {
+				s.logfn(client, notifyDomain)
+			}
+			applyBlockAction(blockedResp, q, cbe.action)
+			return blockedResp
+		}
 		s.cnt.AddUpErr()
 		s.notifyUpstreamError(client, domain, upstreamErrText(upstreamLabel, err))
 		resp.Rcode = dns.RcodeServerFailure
 		return resp
 	}
+	// A cached entry may predate a policy/blocklist change: re-inspect its
+	// chain so a newly-blocked alias is not served from cache. Evict the
+	// poisoned entry so later queries miss and refetch.
+	if cached && chainBlocked(out, func(target string) bool {
+		ok, _, _, _ := classifyTarget(target)
+		return ok
+	}) {
+		var cbe *chainBlockedError
+		for _, rr := range out.Answer {
+			var target string
+			switch v := rr.(type) {
+			case *dns.CNAME:
+				target = v.Target
+			case *dns.DNAME:
+				target = v.Target
+			default:
+				continue
+			}
+			if target == "" {
+				continue
+			}
+			if ok, act, src, lg := classifyTarget(target); ok {
+				cbe = &chainBlockedError{target: strings.TrimSuffix(target, "."), action: act, source: src, shouldLog: lg}
+				break
+			}
+		}
+		s.cache.Delete(key)
+		s.cnt.AddBlocked()
+		blockedResp := new(dns.Msg)
+		blockedResp.SetReply(req)
+		blockedResp.RecursionAvailable = true
+		notifyDomain := domain
+		var act filter.BlockAction
+		var src string
+		var lg bool
+		if cbe != nil {
+			notifyDomain = cbe.target
+			act = cbe.action
+			src = cbe.source
+			lg = cbe.shouldLog
+		}
+		s.notifyBlock(req, blockedResp, client, notifyDomain, src, proto, start)
+		if s.logfn != nil && (lg || src == "global") {
+			s.logfn(client, notifyDomain)
+		}
+		applyBlockAction(blockedResp, q, act)
+		return blockedResp
+	}
 	out.Id = req.Id
 	out.Question = req.Question
+	// UDP path-MTU safety (DNS flag day 1232): truncate large responses so
+	// they fit without IP fragmentation; the client retries over TCP (TC bit).
+	if isUDP && out.Len() > 1232 {
+		out.Truncate(1232)
+	}
 
 	// Notify pass event for query log (with full answer records + qtype so
 	// non-address answers like TXT/CNAME/MX are preserved, not just A/AAAA).
@@ -598,8 +848,8 @@ func (s *Server) Start() error {
 
 	udpH := dns.NewServeMux()
 	udpH.Handle(".", s)
-	s.udp = &dns.Server{Addr: s.cfg.DNSAddr, Net: "udp", Handler: udpH}
-	s.tcp = &dns.Server{Addr: s.cfg.DNSAddr, Net: "tcp", Handler: udpH}
+	s.udp = &dns.Server{Addr: s.cfg.DNSAddr, Net: "udp", Handler: udpH, ReadTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second, IdleTimeout: func() time.Duration { return 30 * time.Second }}
+	s.tcp = &dns.Server{Addr: s.cfg.DNSAddr, Net: "tcp", Handler: udpH, ReadTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second, IdleTimeout: func() time.Duration { return 30 * time.Second }}
 
 	errCh := make(chan error, 2)
 	go func() { errCh <- s.udp.ListenAndServe() }()
@@ -627,6 +877,19 @@ func (s *Server) Start() error {
 			// at runtime (VIP configured after startup) is served immediately.
 			s.doch.TLSConfig = &tls.Config{
 				MinVersion: tls.VersionTLS12,
+				// GCM/ChaCha only: exclude TLS1.2 CBC-SHA suites (Lucky13/ROBOT
+				// class) while keeping broad client compatibility. TLS1.3
+				// suites are always GCM/ChaCha and unaffected by this list.
+				CipherSuites: []uint16{
+					tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+					tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+					tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+					tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+					tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
+					tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
+				},
+				PreferServerCipherSuites: true,
+				CurvePreferences:         []tls.CurveID{tls.X25519, tls.CurveP256},
 				GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
 					if c := s.cert.Load(); c != nil {
 						return c, nil
@@ -674,6 +937,11 @@ func (s *Server) SetDoHHTTPAddr(addr string) error {
 	srv := newHTTPServer(addr, s.Handler())
 	s.dohPlain = srv
 	s.dohPlainAddr = addr
+	// Cleartext DoH exposes queries, answers and client IDs to passive
+	// observers: warn loudly unless it is loopback-only.
+	if host, _, err := net.SplitHostPort(addr); err == nil && host != "" && host != "127.0.0.1" && host != "::1" && host != "localhost" {
+		log.Printf("blipd: WARNING plain-HTTP DoH on non-loopback %s exposes DNS queries in cleartext; use only on a trusted LAN or with explicit insecure ack", addr)
+	}
 	go func() {
 		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 			log.Printf("blipd: doh http listener %s: %v", addr, err)

@@ -37,9 +37,11 @@ const (
 )
 
 // defaultQueryLogRetention is how long query log entries are kept unless the
-// operator picks a different retention in the controller settings. 30 days
-// keeps a useful history window without unbounded growth.
-const defaultQueryLogRetention = 720 * time.Hour
+// operator picks a different retention in the controller settings. 7 days
+// keeps a useful history window without unbounded growth, and limits how long
+// client-identifying query history is retained (privacy by default; longer
+// windows are opt-in via the controller settings).
+const defaultQueryLogRetention = 168 * time.Hour
 
 // QueryLogEntry represents a single DNS query event
 // (answers reuse control.Answer: identical JSON, single type).
@@ -348,8 +350,10 @@ func NewQueryLogStore(dbPath string) (*QueryLogStore, error) {
 		if err := os.MkdirAll(dir, 0750); err != nil {
 			return nil, fmt.Errorf("create query log db dir: %w", err)
 		}
+		// Best-effort: the dir may be root-owned (e.g. /var/lib/blipc in
+		// tests); never fail store init over a defensive chmod.
 		if err := os.Chmod(dir, 0750); err != nil {
-			return nil, fmt.Errorf("chmod query log db dir: %w", err)
+			log.Printf("blipc: warning: chmod query log db dir: %v", err)
 		}
 	}
 	db, err := sql.Open("sqlite", withBusyTimeout(dbPath))
@@ -414,6 +418,11 @@ func NewQueryLogStore(dbPath string) (*QueryLogStore, error) {
 	// defensive chmod.
 	if err := os.Chmod(dbPath, 0600); err != nil {
 		log.Printf("blipc: warning: chmod query log db: %v", err)
+	}
+	// SQLite sidecars (WAL/SHM/journal) inherit the process umask, not the DB
+	// mode: lock them down best-effort too so query history isn't world-readable.
+	for _, suffix := range []string{"-wal", "-shm", "-journal"} {
+		_ = os.Chmod(dbPath+suffix, 0600)
 	}
 	// Add columns to existing databases (no-ops if already present)
 	for _, col := range []string{
@@ -489,11 +498,21 @@ func logFilter(query string, args []interface{}, instance, action, cached, filte
 		args = append(args, cached)
 	}
 	if filter != "" {
-		fl := "%" + filter + "%"
-		query += " AND (LOWER(ql.client) LIKE ? OR LOWER(cn.name) LIKE ? OR LOWER(ql.domain) LIKE ? OR LOWER(ql.action) LIKE ?)"
+		// Escape LIKE wildcards so a user filter is matched literally: % _
+		// and the escape char itself must not act as wildcards. The query
+		// lowercases the columns, so lowercase the filter too.
+		fl := "%" + escapeLike(strings.ToLower(filter)) + "%"
+		query += " AND (LOWER(ql.client) LIKE ? ESCAPE '\\' OR LOWER(cn.name) LIKE ? ESCAPE '\\' OR LOWER(ql.domain) LIKE ? ESCAPE '\\' OR LOWER(ql.action) LIKE ? ESCAPE '\\')"
 		args = append(args, fl, fl, fl, fl)
 	}
 	return query, args
+}
+
+// escapeLike escapes the LIKE metacharacters % _ and \ with a backslash so
+// they match literally under ESCAPE '\'.
+func escapeLike(s string) string {
+	r := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+	return r.Replace(s)
 }
 
 func (s *QueryLogStore) Query(ctx context.Context, instance, filter, action, cached, proto string, since time.Time, offset, limit int) ([]QueryLogEntry, error) {

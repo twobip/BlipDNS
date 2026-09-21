@@ -45,6 +45,10 @@ func NewBlocklistStore(dbPath string) (*BlocklistStore, error) {
 		if err := os.MkdirAll(dir, 0750); err != nil {
 			return nil, fmt.Errorf("create blocklist db dir: %w", err)
 		}
+		// Best-effort: never fail store init over a defensive chmod.
+		if err := os.Chmod(dir, 0750); err != nil {
+			log.Printf("blipc: warning: chmod blocklist db dir: %v", err)
+		}
 	}
 	db, err := sql.Open("sqlite", withBusyTimeout(dbPath))
 	if err != nil {
@@ -105,6 +109,11 @@ CREATE INDEX IF NOT EXISTS idx_blocklist_source_domains_domain ON blocklist_sour
 	// over a defensive chmod.
 	if err := os.Chmod(dbPath, 0600); err != nil {
 		log.Printf("blipc: warning: chmod blocklist db: %v", err)
+	}
+	// SQLite sidecars (WAL/SHM/journal) inherit the process umask, not the DB
+	// mode: lock them down best-effort too.
+	for _, suffix := range []string{"-wal", "-shm", "-journal"} {
+		_ = os.Chmod(dbPath+suffix, 0600)
 	}
 	return s, nil
 }

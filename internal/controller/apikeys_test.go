@@ -62,7 +62,7 @@ func TestAPIKeys(t *testing.T) {
 		t.Fatalf("no-cookie list: status=%d, want 401", rec.Code)
 	}
 
-	createBody, _ := json.Marshal(map[string]interface{}{"label": "ai-debug", "ttl_hours": 24})
+	createBody, _ := json.Marshal(map[string]interface{}{"label": "ai-debug", "ttl_hours": 24, "scope": "admin"})
 	rec := doKeys(t, h, http.MethodPost, "/api/keys", createBody, cookie, "")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("create: status=%d body=%s", rec.Code, rec.Body.String())
@@ -70,6 +70,7 @@ func TestAPIKeys(t *testing.T) {
 	var created struct {
 		ID        string    `json:"id"`
 		Key       string    `json:"key"`
+		Scope     string    `json:"scope"`
 		ExpiresAt time.Time `json:"expires_at"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
@@ -89,6 +90,17 @@ func TestAPIKeys(t *testing.T) {
 	h.ServeHTTP(health, req)
 	if health.Code != http.StatusOK {
 		t.Fatalf("bearer health: status=%d body=%s", health.Code, health.Body.String())
+	}
+	// Admin bearer can mutate (settings needs no DB, so it works in any env) …
+	mutReq := httptest.NewRequest(http.MethodPut, "/api/settings", bytes.NewReader([]byte(`{}`)))
+	mutReq.Header.Set("Authorization", "Bearer "+created.Key)
+	mutReq.Header.Set("Content-Type", "application/json")
+	mutRec := httptest.NewRecorder()
+	h.ServeHTTP(mutRec, mutReq)
+	// 403/401 would mean scope auth blocked us; 400 is fine (empty settings
+	// body rejected by the handler, but scope passed).
+	if mutRec.Code == http.StatusForbidden || mutRec.Code == http.StatusUnauthorized {
+		t.Fatalf("admin bearer settings: status=%d body=%s", mutRec.Code, mutRec.Body.String())
 	}
 	// … but not key management (a key must not mint keys).
 	if rec := doKeys(t, h, http.MethodGet, "/api/keys", nil, nil, created.Key); rec.Code != http.StatusUnauthorized {
@@ -139,7 +151,7 @@ func TestAPIKeys(t *testing.T) {
 	}
 
 	// Expiry kills the bearer and Sweep purges it.
-	_, short, _, err := srv.auth.CreateAPIKey("short", time.Millisecond)
+	_, short, _, err := srv.auth.CreateAPIKey("short", time.Millisecond, "admin")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,5 +162,91 @@ func TestAPIKeys(t *testing.T) {
 	srv.auth.Sweep()
 	if got := srv.auth.ListAPIKeys(); len(got) != 0 {
 		t.Fatalf("sweep left %d keys", len(got))
+	}
+}
+
+// TestAPIKeyScopes verifies read-scoped keys can read but cannot mutate, while
+// admin keys keep full access.
+func TestAPIKeyScopes(t *testing.T) {
+	srv := NewServerWithConfig("admin", "test-password-123", NewFleet(""), nil, "", "")
+	h := srv.Handler()
+	cookie := loginSessionCookie(t, h)
+
+	mkKey := func(label, scope string) string {
+		t.Helper()
+		b, _ := json.Marshal(map[string]interface{}{"label": label, "ttl_hours": 24, "scope": scope})
+		rec := doKeys(t, h, http.MethodPost, "/api/keys", b, cookie, "")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("create %s key: status=%d body=%s", scope, rec.Code, rec.Body.String())
+		}
+		var out struct {
+			Key   string `json:"key"`
+			Scope string `json:"scope"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil || out.Key == "" {
+			t.Fatalf("create %s key: bad json: %s", scope, rec.Body.String())
+		}
+		if out.Scope != scope {
+			t.Fatalf("create %s key: scope=%q", scope, out.Scope)
+		}
+		return out.Key
+	}
+
+	adminKey := mkKey("admin-key", "admin")
+	readKey := mkKey("read-key", "read")
+
+	// Invalid scope is rejected.
+	b, _ := json.Marshal(map[string]interface{}{"label": "bad", "ttl_hours": 24, "scope": "root"})
+	if rec := doKeys(t, h, http.MethodPost, "/api/keys", b, cookie, ""); rec.Code != http.StatusBadRequest {
+		t.Fatalf("bad scope: status=%d, want 400", rec.Code)
+	}
+
+	doBearer := func(method, target string, body []byte, key string) *httptest.ResponseRecorder {
+		t.Helper()
+		var rdr *bytes.Reader
+		if body == nil {
+			rdr = bytes.NewReader(nil)
+		} else {
+			rdr = bytes.NewReader(body)
+		}
+		req := httptest.NewRequest(method, target, rdr)
+		req.Header.Set("Authorization", "Bearer "+key)
+		if body != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// Read key: GET allowed.
+	if rec := doBearer(http.MethodGet, "/api/health", nil, readKey); rec.Code != http.StatusOK {
+		t.Fatalf("read bearer GET: status=%d, want 200", rec.Code)
+	}
+	// Read key: POST/PUT/DELETE denied (settings needs no DB).
+	if rec := doBearer(http.MethodPut, "/api/settings", []byte(`{}`), readKey); rec.Code != http.StatusForbidden {
+		t.Fatalf("read bearer PUT: status=%d, want 403", rec.Code)
+	}
+	if rec := doBearer(http.MethodDelete, "/api/keys?id=x", nil, readKey); rec.Code != http.StatusForbidden && rec.Code != http.StatusUnauthorized {
+		t.Fatalf("read bearer DELETE: status=%d, want 403/401", rec.Code)
+	}
+	// Admin key: PUT passes scope auth (any non-403/401 proves it; handler
+	// may 400 on the empty body, which is fine).
+	if rec := doBearer(http.MethodPut, "/api/settings", []byte(`{}`), adminKey); rec.Code == http.StatusForbidden || rec.Code == http.StatusUnauthorized {
+		t.Fatalf("admin bearer PUT: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	// List shows scopes, never secrets.
+	rec := doKeys(t, h, http.MethodGet, "/api/keys", nil, cookie, "")
+	var listed struct {
+		Keys []APIKeyInfo `json:"keys"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &listed); err != nil || len(listed.Keys) != 2 {
+		t.Fatalf("list: unexpected body: %s", rec.Body.String())
+	}
+	for _, k := range listed.Keys {
+		if k.Scope != "admin" && k.Scope != "read" {
+			t.Fatalf("list: bad scope %q", k.Scope)
+		}
 	}
 }

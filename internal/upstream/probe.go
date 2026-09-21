@@ -43,6 +43,10 @@ func ProbeServer(ctx context.Context, sv UpstreamServer, qname string) ProbeResu
 // resolve via the system resolver inside the dial.
 func ProbeServerWithBootstrap(ctx context.Context, sv UpstreamServer, qname string, bootstrap Resolver) ProbeResult {
 	res := ProbeResult{Name: sv.Name, Address: sv.Address}
+	if err := validateTimeoutSec(sv.TimeoutSec); err != nil {
+		res.Error = err.Error()
+		return res
+	}
 	fqdn := dns.Fqdn(strings.TrimSpace(qname))
 	if _, ok := dns.IsDomainName(fqdn); !ok {
 		res.Error = fmt.Sprintf("invalid domain %q", qname)

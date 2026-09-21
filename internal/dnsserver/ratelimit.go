@@ -2,6 +2,7 @@ package dnsserver
 
 import (
 	"hash/fnv"
+	"net"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -104,7 +105,9 @@ func (rl *rateLimiter) allow(client string) bool {
 	now := time.Now()
 	b, ok := sh.buckets[client]
 	if !ok {
-		// bound tracked clients; if saturated, allow (fail-open) rather than DoS.
+		// bound tracked clients; if saturated with no idle entry to evict,
+		// fail closed (deny) rather than fail open: an attacker rotating
+		// source IPs must not get a free pass once the table is full.
 		if len(sh.buckets) >= maxLiveClients/rlShards {
 			// evict an idle entry to make room
 			for k, v := range sh.buckets {
@@ -114,7 +117,7 @@ func (rl *rateLimiter) allow(client string) bool {
 				}
 			}
 			if len(sh.buckets) >= maxLiveClients/rlShards {
-				return true
+				return false
 			}
 		}
 		b = &tokenBucket{tokens: float64(burst), last: now}
@@ -131,4 +134,29 @@ func (rl *rateLimiter) allow(client string) bool {
 		return true
 	}
 	return false
+}
+
+// rateLimitKey returns the rate-limiter bucket key for ip: the full address
+// for IPv4, the /64 prefix for IPv6 (one /64 is typically one LAN/host, so
+// bucketing the full /128 would let a single host mint 2^64 buckets while
+// bucketing coarser than /64 would throttle unrelated customers sharing a
+// prefix). Callers must keep the full IP for policy lookup; only the bucket
+// key is masked.
+func rateLimitKey(ip net.IP) string {
+	if ip == nil {
+		return ""
+	}
+	if ip4 := ip.To4(); ip4 != nil {
+		return ip4.String()
+	}
+	ip16 := ip.To16()
+	if ip16 == nil {
+		return ip.String()
+	}
+	masked := make(net.IP, net.IPv6len)
+	copy(masked, ip16)
+	for i := 8; i < net.IPv6len; i++ {
+		masked[i] = 0
+	}
+	return masked.String()
 }

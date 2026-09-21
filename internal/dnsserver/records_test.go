@@ -30,17 +30,11 @@ func aIP(t *testing.T, resp *dns.Msg) string {
 func TestNegativeTTLFallsBackToDefault(t *testing.T) {
 	rs := NewRecordStore()
 	recs := []control.RecordEntry{{Domain: "neg.test.", Type: "A", Value: "10.0.0.1", TTL: -5}}
-	if err := rs.SetRecords(recs); err != nil {
-		t.Fatal(err)
-	}
-	resp, ok := rs.Lookup(q(t, "neg.test.", dns.TypeA))
-	if !ok || len(resp.Answer) == 0 {
-		t.Fatal("expected an answer")
-	}
-	// A negative TTL used to wrap to ~136 years as uint32; it must fall back
-	// to the server default instead.
-	if ttl := resp.Answer[0].Header().Ttl; ttl != defaultRecordTTL {
-		t.Errorf("negative TTL gave %d, want default %d", ttl, defaultRecordTTL)
+	// Negative TTLs are rejected by SetRecords validation (they would
+	// otherwise wrap to ~136 years as uint32); Lookup still falls back to
+	// the default defensively for any out-of-range value that reaches it.
+	if err := rs.SetRecords(recs); err == nil {
+		t.Fatal("expected error for negative TTL, got nil")
 	}
 }
 

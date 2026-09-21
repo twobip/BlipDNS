@@ -26,8 +26,8 @@ func TestGenerate(t *testing.T) {
 	if leaf.IsCA {
 		t.Error("expected a leaf (non-CA) server certificate")
 	}
-	if leaf.NotAfter.Before(time.Now().AddDate(9, 0, 0)) {
-		t.Errorf("cert validity too short: %s", leaf.NotAfter)
+	if leaf.NotAfter.Before(time.Now().AddDate(0, 0, 300)) || leaf.NotAfter.After(time.Now().AddDate(0, 0, 500)) {
+		t.Errorf("cert validity out of range (want ~398d): %s", leaf.NotAfter)
 	}
 	// the extra host must appear as a SAN
 	found := false

@@ -64,14 +64,16 @@ func New(ttlCap time.Duration, maxEntries int) *Cache {
 }
 
 // Key identifies a cached response by (name, type, class) plus the upstream
-// partition label. It is a comparable struct used directly as the map key:
-// building it allocates nothing (unlike a formatted string) and lookups hash
-// a few fixed words instead of re-hashing the whole encoded name.
+// partition label and the DNSSEC DO bit. It is a comparable struct used
+// directly as the map key: building it allocates nothing (unlike a formatted
+// string) and lookups hash a few fixed words instead of re-hashing the whole
+// encoded name.
 type Key struct {
 	Name   string // FQDN, lowercased (DNS names are case-insensitive; 0x20-mixed case must not mint extra entries)
 	Label  string // upstream partition ("" = default); never parsed, only compared
 	QType  uint16
 	QClass uint16
+	DO     bool // DNSSEC OK bit from the query OPT (DO=1 answers differ: RRSIGs)
 }
 
 // KeyOf returns the cache key for the first question of m.
@@ -80,16 +82,25 @@ func KeyOf(m *dns.Msg) Key {
 		return Key{}
 	}
 	q := m.Question[0]
-	return Key{Name: strings.ToLower(q.Name), QType: q.Qtype, QClass: q.Qclass}
+	k := Key{Name: strings.ToLower(q.Name), QType: q.Qtype, QClass: q.Qclass}
+	if opt := m.IsEdns0(); opt != nil && opt.Do() {
+		k.DO = true
+	}
+	return k
 }
 
-// String renders the key as "name|qtype|qclass|label". Not used on the cache
+// String renders the key as "name|qtype|qclass|label|do". Not used on the cache
 // read path — it exists for the singleflight coalescing key (string-keyed)
 // and for logs. The label (upstream partition) is included so concurrent
 // identical queries routed to different upstreams are not coalesced onto one
-// fetch that would answer both partitions from a single upstream.
+// fetch that would answer both partitions from a single upstream. The DO bit
+// is included so DNSSEC and non-DNSSEC queries are not coalesced either.
 func (k Key) String() string {
-	return k.Name + "|" + strconv.Itoa(int(k.QType)) + "|" + strconv.Itoa(int(k.QClass)) + "|" + k.Label
+	do := "0"
+	if k.DO {
+		do = "1"
+	}
+	return k.Name + "|" + strconv.Itoa(int(k.QType)) + "|" + strconv.Itoa(int(k.QClass)) + "|" + k.Label + "|" + do
 }
 
 func minTTL(m *dns.Msg) time.Duration {
@@ -97,6 +108,12 @@ func minTTL(m *dns.Msg) time.Duration {
 	seen := false
 	for _, rr := range m.Answer {
 		t := rr.Header().Ttl
+		// RFC 2308 §3: negative answers cache for min(SOA TTL, SOA minimum).
+		// A positive answer never carries an SOA, so this only affects the
+		// negative (NXDOMAIN/NODATA) path while keeping one walk.
+		if soa, ok := rr.(*dns.SOA); ok && soa.Minttl < t {
+			t = soa.Minttl
+		}
 		if !seen || t < min {
 			min = t
 			seen = true
@@ -104,6 +121,9 @@ func minTTL(m *dns.Msg) time.Duration {
 	}
 	for _, rr := range m.Ns {
 		t := rr.Header().Ttl
+		if soa, ok := rr.(*dns.SOA); ok && soa.Minttl < t {
+			t = soa.Minttl
+		}
 		if !seen || t < min {
 			min = t
 			seen = true
@@ -186,6 +206,20 @@ copy:
 	}
 	out := e.msg.Copy()
 	for _, rr := range out.Answer {
+		rr.Header().Ttl = ttl
+	}
+	// Authority and additional sections expire with the entry too: serving
+	// them with their original (now stale) TTLs would promise freshness the
+	// cache no longer has. The OPT pseudo-RR carries no TTL (its TTL field
+	// encodes extended RCODE/version/flags such as DO) and must be left
+	// alone.
+	for _, rr := range out.Ns {
+		rr.Header().Ttl = ttl
+	}
+	for _, rr := range out.Extra {
+		if _, ok := rr.(*dns.OPT); ok {
+			continue
+		}
 		rr.Header().Ttl = ttl
 	}
 	return out, true
@@ -294,6 +328,17 @@ func (c *Cache) Purge() {
 	defer c.mu.Unlock()
 	c.items = make(map[Key]*entry)
 	c.lru.Init()
+}
+
+// Delete drops a single cached entry, e.g. a response discovered (via CNAME
+// inspection) to point at a newly-blocked domain after it was cached.
+func (c *Cache) Delete(k Key) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if e, ok := c.items[k]; ok {
+		delete(c.items, k)
+		c.lru.Remove(e.elem)
+	}
 }
 
 // Len returns the number of cached entries.

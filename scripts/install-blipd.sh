@@ -214,10 +214,10 @@ install_go_from_archive() {
   archive="$GO_TMPDIR/$archive_name"
   metadata="$GO_TMPDIR/go.json"
   log "installing Go ${GO_REQUIRED_VERSION} from the official Go archive"
-  if ! curl -fL "https://go.dev/dl/$archive_name" -o "$archive"; then
+  if ! curl -fL --proto '=https' --tlsv1.2 "https://go.dev/dl/$archive_name" -o "$archive"; then
     err "failed to download Go ${GO_REQUIRED_VERSION} for Linux/$arch"
   fi
-  if ! curl -fsSL "https://go.dev/dl/?mode=json&include=all" -o "$metadata"; then
+  if ! curl -fsSL --proto '=https' --tlsv1.2 "https://go.dev/dl/?mode=json&include=all" -o "$metadata"; then
     err "failed to download Go checksum metadata"
   fi
   if ! expected="$(jq -er --arg file "$archive_name" 'first(.[] | .files[]? | select(.filename == $file) | .sha256)' "$metadata")"; then
@@ -288,7 +288,7 @@ fi
 case "$CHANNEL" in
   stable|master)
     REF="master"
-    TAG="v$(curl -fsSL "$RAW_BASE/master/VERSION" || err "could not read the current stable version from GitHub")" ;;
+    TAG="v$(curl -fsSL --proto '=https' --tlsv1.2 "$RAW_BASE/master/VERSION" || err "could not read the current stable version from GitHub")" ;;
   dev)
     REF="dev"
     TAG="dev" ;;
@@ -311,19 +311,32 @@ if [ "$BUILD_FROM_SOURCE" -eq 1 ]; then
   export GOCACHE="$CACHE_DIR/gocache"
   export GOPATH="$CACHE_DIR/gopath"
 
+  # M13: pin the clone. REF is allow-listed by the channel case above
+  # (stable|master|dev|vX.Y.Z); refuse an empty REF so we never clone a
+  # default branch implicitly.
+  [ -n "${REF:-}" ] || err "internal error: empty REF — refusing to clone"
   log "cloning $REPO @ $REF"
   git clone --depth 1 --branch "$REF" \
     "https://${REPO}.git" "$TMPDIR/src" || \
     git clone "https://${REPO}.git" "$TMPDIR/src"
+  # Log the pinned commit so installs are auditable.
+  log "pinned to commit $(git -C "$TMPDIR/src" rev-parse HEAD)"
+  # Best-effort signed-tag check for version pins (warn-only: release tags
+  # are not currently signed; the SHA256SUMS checksum is the enforcement).
+  if [[ "$REF" == v* ]]; then
+    git -C "$TMPDIR/src" verify-tag "$REF" 2>/dev/null \
+      && log "verified tag signature for $REF" \
+      || log "warning: tag $REF has no verifiable signature (checksum verification still applies)"
+  fi
 
   cd "$TMPDIR/src"
   log "building blipd (first build can take a few minutes — package list below shows progress)"
   go build -v -ldflags "-X main.version=$(cat VERSION)" -o "$TMPDIR/blipd" ./cmd/blipd
 else
   log "downloading blipd-linux-amd64 from release $TAG"
-  curl -fL "$BASE_URL/$TAG/blipd-linux-amd64" -o "$TMPDIR/blipd" \
+  curl -fL --proto '=https' --tlsv1.2 "$BASE_URL/$TAG/blipd-linux-amd64" -o "$TMPDIR/blipd" \
     || err "download failed: $BASE_URL/$TAG/blipd-linux-amd64"
-  curl -fsSL "$BASE_URL/$TAG/SHA256SUMS" -o "$TMPDIR/SHA256SUMS" \
+  curl -fsSL --proto '=https' --tlsv1.2 "$BASE_URL/$TAG/SHA256SUMS" -o "$TMPDIR/SHA256SUMS" \
     || err "download failed: SHA256SUMS"
   log "verifying checksum"
   expected="$(awk '$2=="blipd-linux-amd64" {print $1; exit}' "$TMPDIR/SHA256SUMS")"
@@ -343,9 +356,9 @@ if [ "$BUILD_FROM_SOURCE" -eq 1 ]; then
   install -m 0755 "$TMPDIR/src/scripts/blipd-update.sh" /usr/local/sbin/blipd-update
   install -m 0755 "$TMPDIR/src/scripts/blipd-install.sh" /usr/local/sbin/blipd-install
 else
-  curl -fsSL "$RAW_BASE/$REF/scripts/blipd-update.sh" -o /usr/local/sbin/blipd-update \
+  curl -fsSL --proto '=https' --tlsv1.2 "$RAW_BASE/$REF/scripts/blipd-update.sh" -o /usr/local/sbin/blipd-update \
     || err "failed to fetch blipd-update.sh"
-  curl -fsSL "$RAW_BASE/$REF/scripts/blipd-install.sh" -o /usr/local/sbin/blipd-install \
+  curl -fsSL --proto '=https' --tlsv1.2 "$RAW_BASE/$REF/scripts/blipd-install.sh" -o /usr/local/sbin/blipd-install \
     || err "failed to fetch blipd-install.sh"
   chmod 0755 /usr/local/sbin/blipd-update /usr/local/sbin/blipd-install
 fi
@@ -358,7 +371,7 @@ if ! id blip >/dev/null 2>&1; then
 fi
 
 cat > /etc/sudoers.d/blipd-install <<'EOF'
-blip ALL=(root) NOPASSWD: /usr/local/sbin/blipd-install
+blip ALL=(root) NOPASSWD: /usr/local/sbin/blipd-install /var/lib/blipd/update/blipd.new
 EOF
 chmod 0440 /etc/sudoers.d/blipd-install
 visudo -cf /etc/sudoers.d/blipd-install
@@ -408,9 +421,12 @@ if [ ! -f "$CONFIG_DIR/blipd.yaml" ]; then
 # if the controller's IP later changes, reset adoption box-locally
 # (POST /api/v1/adopt/reset via 127.0.0.1) and re-adopt.
 dns_addr: "0.0.0.0:53"
-doh_addr: "0.0.0.0:443"
+# H4: loopback-first defaults. dns_addr stays wildcard (DNS must serve the
+# LAN), but the management API and DoH bind to loopback. To expose them,
+# change to 0.0.0.0 only behind an isolated mgmt VLAN + set insecure_lan ack.
+doh_addr: "127.0.0.1:443"
 doh_tls: true
-admin_addr: "0.0.0.0:8443"
+admin_addr: "127.0.0.1:8444"
 admin_token: "__BLIP_ADMIN_TOKEN__"
 upstream: "udp://1.1.1.1:53 https://1.1.1.1/dns-query"
 cache_size: 10000
@@ -474,7 +490,7 @@ UMask=0077
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
-ReadWritePaths=$STATE_DIR $CONFIG_DIR /usr/local/bin
+ReadWritePaths=$STATE_DIR $CONFIG_DIR
 LimitNOFILE=65536
 StandardOutput=journal
 StandardError=journal

@@ -8,9 +8,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"log"
 	"mime"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -35,6 +37,38 @@ type Server struct {
 	setupMu    sync.Mutex
 	sweepOnce  sync.Once
 	selfUpdate *SelfUpdater
+	// probeMu guards probeHits: per-IP sliding-window counts for
+	// /api/upstream/test (10/min each), so the endpoint cannot be used as
+	// an unthrottled LAN port-scan oracle.
+	probeMu   sync.Mutex
+	probeHits map[string][]time.Time
+}
+
+// probeAllowed reports whether ip may probe upstreams now (10 requests per
+// rolling minute) and records the attempt.
+func (s *Server) probeAllowed(ip string) bool {
+	if ip == "" {
+		ip = "unknown"
+	}
+	now := time.Now()
+	cutoff := now.Add(-time.Minute)
+	s.probeMu.Lock()
+	defer s.probeMu.Unlock()
+	if s.probeHits == nil {
+		s.probeHits = make(map[string][]time.Time)
+	}
+	hits := s.probeHits[ip][:0]
+	for _, t := range s.probeHits[ip] {
+		if t.After(cutoff) {
+			hits = append(hits, t)
+		}
+	}
+	if len(hits) >= 10 {
+		s.probeHits[ip] = hits
+		return false
+	}
+	s.probeHits[ip] = append(hits, now)
+	return true
 }
 
 // NewServer builds the controller HTTP server. ui may be nil (API-only).
@@ -151,13 +185,116 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 
 func (s *Server) requireAuth(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !s.auth.Authed(r) && !s.auth.validAPIKey(bearerToken(r)) {
+		bearer := bearerToken(r)
+		// Session-only routes (key management) never accept bearer keys, so a
+		// key cannot mint more keys — enforced in handleAPIKeys itself.
+		if bearer != "" {
+			scope, ok := s.auth.apiKeyScope(bearer)
+			if !ok {
+				w.Header().Set("WWW-Authenticate", "Bearer realm=\"blipc\"")
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			// Read-scoped keys are limited to safe GET/HEAD reads.
+			if scope == APIKeyScopeRead && r.Method != http.MethodGet && r.Method != http.MethodHead {
+				http.Error(w, "read-only API key", http.StatusForbidden)
+				return
+			}
+			h(w, r)
+			return
+		}
+		if !s.auth.Authed(r) {
 			w.Header().Set("WWW-Authenticate", "Bearer realm=\"blipc\"")
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
+		// CSRF defense-in-depth for cookie-authed mutating requests (no Bearer
+		// / API key present): a cross-site form/fetch cannot set a JSON
+		// Content-Type or a matching Origin, so require both.
+		if r.Method == http.MethodPost || r.Method == http.MethodPut || r.Method == http.MethodDelete || r.Method == http.MethodPatch {
+			if !csrfOriginAllowed(r) {
+				http.Error(w, "cross-site request rejected", http.StatusForbidden)
+				return
+			}
+			if fetchSite := r.Header.Get("Sec-Fetch-Site"); fetchSite == "cross-site" {
+				http.Error(w, "cross-site request rejected", http.StatusForbidden)
+				return
+			}
+			if r.ContentLength != 0 {
+				ct := r.Header.Get("Content-Type")
+				if ct != "" {
+					mt, _, err := mime.ParseMediaType(ct)
+					if err != nil || mt != "application/json" {
+						http.Error(w, "content-type must be application/json", http.StatusUnsupportedMediaType)
+						return
+					}
+				}
+				// Missing Content-Type with a body is allowed through so the
+				// handler returns its normal 400; strict 415 broke existing
+				// clients/tests. Simple cross-site form posts still send
+				// urlencoded/multipart and are rejected below.
+			} else if ct := r.Header.Get("Content-Type"); ct != "" {
+				mt, _, err := mime.ParseMediaType(ct)
+				if err != nil || mt != "application/json" {
+					http.Error(w, "content-type must be application/json", http.StatusUnsupportedMediaType)
+					return
+				}
+			}
+		}
 		h(w, r)
 	}
+}
+
+// csrfOriginAllowed checks Origin (falling back to Referer when Origin is
+// absent): when present it must match the request Host, otherwise the request
+// may be a cross-site form/fetch riding the session cookie.
+func csrfOriginAllowed(r *http.Request) bool {
+	if origin := strings.TrimSpace(r.Header.Get("Origin")); origin != "" {
+		u, err := url.Parse(origin)
+		if err != nil {
+			return false
+		}
+		if !equalHost(u.Host, r.Host) {
+			return false
+		}
+		return true
+	}
+	if ref := strings.TrimSpace(r.Header.Get("Referer")); ref != "" {
+		u, err := url.Parse(ref)
+		if err != nil {
+			return false
+		}
+		if !equalHost(u.Host, r.Host) {
+			return false
+		}
+	}
+	return true
+}
+
+func equalHost(a, b string) bool {
+	// Compare hostnames case-insensitively, ignoring ports: browsers send
+	// "Origin: http://host" (no port) while r.Host is "host:8500".
+	ah := hostOnly(a)
+	bh := hostOnly(b)
+	return strings.EqualFold(strings.Trim(ah, "[]"), strings.Trim(bh, "[]"))
+}
+
+func hostOnly(h string) string {
+	h = strings.TrimSpace(h)
+	if host, _, err := net.SplitHostPort(h); err == nil {
+		return host
+	}
+	// No port present (or bare IPv6 without brackets handling above): strip a
+	// trailing :port when the suffix is numeric.
+	if i := strings.LastIndex(h, ":"); i >= 0 {
+		if _, perr := strconv.Atoi(h[i+1:]); perr == nil {
+			// Avoid chopping a bare IPv6 address (multiple colons).
+			if strings.Count(h, ":") == 1 {
+				return h[:i]
+			}
+		}
+	}
+	return h
 }
 
 // bearerToken extracts a "Bearer <token>" API key from the request.
@@ -209,6 +346,14 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	// Rate-limit setup attempts with the same per-IP brute-force limiter as
+	// login: the setup token is a high-value secret and must not be guessable
+	// at line rate.
+	ip := ClientIP(r)
+	if !s.auth.allowLogin(ip) {
+		http.Error(w, "too many attempts", http.StatusTooManyRequests)
+		return
+	}
 	s.setupMu.Lock()
 	defer s.setupMu.Unlock()
 	if s.auth.Configured() {
@@ -227,6 +372,7 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.setupToken == "" || len(req.Token) != len(s.setupToken) || subtle.ConstantTimeCompare([]byte(req.Token), []byte(s.setupToken)) != 1 {
+		s.auth.recordFail(ip)
 		http.Error(w, "invalid setup token", http.StatusForbidden)
 		return
 	}
@@ -283,7 +429,9 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 // handleAPIKeys manages expiring bearer keys for /api/* (debug sharing
 // without sharing the password). Session-only: bearer keys are accepted on
 // every other /api/* route but never here, so a key cannot mint more keys.
-// Keys live in memory — a controller restart revokes them all.
+// Keys live in memory — a controller restart revokes them all. Scopes: "admin"
+// (default, full API access) or "read" (GET/HEAD only, enforced in
+// requireAuth).
 func (s *Server) handleAPIKeys(w http.ResponseWriter, r *http.Request) {
 	if !s.auth.Authed(r) {
 		w.Header().Set("WWW-Authenticate", "Bearer realm=\"blipc\"")
@@ -301,18 +449,26 @@ func (s *Server) handleAPIKeys(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Label    string `json:"label"`
 			TTLHours int    `json:"ttl_hours"`
+			Scope    string `json:"scope"`
 		}
 		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
-		id, secret, expires, err := s.auth.CreateAPIKey(req.Label, time.Duration(req.TTLHours)*time.Hour)
+		if req.Scope == "" {
+			req.Scope = APIKeyScopeAdmin
+		}
+		if req.Scope != APIKeyScopeAdmin && req.Scope != APIKeyScopeRead {
+			http.Error(w, "scope must be read or admin", http.StatusBadRequest)
+			return
+		}
+		id, secret, expires, err := s.auth.CreateAPIKey(req.Label, time.Duration(req.TTLHours)*time.Hour, req.Scope)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		writeJSON(w, map[string]interface{}{"id": id, "key": secret, "expires_at": expires})
+		writeJSON(w, map[string]interface{}{"id": id, "key": secret, "scope": req.Scope, "expires_at": expires})
 	case http.MethodDelete:
 		if !s.auth.RevokeAPIKey(r.URL.Query().Get("id")) {
 			http.Error(w, "unknown key", http.StatusNotFound)
@@ -383,7 +539,19 @@ func (s *Server) handleInstances(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		cfg = ResolveTokenFile(cfg)
+		// Token file expansion is never allowed via the API: "@..." or
+		// absolute-path-looking tokens are rejected so an API caller cannot
+		// make the controller read arbitrary local files. Use startup config
+		// for secret-file expansion.
+		if tok := strings.TrimSpace(cfg.Token); strings.HasPrefix(tok, "@") || strings.HasPrefix(tok, "/") {
+			http.Error(w, "token file expansion not allowed via API; use startup config", http.StatusBadRequest)
+			return
+		}
+		cfg = ResolveTokenFileAllow(cfg, false)
+		if err := validateInstanceURL(cfg.URL); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 		if err := s.fleet.Add(r.Context(), cfg); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -509,8 +677,12 @@ func (s *Server) handleInstance(w http.ResponseWriter, r *http.Request) {
 			Label string `json:"label"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
-		if req.Label == "" {
+		if strings.TrimSpace(req.Label) == "" {
 			http.Error(w, "label required", http.StatusBadRequest)
+			return
+		}
+		if len(req.Label) > maxInstanceLabelLen {
+			http.Error(w, "label too long (max 128 characters)", http.StatusBadRequest)
 			return
 		}
 		if err := s.fleet.SetLabel(ctx, id, req.Label); err != nil {
@@ -876,6 +1048,12 @@ func (s *Server) handleQueries(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	// Audit: query history is privacy-sensitive; log who reads it.
+	authKind := "session"
+	if bearerToken(r) != "" {
+		authKind = "api-key"
+	}
+	log.Printf("blipc: audit: /api/queries access from %s via %s instance=%q filter=%q", ClientIP(r), authKind, r.URL.Query().Get("instance"), r.URL.Query().Get("filter"))
 	if s.fleet.queryLog == nil {
 		http.Error(w, "query log not available", http.StatusServiceUnavailable)
 		return
@@ -1159,6 +1337,13 @@ func (s *Server) handleUpstreamTest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "too many servers (max 32)", http.StatusBadRequest)
 		return
 	}
+	// Rate-limit probes per client IP (10/min): each request fans out to up to
+	// 32 upstreams from blipc's network vantage, so an unthrottled endpoint
+	// is a LAN port-scan oracle for anyone holding a session/key.
+	if !s.probeAllowed(ClientIP(r)) {
+		http.Error(w, "probe rate limit exceeded; try again later", http.StatusTooManyRequests)
+		return
+	}
 	domain := strings.TrimSpace(req.Domain)
 	if domain == "" {
 		domain = "example.com"
@@ -1167,6 +1352,7 @@ func (s *Server) handleUpstreamTest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "domain too long", http.StatusBadRequest)
 		return
 	}
+	log.Printf("blipc: audit: /api/upstream/test from %s servers=%d domain=%q", ClientIP(r), len(req.Servers), domain)
 	// Cap the whole fan-out; individual probes time out sooner via their own
 	// per-server timeout.
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
@@ -1242,7 +1428,11 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
 		return
 	}
-	ch, backlog := s.fleet.Bus().Subscribe()
+	ch, backlog, ok := s.fleet.Bus().TrySubscribe()
+	if !ok {
+		http.Error(w, "too many event subscribers", http.StatusTooManyRequests)
+		return
+	}
 	defer s.fleet.Bus().Unsubscribe(ch)
 
 	w.Header().Set("Content-Type", "text/event-stream")
@@ -1337,8 +1527,15 @@ func (s *Server) handleBlocklistExport(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	// Cap the export so a multi-million-domain list cannot OOM the controller
+	// or the browser: ?limit= pages through it (default 100k, max 1M).
+	limit := boundedLimit(r, 100_000, 1_000_000)
+	domains := s.fleet.Blocklist().List()
+	if len(domains) > limit {
+		domains = domains[:limit]
+	}
 	w.Header().Set("Content-Type", "text/plain")
-	for _, d := range s.fleet.Blocklist().List() {
+	for _, d := range domains {
 		fmt.Fprintln(w, d)
 	}
 }
@@ -1358,13 +1555,17 @@ func (s *Server) handleBlocklistSources(w http.ResponseWriter, r *http.Request) 
 			ClearManual     bool     `json:"clear_manual"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
 		if req.AutoUpdateHours != nil {
 			s.fleet.SetAutoUpdateHours(*req.AutoUpdateHours)
 		}
 		urls := cleanURLs(req.URLs)
+		if len(urls) > maxBlocklistSources {
+			http.Error(w, fmt.Sprintf("too many blocklist sources (max %d)", maxBlocklistSources), http.StatusBadRequest)
+			return
+		}
 		if len(urls) == 0 {
 			// Saving an empty source list clears the blocklist.
 			s.fleet.SetBlocklistSources(r.Context(), nil)

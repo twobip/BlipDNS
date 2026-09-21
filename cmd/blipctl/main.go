@@ -30,12 +30,26 @@ import (
 )
 
 func main() {
-	token := flag.String("token", os.Getenv("BLIP_TOKEN"), "management API bearer token")
-	tokenFile := flag.String("token-file", "", "read management API bearer token from file (used only when --token/BLIP_TOKEN is empty)")
+	token := flag.String("token", os.Getenv("BLIP_TOKEN"), "management API bearer token (visible via ps; prefer --token-file)")
+	tokenFile := flag.String("token-file", "", "read management API bearer token from file (0600 recommended; used only when --token/BLIP_TOKEN is empty)")
+	outTokenFile := flag.String("out-token-file", "", "write the adopted admin token to this file (0600) instead of printing it to stdout")
 	flag.Usage = func() { usage() }
 	flag.Parse()
 
+	// Warn when the secret travels via argv/env: it is visible in `ps`,
+	// /proc/<pid>/cmdline (or environ), shell history, and audit logs.
+	if t := strings.TrimSpace(*token); t != "" {
+		if isFlagSet("token") {
+			fmt.Fprintln(os.Stderr, "warning: --token is visible via ps and shell history; prefer --token-file with mode 0600")
+		} else {
+			fmt.Fprintln(os.Stderr, "warning: BLIP_TOKEN is visible via /proc/<pid>/environ; prefer --token-file with mode 0600")
+		}
+	}
+
 	if *token == "" && *tokenFile != "" {
+		if fi, err := os.Stat(*tokenFile); err == nil && fi.Mode().Perm()&0o077 != 0 {
+			fmt.Fprintf(os.Stderr, "warning: token file %s is group/world-accessible (mode %04o); use chmod 600\n", *tokenFile, fi.Mode().Perm())
+		}
 		b, err := os.ReadFile(*tokenFile)
 		die(err)
 		*token = strings.TrimSpace(string(b))
@@ -105,7 +119,17 @@ func main() {
 			die(fmt.Errorf("adoption rejected: %s", resp.Message))
 		}
 		if resp.Token != "" {
-			fmt.Println("adopted. admin token:", resp.Token)
+			if strings.TrimSpace(*outTokenFile) != "" {
+				if err := os.WriteFile(*outTokenFile, []byte(resp.Token+"\n"), 0600); err != nil {
+					die(err)
+				}
+				// WriteFile does not chmod existing files; enforce 0600.
+				_ = os.Chmod(*outTokenFile, 0600)
+				fmt.Println("adopted. admin token written to", *outTokenFile, "(mode 0600; keep it private)")
+			} else {
+				fmt.Fprintln(os.Stderr, "WARNING: this admin token is printed once — store it in a 0600 file (see --out-token-file) and clear your terminal history")
+				fmt.Println("adopted. admin token:", resp.Token)
+			}
 		} else {
 			fmt.Println("already adopted (token was issued earlier; use the stored token)")
 		}
@@ -120,6 +144,16 @@ func main() {
 		usage()
 		os.Exit(2)
 	}
+}
+
+func isFlagSet(name string) bool {
+	found := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			found = true
+		}
+	})
+	return found
 }
 
 func loadPolicyFile(path string) *control.Policy {

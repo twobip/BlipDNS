@@ -4,6 +4,7 @@ package ha
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net"
 	"os"
 	"os/exec"
@@ -83,13 +84,16 @@ func (m *Manager) SetHAConfig(cfg control.HAConfig) error {
 		return fmt.Errorf("save high availability configuration: %w", err)
 	}
 	m.mu.Lock()
+	prevVIP := m.cfg.VirtualIP
 	m.cfg = cfg
 	m.lastError = ""
 	refresh := m.certRefresher
 	m.mu.Unlock()
 	// The VIP is a DoH identity this node now serves, so the certificate must
 	// cover it — including on the node that never holds it until failover.
-	if refresh != nil {
+	// Refresh only when the VIP identity actually changed: every regeneration
+	// changes the served fingerprint (pinning DoS) and rewrites key files.
+	if refresh != nil && cfg.VirtualIP != prevVIP {
 		refresh()
 	}
 	return nil
@@ -428,6 +432,11 @@ func (m *Manager) loadState() {
 	b, err := os.ReadFile(m.statePath)
 	if err != nil {
 		return
+	}
+	// ha.json holds the VRRP auth password: warn when it is group/world
+	// readable so a loose restore does not silently leak it.
+	if fi, serr := os.Stat(m.statePath); serr == nil && fi.Mode().Perm()&0o077 != 0 {
+		log.Printf("ha: warning: %s is group/world readable (mode %04o); run chmod 0600", m.statePath, fi.Mode().Perm())
 	}
 	var cfg control.HAConfig
 	if err := json.Unmarshal(b, &cfg); err != nil {

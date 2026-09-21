@@ -263,6 +263,7 @@ const (
 type APIKeyInfo struct {
 	ID      string    `json:"id"`
 	Label   string    `json:"label"`
+	Scope   string    `json:"scope"`
 	Created time.Time `json:"created_at"`
 	Expires time.Time `json:"expires_at"`
 }
@@ -270,13 +271,31 @@ type APIKeyInfo struct {
 type apiKey struct {
 	secret  string
 	label   string
+	scope   string // "read" or "admin" ("" = legacy admin, treated as admin)
 	created time.Time
 	expires time.Time
 }
 
+// API key scopes: "admin" can call any /api/* route; "read" is limited to
+// safe GET/HEAD reads (enforced in requireAuth).
+const (
+	APIKeyScopeAdmin = "admin"
+	APIKeyScopeRead  = "read"
+)
+
+// normalizeAPIKeyScope maps "" (unset/legacy) and unknown values to admin,
+// so keys minted before scopes existed keep full access.
+func normalizeAPIKeyScope(scope string) string {
+	if scope == APIKeyScopeRead {
+		return APIKeyScopeRead
+	}
+	return APIKeyScopeAdmin
+}
+
 // CreateAPIKey mints a bearer key for /api/* valid for ttl. ttl must be
-// positive and at most 30 days.
-func (a *Auth) CreateAPIKey(label string, ttl time.Duration) (id, secret string, expires time.Time, err error) {
+// positive and at most 30 days. scope is "read" (GET/HEAD only) or "admin"
+// (full access); "" defaults to admin for backward compatibility.
+func (a *Auth) CreateAPIKey(label string, ttl time.Duration, scope string) (id, secret string, expires time.Time, err error) {
 	label = strings.TrimSpace(label)
 	if label == "" || len(label) > maxAPIKeyLabelLen {
 		return "", "", time.Time{}, errors.New("label must be 1-64 characters")
@@ -284,6 +303,7 @@ func (a *Auth) CreateAPIKey(label string, ttl time.Duration) (id, secret string,
 	if ttl <= 0 || ttl > maxAPIKeyTTL {
 		return "", "", time.Time{}, errors.New("ttl must be positive and at most 30 days")
 	}
+	scope = normalizeAPIKeyScope(scope)
 	raw, err := newSessionID() // 32 random bytes, hex — reuse the session secret shape
 	if err != nil {
 		return "", "", time.Time{}, err
@@ -293,7 +313,7 @@ func (a *Auth) CreateAPIKey(label string, ttl time.Duration) (id, secret string,
 		return "", "", time.Time{}, err
 	}
 	now := time.Now()
-	k := apiKey{secret: "blip_" + raw, label: label, created: now, expires: now.Add(ttl)}
+	k := apiKey{secret: "blip_" + raw, label: label, scope: scope, created: now, expires: now.Add(ttl)}
 	id = hex.EncodeToString(idRaw)
 	a.mu.Lock()
 	a.keys[id] = k
@@ -307,7 +327,7 @@ func (a *Auth) ListAPIKeys() []APIKeyInfo {
 	defer a.mu.Unlock()
 	out := make([]APIKeyInfo, 0, len(a.keys))
 	for id, k := range a.keys {
-		out = append(out, APIKeyInfo{ID: id, Label: k.label, Created: k.created, Expires: k.expires})
+		out = append(out, APIKeyInfo{ID: id, Label: k.label, Scope: normalizeAPIKeyScope(k.scope), Created: k.created, Expires: k.expires})
 	}
 	return out
 }
@@ -326,18 +346,28 @@ func (a *Auth) RevokeAPIKey(id string) bool {
 // validAPIKey reports whether secret is a live key.
 // ponytail: O(n) scan, per-key map when keys number in the hundreds.
 func (a *Auth) validAPIKey(secret string) bool {
+	_, ok := a.apiKeyScope(secret)
+	return ok
+}
+
+// apiKeyScope reports the scope of a live key ("read" or "admin"). Expired or
+// unknown secrets return ok=false.
+func (a *Auth) apiKeyScope(secret string) (scope string, ok bool) {
 	if secret == "" {
-		return false
+		return "", false
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	now := time.Now()
 	for _, k := range a.keys {
 		if len(secret) == len(k.secret) && subtle.ConstantTimeCompare([]byte(secret), []byte(k.secret)) == 1 {
-			return now.Before(k.expires)
+			if now.Before(k.expires) {
+				return normalizeAPIKeyScope(k.scope), true
+			}
+			return "", false
 		}
 	}
-	return false
+	return "", false
 }
 
 // ---- brute-force guard (sliding window) ----

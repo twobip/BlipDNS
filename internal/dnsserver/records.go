@@ -1,6 +1,7 @@
 package dnsserver
 
 import (
+	"fmt"
 	"net"
 	"strings"
 	"sync"
@@ -9,12 +10,17 @@ import (
 	"github.com/twobip/BlipDNS/internal/control"
 )
 
-// defaultRecordTTL is the TTL used when a record entry omits one (0) or sets
-// an invalid negative one (which would otherwise wrap to ~136 years as uint32).
+// defaultRecordTTL is the TTL used when a record entry omits one (0). A
+// negative TTL is rejected by SetRecords; Lookup still falls back to the
+// default defensively for any out-of-range value that reaches it.
 const defaultRecordTTL = 60
 
 // maxRecordTTL caps how long a local record may live (one week, in seconds).
 const maxRecordTTL = 7 * 24 * 3600
+
+// maxLocalRecords caps the number of static records accepted in one push so a
+// misconfigured controller cannot exhaust blipd memory.
+const maxLocalRecords = 10000
 
 // RecordStore holds static DNS records (A, AAAA, CNAME) answered locally by
 // blipd instead of being forwarded upstream. PTR queries for an IP present in
@@ -42,27 +48,128 @@ func NewRecordStore() *RecordStore {
 // SetRecords replaces all local records atomically. Records whose Domain
 // begins with "*." (e.g. "*.lan.twobip.com") are stored as wildcards and answered
 // for any matching subdomain; the apex itself is not matched by a wildcard.
+//
+// Every record is validated: domain labels are ≤63 octets, total ≤253,
+// charset [a-z0-9-] (input is already lowercased, punycode included); Type is
+// one of A/AAAA/CNAME (case-insensitive); A values must parse with To4!=nil,
+// AAAA values must parse with To16!=nil and To4==nil (no v4-mapped), CNAME
+// targets must be valid hostnames; TTL is 0 (server default) or 1..maxRecordTTL
+// compared as int before any uint32 cast; at most 10000 records and every
+// Value ≤253 octets.
 func (rs *RecordStore) SetRecords(records []control.RecordEntry) error {
-	rs.mu.Lock()
-	defer rs.mu.Unlock()
-	rs.records = make(map[string][]control.RecordEntry, len(records))
-	rs.wildcards = make(map[string][]control.RecordEntry, len(records))
-	for _, r := range records {
-		key := strings.ToLower(strings.TrimSuffix(r.Domain, "."))
-		if key == "" {
-			continue
+	if len(records) > maxLocalRecords {
+		return fmt.Errorf("too many records: %d > %d", len(records), maxLocalRecords)
+	}
+	tmpExact := make(map[string][]control.RecordEntry, len(records))
+	tmpWild := make(map[string][]control.RecordEntry, len(records))
+	for i, r := range records {
+		if err := validateRecordEntry(r); err != nil {
+			return fmt.Errorf("record %d: %w", i, err)
 		}
+		key := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(r.Domain), "."))
 		if strings.HasPrefix(key, "*.") {
 			parent := key[2:]
-			if parent == "" {
-				continue
-			}
-			rs.wildcards[parent] = append(rs.wildcards[parent], r)
+			tmpWild[parent] = append(tmpWild[parent], r)
 			continue
 		}
-		rs.records[key] = append(rs.records[key], r)
+		tmpExact[key] = append(tmpExact[key], r)
+	}
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	rs.records = tmpExact
+	rs.wildcards = tmpWild
+	return nil
+}
+
+func validateRecordEntry(r control.RecordEntry) error {
+	domain := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(r.Domain), "."))
+	if domain == "" {
+		return fmt.Errorf("empty domain")
+	}
+	if len(domain) > 253 {
+		return fmt.Errorf("domain %q too long", r.Domain)
+	}
+	if strings.HasPrefix(domain, "*.") {
+		parent := domain[2:]
+		if parent == "" {
+			return fmt.Errorf("wildcard %q missing parent", r.Domain)
+		}
+		if !validHostname(parent) {
+			return fmt.Errorf("invalid wildcard parent %q", r.Domain)
+		}
+	} else {
+		if strings.Contains(domain, "*") {
+			return fmt.Errorf("wildcard only allowed as \"*.\" prefix: %q", r.Domain)
+		}
+		if !validHostname(domain) {
+			return fmt.Errorf("invalid domain %q", r.Domain)
+		}
+	}
+	t := strings.ToUpper(strings.TrimSpace(r.Type))
+	if t != "A" && t != "AAAA" && t != "CNAME" {
+		return fmt.Errorf("invalid type %q (want A/AAAA/CNAME)", r.Type)
+	}
+	if len(r.Value) == 0 || len(strings.TrimSuffix(r.Value, ".")) > 253 {
+		return fmt.Errorf("value too long or empty")
+	}
+	switch t {
+	case "A":
+		ip := net.ParseIP(strings.TrimSpace(r.Value))
+		if ip == nil || ip.To4() == nil {
+			return fmt.Errorf("invalid A value %q (want IPv4)", r.Value)
+		}
+	case "AAAA":
+		ip := net.ParseIP(strings.TrimSpace(r.Value))
+		if ip == nil || ip.To16() == nil || ip.To4() != nil {
+			return fmt.Errorf("invalid AAAA value %q (want IPv6, not IPv4)", r.Value)
+		}
+	case "CNAME":
+		target := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(r.Value), "."))
+		if target == "" || strings.Contains(target, "*") || !validHostname(target) {
+			return fmt.Errorf("invalid CNAME target %q", r.Value)
+		}
+	}
+	// Compare as int before any uint32 cast: a large int64 TTL truncated to
+	// uint32 would otherwise wrap to a small value and dodge the cap.
+	if r.TTL != 0 && (r.TTL < 1 || r.TTL > maxRecordTTL) {
+		return fmt.Errorf("invalid TTL %d (want 0 or 1..%d)", r.TTL, maxRecordTTL)
 	}
 	return nil
+}
+
+func validLabel(label string) bool {
+	if len(label) == 0 || len(label) > 63 {
+		return false
+	}
+	for i := 0; i < len(label); i++ {
+		c := label[i]
+		if c >= 'a' && c <= 'z' {
+			continue
+		}
+		if c >= '0' && c <= '9' {
+			continue
+		}
+		if c == '-' {
+			continue
+		}
+		return false
+	}
+	if label[0] == '-' || label[len(label)-1] == '-' {
+		return false
+	}
+	return true
+}
+
+func validHostname(host string) bool {
+	if host == "" || len(host) > 253 {
+		return false
+	}
+	for _, l := range strings.Split(host, ".") {
+		if !validLabel(l) {
+			return false
+		}
+	}
+	return true
 }
 
 // GetRecords returns all records as a flat slice (exact and wildcard).
@@ -135,16 +242,21 @@ func (rs *RecordStore) Lookup(req *dns.Msg) (*dns.Msg, bool) {
 		if rrType != q.Qtype {
 			continue
 		}
-		ttl := uint32(r.TTL)
+		// Compare TTL as int before any uint32 cast: casting first would
+		// truncate large values (e.g. 1<<32+5 -> 5) and dodge the cap, and a
+		// negative would wrap to ~136 years.
+		var ttl uint32
 		if r.TTL <= 0 {
 			ttl = defaultRecordTTL
-		} else if ttl > maxRecordTTL {
+		} else if r.TTL > maxRecordTTL {
 			ttl = maxRecordTTL
+		} else {
+			ttl = uint32(r.TTL)
 		}
 		switch rrType {
 		case dns.TypeA:
-			ip := net.ParseIP(r.Value)
-			if ip == nil {
+			ip := net.ParseIP(strings.TrimSpace(r.Value))
+			if ip == nil || ip.To4() == nil {
 				continue
 			}
 			resp.Answer = append(resp.Answer, &dns.A{
@@ -152,13 +264,17 @@ func (rs *RecordStore) Lookup(req *dns.Msg) (*dns.Msg, bool) {
 				A:   ip.To4(),
 			})
 		case dns.TypeAAAA:
-			ip := net.ParseIP(r.Value)
-			if ip == nil {
+			ip := net.ParseIP(strings.TrimSpace(r.Value))
+			if ip == nil || ip.To4() != nil {
+				continue
+			}
+			v6 := ip.To16()
+			if v6 == nil {
 				continue
 			}
 			resp.Answer = append(resp.Answer, &dns.AAAA{
 				Hdr:  dns.RR_Header{Name: q.Name, Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: ttl},
-				AAAA: ip.To16(),
+				AAAA: v6,
 			})
 		case dns.TypeCNAME:
 			resp.Answer = append(resp.Answer, &dns.CNAME{
@@ -210,9 +326,10 @@ func (rs *RecordStore) lookupPTR(req *dns.Msg, qname string) (*dns.Msg, bool) {
 			}
 			ttl := uint32(defaultRecordTTL)
 			if r.TTL > 0 {
-				ttl = uint32(r.TTL)
-				if ttl > maxRecordTTL {
+				if r.TTL > maxRecordTTL {
 					ttl = maxRecordTTL
+				} else {
+					ttl = uint32(r.TTL)
 				}
 			}
 			resp.Answer = append(resp.Answer, &dns.PTR{

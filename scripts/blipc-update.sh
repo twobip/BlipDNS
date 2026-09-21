@@ -13,8 +13,10 @@ readonly RAW="https://raw.githubusercontent.com/twobip/BlipDNS"
 CHANNEL="${1:-stable}"
 case "$CHANNEL" in
   stable|master)
-    VER="$(curl -fsSL "$RAW/master/VERSION")" \
+    VER="$(curl -fsSL --proto '=https' --tlsv1.2 "$RAW/master/VERSION")" \
       || { echo "error: could not read stable VERSION from GitHub" >&2; exit 1; }
+    # H2: validate the VERSION payload before turning it into a download URL.
+    [[ "$VER" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "error: invalid VERSION from GitHub: $VER" >&2; exit 1; }
     TAG="v$VER" ;;
   dev)
     TAG="dev" ;;
@@ -24,14 +26,62 @@ case "$CHANNEL" in
     echo "channel must be stable or dev" >&2; exit 1 ;;
 esac
 
+# H2: validate the resolved tag so a compromised/malformed VERSION cannot
+# turn into an arbitrary release URL.
+if [[ "$TAG" != "dev" ]]; then
+  [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "error: invalid tag: $TAG" >&2; exit 1; }
+fi
+
 WORK="/var/lib/blipc/update"
 mkdir -p "$WORK"
+
+# M14: best-effort downgrade guard. blipc has no --version flag, so probe
+# binary strings, then the last recorded stamp. Unknown current version =>
+# warn and continue. Set ALLOW_DOWNGRADE=1 to bypass. "dev" is exempt.
+semver_cmp() {
+  local a="${1#v}" b="${2#v}"
+  a="${a%%+*}"; b="${b%%+*}"
+  local IFS=.
+  local av bv i x y
+  # shellcheck disable=SC2206
+  av=($a); bv=($b)
+  for i in 0 1 2; do
+    x="${av[$i]:-0}"; y="${bv[$i]:-0}"
+    x="${x%%[^0-9]*}"; y="${y%%[^0-9]*}"
+    x="${x:-0}"; y="${y:-0}"
+    if (( 10#$x > 10#$y )); then echo 1; return; fi
+    if (( 10#$x < 10#$y )); then echo 2; return; fi
+  done
+  echo 0
+}
+current_version_best_effort() {
+  local v=""
+  if [[ -x /usr/local/bin/blipc ]]; then
+    v="$(strings /usr/local/bin/blipc 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+(\+[0-9a-f]{7,})?' | head -n1 || true)"
+    v="${v%%+*}"
+  fi
+  if [[ -z "$v" && -f "$WORK/.installed-version" ]]; then
+    v="$(tr -d '[:space:]' < "$WORK/.installed-version" 2>/dev/null || true)"
+  fi
+  printf '%s' "$v"
+}
+if [[ "$TAG" != "dev" && "${ALLOW_DOWNGRADE:-0}" != "1" ]]; then
+  CUR="$(current_version_best_effort || true)"
+  if [[ -n "$CUR" ]]; then
+    TARGET="${TAG#v}"
+    if [[ "$(semver_cmp "$TARGET" "$CUR")" == "2" ]]; then
+      echo "error: refusing downgrade $CUR -> $TARGET (set ALLOW_DOWNGRADE=1 to bypass)" >&2; exit 1
+    fi
+  else
+    echo "warning: installed version unknown — downgrade check skipped (no --version flag; probed strings/stamp)" >&2
+  fi
+fi
 
 echo "phase: downloading ($TAG)"
 DL="$(mktemp -d "$WORK/dl.XXXXXX")"
 trap 'rm -rf "$DL"' EXIT
-curl -fL "$BASE/$TAG/blipc-linux-amd64" -o "$DL/blipc-linux-amd64"
-curl -fsSL "$BASE/$TAG/SHA256SUMS" -o "$DL/SHA256SUMS"
+curl -fL --proto '=https' --tlsv1.2 "$BASE/$TAG/blipc-linux-amd64" -o "$DL/blipc-linux-amd64"
+curl -fsSL --proto '=https' --tlsv1.2 "$BASE/$TAG/SHA256SUMS" -o "$DL/SHA256SUMS"
 
 echo "phase: verifying"
 expected="$(awk '$2=="blipc-linux-amd64" {print $1; exit}' "$DL/SHA256SUMS")"
@@ -42,5 +92,20 @@ actual="$(sha256sum "$DL/blipc-linux-amd64" | awk '{print $1}')"
 install -m 0755 "$DL/blipc-linux-amd64" "$WORK/blipc.new"
 
 # Hand the verified (unprivileged) binary to the root install helper.
-sudo -n /usr/local/sbin/blipc-install "$WORK/blipc.new"
+# Pass the verified checksum so the root side can re-verify (H2). Sudo
+# without SETENV rejects VAR=val assignments, so retry bare only when sudo
+# itself complains about the environment (the helper warns and still
+# enforces path/ELF checks). Genuine install failures propagate as-is.
+install_out="$(sudo -n EXPECTED_SHA256="$expected" /usr/local/sbin/blipc-install "$WORK/blipc.new" 2>&1)" && install_rc=0 || install_rc=$?
+printf '%s\n' "$install_out"
+if [[ "$install_rc" -ne 0 && "$install_out" == *"environment"* ]]; then
+  echo "warning: sudo rejected the checksum env, retrying without it" >&2
+  sudo -n /usr/local/sbin/blipc-install "$WORK/blipc.new"
+elif [[ "$install_rc" -ne 0 ]]; then
+  exit "$install_rc"
+fi
+# Record the installed version stamp for future downgrade checks (M14).
+if [[ "$TAG" != "dev" ]]; then
+  printf '%s\n' "${TAG#v}" > "$WORK/.installed-version" 2>/dev/null || true
+fi
 echo "phase: done"

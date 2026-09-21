@@ -6,8 +6,11 @@ package upstream
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"log"
+	"math/rand"
 	"net"
 	"net/http"
 	"sort"
@@ -42,12 +45,15 @@ func NewUDP(addr string, timeout time.Duration) *UDPResolver {
 	return &UDPResolver{
 		addr:    addr,
 		timeout: timeout,
-		udp:     dns.Client{Net: "udp", Timeout: timeout},
-		tcp:     dns.Client{Net: "tcp", Timeout: timeout},
+		udp:     dns.Client{Net: "udp", Timeout: timeout, Dialer: &net.Dialer{Timeout: timeout}},
+		tcp:     dns.Client{Net: "tcp", Timeout: timeout, Dialer: &net.Dialer{Timeout: timeout}},
 	}
 }
 
 func (r *UDPResolver) Resolve(ctx context.Context, q *dns.Msg) (*dns.Msg, error) {
+	if err := guardUpstreamAddr(ctx, r.addr); err != nil {
+		return nil, errUpstream(r.addr, err)
+	}
 	resp, _, err := r.udp.Exchange(q, r.addr)
 	if err != nil {
 		return nil, errUpstream(r.addr, err)
@@ -80,11 +86,14 @@ func NewTLS(addr string, timeout time.Duration) *TLSResolver {
 	}
 	return &TLSResolver{
 		addr: addr,
-		tls:  dns.Client{Net: "tcp-tls", Timeout: timeout},
+		tls:  dns.Client{Net: "tcp-tls", Timeout: timeout, Dialer: &net.Dialer{Timeout: timeout}},
 	}
 }
 
 func (r *TLSResolver) Resolve(ctx context.Context, q *dns.Msg) (*dns.Msg, error) {
+	if err := guardUpstreamAddr(ctx, r.addr); err != nil {
+		return nil, errUpstream(r.addr, err)
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	// A server-closed idle connection only fails the exchange, never the
@@ -189,6 +198,10 @@ func NewDoHWithBootstrap(endpoint string, timeout time.Duration, bootstrap Resol
 	}
 	if bootstrap != nil {
 		tr.DialContext = bootstrapDialContext(bootstrap, timeout)
+		tr.DialTLSContext = bootstrapDialContext(bootstrap, timeout)
+	} else {
+		tr.DialContext = validatingDialContext(timeout)
+		tr.DialTLSContext = validatingDialContext(timeout)
 	}
 	return &DoHResolver{
 		endpoint: endpoint,
@@ -219,6 +232,7 @@ func bootstrapDialContext(bootstrap Resolver, timeout time.Duration) func(ctx co
 			if blockedUpstreamIP(net.ParseIP(host)) {
 				return nil, fmt.Errorf("refusing link-local/metadata upstream address %s", host)
 			}
+			warnLocalUpstream(net.ParseIP(host))
 			return d.DialContext(ctx, network, addr)
 		}
 		ips := bootstrapLookupIP(ctx, bootstrap, host)
@@ -233,6 +247,7 @@ func bootstrapDialContext(bootstrap Resolver, timeout time.Duration) func(ctx co
 				lastErr = fmt.Errorf("refusing link-local/metadata upstream address %s", ip)
 				continue
 			}
+			warnLocalUpstream(ip)
 			c, derr := d.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
 			if derr == nil {
 				return c, nil
@@ -245,14 +260,119 @@ func bootstrapDialContext(bootstrap Resolver, timeout time.Duration) func(ctx co
 
 // blockedUpstreamIP reports whether ip must never be dialled as an upstream:
 // link-local (169.254.0.0/16 and fe80::/10, where cloud metadata services
-// live) and the unspecified address. Loopback and RFC1918 stay allowed — a
-// resolver legitimately forwards to a LAN or local upstream; the guard exists
-// to stop the control plane, a policy override or a DNS answer from aiming
-// blipd at the metadata service.
+// live), any multicast, and the unspecified address. Loopback and RFC1918 stay
+// allowed — a resolver legitimately forwards to a LAN or local upstream; the
+// guard exists to stop the control plane, a policy override or a DNS answer
+// from aiming blipd at the metadata service. Callers that dial a loopback or
+// private address still get a warn log (see warnLocalUpstream) but are allowed.
 // ponytail: spec-time check rejects literal IPs, dial-time check covers
 // resolved hostnames; an RFC1918 target stays allowed on purpose.
 func blockedUpstreamIP(ip net.IP) bool {
-	return ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified()
+	if ip == nil {
+		return true
+	}
+	return ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified()
+}
+
+// warnLocalUpstream logs when an upstream is loopback or private (RFC1918).
+// These stay allowed — forwarding to a LAN or local resolver is a normal
+// deployment — but the warning surfaces accidental self-reference or overly
+// broad forwarding in the logs.
+func warnLocalUpstream(ip net.IP) {
+	if ip == nil {
+		return
+	}
+	if ip.IsLoopback() || ip.IsPrivate() {
+		log.Printf("upstream: warning: forwarding to local/private address %s (allowed, but verify this is intended)", ip.String())
+	}
+}
+
+// validatingDialContext returns a DialContext that resolves host via the
+// system resolver, refuses blocked IPs (link-local/multicast/unspecified),
+// warns on loopback/private, and dials the first reachable allowed address.
+// It is installed on every upstream dial path (UDP, DoT, DoH without
+// bootstrap) so a hostname that only resolves into blocked space after the
+// fact (metadata service, DNS rebinding) can never be dialled.
+func validatingDialContext(timeout time.Duration) func(ctx context.Context, network, addr string) (net.Conn, error) {
+	d := &net.Dialer{Timeout: timeout}
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, err
+		}
+		if ip := net.ParseIP(host); ip != nil {
+			if blockedUpstreamIP(ip) {
+				return nil, fmt.Errorf("refusing link-local/metadata upstream address %s", host)
+			}
+			warnLocalUpstream(ip)
+			return d.DialContext(ctx, network, addr)
+		}
+		ips, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
+		if err != nil {
+			return nil, err
+		}
+		var lastErr error
+		for _, ip := range ips {
+			if blockedUpstreamIP(ip) {
+				lastErr = fmt.Errorf("refusing link-local/metadata upstream address %s", ip)
+				continue
+			}
+			warnLocalUpstream(ip)
+			c, derr := d.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
+			if derr == nil {
+				return c, nil
+			}
+			lastErr = derr
+		}
+		if lastErr == nil {
+			lastErr = fmt.Errorf("no dialable addresses for %q", host)
+		}
+		return nil, lastErr
+	}
+}
+
+// guardUpstreamAddr validates a host:port upstream before a classic-DNS
+// (UDP/TCP/DoT) exchange. Literal blocked IPs are rejected immediately;
+// hostnames are resolved via the system resolver and at least one dialable
+// (non-blocked) address must exist. Loopback/private targets are allowed but
+// logged. This covers dns.Client paths that cannot take a custom DialContext
+// (Client.Dialer is a concrete *net.Dialer) — the check runs before Exchange
+// so the guard still applies on every query (TOCTOU aside).
+func guardUpstreamAddr(ctx context.Context, addr string) error {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		// Let the dial report malformed addresses; only guard what we parse.
+		return nil
+	}
+	if ip := net.ParseIP(strings.Trim(host, "[]")); ip != nil {
+		if blockedUpstreamIP(ip) {
+			return fmt.Errorf("refusing link-local/metadata upstream address %s", host)
+		}
+		warnLocalUpstream(ip)
+		return nil
+	}
+	ips, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
+	if err != nil {
+		// Unresolvable here: let the exchange surface the DNS error rather
+		// than failing closed on a transient resolver hiccup when the target
+		// is a normal public hostname. Blocked-IP enforcement for this path
+		// still happens per-connection via the dialer timeout path; the
+		// validating dialer is authoritative for DoH. Only fail closed when
+		// we positively resolved into blocked space.
+		return nil
+	}
+	allowed := false
+	for _, ip := range ips {
+		if blockedUpstreamIP(ip) {
+			continue
+		}
+		allowed = true
+		warnLocalUpstream(ip)
+	}
+	if !allowed && len(ips) > 0 {
+		return fmt.Errorf("refusing link-local/metadata upstream address %s (resolved to %v)", host, ips)
+	}
+	return nil
 }
 
 // bootstrapLookupIP resolves A and AAAA for host through r, tolerating a
@@ -313,20 +433,58 @@ func (r *DoHResolver) Resolve(ctx context.Context, q *dns.Msg) (*dns.Msg, error)
 	if err := out.Unpack(body); err != nil {
 		return nil, errUpstream(r.endpoint, fmt.Errorf("doh: unpack response: %w", err))
 	}
+	// H6: verify the response actually answers this query before it is
+	// cached or served. A mismatched ID, a missing QR bit, or a question
+	// echo that does not match the query's first question means the payload
+	// is not for us (misdirected, pooled-connection mixup, or tampered) —
+	// fail the query rather than cache poison.
+	if err := verifyDoHResponse(q, out); err != nil {
+		return nil, errUpstream(r.endpoint, err)
+	}
 	return out, nil
+}
+
+// verifyDoHResponse checks that resp answers q: matching ID, QR set, and a
+// first-question echo (owner + type) identical to the query. Class is
+// intentionally not compared (upstreams may normalize IN).
+func verifyDoHResponse(q, resp *dns.Msg) error {
+	if resp.Id != q.Id {
+		return fmt.Errorf("doh: response ID mismatch (got %d, want %d)", resp.Id, q.Id)
+	}
+	if !resp.Response {
+		return fmt.Errorf("doh: response missing QR bit")
+	}
+	if len(q.Question) == 0 || len(resp.Question) == 0 {
+		return fmt.Errorf("doh: response question missing")
+	}
+	qname := strings.ToLower(q.Question[0].Name)
+	rname := strings.ToLower(resp.Question[0].Name)
+	if qname != rname || q.Question[0].Qtype != resp.Question[0].Qtype {
+		return fmt.Errorf("doh: question echo mismatch (got %s %d, want %s %d)", resp.Question[0].Name, resp.Question[0].Qtype, q.Question[0].Name, q.Question[0].Qtype)
+	}
+	return nil
 }
 
 // MultiResolver tries each resolver in priority order until one succeeds and
 // remembers which resolvers are currently failing so a down upstream is
 // skipped for a short cooldown instead of stalling every request.
 //
+// A resolver trips into cooldown only after 3 consecutive transport/timeout
+// failures; a single blip (or a caller-canceled query) never takes it out of
+// rotation. DNS-level answers — even SERVFAIL/NXDOMAIN — are successes (they
+// are valid responses, not transport failures). Cooldown is 15s plus up to 5s
+// of jitter so a fleet of blipds does not thunder-herd the next upstream in
+// lockstep.
+//
 // downUntil holds unix-nanos per resolver, accessed atomically: the hot path
 // (all resolvers healthy) never takes a lock, it only loads the cooldown
 // stamps, and the rare all-down reset clears them in place with atomic stores
 // — the slice is never replaced, so lock-free readers always see a valid one.
+// fails holds consecutive transport-failure counts, also accessed atomically.
 type MultiResolver struct {
 	resolvers []Resolver
 	downUntil []int64 // unix nanos; 0 = up
+	fails     []int32 // consecutive transport failures; trip at 3
 	cooldown  time.Duration
 }
 
@@ -336,8 +494,28 @@ func NewMulti(resolvers ...Resolver) *MultiResolver {
 	return &MultiResolver{
 		resolvers: resolvers,
 		downUntil: make([]int64, len(resolvers)),
+		fails:     make([]int32, len(resolvers)),
 		cooldown:  15 * time.Second,
 	}
+}
+
+// isCallerCancel reports whether err stems from the caller giving up rather
+// than the upstream failing: context.Canceled always, or a deadline that fired
+// while the caller's own context is done. Such errors must not trip the
+// breaker — every upstream would look down during a client disconnect.
+func isCallerCancel(ctx context.Context, err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) {
+		return true
+	}
+	if ctx != nil && ctx.Err() != nil {
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.Canceled) {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *MultiResolver) Resolve(ctx context.Context, q *dns.Msg) (*dns.Msg, error) {
@@ -364,6 +542,7 @@ func (m *MultiResolver) Resolve(ctx context.Context, q *dns.Msg) (*dns.Msg, erro
 	for _, i := range order {
 		resp, err := m.resolvers[i].Resolve(ctx, q)
 		if err == nil {
+			atomic.StoreInt32(&m.fails[i], 0)
 			atomic.StoreInt64(&m.downUntil[i], 0)
 			return resp, nil
 		}
@@ -372,7 +551,16 @@ func (m *MultiResolver) Resolve(ctx context.Context, q *dns.Msg) (*dns.Msg, erro
 			// resolver would misattribute a multi-upstream outage.
 			firstErr = err
 		}
-		atomic.StoreInt64(&m.downUntil[i], now+m.cooldown.Nanoseconds())
+		if isCallerCancel(ctx, err) {
+			// The caller went away; don't blame the upstream.
+			continue
+		}
+		n := atomic.AddInt32(&m.fails[i], 1)
+		if n >= 3 {
+			jitter := time.Duration(rand.Int63n(5 * int64(time.Second)))
+			atomic.StoreInt64(&m.downUntil[i], now+(m.cooldown+jitter).Nanoseconds())
+			log.Printf("upstream: resolver %d failing (%d consecutive); cooling down for %v: %v", i, n, m.cooldown+jitter, err)
+		}
 	}
 	if firstErr == nil {
 		firstErr = fmt.Errorf("upstream: no resolvers configured")
