@@ -2404,3 +2404,20 @@ func TestWarnOrphanPolicyUpstreams(t *testing.T) {
 		t.Fatalf("startup scan flagged %d policies, want 3: %v", len(all), all)
 	}
 }
+
+func TestBlocklistAddAcceptsSpaceSeparated(t *testing.T) {
+	fleet := NewFleet("")
+	srv := &Server{fleet: fleet}
+	body := bytes.NewReader([]byte(`{"domain":"a.example.com b.example.com\nc.example.net  not a domain"}`))
+	req := httptest.NewRequest(http.MethodPost, "/api/blocklist", body)
+	rec := httptest.NewRecorder()
+	srv.handleBlocklist(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	got := fleet.ManualDomains()
+	want := []string{"a.example.com", "b.example.com", "c.example.net"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("ManualDomains() = %v, want %v", got, want)
+	}
+}

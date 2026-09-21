@@ -1308,10 +1308,15 @@ func (s *Server) handleBlocklist(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if r.Method == http.MethodPost {
-			if req.Allow {
-				s.fleet.AddAllowedDomain(req.Domain)
-			} else {
-				s.fleet.AddManualDomain(req.Domain)
+			// ponytail: strings.Fields so pasting "a.com b.com" (or
+			// multi-line) adds each; invalid entries normalize to "" and
+			// are skipped inside Add*.
+			for _, d := range strings.Fields(req.Domain) {
+				if req.Allow {
+					s.fleet.AddAllowedDomain(d)
+				} else {
+					s.fleet.AddManualDomain(d)
+				}
 			}
 			writeJSON(w, map[string]string{"ok": "added"})
 		} else {

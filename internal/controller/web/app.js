@@ -2076,7 +2076,7 @@ document.querySelectorAll("#bl-mode-seg button").forEach((b) => b.onclick = () =
   document.querySelectorAll("#bl-mode-seg button").forEach((x) => x.classList.remove("active"));
   b.classList.add("active");
   blMode = b.dataset.mode;
-  $("bl-add-input").placeholder = blMode === "allow" ? "whitelist a domain…" : "domain.example.com";
+  $("bl-add-input").placeholder = blMode === "allow" ? "whitelist domains… (space-separated)" : "domain.example.com (space-separated for several)";
 });
 $("bl-add").onclick = async () => {
   const d = ($("bl-add-input").value || "").trim();
