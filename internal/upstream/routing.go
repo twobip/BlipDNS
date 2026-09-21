@@ -40,6 +40,7 @@ type UpstreamRoute struct {
 type ResolverPool struct {
 	named     map[string]Resolver // server name -> resolver (all servers, incl. priority 0)
 	auto      Resolver            // Priority>0 servers as an ordered failover group, or the legacy upstream
+	autoLabel string              // precomputed LabelFor(auto) so the hot path avoids Join per query
 	rules     []routeRule         // conditional-forwarding routes
 	servers   []UpstreamServer
 	routes    []UpstreamRoute
@@ -88,15 +89,22 @@ func NewPoolWithBootstrap(servers []UpstreamServer, routes []UpstreamRoute, lega
 		p.named[sv.Name] = r
 	}
 	// Automatic rotation: Priority>0 servers, lowest number first.
+	// Pre-resolve priorities once so the sort comparator is O(1), not O(n).
+	prio := make(map[string]int, len(p.servers))
 	var order []string
 	for _, sv := range p.servers {
+		name := sv.Name
+		if name == "" {
+			name = "server#" + sv.Address
+		}
+		prio[name] = sv.Priority
 		if sv.Priority > 0 {
-			order = append(order, sv.Name)
+			order = append(order, name)
 		}
 	}
 	sort.SliceStable(order, func(i, j int) bool {
-		pi := serverPriority(p.servers, order[i])
-		pj := serverPriority(p.servers, order[j])
+		pi := prio[order[i]]
+		pj := prio[order[j]]
 		if pi == pj {
 			return order[i] < order[j]
 		}
@@ -130,14 +138,39 @@ func NewPoolWithBootstrap(servers []UpstreamServer, routes []UpstreamRoute, lega
 		}
 		p.rules = append(p.rules, rule)
 	}
+	p.autoLabel = buildAutoLabel(p.servers, p.auto)
 	return p, nil
+}
+
+func buildAutoLabel(servers []UpstreamServer, auto Resolver) string {
+	if auto == nil {
+		return ""
+	}
+	var names []string
+	for _, sv := range servers {
+		if sv.Priority > 0 {
+			name := sv.Name
+			if name == "" {
+				name = "server#" + sv.Address
+			}
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return "auto"
+	}
+	return "auto (" + strings.Join(names, ", ") + ")"
 }
 
 // NewPoolWithAuto builds a resolver pool whose automatic resolver is exactly r,
 // with no named servers or routes. It exists so tests can inject a stub
 // resolver; production code builds pools from server specs via NewPool.
 func NewPoolWithAuto(r Resolver) *ResolverPool {
-	return &ResolverPool{auto: r}
+	label := ""
+	if r != nil {
+		label = "auto"
+	}
+	return &ResolverPool{auto: r, autoLabel: label}
 }
 
 func serverPriority(servers []UpstreamServer, name string) int {
@@ -268,6 +301,9 @@ func (p *ResolverPool) Bootstrap() []UpstreamServer {
 // Match returns the resolver for the best-matching route (longest qname suffix,
 // restricted to a matching client CIDR), or nil if no route matches.
 func (p *ResolverPool) Match(qname string, client net.IP) Resolver {
+	if len(p.rules) == 0 {
+		return nil
+	}
 	q := fqdn(qname)
 	var best *routeRule
 	for i := range p.rules {
@@ -293,22 +329,14 @@ func (p *ResolverPool) Match(qname string, client net.IP) Resolver {
 // LabelFor returns a short human-readable label describing r when it is one
 // of the pool's named servers or the automatic rotation, and "" otherwise
 // (e.g. a per-policy override built outside the pool). The label is used to
-// attribute a query to the upstream that answered it.
+// attribute a query to the upstream that answered it. The auto label is
+// precomputed at pool build; this stays allocation-free on the hot path.
 func (p *ResolverPool) LabelFor(r Resolver) string {
 	if r == nil {
 		return ""
 	}
 	if r == p.auto {
-		var names []string
-		for _, sv := range p.servers {
-			if sv.Priority > 0 {
-				names = append(names, sv.Name)
-			}
-		}
-		if len(names) == 0 {
-			return "auto"
-		}
-		return "auto (" + strings.Join(names, ", ") + ")"
+		return p.autoLabel
 	}
 	for _, sv := range p.servers {
 		if sv.Name != "" && p.named[sv.Name] == r {

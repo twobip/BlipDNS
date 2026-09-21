@@ -63,13 +63,20 @@ func (s *Server) Upstream() ([]upstream.UpstreamServer, []upstream.UpstreamRoute
 // then the automatic rotation. The per-policy upstream override is applied by
 // the caller when routeResolved is false.
 func (s *Server) upstreamFor(name string, clientIP net.IP) (r upstream.Resolver, routeResolved bool) {
-	p := s.safePool()
+	return s.upstreamForWithPool(s.safePool(), name, clientIP)
+}
+
+// upstreamForWithPool is upstreamFor against an already-snapshotted pool so
+// the hot path takes one RLock per query instead of three (Match + Auto +
+// LabelFor each locked separately).
+func (s *Server) upstreamForWithPool(p *upstream.ResolverPool, name string, clientIP net.IP) (r upstream.Resolver, routeResolved bool) {
 	if p != nil {
 		if m := p.Match(name, clientIP); m != nil {
 			return m, true
 		}
+		return p.Auto(), false
 	}
-	return s.upstreamAuto(), false
+	return nil, false
 }
 
 // overrideResolver returns the memoized resolver for a per-policy upstream
@@ -91,10 +98,15 @@ func (s *Server) overrideResolver(spec string) (upstream.Resolver, error) {
 // took effect is labeled with its spec; otherwise the pool names the resolver
 // (named server or automatic rotation).
 func (s *Server) upstreamLabel(resolver upstream.Resolver, matchedRoute bool, override string) string {
+	return upstreamLabelWithPool(s.safePool(), resolver, matchedRoute, override)
+}
+
+// upstreamLabelWithPool is upstreamLabel against an already-snapshotted pool.
+func upstreamLabelWithPool(p *upstream.ResolverPool, resolver upstream.Resolver, matchedRoute bool, override string) string {
 	if !matchedRoute && override != "" {
 		return "override: " + override
 	}
-	if p := s.safePool(); p != nil {
+	if p != nil {
 		if l := p.LabelFor(resolver); l != "" {
 			return l
 		}

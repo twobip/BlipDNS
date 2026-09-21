@@ -52,11 +52,7 @@ type matcher struct {
 }
 
 func buildMatcher(domains []string) *matcher {
-	m := &matcher{
-		exact:   make(map[string]struct{}),
-		suffix:  make(map[string]struct{}),
-		subOnly: make(map[string]struct{}),
-	}
+	m := &matcher{}
 	for _, d := range domains {
 		d = strings.ToLower(strings.TrimSpace(d))
 		if d == "" {
@@ -65,6 +61,9 @@ func buildMatcher(domains []string) *matcher {
 		if strings.HasPrefix(d, "*.") {
 			root := d[2:]
 			if root != "" {
+				if m.subOnly == nil {
+					m.subOnly = make(map[string]struct{}, len(domains))
+				}
 				m.subOnly[root] = struct{}{}
 			}
 			continue
@@ -73,23 +72,42 @@ func buildMatcher(domains []string) *matcher {
 		if d == "" {
 			continue
 		}
+		if m.exact == nil {
+			m.exact = make(map[string]struct{}, len(domains))
+			m.suffix = make(map[string]struct{}, len(domains))
+		}
 		m.exact[d] = struct{}{}
 		m.suffix[d] = struct{}{}
 	}
 	return m
 }
 
+// NormalizeName lowercases a DNS name and strips the root dot (wire format
+// always carries it). Matchers store normalized keys, so every lookup
+// normalizes once up front instead of per match walk. ASCII fast path avoids
+// allocating when the name is already lowercase (the common case) — DNS names
+// are ASCII, so strings.ToLower's Unicode handling is unnecessary here.
+func NormalizeName(name string) string {
+	name = strings.TrimSuffix(name, ".")
+	for i := 0; i < len(name); i++ {
+		if c := name[i]; c >= 'A' && c <= 'Z' {
+			return strings.ToLower(name)
+		}
+	}
+	return name
+}
+
 // normalizeName lowercases a DNS name and strips the root dot (wire format
 // always carries it). Matchers store normalized keys, so every lookup
 // normalizes once up front instead of per match walk.
 func normalizeName(name string) string {
-	return strings.TrimSuffix(strings.ToLower(name), ".")
+	return NormalizeName(name)
 }
 
 // match reports whether name is covered by this matcher.
 // name must already be normalized (see normalizeName).
 func (m *matcher) match(name string) bool {
-	if name == "" {
+	if m == nil || name == "" {
 		return false
 	}
 	if _, ok := m.exact[name]; ok {
@@ -98,16 +116,23 @@ func (m *matcher) match(name string) bool {
 	// Walk the label boundaries without allocating: instead of Split+Join,
 	// index each dot and probe the remainder as the candidate root in both
 	// sets (plain suffixes and "subdomains only" wildcards share the walk).
-	if len(m.suffix) > 0 || len(m.subOnly) > 0 {
+	// Each map is probed only when non-empty so an empty table costs no hash.
+	if len(m.suffix) > 0 {
 		for i := 0; i < len(name); i++ {
 			if name[i] != '.' {
 				continue
 			}
-			rest := name[i+1:]
-			if _, ok := m.suffix[rest]; ok {
+			if _, ok := m.suffix[name[i+1:]]; ok {
 				return true
 			}
-			if _, ok := m.subOnly[rest]; ok {
+		}
+	}
+	if len(m.subOnly) > 0 {
+		for i := 0; i < len(name); i++ {
+			if name[i] != '.' {
+				continue
+			}
+			if _, ok := m.subOnly[name[i+1:]]; ok {
 				return true
 			}
 		}
@@ -132,6 +157,7 @@ func compile(p *Policy) *compiledPolicy {
 
 type netEntry struct {
 	net    *net.IPNet
+	ones   int // prefix length, precomputed at rebuild for longest-match sort
 	policy *compiledPolicy
 }
 
@@ -196,8 +222,14 @@ func (s *Store) RemovePolicy(id string) {
 }
 
 func (s *Store) rebuildLocked() {
-	nets := make([]netEntry, 0)
-	byClient := make(map[string]*compiledPolicy)
+	totalNets := 0
+	totalClients := 0
+	for _, cp := range s.policies {
+		totalNets += len(cp.nets)
+		totalClients += len(cp.Clients)
+	}
+	nets := make([]netEntry, 0, totalNets)
+	byClient := make(map[string]*compiledPolicy, totalClients)
 	// Iterate in a stable order so a client ID claimed by several policies
 	// resolves deterministically (the last policy in sorted ID order wins).
 	ids := make([]string, 0, len(s.policies))
@@ -208,7 +240,8 @@ func (s *Store) rebuildLocked() {
 	for _, id := range ids {
 		cp := s.policies[id]
 		for _, ipnet := range cp.nets {
-			nets = append(nets, netEntry{net: ipnet, policy: cp})
+			ones, _ := ipnet.Mask.Size()
+			nets = append(nets, netEntry{net: ipnet, ones: ones, policy: cp})
 		}
 		for _, c := range cp.Clients {
 			// Accept the documented "/dns-query/<id>" form as well as the bare
@@ -220,6 +253,9 @@ func (s *Store) rebuildLocked() {
 			}
 		}
 	}
+	// Longest-prefix first so lookup can early-exit on first match instead of
+	// scanning every CIDR and recomputing Mask.Size per hit.
+	sort.Slice(nets, func(i, j int) bool { return nets[i].ones > nets[j].ones })
 	s.nets = nets
 	s.byClient = byClient
 }
@@ -256,6 +292,7 @@ func (s *Store) All() (def *Policy, list []*Policy) {
 		d := s.defaults.Policy
 		def = &d
 	}
+	list = make([]*Policy, 0, len(s.policies))
 	for _, cp := range s.policies {
 		p := cp.Policy
 		list = append(list, &p)
@@ -264,10 +301,20 @@ func (s *Store) All() (def *Policy, list []*Policy) {
 }
 
 // lookup returns the policy for a DoH client ID if one matches, otherwise the
-// most specific policy for ip, else the default.
+// most specific policy for ip, else the default. Nets are sorted longest-prefix
+// first so the first match wins (early exit, no Mask.Size recompute).
 func (s *Store) lookup(ip net.IP, clientID string) *compiledPolicy {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	return s.lookupLocked(ip, clientID)
+}
+
+func (s *Store) lookupLocked(ip net.IP, clientID string) *compiledPolicy {
+	// Normalize once: net.ParseIP returns 16B; To4 returns a 4B slice.
+	nip := ip
+	if ip4 := ip.To4(); ip4 != nil {
+		nip = ip4
+	}
 	if clientID != "" {
 		if p, ok := s.byClient[clientID]; ok {
 			// A DoH client-ID is self-asserted (no auth), so it only selects
@@ -276,33 +323,56 @@ func (s *Store) lookup(ip net.IP, clientID string) *compiledPolicy {
 			// otherwise anyone could claim an ID whose policy carries an
 			// allowlist (escaping the global blocklist) or another client's
 			// identity. Scope an ID policy with Networks to use it.
-			nip := ip
-			if ip4 := ip.To4(); ip4 != nil {
-				nip = ip4
-			}
 			if len(p.nets) > 0 && netsContain(p.nets, nip) {
 				return p
 			}
 		}
 	}
-	best := -1
-	var bp *compiledPolicy
-	if ip4 := ip.To4(); ip4 != nil {
-		ip = ip4
-	}
-	for _, e := range s.nets {
-		if e.net.Contains(ip) {
-			ones, _ := e.net.Mask.Size()
-			if ones > best {
-				best = ones
-				bp = e.policy
-			}
+	for i := range s.nets {
+		if s.nets[i].net.Contains(nip) {
+			return s.nets[i].policy
 		}
 	}
-	if bp != nil {
-		return bp
-	}
 	return s.defaults
+}
+
+// Check evaluates allow/block for an already-normalized name in a single
+// lookup + single allow walk + single block walk. It replaces the
+// Allowed+Classify+BlockSource triple on the query hot path (which paid 2-3x
+// CIDR scans, normalizes and walks). Callers that already normalized with
+// NormalizeName must use this (or the *Normalized helpers) to avoid
+// re-lowercasing per stage.
+func (s *Store) Check(clientIP net.IP, clientID, normalizedName string) (allowed, blocked bool, action BlockAction, upstream string, doLog bool, source string) {
+	s.mu.RLock()
+	p := s.lookupLocked(clientIP, clientID)
+	s.mu.RUnlock()
+	if p == nil {
+		return false, false, DefaultAction, "", false, ""
+	}
+	if p.allowM.match(normalizedName) {
+		return true, false, p.action(), p.Upstream, p.Log, ""
+	}
+	if p.blockM.match(normalizedName) {
+		id := p.ID
+		if id == "" {
+			id = "default"
+		}
+		return false, true, p.action(), p.Upstream, p.Log, "policy:" + id
+	}
+	return false, false, p.action(), p.Upstream, p.Log, ""
+}
+
+// ClassifyNormalized is Classify for an already-normalized name (see
+// NormalizeName): it skips the per-call ToLower allocation.
+func (s *Store) ClassifyNormalized(clientIP net.IP, clientID, normalizedName string) (blocked bool, action BlockAction, upstream string, log bool) {
+	_, blocked, action, upstream, log, _ = s.Check(clientIP, clientID, normalizedName)
+	return blocked, action, upstream, log
+}
+
+// AllowedNormalized is Allowed for an already-normalized name.
+func (s *Store) AllowedNormalized(clientIP net.IP, clientID, normalizedName string) bool {
+	allowed, _, _, _, _, _ := s.Check(clientIP, clientID, normalizedName)
+	return allowed
 }
 
 // Classify reports whether name from clientIP (or DoH clientID) should be

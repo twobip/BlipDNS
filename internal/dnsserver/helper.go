@@ -26,6 +26,16 @@ func clientIDFromPath(p string) string {
 // authoritatively by Cloudflare Tunnel) wins over X-Forwarded-For when both
 // are present.
 func clientIPFromReq(r *http.Request, trusted []*net.IPNet) net.IP {
+	if len(trusted) == 0 {
+		// Fast path (default): headers are never trusted, so parse RemoteAddr
+		// once and skip header lookups entirely.
+		if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+			if ip := net.ParseIP(host); ip != nil {
+				return ip
+			}
+		}
+		return net.ParseIP(r.RemoteAddr)
+	}
 	if isTrustedPeer(r, trusted) {
 		if cf := r.Header.Get("CF-Connecting-IP"); cf != "" {
 			if ip := net.ParseIP(firstToken(cf)); ip != nil {

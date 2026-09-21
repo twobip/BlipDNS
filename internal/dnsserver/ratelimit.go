@@ -1,7 +1,6 @@
 package dnsserver
 
 import (
-	"hash/fnv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -55,7 +54,8 @@ func newRateLimiter() *rateLimiter {
 
 // set updates the limit. A non-positive burst defaults to qps (min 1) so a
 // single query is never denied. Existing buckets are reset so the new rate
-// takes effect immediately.
+// takes effect immediately. Fresh maps are allocated before locking so the
+// fleet-push path never stalls queries across 16 sequential allocations.
 func (rl *rateLimiter) set(qps int, burst int) {
 	if qps < 0 {
 		qps = 0
@@ -66,14 +66,18 @@ func (rl *rateLimiter) set(qps int, burst int) {
 			burst = 1
 		}
 	}
-	rl.qpsVal.Store(int64(qps))
-	rl.burstVal.Store(int64(burst))
+	fresh := make([]map[string]*tokenBucket, rlShards)
+	for i := range fresh {
+		fresh[i] = make(map[string]*tokenBucket)
+	}
 	for i := range rl.shards {
 		sh := &rl.shards[i]
 		sh.mu.Lock()
-		sh.buckets = make(map[string]*tokenBucket)
+		sh.buckets = fresh[i]
 		sh.mu.Unlock()
 	}
+	rl.qpsVal.Store(int64(qps))
+	rl.burstVal.Store(int64(burst))
 	rl.off.Store(qps == 0)
 }
 
@@ -83,9 +87,14 @@ func (rl *rateLimiter) qps() int {
 }
 
 func rlShardFor(client string) int {
-	h := fnv.New32a()
-	_, _ = h.Write([]byte(client))
-	return int(h.Sum32() & (rlShards - 1))
+	// Inline zero-alloc FNV-1a over the key bytes: avoids the fnv.New32a heap
+	// object plus the string->[]byte copy that cost 2 allocs per query.
+	h := uint32(2166136261)
+	for i := 0; i < len(client); i++ {
+		h ^= uint32(client[i])
+		h *= 16777619
+	}
+	return int(h & (rlShards - 1))
 }
 
 // allow reports whether a query from client may proceed, refilling its bucket.
@@ -100,20 +109,20 @@ func (rl *rateLimiter) allow(client string) bool {
 	}
 	sh := &rl.shards[rlShardFor(client)]
 	sh.mu.Lock()
-	defer sh.mu.Unlock()
 	now := time.Now()
 	b, ok := sh.buckets[client]
 	if !ok {
 		// bound tracked clients; if saturated, allow (fail-open) rather than DoS.
 		if len(sh.buckets) >= maxLiveClients/rlShards {
-			// evict an idle entry to make room
-			for k, v := range sh.buckets {
-				if now.Sub(v.last) > time.Minute {
-					delete(sh.buckets, k)
-					break
-				}
+			// O(1) probabilistic eviction: drop one arbitrary entry instead of
+			// scanning up to 1024 entries under the shard lock (spoofed-IP DoS
+			// amplified the old hold time).
+			for k := range sh.buckets {
+				delete(sh.buckets, k)
+				break
 			}
 			if len(sh.buckets) >= maxLiveClients/rlShards {
+				sh.mu.Unlock()
 				return true
 			}
 		}
@@ -128,7 +137,9 @@ func (rl *rateLimiter) allow(client string) bool {
 	}
 	if b.tokens >= 1 {
 		b.tokens--
+		sh.mu.Unlock()
 		return true
 	}
+	sh.mu.Unlock()
 	return false
 }
