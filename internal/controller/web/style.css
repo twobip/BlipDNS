@@ -567,6 +567,12 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
 .bl-import-bar { flex: 1; height: 8px; border-radius: 999px; background: var(--surface-3); overflow: hidden; border: 1px solid var(--border); }
 .bl-import-bar > i { display: block; height: 100%; width: 0; border-radius: 999px; background: var(--accent-grad); transition: width .35s ease; box-shadow: 0 0 10px rgba(79,140,255,.45); }
 .bl-import-bar-text { font-size: 12.5px; color: var(--muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+/* ponytail: the sync status lines carry a full source URL plus ever-changing
+   counts; let them truncate instead of resizing the row and shoving the
+   buttons around mid-import. */
+#bl-import-status, .bl-import-bar-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-variant-numeric: tabular-nums; }
+#bl-import-status { flex: 1 1 auto; }
+.bl-import-bar-text { max-width: 45%; }
 
 /* source row states + toggle switch */
 .tbl tbody tr.bl-src-off td { opacity: .55; }
