@@ -478,6 +478,54 @@ func TestCacheRoundtripWithAllowed(t *testing.T) {
 	}
 }
 
+func TestHashStringVectors(t *testing.T) {
+	// Pinned against hash/fnv FNV-1a 32 (recorded 2026-09-21): the hand-rolled
+	// loop must stay bit-identical so checksums never flap across versions.
+	for in, want := range map[string]uint64{
+		"":                       0x811c9dc5,
+		"foobar":                 0xbf9cf968,
+		"a.com":                  0x60f68a87,
+		"*.ads.net":              0xbed21764,
+		"allow:keep.example.com": 0x3627a336,
+		"host-42.example-42.com": 0xa8a535ee,
+	} {
+		if got := hashString(in); got != want {
+			t.Errorf("hashString(%q) = 0x%08x, want 0x%08x", in, got, want)
+		}
+	}
+}
+
+func TestParseHostsAnyIP(t *testing.T) {
+	set := make(map[string]struct{})
+	for _, line := range []string{
+		"127.0.0.2 evil.example.com",
+		"8.8.8.8 ads.example.net",
+		"::ffff:1.2.3.4 v6.example.org",
+		"0.0.0.0 dup.example.com",
+		"0.0.0.0 dup.example.com",
+	} {
+		if !parseLine(line, set) && line != "0.0.0.0 dup.example.com" {
+			t.Errorf("parseLine(%q) = false, want true", line)
+		}
+	}
+	for _, d := range []string{"evil.example.com", "ads.example.net", "v6.example.org", "dup.example.com"} {
+		if _, ok := set[d]; !ok {
+			t.Errorf("expected %q in set %v", d, set)
+		}
+	}
+	if len(set) != 4 {
+		t.Errorf("set = %v, want 4 unique domains (no garbage keys)", set)
+	}
+	// Digit-leading domains must still parse as domains, not hosts lines.
+	set2 := make(map[string]struct{})
+	if !parseLine("123movies.example.com", set2) {
+		t.Error("parseLine(123movies.example.com) = false, want true")
+	}
+	if _, ok := set2["123movies.example.com"]; !ok {
+		t.Errorf("digit-leading domain missing from %v", set2)
+	}
+}
+
 func TestLoadFromURLsPerSourceCounts(t *testing.T) {
 	listA := "||a.example.com^\n||b.example.com^\n"
 	listB := "||b.example.com^\n||c.example.com^\n||d.example.org^\n"

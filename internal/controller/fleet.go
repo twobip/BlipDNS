@@ -2448,7 +2448,19 @@ func (f *Fleet) runBlocklistImport(ctx context.Context, gen int) {
 		}
 	}
 
-	merged := f.manualDomainSet()
+	manual := f.manualDomainSet()
+	// Pre-size for the last known snapshot counts so a million-domain merge
+	// doesn't rehash/grow repeatedly (prevMeta misses just under-hint).
+	hint := len(manual)
+	for _, u := range urls {
+		if pm, ok := prevMeta[u]; ok {
+			hint += pm.Domains
+		}
+	}
+	merged := make(map[string]struct{}, hint)
+	for d := range manual {
+		merged[d] = struct{}{}
+	}
 	if len(merged) > 0 {
 		f.logImport("seeding %d manually added domain(s)", len(merged))
 	}
@@ -2609,7 +2621,9 @@ func (f *Fleet) runBlocklistImport(ctx context.Context, gen int) {
 	f.blMu.Unlock()
 	f.logImport("merged %d domains from %d source(s)", len(merged), len(urls))
 
+	prevHash := f.blocklist.Checksum()
 	f.blocklist.FromDomainsMap(merged)
+	blocklistChanged := f.blocklist.Checksum() != prevHash
 	applied = true
 	// Drop snapshots/metadata for sources that are no longer configured.
 	// Disabled sources stay in allURLs so their snapshots survive, letting a
@@ -2620,6 +2634,13 @@ func (f *Fleet) runBlocklistImport(ctx context.Context, gen int) {
 		}
 		// One WAL truncate per import, not per source.
 		_ = f.blocklistDB.checkpoint(ctx)
+	}
+	if !blocklistChanged {
+		// Steady state (all 304 / same content): the merged set is identical,
+		// so skip the full SQLite re-write and the multi-MB push to every
+		// instance — reconcilers already converge any drifted node.
+		f.logImport("list unchanged (%d domains) — skipping persist + distribute", len(merged))
+		return
 	}
 	// Persist the merged list so a controller restart loads it into RAM
 	// instantly instead of re-fetching every source.

@@ -13,7 +13,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"hash/fnv"
 	"io"
 	"net"
 	"net/http"
@@ -53,14 +52,14 @@ var safeBlocklistTransport = &http.Transport{
 		if err != nil {
 			return nil, err
 		}
-		d := net.Dialer{}
+		d := net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
 		for _, ip := range ips {
 			if isPrivateIP(net.ParseIP(ip)) {
 				continue
 			}
 			c, err := d.DialContext(ctx, network, net.JoinHostPort(ip, port))
 			if err != nil {
-				return nil, err
+				continue
 			}
 			return c, nil
 		}
@@ -68,8 +67,12 @@ var safeBlocklistTransport = &http.Transport{
 	},
 	ForceAttemptHTTP2:   true,
 	MaxIdleConns:        10,
+	MaxIdleConnsPerHost: maxSourceFetchers,
 	IdleConnTimeout:     30 * time.Second,
 	TLSHandshakeTimeout: 10 * time.Second,
+	// Fail stalled headers fast so one hung source can't pin a fetch slot
+	// for the full 2-minute body timeout.
+	ResponseHeaderTimeout: 15 * time.Second,
 }
 
 // maxSourceFetchers bounds how many blocklist sources are fetched concurrently.
@@ -562,7 +565,7 @@ func FetchSource(ctx context.Context, rawURL string, v Validators) (*FetchResult
 
 	set := make(map[string]struct{})
 	sc := bufio.NewScanner(io.LimitReader(resp.Body, maxSourceBytes))
-	sc.Buffer(make([]byte, 64*1024), maxLineLen)
+	sc.Buffer(make([]byte, 8*1024), maxLineLen)
 	for sc.Scan() {
 		parseLine(sc.Text(), set)
 		if ctx.Err() != nil {
@@ -602,16 +605,17 @@ func parseLine(line string, merged map[string]struct{}) bool {
 		}
 		return false
 	}
-	// Strip any inline comment.
+	// Strip any inline comment (input is already left-trimmed, so only the
+	// right side can hold whitespace).
 	if idx := strings.IndexAny(line, "!#"); idx != -1 {
-		line = strings.TrimSpace(line[:idx])
+		line = strings.TrimRight(line[:idx], " 	")
 		if line == "" {
 			return false
 		}
 	}
 	// Strip $options.
 	if idx := strings.IndexByte(line, '$'); idx != -1 {
-		line = strings.TrimSpace(line[:idx])
+		line = strings.TrimRight(line[:idx], " 	")
 		if line == "" {
 			return false
 		}
@@ -663,17 +667,25 @@ func parseLine(line string, merged map[string]struct{}) bool {
 }
 
 // isHostsIP reports whether a line starts with an IP literal (hosts-file form).
+// Any IP literal counts, not just the common 0.0.0.0/127.0.0.1 ones: without
+// this, a line like "127.0.0.2 evil.com" falls through to ABP parsing and the
+// whole "IP + space + host" string lands in the set as a garbage domain.
 func isHostsIP(line string) bool {
 	if line == "" {
 		return false
 	}
 	ip := line
-	if idx := strings.IndexAny(ip, " \t"); idx != -1 {
+	if idx := strings.IndexAny(ip, " 	"); idx != -1 {
 		ip = ip[:idx]
 	}
 	switch ip {
 	case "0.0.0.0", "127.0.0.1", "::", "::1", "255.255.255.255", "localhost":
 		return true
+	}
+	// ABP/domain lines never start with a digit or colon, so only pay for a
+	// parse attempt on hosts-file candidates.
+	if c := line[0]; (c >= '0' && c <= '9') || c == ':' {
+		return net.ParseIP(ip) != nil
 	}
 	return false
 }
@@ -761,8 +773,14 @@ func LoadCache(path string) (*Blocklist, error) {
 }
 
 // hashString returns an FNV-1a 32-bit hash as a uint64 (for the checksum sum).
+// Hand-rolled loop: bit-identical to fnv.New32a with zero allocs (the hasher
+// + interface + []byte conversion cost ~50ns per unique domain on the load
+// path). Pinned by TestHashStringVectors.
 func hashString(s string) uint64 {
-	h := fnv.New32a()
-	_, _ = h.Write([]byte(s))
-	return uint64(h.Sum32())
+	h := uint32(2166136261)
+	for i := 0; i < len(s); i++ {
+		h ^= uint32(s[i])
+		h *= 16777619
+	}
+	return uint64(h)
 }
