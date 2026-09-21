@@ -28,13 +28,21 @@ type Resolver interface {
 	Resolve(ctx context.Context, q *dns.Msg) (*dns.Msg, error)
 }
 
-// UDPResolver forwards over UDP (falling back to TCP on truncation).
+// UDPResolver forwards over UDP (falling back to TCP on truncation) with a
+// small pool of connected sockets reused across queries. miekg/dns Exchange
+// dials + closes per call; reusing connected conns via ExchangeWithConnContext
+// removes a socket+connect+close per DNS query and honors ctx cancellation.
 type UDPResolver struct {
 	addr    string
 	timeout time.Duration
 	udp     dns.Client // pre-built; reused across queries (no per-query alloc)
 	tcp     dns.Client
+	mu      sync.Mutex
+	conns   []*dns.Conn // idle connected UDP conns, LIFO
 }
+
+// udpPoolSize bounds reused sockets per upstream (LIFO stack, no channel).
+const udpPoolSize = 4
 
 // NewUDP creates a UDP/TCP upstream resolver for addr (host:port) with the
 // given timeout (0 = 5 second default).
@@ -50,33 +58,94 @@ func NewUDP(addr string, timeout time.Duration) *UDPResolver {
 	}
 }
 
+func (r *UDPResolver) getConn(ctx context.Context) (*dns.Conn, error) {
+	r.mu.Lock()
+	n := len(r.conns)
+	if n > 0 {
+		c := r.conns[n-1]
+		r.conns = r.conns[:n-1]
+		r.mu.Unlock()
+		return c, nil
+	}
+	r.mu.Unlock()
+	// Dial outside the lock so concurrent queries dial in parallel.
+	d := &net.Dialer{Timeout: r.timeout}
+	// Prefer ctx deadline when tighter than the per-server timeout.
+	conn, err := d.DialContext(ctx, "udp", r.addr)
+	if err != nil {
+		return nil, err
+	}
+	return &dns.Conn{Conn: conn}, nil
+}
+
+func (r *UDPResolver) putConn(c *dns.Conn) {
+	if c == nil || c.Conn == nil {
+		return
+	}
+	r.mu.Lock()
+	if len(r.conns) < udpPoolSize {
+		r.conns = append(r.conns, c)
+		r.mu.Unlock()
+		return
+	}
+	r.mu.Unlock()
+	_ = c.Close()
+}
+
+// CloseIdleConnections drains pooled UDP sockets.
+func (r *UDPResolver) CloseIdleConnections() {
+	r.mu.Lock()
+	conns := r.conns
+	r.conns = nil
+	r.mu.Unlock()
+	for _, c := range conns {
+		_ = c.Close()
+	}
+}
+
 func (r *UDPResolver) Resolve(ctx context.Context, q *dns.Msg) (*dns.Msg, error) {
 	if err := guardUpstreamAddr(ctx, r.addr); err != nil {
 		return nil, errUpstream(r.addr, err)
 	}
-	resp, _, err := r.udp.Exchange(q, r.addr)
+	// Bound by ctx when the caller set one (pool budget), else the per-server
+	// timeout. ExchangeWithConnContext honors the deadline; the old Exchange
+	// used Background and ignored ctx entirely.
+	c, err := r.getConn(ctx)
 	if err != nil {
 		return nil, errUpstream(r.addr, err)
 	}
-	if resp.Truncated {
-		resp, _, err = r.tcp.Exchange(q, r.addr)
-		if err != nil {
-			return nil, errUpstream(r.addr, err)
-		}
+	resp, _, err := r.udp.ExchangeWithConnContext(ctx, q, c)
+	if err != nil {
+		_ = c.Close()
+		return nil, errUpstream(r.addr, err)
 	}
-	return resp, nil
+	if !resp.Truncated {
+		r.putConn(c)
+		return resp, nil
+	}
+	// Truncated: return the UDP conn and fall back to TCP (rare path keeps a
+	// per-query dial to avoid a second pool).
+	r.putConn(c)
+	resp2, _, err := r.tcp.ExchangeContext(ctx, q, r.addr)
+	if err != nil {
+		return nil, errUpstream(r.addr, err)
+	}
+	return resp2, nil
 }
 
-// TLSResolver forwards over DNS-over-TLS (RFC 7858, port 853) on one shared
-// connection, redialed when the server closes it.
+// TLSResolver forwards over DNS-over-TLS (RFC 7858, port 853) on a small pool
+// of shared connections, redialed when the server closes them. The old single
+// conn + single mutex capped throughput at 1/RTT; pooling K conns lets K
+// queries proceed concurrently.
 type TLSResolver struct {
-	addr string
-	tls  dns.Client // pre-built; reused across queries (no per-query alloc)
-	// mu serializes queries: a dns.Conn cannot serve concurrent exchanges.
-	// ponytail: one connection per upstream; pool them if this bottlenecks.
-	mu   sync.Mutex
-	conn *dns.Conn
+	addr  string
+	tls   dns.Client // pre-built; reused across queries (no per-query alloc)
+	mu    sync.Mutex
+	conns []*dns.Conn // idle TLS conns, LIFO
 }
+
+// tlsPoolSize bounds concurrent DoT connections per upstream.
+const tlsPoolSize = 4
 
 // NewTLS creates a DoT upstream resolver for addr (host:port) with the given
 // timeout (0 = 5 second default). TLS is verified against the system roots.
@@ -90,27 +159,74 @@ func NewTLS(addr string, timeout time.Duration) *TLSResolver {
 	}
 }
 
+func (r *TLSResolver) getConn(ctx context.Context) (*dns.Conn, error) {
+	r.mu.Lock()
+	n := len(r.conns)
+	if n > 0 {
+		c := r.conns[n-1]
+		r.conns = r.conns[:n-1]
+		r.mu.Unlock()
+		return c, nil
+	}
+	r.mu.Unlock()
+	// DialContext honors ctx (pool budget) and falls back to Client.Timeout
+	// when ctx has no deadline; old Dial ignored ctx entirely.
+	c, err := r.tls.DialContext(ctx, r.addr)
+	if err != nil {
+		return nil, err
+	}
+	return c, nil
+}
+
+func (r *TLSResolver) putConn(c *dns.Conn) {
+	if c == nil {
+		return
+	}
+	r.mu.Lock()
+	if len(r.conns) < tlsPoolSize {
+		r.conns = append(r.conns, c)
+		r.mu.Unlock()
+		return
+	}
+	r.mu.Unlock()
+	_ = c.Close()
+}
+
+// dropIdle closes all pooled idle connections (test hook for simulating a
+// server-closed idle conn, plus pool teardown).
+func (r *TLSResolver) dropIdle() {
+	r.CloseIdleConnections()
+}
+
+// CloseIdleConnections drains pooled DoT connections.
+func (r *TLSResolver) CloseIdleConnections() {
+	r.mu.Lock()
+	conns := r.conns
+	r.conns = nil
+	r.mu.Unlock()
+	for _, c := range conns {
+		_ = c.Close()
+	}
+}
+
 func (r *TLSResolver) Resolve(ctx context.Context, q *dns.Msg) (*dns.Msg, error) {
 	if err := guardUpstreamAddr(ctx, r.addr); err != nil {
 		return nil, errUpstream(r.addr, err)
 	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
 	// A server-closed idle connection only fails the exchange, never the
 	// dial — so drop a dead connection and redial once before giving up.
 	var err error
 	for attempt := 0; attempt < 2; attempt++ {
-		if r.conn == nil {
-			if r.conn, err = r.tls.Dial(r.addr); err != nil {
-				return nil, errUpstream(r.addr, err)
-			}
+		var c *dns.Conn
+		if c, err = r.getConn(ctx); err != nil {
+			return nil, errUpstream(r.addr, err)
 		}
 		var resp *dns.Msg
-		if resp, _, err = r.tls.ExchangeWithConn(q, r.conn); err == nil {
+		if resp, _, err = r.tls.ExchangeWithConnContext(ctx, q, c); err == nil {
+			r.putConn(c)
 			return resp, nil
 		}
-		r.conn.Close()
-		r.conn = nil
+		_ = c.Close()
 	}
 	return nil, errUpstream(r.addr, err)
 }
@@ -191,10 +307,13 @@ func NewDoHWithBootstrap(endpoint string, timeout time.Duration, bootstrap Resol
 		timeout = 5 * time.Second
 	}
 	tr := &http.Transport{
-		MaxIdleConns:        64,
-		MaxIdleConnsPerHost: 32,
-		IdleConnTimeout:     90 * time.Second,
-		ForceAttemptHTTP2:   true,
+		MaxIdleConns:          64,
+		MaxIdleConnsPerHost:   32,
+		IdleConnTimeout:       90 * time.Second,
+		ForceAttemptHTTP2:     true,
+		TLSHandshakeTimeout:   minDuration(timeout, 10*time.Second),
+		ResponseHeaderTimeout: timeout,
+		ExpectContinueTimeout: 1 * time.Second,
 	}
 	if bootstrap != nil {
 		tr.DialContext = bootstrapDialContext(bootstrap, timeout)
@@ -217,12 +336,27 @@ func NewDoHWithBootstrap(endpoint string, timeout time.Duration, bootstrap Resol
 	}
 }
 
+func minDuration(a, b time.Duration) time.Duration {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+// CloseIdleConnections closes idle DoH keepalives so a replaced pool doesn't
+// leak Transports until the 90s idle timeout.
+func (r *DoHResolver) CloseIdleConnections() {
+	if tr, ok := r.client.Transport.(*http.Transport); ok {
+		tr.CloseIdleConnections()
+	}
+}
+
 // bootstrapDialContext returns a DialContext that resolves the address
 // hostname through the bootstrap resolver and dials the first reachable
 // address, keeping the port. TLS is handled by the transport after this dial,
 // so the DoH certificate is still verified against the endpoint hostname.
 func bootstrapDialContext(bootstrap Resolver, timeout time.Duration) func(ctx context.Context, network, addr string) (net.Conn, error) {
-	d := &net.Dialer{Timeout: timeout}
+	d := &net.Dialer{Timeout: timeout, KeepAlive: 30 * time.Second}
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
 		host, port, err := net.SplitHostPort(addr)
 		if err != nil {
@@ -239,20 +373,33 @@ func bootstrapDialContext(bootstrap Resolver, timeout time.Duration) func(ctx co
 		if len(ips) == 0 {
 			return nil, fmt.Errorf("bootstrap resolve %q: no addresses", host)
 		}
-		var lastErr error
+		// Race dials across returned IPs with a shared deadline (Happy
+		// Eyeballs-lite) instead of trying them serially with full timeouts.
+		type dialRes struct {
+			c   net.Conn
+			err error
+		}
+		ch := make(chan dialRes, len(ips))
+		dialCtx, cancel := context.WithTimeout(ctx, timeout)
+		defer cancel()
 		for _, ip := range ips {
-			// A name the bootstrap resolves into link-local space (metadata
-			// service, DNS rebinding) is never a legitimate DoH endpoint.
 			if blockedUpstreamIP(ip) {
-				lastErr = fmt.Errorf("refusing link-local/metadata upstream address %s", ip)
+				ch <- dialRes{err: fmt.Errorf("refusing link-local/metadata upstream address %s", ip)}
 				continue
 			}
 			warnLocalUpstream(ip)
-			c, derr := d.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
-			if derr == nil {
-				return c, nil
+			go func(ip net.IP) {
+				c, derr := d.DialContext(dialCtx, network, net.JoinHostPort(ip.String(), port))
+				ch <- dialRes{c: c, err: derr}
+			}(ip)
+		}
+		var lastErr error
+		for range ips {
+			r := <-ch
+			if r.err == nil {
+				return r.c, nil
 			}
-			lastErr = derr
+			lastErr = r.err
 		}
 		return nil, lastErr
 	}
@@ -375,28 +522,118 @@ func guardUpstreamAddr(ctx context.Context, addr string) error {
 	return nil
 }
 
-// bootstrapLookupIP resolves A and AAAA for host through r, tolerating a
-// resolver that only answers one family (a failed AAAA query is not fatal when
-// the A query succeeded, and vice-versa).
-func bootstrapLookupIP(ctx context.Context, r Resolver, host string) []net.IP {
-	var ips []net.IP
-	for _, t := range []uint16{dns.TypeA, dns.TypeAAAA} {
-		q := new(dns.Msg)
-		q.SetQuestion(dns.Fqdn(host), t)
-		resp, err := r.Resolve(ctx, q)
-		if err != nil {
-			continue
+// bootstrapCache caches bootstrap host->IPs with TTL to avoid paying 2
+// bootstrap RTTs on every fresh DoH connection (and again after each 90s idle
+// expiry). Bounded, single-mutex, TTL floor 60s / cap 10m.
+var bootstrapCache = struct {
+	sync.Mutex
+	m map[string]bootstrapEntry
+}{m: make(map[string]bootstrapEntry)}
+
+type bootstrapEntry struct {
+	ips    []net.IP
+	expire time.Time
+}
+
+func bootstrapCacheGet(host string) ([]net.IP, bool) {
+	bootstrapCache.Lock()
+	defer bootstrapCache.Unlock()
+	e, ok := bootstrapCache.m[host]
+	if !ok || time.Now().After(e.expire) {
+		if ok {
+			delete(bootstrapCache.m, host)
 		}
-		for _, rr := range resp.Answer {
-			switch v := rr.(type) {
-			case *dns.A:
-				ips = append(ips, v.A)
-			case *dns.AAAA:
-				ips = append(ips, v.AAAA)
-			}
+		return nil, false
+	}
+	out := make([]net.IP, len(e.ips))
+	copy(out, e.ips)
+	return out, true
+}
+
+func bootstrapCachePut(host string, ips []net.IP, ttl time.Duration) {
+	if len(ips) == 0 {
+		return
+	}
+	if ttl < 60*time.Second {
+		ttl = 60 * time.Second
+	}
+	if ttl > 10*time.Minute {
+		ttl = 10 * time.Minute
+	}
+	bootstrapCache.Lock()
+	defer bootstrapCache.Unlock()
+	if len(bootstrapCache.m) > 1024 {
+		// Probabilistic eviction to bound memory.
+		for k := range bootstrapCache.m {
+			delete(bootstrapCache.m, k)
+			break
 		}
 	}
-	return ips
+	cp := make([]net.IP, len(ips))
+	copy(cp, ips)
+	bootstrapCache.m[host] = bootstrapEntry{ips: cp, expire: time.Now().Add(ttl)}
+}
+
+// clearBootstrapCache drops cached bootstrap resolutions (test isolation:
+// TestDoHBootstrapResolve asserts the stub is consulted).
+func clearBootstrapCache() {
+	bootstrapCache.Lock()
+	defer bootstrapCache.Unlock()
+	bootstrapCache.m = make(map[string]bootstrapEntry)
+}
+
+// bootstrapLookupIP resolves A and AAAA for host through r, tolerating a
+// resolver that only answers one family (a failed AAAA query is not fatal when
+// the A query succeeded, and vice-versa). A+AAAA issue concurrently; results
+// share the caller's ctx budget.
+func bootstrapLookupIP(ctx context.Context, r Resolver, host string) []net.IP {
+	if ips, ok := bootstrapCacheGet(host); ok {
+		return ips
+	}
+	type famRes struct {
+		ips []net.IP
+		ttl time.Duration
+	}
+	ch := make(chan famRes, 2)
+	for _, t := range []uint16{dns.TypeA, dns.TypeAAAA} {
+		go func(t uint16) {
+			q := new(dns.Msg)
+			q.SetQuestion(dns.Fqdn(host), t)
+			resp, err := r.Resolve(ctx, q)
+			if err != nil {
+				ch <- famRes{}
+				return
+			}
+			var ips []net.IP
+			minTTL := 10 * time.Minute
+			for _, rr := range resp.Answer {
+				switch v := rr.(type) {
+				case *dns.A:
+					ips = append(ips, v.A)
+					if d := time.Duration(v.Hdr.Ttl) * time.Second; d < minTTL {
+						minTTL = d
+					}
+				case *dns.AAAA:
+					ips = append(ips, v.AAAA)
+					if d := time.Duration(v.Hdr.Ttl) * time.Second; d < minTTL {
+						minTTL = d
+					}
+				}
+			}
+			ch <- famRes{ips: ips, ttl: minTTL}
+		}(t)
+	}
+	var all []net.IP
+	ttl := 10 * time.Minute
+	for i := 0; i < 2; i++ {
+		fr := <-ch
+		all = append(all, fr.ips...)
+		if fr.ttl < ttl {
+			ttl = fr.ttl
+		}
+	}
+	bootstrapCachePut(host, all, ttl)
+	return all
 }
 
 func (r *DoHResolver) Resolve(ctx context.Context, q *dns.Msg) (*dns.Msg, error) {
@@ -419,13 +656,16 @@ func (r *DoHResolver) Resolve(ctx context.Context, q *dns.Msg) (*dns.Msg, error)
 	}
 	defer resp.Body.Close()
 	const maxDNSResponseBytes = 65535
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxDNSResponseBytes+1))
-	if err != nil {
+	// Fixed buffer + Unpack avoids io.ReadAll doubling appends.
+	var fixed [maxDNSResponseBytes + 1]byte
+	n, err := io.ReadFull(resp.Body, fixed[:])
+	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
 		return nil, errUpstream(r.endpoint, err)
 	}
-	if len(body) > maxDNSResponseBytes {
+	if n > maxDNSResponseBytes {
 		return nil, errUpstream(r.endpoint, fmt.Errorf("doh: upstream response too large"))
 	}
+	body := fixed[:n]
 	if resp.StatusCode != http.StatusOK {
 		return nil, errUpstream(r.endpoint, fmt.Errorf("doh: upstream returned %d", resp.StatusCode))
 	}
@@ -519,32 +759,65 @@ func isCallerCancel(ctx context.Context, err error) bool {
 }
 
 func (m *MultiResolver) Resolve(ctx context.Context, q *dns.Msg) (*dns.Msg, error) {
+	// Pool-level budget so serial failover can't park a handler for
+	// Σ(timeouts) (3 down upstreams ≈ 15s before). 8s covers typical RTTs
+	// while bounding outage latency; an existing tighter deadline is kept.
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, 8*time.Second)
+		defer cancel()
+	}
 	now := time.Now().UnixNano()
+	// Stack-backed order avoids the per-query order []int heap alloc in the
+	// common ≤8 upstream case.
+	var orderBuf [8]int
 	var order []int
+	nOrder := 0
 	allDown := true
 	for i := range m.resolvers {
 		if atomic.LoadInt64(&m.downUntil[i]) <= now {
-			order = append(order, i)
 			allDown = false
+			if nOrder < len(orderBuf) {
+				orderBuf[nOrder] = i
+				nOrder++
+			} else {
+				if order == nil {
+					order = append([]int(nil), orderBuf[:nOrder]...)
+				}
+				order = append(order, i)
+			}
 		}
 	}
-	if allDown { // everything tripped: retry all in order this pass
+	if allDown && len(m.resolvers) > 0 { // everything tripped: retry all in order
 		for i := range m.downUntil {
 			atomic.StoreInt64(&m.downUntil[i], 0)
 		}
-		order = make([]int, len(m.resolvers))
-		for i := range order {
-			order[i] = i
+		nOrder = 0
+		order = nil
+		for i := range m.resolvers {
+			if nOrder < len(orderBuf) {
+				orderBuf[nOrder] = i
+				nOrder++
+			} else {
+				if order == nil {
+					order = append([]int(nil), orderBuf[:nOrder]...)
+				}
+				order = append(order, i)
+			}
 		}
 	}
 
 	var firstErr error
-	for _, i := range order {
+	// step tries one resolver: success clears its strike count and cooldown;
+	// caller-cancel errors never trip the breaker; 3 consecutive genuine
+	// failures exile it for cooldown+jitter (failure-time stamped so a slow
+	// try doesn't shorten the exile). Returns non-nil resp on success.
+	step := func(i int) *dns.Msg {
 		resp, err := m.resolvers[i].Resolve(ctx, q)
 		if err == nil {
 			atomic.StoreInt32(&m.fails[i], 0)
 			atomic.StoreInt64(&m.downUntil[i], 0)
-			return resp, nil
+			return resp
 		}
 		if firstErr == nil {
 			// Report the first (highest-priority) failure: the last tried
@@ -553,13 +826,35 @@ func (m *MultiResolver) Resolve(ctx context.Context, q *dns.Msg) (*dns.Msg, erro
 		}
 		if isCallerCancel(ctx, err) {
 			// The caller went away; don't blame the upstream.
-			continue
+			return nil
 		}
-		n := atomic.AddInt32(&m.fails[i], 1)
-		if n >= 3 {
+		if n := atomic.AddInt32(&m.fails[i], 1); n >= 3 {
+			fail := time.Now().UnixNano()
 			jitter := time.Duration(rand.Int63n(5 * int64(time.Second)))
-			atomic.StoreInt64(&m.downUntil[i], now+(m.cooldown+jitter).Nanoseconds())
+			atomic.StoreInt64(&m.downUntil[i], fail+(m.cooldown+jitter).Nanoseconds())
 			log.Printf("upstream: resolver %d failing (%d consecutive); cooling down for %v: %v", i, n, m.cooldown+jitter, err)
+		}
+		return nil
+	}
+	// Single ordered failover loop (stack-backed order avoids the per-query
+	// heap alloc in the common ≤8 upstream case).
+	if order != nil {
+		for _, i := range order {
+			if resp := step(i); resp != nil {
+				return resp, nil
+			}
+			if ctx.Err() != nil {
+				break
+			}
+		}
+	} else {
+		for k := 0; k < nOrder; k++ {
+			if resp := step(orderBuf[k]); resp != nil {
+				return resp, nil
+			}
+			if ctx.Err() != nil {
+				break
+			}
 		}
 	}
 	if firstErr == nil {

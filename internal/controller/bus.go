@@ -70,20 +70,29 @@ func (b *Bus) Unsubscribe(ch chan Event) {
 	b.mu.Unlock()
 }
 
-// Publish broadcasts an event and appends it to the ring buffer.
+// Publish broadcasts an event and appends it to the ring buffer. Subscribers
+// are copied under lock and notified outside it so a slow/high-rate publisher
+// never serializes on subscriber sends. The buffer is a true ring (no
+// ever-growing backing array retained by slicing).
 func (b *Bus) Publish(e Event) {
 	b.mu.Lock()
-	b.buffer = append(b.buffer, e)
-	if len(b.buffer) > b.cap {
-		b.buffer = b.buffer[len(b.buffer)-b.cap:]
+	if len(b.buffer) < b.cap {
+		b.buffer = append(b.buffer, e)
+	} else {
+		copy(b.buffer, b.buffer[1:])
+		b.buffer[len(b.buffer)-1] = e
 	}
+	subs := make([]chan Event, 0, len(b.subs))
 	for ch := range b.subs {
+		subs = append(subs, ch)
+	}
+	b.mu.Unlock()
+	for _, ch := range subs {
 		select {
 		case ch <- e:
 		default:
 		}
 	}
-	b.mu.Unlock()
 }
 
 // Recent returns the buffered events (oldest first).

@@ -34,14 +34,68 @@ const maxLocalRecords = 10000
 // record always takes precedence over a wildcard.
 type RecordStore struct {
 	mu        sync.RWMutex
-	records   map[string][]control.RecordEntry // exact: keyed by lowercased domain (no trailing .)
-	wildcards map[string][]control.RecordEntry // wildcard: keyed by the parent suffix (e.g. "lan.twobip.com" for "*.lan.twobip.com")
+	records   map[string][]compiledRecord // exact: keyed by lowercased domain (no trailing .)
+	wildcards map[string][]compiledRecord // wildcard: keyed by the parent suffix (e.g. "lan.twobip.com" for "*.lan.twobip.com")
+	// raw preserves the original entries for GetRecords/Hash round-trips.
+	raw []control.RecordEntry
+	// ptrIndex maps string(ip) -> indexes into raw for O(1) PTR synthesis.
+	ptrIndex map[string][]int
+}
+
+// compiledRecord is a RecordEntry with its hot-path parsing done once at
+// SetRecords: resolved RR type, pre-parsed IP and pre-computed TTL/target.
+type compiledRecord struct {
+	entry  control.RecordEntry
+	rrType uint16
+	ip     net.IP
+	target string // FQDN for CNAME / PTR owner
+	ttl    uint32
+}
+
+func compileRecord(r control.RecordEntry) (compiledRecord, bool) {
+	rrType, ok := dns.StringToType[strings.ToUpper(strings.TrimSpace(r.Type))]
+	if !ok {
+		return compiledRecord{}, false
+	}
+	if rrType != dns.TypeA && rrType != dns.TypeAAAA && rrType != dns.TypeCNAME {
+		return compiledRecord{}, false
+	}
+	// Compare TTL as int before any uint32 cast: casting first would truncate
+	// large values (e.g. 1<<32+5 -> 5) and dodge the cap, and a negative
+	// would wrap to ~136 years.
+	var ttl uint32
+	if r.TTL <= 0 {
+		ttl = defaultRecordTTL
+	} else if r.TTL > maxRecordTTL {
+		ttl = maxRecordTTL
+	} else {
+		ttl = uint32(r.TTL)
+	}
+	cr := compiledRecord{entry: r, rrType: rrType, ttl: ttl}
+	switch rrType {
+	case dns.TypeA:
+		ip := net.ParseIP(strings.TrimSpace(r.Value))
+		if ip == nil || ip.To4() == nil {
+			return compiledRecord{}, false
+		}
+		cr.ip = ip
+	case dns.TypeAAAA:
+		ip := net.ParseIP(strings.TrimSpace(r.Value))
+		if ip == nil || ip.To16() == nil || ip.To4() != nil {
+			return compiledRecord{}, false
+		}
+		cr.ip = ip
+	case dns.TypeCNAME:
+		cr.target = dns.Fqdn(r.Value)
+	}
+	return cr, true
 }
 
 func NewRecordStore() *RecordStore {
 	return &RecordStore{
-		records:   make(map[string][]control.RecordEntry),
-		wildcards: make(map[string][]control.RecordEntry),
+		records:   make(map[string][]compiledRecord),
+		wildcards: make(map[string][]compiledRecord),
+		ptrIndex:  make(map[string][]int),
 	}
 }
 
@@ -60,24 +114,49 @@ func (rs *RecordStore) SetRecords(records []control.RecordEntry) error {
 	if len(records) > maxLocalRecords {
 		return fmt.Errorf("too many records: %d > %d", len(records), maxLocalRecords)
 	}
-	tmpExact := make(map[string][]control.RecordEntry, len(records))
-	tmpWild := make(map[string][]control.RecordEntry, len(records))
+	recs := make(map[string][]compiledRecord, len(records))
+	wilds := make(map[string][]compiledRecord, len(records))
+	raw := make([]control.RecordEntry, 0, len(records))
+	ptrIndex := make(map[string][]int)
 	for i, r := range records {
 		if err := validateRecordEntry(r); err != nil {
 			return fmt.Errorf("record %d: %w", i, err)
 		}
 		key := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(r.Domain), "."))
-		if strings.HasPrefix(key, "*.") {
-			parent := key[2:]
-			tmpWild[parent] = append(tmpWild[parent], r)
+		cr, ok := compileRecord(r)
+		if !ok {
+			// Validated above, so this is unreachable; keep the entry for
+			// GetRecords round-trip fidelity and skip it on the lookup path.
+			raw = append(raw, r)
 			continue
 		}
-		tmpExact[key] = append(tmpExact[key], r)
+		// Precompute PTR owner target once.
+		cr.target = dns.Fqdn(strings.ToLower(strings.TrimSuffix(strings.TrimSpace(r.Domain), ".")))
+		// CNAME target is the rdata, not the owner.
+		if cr.rrType == dns.TypeCNAME {
+			cr.target = dns.Fqdn(strings.TrimSpace(r.Value))
+		}
+		raw = append(raw, r)
+		idx := len(raw) - 1
+		if strings.HasPrefix(key, "*.") {
+			parent := key[2:]
+			if parent == "" {
+				continue
+			}
+			wilds[parent] = append(wilds[parent], cr)
+			continue
+		}
+		recs[key] = append(recs[key], cr)
+		if cr.rrType == dns.TypeA || cr.rrType == dns.TypeAAAA {
+			ptrIndex[string(cr.ip.To16())] = append(ptrIndex[string(cr.ip.To16())], idx)
+		}
 	}
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
-	rs.records = tmpExact
-	rs.wildcards = tmpWild
+	rs.records = recs
+	rs.wildcards = wilds
+	rs.raw = raw
+	rs.ptrIndex = ptrIndex
 	return nil
 }
 
@@ -176,13 +255,8 @@ func validHostname(host string) bool {
 func (rs *RecordStore) GetRecords() ([]control.RecordEntry, error) {
 	rs.mu.RLock()
 	defer rs.mu.RUnlock()
-	out := make([]control.RecordEntry, 0, len(rs.records)+len(rs.wildcards))
-	for _, recs := range rs.records {
-		out = append(out, recs...)
-	}
-	for _, recs := range rs.wildcards {
-		out = append(out, recs...)
-	}
+	out := make([]control.RecordEntry, len(rs.raw))
+	copy(out, rs.raw)
 	return out, nil
 }
 
@@ -195,7 +269,19 @@ func (rs *RecordStore) Lookup(req *dns.Msg) (*dns.Msg, bool) {
 		return nil, false
 	}
 	q := req.Question[0]
-	domain := strings.ToLower(strings.TrimSuffix(q.Name, "."))
+	// ASCII fast-path normalize (DNS is ASCII): avoid ToLower alloc when
+	// already lowercase.
+	domain := strings.TrimSuffix(q.Name, ".")
+	needLower := false
+	for i := 0; i < len(domain); i++ {
+		if c := domain[i]; c >= 'A' && c <= 'Z' {
+			needLower = true
+			break
+		}
+	}
+	if needLower {
+		domain = strings.ToLower(domain)
+	}
 	if domain == "" {
 		return nil, false
 	}
@@ -207,13 +293,15 @@ func (rs *RecordStore) Lookup(req *dns.Msg) (*dns.Msg, bool) {
 	// (deepest) wildcard covering the queried subdomain. A wildcard "*.root"
 	// matches host.root and deep.host.root but not "root" itself (no apex match),
 	// matching the suffix/wildcard semantics used by the filter policy store.
+	// Dot-walk without Split/Join allocations.
 	rs.mu.RLock()
 	recs := rs.records[domain]
 	if len(recs) == 0 {
-		labels := strings.Split(domain, ".")
-		for i := 1; i < len(labels); i++ {
-			parent := strings.Join(labels[i:], ".")
-			if w, ok := rs.wildcards[parent]; ok {
+		for i := 0; i < len(domain); i++ {
+			if domain[i] != '.' {
+				continue
+			}
+			if w, ok := rs.wildcards[domain[i+1:]]; ok {
 				recs = w
 				break
 			}
@@ -231,56 +319,29 @@ func (rs *RecordStore) Lookup(req *dns.Msg) (*dns.Msg, bool) {
 
 	var matched, nameKnown bool
 	for _, r := range recs {
-		rrType, ok := dns.StringToType[strings.ToUpper(r.Type)]
-		if !ok {
-			continue
-		}
-		if rrType != dns.TypeA && rrType != dns.TypeAAAA && rrType != dns.TypeCNAME {
-			continue
-		}
+		rrType := r.rrType
 		nameKnown = true
 		if rrType != q.Qtype {
 			continue
 		}
-		// Compare TTL as int before any uint32 cast: casting first would
-		// truncate large values (e.g. 1<<32+5 -> 5) and dodge the cap, and a
-		// negative would wrap to ~136 years.
-		var ttl uint32
-		if r.TTL <= 0 {
-			ttl = defaultRecordTTL
-		} else if r.TTL > maxRecordTTL {
-			ttl = maxRecordTTL
-		} else {
-			ttl = uint32(r.TTL)
-		}
 		switch rrType {
 		case dns.TypeA:
-			ip := net.ParseIP(strings.TrimSpace(r.Value))
-			if ip == nil || ip.To4() == nil {
-				continue
-			}
 			resp.Answer = append(resp.Answer, &dns.A{
-				Hdr: dns.RR_Header{Name: q.Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: ttl},
-				A:   ip.To4(),
+				Hdr: dns.RR_Header{Name: q.Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: r.ttl},
+				A:   r.ip.To4(),
 			})
 		case dns.TypeAAAA:
-			ip := net.ParseIP(strings.TrimSpace(r.Value))
-			if ip == nil || ip.To4() != nil {
-				continue
-			}
-			v6 := ip.To16()
-			if v6 == nil {
-				continue
-			}
 			resp.Answer = append(resp.Answer, &dns.AAAA{
-				Hdr:  dns.RR_Header{Name: q.Name, Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: ttl},
-				AAAA: v6,
+				Hdr:  dns.RR_Header{Name: q.Name, Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: r.ttl},
+				AAAA: r.ip.To16(),
 			})
 		case dns.TypeCNAME:
 			resp.Answer = append(resp.Answer, &dns.CNAME{
-				Hdr:    dns.RR_Header{Name: q.Name, Rrtype: dns.TypeCNAME, Class: dns.ClassINET, Ttl: ttl},
-				Target: dns.Fqdn(r.Value),
+				Hdr:    dns.RR_Header{Name: q.Name, Rrtype: dns.TypeCNAME, Class: dns.ClassINET, Ttl: r.ttl},
+				Target: dns.Fqdn(r.entry.Value),
 			})
+		default:
+			continue
 		}
 		matched = true
 	}
@@ -303,40 +364,43 @@ func (rs *RecordStore) Lookup(req *dns.Msg) (*dns.Msg, bool) {
 // caller decides — serve() NXDOMAINs non-public reverse locally and forwards
 // the rest. Only exact records participate; a wildcard (*.lan) has no single
 // name to return, so it is skipped.
-// ponytail: linear scan over records per PTR query; build an IP index if the
-// local record set ever grows large.
 func (rs *RecordStore) lookupPTR(req *dns.Msg, qname string) (*dns.Msg, bool) {
 	ip, ok := ptrIPFromArpa(qname)
 	if !ok {
 		return nil, false
 	}
+	// Snapshot index + raw under a short RLock, then build outside the lock so
+	// a large record set doesn't stall SetRecords.
 	rs.mu.RLock()
-	defer rs.mu.RUnlock()
+	indexes := rs.ptrIndex[string(ip.To16())]
+	raw := rs.raw
+	rs.mu.RUnlock()
+	if len(indexes) == 0 {
+		return nil, false
+	}
 	resp := new(dns.Msg)
 	resp.SetReply(req)
 	resp.Authoritative = true
 	resp.RecursionAvailable = true
-	for _, recs := range rs.records {
-		for _, r := range recs {
-			if t := strings.ToUpper(r.Type); t != "A" && t != "AAAA" {
-				continue
-			}
-			if rip := net.ParseIP(r.Value); rip == nil || !rip.Equal(ip) {
-				continue
-			}
-			ttl := uint32(defaultRecordTTL)
-			if r.TTL > 0 {
-				if r.TTL > maxRecordTTL {
-					ttl = maxRecordTTL
-				} else {
-					ttl = uint32(r.TTL)
-				}
-			}
-			resp.Answer = append(resp.Answer, &dns.PTR{
-				Hdr: dns.RR_Header{Name: qname, Rrtype: dns.TypePTR, Class: dns.ClassINET, Ttl: ttl},
-				Ptr: dns.Fqdn(strings.ToLower(strings.TrimSuffix(r.Domain, "."))),
-			})
+	for _, idx := range indexes {
+		if idx < 0 || idx >= len(raw) {
+			continue
 		}
+		r := raw[idx]
+		// Compare TTL as int before any uint32 cast (defensive: SetRecords
+		// already validates 0..maxRecordTTL).
+		ttl := uint32(defaultRecordTTL)
+		if r.TTL > 0 {
+			if r.TTL > maxRecordTTL {
+				ttl = maxRecordTTL
+			} else {
+				ttl = uint32(r.TTL)
+			}
+		}
+		resp.Answer = append(resp.Answer, &dns.PTR{
+			Hdr: dns.RR_Header{Name: qname, Rrtype: dns.TypePTR, Class: dns.ClassINET, Ttl: ttl},
+			Ptr: dns.Fqdn(strings.ToLower(strings.TrimSuffix(r.Domain, "."))),
+		})
 	}
 	if len(resp.Answer) == 0 {
 		return nil, false
@@ -384,15 +448,7 @@ func ptrIPFromArpa(name string) (net.IP, bool) {
 // Hash returns a stable checksum of the current records for reconciliation.
 func (rs *RecordStore) Hash() uint64 {
 	rs.mu.RLock()
-	defer rs.mu.RUnlock()
-	// Collect a flat snapshot so the hash is order-independent of the map
-	// iteration, matching how the controller computes its expected hash.
-	all := make([]control.RecordEntry, 0, len(rs.records)+len(rs.wildcards))
-	for _, recs := range rs.records {
-		all = append(all, recs...)
-	}
-	for _, recs := range rs.wildcards {
-		all = append(all, recs...)
-	}
-	return control.RecordsHash(all)
+	raw := rs.raw
+	rs.mu.RUnlock()
+	return control.RecordsHash(raw)
 }

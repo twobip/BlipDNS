@@ -14,6 +14,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -177,12 +178,19 @@ func (s *Server) Handler() http.Handler {
 	return control.SecurityHeaders(mux)
 }
 
+// dohBodyPool reuses POST body buffers so attacker-sized (up to 64KiB) DoH
+// bodies don't grow via doubling appends per request.
+var dohBodyPool = sync.Pool{New: func() any { return make([]byte, 0, 4096) }}
+
 func (s *Server) handleDoH(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	var req *dns.Msg
 	switch r.Method {
 	case http.MethodGet:
-		v := r.URL.Query().Get("dns")
+		// Only the `dns` param is read: extract it from RawQuery directly
+		// instead of r.URL.Query() which parses + unescapes every param into
+		// a map per request.
+		v := dnsParamFromQuery(r.URL.RawQuery)
 		if v == "" {
 			http.Error(w, "missing dns parameter", http.StatusBadRequest)
 			return
@@ -208,18 +216,37 @@ func (s *Server) handleDoH(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// Bound the body to the RFC 8484 max DNS message size and reject (413)
-		// anything larger rather than silently truncate it.
-		b, err := io.ReadAll(io.LimitReader(r.Body, maxDoHMessage+1))
-		if err != nil {
-			http.Error(w, "read error", http.StatusBadRequest)
-			return
+		// anything larger rather than silently truncate it. Buffer is pooled.
+		buf := dohBodyPool.Get().([]byte)
+		buf = buf[:0]
+		// Grow at most to maxDoHMessage+1 to detect overflow.
+		lr := io.LimitReader(r.Body, maxDoHMessage+1)
+		// Manual read loop into pooled slice to avoid io.ReadAll doubling.
+		tmp := make([]byte, 4096)
+		tooLarge := false
+		for {
+			n, err := lr.Read(tmp)
+			if n > 0 {
+				if len(buf)+n > maxDoHMessage+1 {
+					tooLarge = true
+					break
+				}
+				buf = append(buf, tmp[:n]...)
+			}
+			if err != nil {
+				break
+			}
 		}
-		if len(b) > maxDoHMessage {
+		b := buf
+		if tooLarge || len(b) > maxDoHMessage {
+			dohBodyPool.Put(b[:0])
 			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
 			return
 		}
 		req = new(dns.Msg)
-		if err := req.Unpack(b); err != nil {
+		err := req.Unpack(b)
+		dohBodyPool.Put(b[:0])
+		if err != nil {
 			http.Error(w, "bad dns message", http.StatusBadRequest)
 			return
 		}
@@ -235,7 +262,10 @@ func (s *Server) handleDoH(w http.ResponseWriter, r *http.Request) {
 		// Cloudflare Worker edge cache normalizes /dns-query/<id> to the
 		// bare path (one cache entry per query) and forwards the identity
 		// in X-Device-ID instead. Same validation as the path form.
-		clientID = clientIDFromPath("/dns-query/" + r.Header.Get("X-Device-ID"))
+		// Avoid string concat when the header is empty (common case).
+		if h := r.Header.Get("X-Device-ID"); h != "" {
+			clientID = clientIDFromPath("/dns-query/" + h)
+		}
 	}
 	resp := s.serve(ctx, clientIP, clientID, control.ProtoDoH, req)
 	buf, err := resp.Pack()
@@ -249,12 +279,54 @@ func (s *Server) handleDoH(w http.ResponseWriter, r *http.Request) {
 	// marked private — a shared intermediary cache must not hand one client's
 	// view to another.
 	if age := dohMaxAge(resp); age > 0 {
-		w.Header().Set("Cache-Control", "max-age="+strconv.FormatUint(uint64(age), 10)+", private")
+		var cc [64]byte
+		b := append(cc[:0], "max-age="...)
+		b = strconv.AppendUint(b, uint64(age), 10)
+		b = append(b, ", private"...)
+		w.Header().Set("Cache-Control", string(b))
 	} else {
 		w.Header().Set("Cache-Control", "no-store")
 	}
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(buf)
+}
+
+// dnsParamFromQuery extracts the first `dns` value from a raw query string
+// without allocating the full url.Values map. Percent-encoding is left intact
+// for the base64 decoder path (QueryUnescape is applied by the caller via the
+// standard path only when needed); base64url has no reserved chars that
+// require unescaping beyond what RawURLEncoding tolerates, but '+'/'%' forms
+// from some clients need a single unescape — fall back to Query().Get there.
+func dnsParamFromQuery(raw string) string {
+	for len(raw) > 0 {
+		var kv string
+		if i := strings.IndexByte(raw, '&'); i >= 0 {
+			kv, raw = raw[:i], raw[i+1:]
+		} else {
+			kv, raw = raw, ""
+		}
+		if kv == "" {
+			continue
+		}
+		k, v, hasEq := strings.Cut(kv, "=")
+		if k != "dns" || !hasEq {
+			continue
+		}
+		// Fast path: base64url alphabet needs no unescaping.
+		if strings.IndexAny(v, "%+") < 0 {
+			return v
+		}
+		// Slow path: percent-encoded or '+'-as-space form.
+		if un, err := unescapeQueryValue(v); err == nil {
+			return un
+		}
+		return v
+	}
+	return ""
+}
+
+func unescapeQueryValue(v string) (string, error) {
+	return url.QueryUnescape(v)
 }
 
 // dohMaxAge is the HTTP freshness (seconds) to advertise for a DoH response:
@@ -278,7 +350,21 @@ func dohMaxAge(resp *dns.Msg) uint32 {
 
 // ServeDNS implements dns.Handler for classic DNS.
 func (s *Server) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
-	clientIP, _, _ := net.SplitHostPort(w.RemoteAddr().String())
+	// Zero-alloc client IP: type-assert the packet address instead of
+	// String()+SplitHostPort+ParseIP (3 allocs per query on the old path).
+	var clientIP net.IP
+	switch a := w.RemoteAddr().(type) {
+	case *net.UDPAddr:
+		clientIP = a.IP
+	case *net.TCPAddr:
+		clientIP = a.IP
+	default:
+		if host, _, err := net.SplitHostPort(w.RemoteAddr().String()); err == nil {
+			clientIP = net.ParseIP(host)
+		} else {
+			clientIP = net.ParseIP(w.RemoteAddr().String())
+		}
+	}
 	isUDP := false
 	// The mux serves both UDP and TCP on the same handler; only UDP needs
 	// truncation to 1232 (DNS flag day) to avoid IP fragmentation. TCP can
@@ -290,7 +376,7 @@ func (s *Server) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
 	}
 	ctx, cancel := queryCtx()
 	defer cancel()
-	resp := s.serveInner(ctx, net.ParseIP(clientIP), "", control.ProtoDNS, isUDP, req)
+	resp := s.serveInner(ctx, clientIP, "", control.ProtoDNS, isUDP, req)
 	// Safety net for every early-return path (blocked/local/refused): a large
 	// local answer over UDP must still fit the path MTU.
 	if isUDP && resp != nil && resp.Len() > 1232 {
@@ -401,32 +487,40 @@ func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, prot
 	// Only attribute the self-asserted DoH client-ID when it actually
 	// selected its policy (IP inside that policy's networks). Otherwise the
 	// query is logged as "unverified-id" so one client cannot impersonate
-	// another's identity to escape its own policy.
+	// another's identity to escape its own policy. The log identity renders
+	// lazily: the unlimited default path with no logging must not pay for
+	// IP.String(), and the no-id case reuses one rendering.
 	verifiedID := ""
 	if clientID != "" && s.cfg.Store != nil && s.cfg.Store.ClientIDSelected(clientIP, clientID) {
 		verifiedID = clientID
 	}
-	client := ""
-	if verifiedID != "" {
-		client = verifiedID
-	} else if clientID != "" {
-		log.Printf("blipd: unverified client-id %q from %s", clientID, clientIP.String())
-		client = "unverified-id"
-	} else {
-		// No DoH client-id: the rendered IP is the log identity. The
-		// rate-limit key is derived separately (masked /64 for IPv6).
-		client = clientIP.String()
+	var client string
+	clientRendered := false
+	renderClient := func() string {
+		if !clientRendered {
+			if verifiedID != "" {
+				client = verifiedID
+			} else if clientID != "" {
+				log.Printf("blipd: unverified client-id %q from %s", clientID, clientIP.String())
+				client = "unverified-id"
+			} else {
+				client = clientIP.String()
+			}
+			clientRendered = true
+		}
+		return client
 	}
 	// Per-client rate limit is keyed by the SOURCE IP (post trusted-proxy
 	// resolution, masked to /64 for IPv6), never the DoH client-id path
 	// segment, so an attacker can't rotate /dns-query/{client-id} to get a
 	// fresh bucket. The full IP is kept for policy lookup; only the bucket
-	// key is masked. Excess queries are dropped with REFUSED so abusive
+	// key is masked. The atomic off check keeps the (default) unlimited case
+	// lock- and alloc-free. Excess queries are dropped with REFUSED so abusive
 	// clients can't exhaust upstream. REFUSED queries are tracked separately
 	// (AddRateLimited) and excluded from the query totals / query log: only
 	// queries that actually get resolved count toward throughput, cache and
 	// top-domain stats.
-	if s.rl != nil {
+	if s.rl != nil && !s.rl.off.Load() {
 		if !s.rl.allow(rateLimitKey(clientIP)) {
 			s.cnt.AddRateLimited()
 			resp := new(dns.Msg)
@@ -441,10 +535,10 @@ func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, prot
 	// response-time stat; the deferred closure (a bare deferred call would
 	// evaluate time.Since at registration) covers every return path below.
 	defer func() { s.cnt.AddDuration(time.Since(start)) }()
-	resp := new(dns.Msg)
-	resp.SetReply(req)
-	resp.RecursionAvailable = true // locally-built replies must carry RA like relayed ones
 	if len(req.Question) == 0 {
+		resp := new(dns.Msg)
+		resp.SetReply(req)
+		resp.RecursionAvailable = true
 		resp.Rcode = dns.RcodeFormatError
 		return resp
 	}
@@ -453,51 +547,65 @@ func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, prot
 	// upstream: they disclose the upstream's identity (PoP names) and a
 	// resolver has no CHAOS data of its own to give.
 	if q.Qclass == dns.ClassCHAOS {
+		resp := new(dns.Msg)
+		resp.SetReply(req)
+		resp.RecursionAvailable = true
 		resp.Rcode = dns.RcodeRefused
 		return resp
 	}
+	resp := new(dns.Msg)
+	resp.SetReply(req)
+	resp.RecursionAvailable = true // locally-built replies must carry RA like relayed ones
 	// ANY (255) and AXFR (252) are refused: ANY amplifies reflection attacks
 	// and AXFR is a zone transfer, never a resolver query.
 	if q.Qtype == dns.TypeANY || q.Qtype == dns.TypeAXFR {
 		resp.Rcode = dns.RcodeRefused
 		return resp
 	}
-	// The DNS wire format always carries the root dot ("google.com."); strip it
-	// so logs and the query log show the bare domain name.
-	domain := strings.TrimSuffix(q.Name, ".")
+	// Normalize once (ASCII fast path, no alloc when already lowercase) and
+	// reuse for blocklist, filter Check and cache key — the old path lowercased
+	// 3-4x per query.
+	domain := filter.NormalizeName(q.Name)
+
+	// Single filter evaluation: one lookup + one allow walk + one block walk.
+	// Replaces the old Allowed+Classify+BlockSource triple (2-3x CIDR scans).
+	allowed, blocked, action, upstreamOverride, doLog, source := s.cfg.Store.Check(clientIP, clientID, domain)
 
 	// Check global blocklist first (applied to all clients). A per-client
 	// allowlist always wins: a domain the client's policy whitelists is never
 	// blocked by the global blocklist (or any policy block list).
-	if s.cfg.Blocklist != nil && s.cfg.Blocklist.IsBlocked(domain) && !s.cfg.Store.Allowed(clientIP, clientID, domain) {
+	if s.cfg.Blocklist != nil && s.cfg.Blocklist.IsBlocked(domain) && !allowed {
 		s.cnt.AddBlocked()
-		s.notifyBlock(req, resp, client, domain, "global", proto, start)
+		c := renderClient()
+		s.notifyBlock(req, resp, c, domain, "global", proto, start)
 		if s.logfn != nil {
-			s.logfn(client, domain)
+			s.logfn(c, domain)
 		}
 		applyBlockAction(resp, q, s.cfg.BlockAction)
 		return resp
 	}
 
-	blocked, action, upstreamOverride, log := s.cfg.Store.Classify(clientIP, clientID, domain)
 	if blocked {
 		s.cnt.AddBlocked()
-		s.notifyBlock(req, resp, client, domain, s.cfg.Store.BlockSource(clientIP, clientID, domain), proto, start)
-		if log && s.logfn != nil {
-			s.logfn(client, domain)
+		c := renderClient()
+		s.notifyBlock(req, resp, c, domain, source, proto, start)
+		if doLog && s.logfn != nil {
+			s.logfn(c, domain)
 		}
 		applyBlockAction(resp, q, action)
 		return resp
 	}
 
-	if log && s.logfn != nil {
-		s.logfn(client, domain)
+	if doLog && s.logfn != nil {
+		s.logfn(renderClient(), domain)
 	}
 
 	// Resolve the upstream. Order: a conditional-forwarding route (query name
 	// + client CIDR) wins; otherwise a per-policy upstream override that only
 	// applies when no route matched; otherwise the automatic rotation.
 	// Check local static records first — these short-circuit before cache/upstream.
+	// Snapshot the pool once so Match+Auto+LabelFor cost one RLock, not three.
+	pool := s.safePool()
 	if s.rec != nil {
 		if recResp, ok := s.rec.Lookup(req); ok {
 			if s.ctrl.HasWatchers() {
@@ -505,7 +613,7 @@ func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, prot
 					Type:       "pass",
 					Proto:      proto,
 					At:         time.Now(),
-					Client:     client,
+					Client:     renderClient(),
 					Domain:     domain,
 					QType:      qType(req),
 					Answers:    answersFor(req, recResp),
@@ -518,7 +626,7 @@ func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, prot
 			return out
 		}
 	}
-	resolver, matchedRoute := s.upstreamFor(q.Name, clientIP)
+	resolver, matchedRoute := s.upstreamForWithPool(pool, q.Name, clientIP)
 	// Private reverse lookups never leave the box: a non-public IP has no
 	// public PTR, so forwarding it only burns upstream quota (and leaks LAN
 	// structure). An explicit conditional-forwarding route or per-policy
@@ -534,25 +642,32 @@ func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, prot
 		resolver, err = s.overrideResolver(upstreamOverride)
 		if err != nil {
 			s.cnt.AddUpErr()
-			s.notifyUpstreamError(client, domain, fmt.Sprintf("invalid upstream override %q: %v", upstreamOverride, err))
+			s.notifyUpstreamError(renderClient(), domain, "invalid upstream override "+strconv.Quote(upstreamOverride)+": "+err.Error())
 			resp.Rcode = dns.RcodeServerFailure
 			return resp
 		}
 	}
 	if resolver == nil {
 		s.cnt.AddUpErr()
-		s.notifyUpstreamError(client, domain, "no upstream configured")
+		s.notifyUpstreamError(renderClient(), domain, "no upstream configured")
 		resp.Rcode = dns.RcodeServerFailure
 		return resp
 	}
-	upstreamLabel := s.upstreamLabel(resolver, matchedRoute, upstreamOverride)
+	upstreamLabel := upstreamLabelWithPool(pool, resolver, matchedRoute, upstreamOverride)
 
 	// Never forward the client subnet upstream (RFC 7871 privacy): strip the
 	// EDNS0_SUBNET option from the query OPT before it is cached or resolved.
-	// KeyOf already partitions on the DO bit, and the subnet option is not
-	// part of the key, so distinct subnets share one cache entry.
+	// The key partitions on the DO bit, and the subnet option is not part of
+	// the key, so distinct subnets share one cache entry. The qname is already
+	// normalized above; only the DO bit is read here (no second ToLower).
+	// stripSubnet preserves all other OPT options (including DO), so the bit
+	// can be read either side of the strip.
+	do := false
+	if opt := req.IsEdns0(); opt != nil && opt.Do() {
+		do = true
+	}
 	stripSubnet(req)
-	key := cache.KeyOf(req)
+	key := cache.KeyOfNormalized(q.Name, q.Qtype, q.Qclass, do)
 	if upstreamLabel != "" {
 		// Partition the cache by the resolver that will answer: routes and
 		// per-policy overrides can give different clients different answers
@@ -562,15 +677,17 @@ func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, prot
 		key.Label = upstreamLabel
 	}
 	// classifyTarget applies the same policy/blocklist decision used for the
-	// qname to a CNAME/DNAME target.
+	// qname to a CNAME/DNAME target. Single Check evaluation on the normalized
+	// target (one lookup + one allow/block walk) instead of the
+	// Allowed+Classify+BlockSource triple.
 	classifyTarget := func(target string) (bool, filter.BlockAction, string, bool) {
-		bare := strings.TrimSuffix(target, ".")
-		if s.cfg.Blocklist != nil && s.cfg.Blocklist.IsBlocked(bare) && !s.cfg.Store.Allowed(clientIP, clientID, bare) {
+		bare := filter.NormalizeName(target)
+		allowed, blocked, action, _, doLog, source := s.cfg.Store.Check(clientIP, clientID, bare)
+		if s.cfg.Blocklist != nil && s.cfg.Blocklist.IsBlocked(bare) && !allowed {
 			return true, s.cfg.BlockAction, "global", true
 		}
-		blocked, action, _, lg := s.cfg.Store.Classify(clientIP, clientID, bare)
 		if blocked {
-			return true, action, s.cfg.Store.BlockSource(clientIP, clientID, bare), lg
+			return true, action, source, doLog
 		}
 		return false, "", "", false
 	}
@@ -624,15 +741,16 @@ func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, prot
 			if notifyDomain == "" {
 				notifyDomain = domain
 			}
-			s.notifyBlock(req, blockedResp, client, notifyDomain, cbe.source, proto, start)
+			c := renderClient()
+			s.notifyBlock(req, blockedResp, c, notifyDomain, cbe.source, proto, start)
 			if s.logfn != nil && (cbe.shouldLog || cbe.source == "global") {
-				s.logfn(client, notifyDomain)
+				s.logfn(c, notifyDomain)
 			}
 			applyBlockAction(blockedResp, q, cbe.action)
 			return blockedResp
 		}
 		s.cnt.AddUpErr()
-		s.notifyUpstreamError(client, domain, upstreamErrText(upstreamLabel, err))
+		s.notifyUpstreamError(renderClient(), domain, upstreamErrText(upstreamLabel, err))
 		resp.Rcode = dns.RcodeServerFailure
 		return resp
 	}
@@ -677,9 +795,9 @@ func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, prot
 			src = cbe.source
 			lg = cbe.shouldLog
 		}
-		s.notifyBlock(req, blockedResp, client, notifyDomain, src, proto, start)
+		s.notifyBlock(req, blockedResp, renderClient(), notifyDomain, src, proto, start)
 		if s.logfn != nil && (lg || src == "global") {
-			s.logfn(client, notifyDomain)
+			s.logfn(renderClient(), notifyDomain)
 		}
 		applyBlockAction(blockedResp, q, act)
 		return blockedResp
@@ -709,7 +827,7 @@ func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, prot
 			Type:       "pass",
 			Proto:      proto,
 			At:         time.Now(),
-			Client:     client,
+			Client:     renderClient(),
 			Domain:     domain,
 			QType:      qType(req),
 			IPs:        ips,
@@ -798,8 +916,12 @@ func upstreamErrText(upstream string, err error) string {
 }
 
 // notifyUpstreamError streams an upstream failure to the controller so it can
-// be shown on the Upstream Errors page.
+// be shown on the Upstream Errors page. Skipped entirely when nobody is
+// streaming (which is exactly when upstream is down and this would hurt most).
 func (s *Server) notifyUpstreamError(client, domain, msg string) {
+	if !s.ctrl.HasWatchers() {
+		return
+	}
 	s.ctrl.Notify(control.WatchEvent{
 		Type:   "error",
 		At:     time.Now(),

@@ -32,7 +32,8 @@ func (s *Server) upstreamAuto() upstream.Resolver {
 // routes, and bootstrap DNS servers. Passing nil/empty for all reverts to the
 // blipd config-file upstream. This implements control.LocalResolverController
 // so the management API can reconfigure forwarding at runtime (the controller
-// pushes from Settings).
+// pushes from Settings). The replaced pool's idle DoH keepalives are closed so
+// fleet pushes don't leak Transports and thunder-reconnect.
 func (s *Server) SetUpstream(servers []upstream.UpstreamServer, routes []upstream.UpstreamRoute, bootstrap []upstream.UpstreamServer) error {
 	pool, err := upstream.NewPoolWithBootstrap(servers, routes, s.cfg.Upstream, bootstrap)
 	if err != nil {
@@ -42,8 +43,11 @@ func (s *Server) SetUpstream(servers []upstream.UpstreamServer, routes []upstrea
 	prev := s.pool
 	s.pool = pool
 	s.upMu.Unlock()
-	if prev != nil && pool != nil {
-		log.Printf("blipd: upstream pool replaced (was %d servers, now %d)", len(prev.Servers()), len(pool.Servers()))
+	if prev != nil {
+		prev.CloseIdleConnections()
+		if pool != nil {
+			log.Printf("blipd: upstream pool replaced (was %d servers, now %d)", len(prev.Servers()), len(pool.Servers()))
+		}
 	}
 	return nil
 }
@@ -63,17 +67,26 @@ func (s *Server) Upstream() ([]upstream.UpstreamServer, []upstream.UpstreamRoute
 // then the automatic rotation. The per-policy upstream override is applied by
 // the caller when routeResolved is false.
 func (s *Server) upstreamFor(name string, clientIP net.IP) (r upstream.Resolver, routeResolved bool) {
-	p := s.safePool()
+	return s.upstreamForWithPool(s.safePool(), name, clientIP)
+}
+
+// upstreamForWithPool is upstreamFor against an already-snapshotted pool so
+// the hot path takes one RLock per query instead of three (Match + Auto +
+// LabelFor each locked separately).
+func (s *Server) upstreamForWithPool(p *upstream.ResolverPool, name string, clientIP net.IP) (r upstream.Resolver, routeResolved bool) {
 	if p != nil {
 		if m := p.Match(name, clientIP); m != nil {
 			return m, true
 		}
+		return p.Auto(), false
 	}
-	return s.upstreamAuto(), false
+	return nil, false
 }
 
 // overrideResolver returns the memoized resolver for a per-policy upstream
-// spec string, building it once on first use.
+// spec string, building it once on first use. The memo is capped (LRU-ish
+// random eviction with idle-close) so distinct override strings can't grow
+// Transports forever.
 func (s *Server) overrideResolver(spec string) (upstream.Resolver, error) {
 	if r, ok := s.overrides.Load(spec); ok {
 		return r.(upstream.Resolver), nil
@@ -82,7 +95,30 @@ func (s *Server) overrideResolver(spec string) (upstream.Resolver, error) {
 	if err != nil {
 		return nil, err
 	}
-	actual, _ := s.overrides.LoadOrStore(spec, r)
+	actual, loaded := s.overrides.LoadOrStore(spec, r)
+	if !loaded {
+		// Cap distinct specs: evict one arbitrary entry when over budget.
+		count := 0
+		s.overrides.Range(func(k, v any) bool { count++; return count <= 64 })
+		if count > 64 {
+			s.overrides.Range(func(k, v any) bool {
+				if ks, ok := k.(string); ok && ks != spec {
+					if old, loaded := s.overrides.LoadAndDelete(ks); loaded {
+						if d, ok := old.(interface{ CloseIdleConnections() }); ok {
+							d.CloseIdleConnections()
+						}
+					}
+					return false
+				}
+				return true
+			})
+		}
+		return r, nil
+	}
+	// Lost the race: close the throwaway's idle conns if DoH-backed.
+	if d, ok := r.(interface{ CloseIdleConnections() }); ok {
+		d.CloseIdleConnections()
+	}
 	return actual.(upstream.Resolver), nil
 }
 
@@ -91,10 +127,15 @@ func (s *Server) overrideResolver(spec string) (upstream.Resolver, error) {
 // took effect is labeled with its spec; otherwise the pool names the resolver
 // (named server or automatic rotation).
 func (s *Server) upstreamLabel(resolver upstream.Resolver, matchedRoute bool, override string) string {
+	return upstreamLabelWithPool(s.safePool(), resolver, matchedRoute, override)
+}
+
+// upstreamLabelWithPool is upstreamLabel against an already-snapshotted pool.
+func upstreamLabelWithPool(p *upstream.ResolverPool, resolver upstream.Resolver, matchedRoute bool, override string) string {
 	if !matchedRoute && override != "" {
 		return "override: " + override
 	}
-	if p := s.safePool(); p != nil {
+	if p != nil {
 		if l := p.LabelFor(resolver); l != "" {
 			return l
 		}

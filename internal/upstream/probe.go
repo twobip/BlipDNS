@@ -58,6 +58,13 @@ func ProbeServerWithBootstrap(ctx context.Context, sv UpstreamServer, qname stri
 		res.Error = err.Error()
 		return res
 	}
+	// Throwaway resolvers mint a Transport each; close idle keepalives so Test
+	// clicks don't accumulate pools.
+	defer func() {
+		if c, ok := r.(interface{ CloseIdleConnections() }); ok {
+			c.CloseIdleConnections()
+		}
+	}()
 	// Warm a hostname DoH endpoint through bootstrap on the caller's context,
 	// then pin the timed query's dial to the warmed IPs: otherwise the
 	// bootstrap A+AAAA lookups burn the per-server budget and a slow bootstrap
@@ -122,6 +129,7 @@ func warmDoHEndpoint(ctx context.Context, doh *DoHResolver, timeout time.Duratio
 		return nil, nil
 	}
 	pinned := NewDoHWithBootstrap(doh.endpoint, timeout, &staticResolver{host: host, ips: ips})
+	defer pinned.CloseIdleConnections()
 	return pinned, nil
 }
 

@@ -54,8 +54,12 @@ func New(ttlCap time.Duration, maxEntries int) *Cache {
 	if ttlCap <= 0 {
 		ttlCap = time.Hour
 	}
+	hint := maxEntries
+	if hint < 0 {
+		hint = 0
+	}
 	return &Cache{
-		items:      make(map[Key]*entry),
+		items:      make(map[Key]*entry, hint),
 		lru:        list.New(),
 		ttlCap:     ttlCap,
 		maxEntries: maxEntries,
@@ -82,11 +86,31 @@ func KeyOf(m *dns.Msg) Key {
 		return Key{}
 	}
 	q := m.Question[0]
-	k := Key{Name: strings.ToLower(q.Name), QType: q.Qtype, QClass: q.Qclass}
+	return KeyOfNormalized(q.Name, q.Qtype, q.Qclass, doBit(m))
+}
+
+// doBit reports the DNSSEC DO bit from the query OPT (DO=1 answers carry
+// RRSIGs and must not share cache entries with DO=0).
+func doBit(m *dns.Msg) bool {
 	if opt := m.IsEdns0(); opt != nil && opt.Do() {
-		k.DO = true
+		return true
 	}
-	return k
+	return false
+}
+
+// KeyOfNormalized returns the cache key for an already-lowercased FQDN plus
+// type/class/DO. Use it when the caller already normalized the qname (e.g. the
+// DNS serve path) to avoid a second strings.ToLower allocation per query.
+func KeyOfNormalized(fqdn string, qtype, qclass uint16, do bool) Key {
+	// DNS names are ASCII: fast-path the common already-lowercase case.
+	lower := fqdn
+	for i := 0; i < len(fqdn); i++ {
+		if c := fqdn[i]; c >= 'A' && c <= 'Z' {
+			lower = strings.ToLower(fqdn)
+			break
+		}
+	}
+	return Key{Name: lower, QType: qtype, QClass: qclass, DO: do}
 }
 
 // String renders the key as "name|qtype|qclass|label|do". Not used on the cache
@@ -162,19 +186,17 @@ func (c *Cache) Get(k Key) (*dns.Msg, bool) {
 	if now.After(e.expire) {
 		c.mu.RUnlock()
 		// Expired: take the exclusive lock to delete it (or use a value a
-		// concurrent Set refreshed in the meantime).
+		// concurrent Set refreshed in the meantime). Single clock read, single
+		// re-lookup under the write lock.
 		c.mu.Lock()
-		var fresh *entry
-		if e2, ok2 := c.items[k]; ok2 && !c.now().After(e2.expire) {
-			fresh = e2
-		}
-		if fresh != nil {
-			e = fresh
-			now = c.now()
-			c.mu.Unlock()
-			goto copy
-		}
+		now2 := c.now()
 		if e2, ok2 := c.items[k]; ok2 {
+			if !now2.After(e2.expire) {
+				e = e2
+				now = now2
+				c.mu.Unlock()
+				goto copy
+			}
 			delete(c.items, k)
 			c.lru.Remove(e2.elem)
 		}
@@ -228,6 +250,8 @@ copy:
 // Set stores a response for its record TTL (capped at ttlCap), evicting the
 // least-recently-used entry if the cache is over its size limit. Setting an
 // existing key refreshes its value and TTL but preserves its hit count.
+// The message copy happens outside the exclusive lock so large responses
+// don't stall concurrent readers.
 func (c *Cache) Set(k Key, m *dns.Msg) {
 	if k.Name == "" || m == nil {
 		return
@@ -244,16 +268,18 @@ func (c *Cache) Set(k Key, m *dns.Msg) {
 	if ttl > c.ttlCap {
 		ttl = c.ttlCap
 	}
+	cp := m.Copy()
+	expire := now.Add(ttl)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if e, ok := c.items[k]; ok {
-		e.msg = m.Copy()
-		e.expire = now.Add(ttl)
+		e.msg = cp
+		e.expire = expire
 		c.lru.MoveToFront(e.elem)
 		return
 	}
-	e := &entry{key: k, msg: m.Copy()}
-	e.expire = now.Add(ttl)
+	e := &entry{key: k, msg: cp}
+	e.expire = expire
 	e.elem = c.lru.PushFront(e)
 	c.items[k] = e
 	c.evictLocked()
@@ -326,7 +352,7 @@ func (c *Cache) DoHit(ctx context.Context, k Key, fn func() (*dns.Msg, error)) (
 func (c *Cache) Purge() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.items = make(map[Key]*entry)
+	c.items = make(map[Key]*entry, len(c.items))
 	c.lru.Init()
 }
 

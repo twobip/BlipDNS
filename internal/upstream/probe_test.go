@@ -50,6 +50,7 @@ func TestProbeServerUnreachable(t *testing.T) {
 }
 
 func TestProbeWarmsBootstrapBeforeQueryTimeout(t *testing.T) {
+	clearBootstrapCache()
 	// A DoH endpoint whose hostname resolves via a slow bootstrap: warm-up
 	// must run on the caller's context and pin the result, so the timed query
 	// never consults the slow bootstrap again. Bootstrap answers after 3s;
@@ -86,6 +87,7 @@ func TestProbeWarmsBootstrapBeforeQueryTimeout(t *testing.T) {
 }
 
 func TestProbeDeadBootstrapSurfacesBootstrapError(t *testing.T) {
+	clearBootstrapCache()
 	// Caller context already expired: the pre-warm must blame bootstrap, not
 	// the query's "context deadline exceeded".
 	dead := &failBootstrap{}
