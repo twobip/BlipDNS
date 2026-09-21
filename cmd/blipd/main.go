@@ -6,7 +6,6 @@ import (
 	"crypto/tls"
 	"flag"
 	"log"
-	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -53,7 +52,7 @@ func main() {
 		log.Fatalf("blipd: %v", err)
 	}
 	config.WarnConfigPerms("blipd", *cfgPath)
-	warnPlainHTTP("blipd", "management API", cfg.AdminAddr)
+	config.WarnPlainHTTP("blipd", "management API", cfg.AdminAddr, "bearer tokens")
 
 	store := filter.NewStore(cfg.Default)
 	for _, p := range cfg.Policies {
@@ -264,17 +263,4 @@ func dohScheme(cfg *config.Config) string {
 		return "https"
 	}
 	return "http"
-}
-
-// warnPlainHTTP logs when a credential-bearing HTTP listener binds beyond
-// loopback without TLS (bearer tokens cross the wire in cleartext there).
-func warnPlainHTTP(prog, what, addr string) {
-	h, _, err := net.SplitHostPort(addr)
-	if err != nil {
-		return
-	}
-	if h == "" || h == "127.0.0.1" || h == "::1" || h == "localhost" {
-		return
-	}
-	log.Printf("%s: WARNING: %s on %s is plain HTTP on a non-loopback address; bearer tokens are sniffable. Terminate TLS in front of it.", prog, what, addr)
 }

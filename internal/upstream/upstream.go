@@ -311,7 +311,7 @@ func NewDoHWithBootstrap(endpoint string, timeout time.Duration, bootstrap Resol
 		MaxIdleConnsPerHost:   32,
 		IdleConnTimeout:       90 * time.Second,
 		ForceAttemptHTTP2:     true,
-		TLSHandshakeTimeout:   minDuration(timeout, 10*time.Second),
+		TLSHandshakeTimeout:   min(timeout, 10*time.Second),
 		ResponseHeaderTimeout: timeout,
 		ExpectContinueTimeout: 1 * time.Second,
 	}
@@ -334,13 +334,6 @@ func NewDoHWithBootstrap(endpoint string, timeout time.Duration, bootstrap Resol
 		},
 		bootstrap: bootstrap,
 	}
-}
-
-func minDuration(a, b time.Duration) time.Duration {
-	if a < b {
-		return a
-	}
-	return b
 }
 
 // CloseIdleConnections closes idle DoH keepalives so a replaced pool doesn't

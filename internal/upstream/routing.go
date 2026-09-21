@@ -183,15 +183,6 @@ func NewPoolWithAuto(r Resolver) *ResolverPool {
 	return &ResolverPool{auto: r, autoLabel: label}
 }
 
-func serverPriority(servers []UpstreamServer, name string) int {
-	for _, sv := range servers {
-		if sv.Name == name || (sv.Name == "" && "server#"+sv.Address == name) {
-			return sv.Priority
-		}
-	}
-	return 0
-}
-
 // fromServerSpec builds a single resolver from one endpoint spec and timeout.
 // A server address must name exactly one endpoint (the multi-token form belongs
 // to the legacy `upstream:` string, handled by FromSpec).

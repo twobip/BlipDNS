@@ -4,6 +4,7 @@ package config
 import (
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"strings"
 	"time"
@@ -101,4 +102,18 @@ func WarnConfigPerms(prog, path string) {
 	if m := fi.Mode().Perm(); m&0o077 != 0 {
 		log.Printf("%s: WARNING: config file %s is group/world-accessible (mode %04o); it may contain credentials. Use `chmod 600 %s`.", prog, path, m, path)
 	}
+}
+
+// WarnPlainHTTP logs when a credential-bearing HTTP listener binds beyond
+// loopback without TLS (secrets cross the wire in cleartext there).
+// secretKind names what is exposed, e.g. "bearer tokens" or "session cookies".
+func WarnPlainHTTP(prog, what, addr, secretKind string) {
+	h, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return
+	}
+	if h == "" || h == "127.0.0.1" || h == "::1" || h == "localhost" {
+		return
+	}
+	log.Printf("%s: WARNING: %s on %s is plain HTTP on a non-loopback address; %s are sniffable. Terminate TLS in front of it.", prog, what, addr, secretKind)
 }
