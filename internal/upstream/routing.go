@@ -298,6 +298,29 @@ func (p *ResolverPool) Bootstrap() []UpstreamServer {
 	return p.bootstrap
 }
 
+// CloseIdleConnections closes idle keepalives on DoH resolvers so a replaced
+// pool doesn't leak Transports until the 90s idle timeout. Safe on nil pool.
+func (p *ResolverPool) CloseIdleConnections() {
+	if p == nil {
+		return
+	}
+	closeOne := func(r Resolver) {
+		if c, ok := r.(interface{ CloseIdleConnections() }); ok {
+			c.CloseIdleConnections()
+		}
+	}
+	for _, r := range p.named {
+		closeOne(r)
+	}
+	if m, ok := p.auto.(*MultiResolver); ok {
+		for _, r := range m.resolvers {
+			closeOne(r)
+		}
+	} else {
+		closeOne(p.auto)
+	}
+}
+
 // Match returns the resolver for the best-matching route (longest qname suffix,
 // restricted to a matching client CIDR), or nil if no route matches.
 func (p *ResolverPool) Match(qname string, client net.IP) Resolver {

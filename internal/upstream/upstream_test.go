@@ -119,7 +119,7 @@ func TestTLSResolverReusesConnection(t *testing.T) {
 		t.Fatalf("server accepted %d connections for 2 queries, want 1 (reuse)", n)
 	}
 	// A server-closed idle connection redials transparently on next use.
-	r.conn.Close()
+	r.dropIdle()
 	if _, err := r.Resolve(context.Background(), q); err != nil {
 		t.Fatalf("Resolve after close: %v", err)
 	}
@@ -592,6 +592,7 @@ func (s *stubBootstrapResolver) Resolve(ctx context.Context, q *dns.Msg) (*dns.M
 }
 
 func TestDoHBootstrapResolve(t *testing.T) {
+	clearBootstrapCache()
 	// A plain-HTTP DoH endpoint ("doh.test:PORT"): TLS is not involved, so the
 	// only hostname handling that must happen is the bootstrap resolution.
 	done := make(chan struct{})

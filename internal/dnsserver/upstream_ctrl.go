@@ -32,7 +32,8 @@ func (s *Server) upstreamAuto() upstream.Resolver {
 // routes, and bootstrap DNS servers. Passing nil/empty for all reverts to the
 // blipd config-file upstream. This implements control.LocalResolverController
 // so the management API can reconfigure forwarding at runtime (the controller
-// pushes from Settings).
+// pushes from Settings). The replaced pool's idle DoH keepalives are closed so
+// fleet pushes don't leak Transports and thunder-reconnect.
 func (s *Server) SetUpstream(servers []upstream.UpstreamServer, routes []upstream.UpstreamRoute, bootstrap []upstream.UpstreamServer) error {
 	pool, err := upstream.NewPoolWithBootstrap(servers, routes, s.cfg.Upstream, bootstrap)
 	if err != nil {
@@ -42,8 +43,11 @@ func (s *Server) SetUpstream(servers []upstream.UpstreamServer, routes []upstrea
 	prev := s.pool
 	s.pool = pool
 	s.upMu.Unlock()
-	if prev != nil && pool != nil {
-		log.Printf("blipd: upstream pool replaced (was %d servers, now %d)", len(prev.Servers()), len(pool.Servers()))
+	if prev != nil {
+		prev.CloseIdleConnections()
+		if pool != nil {
+			log.Printf("blipd: upstream pool replaced (was %d servers, now %d)", len(prev.Servers()), len(pool.Servers()))
+		}
 	}
 	return nil
 }
@@ -80,7 +84,9 @@ func (s *Server) upstreamForWithPool(p *upstream.ResolverPool, name string, clie
 }
 
 // overrideResolver returns the memoized resolver for a per-policy upstream
-// spec string, building it once on first use.
+// spec string, building it once on first use. The memo is capped (LRU-ish
+// random eviction with idle-close) so distinct override strings can't grow
+// Transports forever.
 func (s *Server) overrideResolver(spec string) (upstream.Resolver, error) {
 	if r, ok := s.overrides.Load(spec); ok {
 		return r.(upstream.Resolver), nil
@@ -89,7 +95,30 @@ func (s *Server) overrideResolver(spec string) (upstream.Resolver, error) {
 	if err != nil {
 		return nil, err
 	}
-	actual, _ := s.overrides.LoadOrStore(spec, r)
+	actual, loaded := s.overrides.LoadOrStore(spec, r)
+	if !loaded {
+		// Cap distinct specs: evict one arbitrary entry when over budget.
+		count := 0
+		s.overrides.Range(func(k, v any) bool { count++; return count <= 64 })
+		if count > 64 {
+			s.overrides.Range(func(k, v any) bool {
+				if ks, ok := k.(string); ok && ks != spec {
+					if old, loaded := s.overrides.LoadAndDelete(ks); loaded {
+						if d, ok := old.(interface{ CloseIdleConnections() }); ok {
+							d.CloseIdleConnections()
+						}
+					}
+					return false
+				}
+				return true
+			})
+		}
+		return r, nil
+	}
+	// Lost the race: close the throwaway's idle conns if DoH-backed.
+	if d, ok := r.(interface{ CloseIdleConnections() }); ok {
+		d.CloseIdleConnections()
+	}
 	return actual.(upstream.Resolver), nil
 }
 
