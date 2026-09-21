@@ -53,6 +53,7 @@ const fmtLat = (us) => {
 // without needing to Refresh, as long as those rows are rendered.
 let clockTimer = null;
 function tickRelativeTimes() {
+  if (document.hidden) return;
   document.querySelectorAll(".t[data-t]").forEach((t) => {
     const ts = t.dataset.t;
     if (!ts) return;
@@ -63,7 +64,9 @@ function tickRelativeTimes() {
 function startClock() {
   if (clockTimer) return;
   tickRelativeTimes();
-  clockTimer = setInterval(tickRelativeTimes, 1000);
+  clockTimer = setInterval(tickRelativeTimes, 10000); // ponytail: was 1s —
+// rewriting every timestamp in the DOM each second kept the renderer busy
+// during scroll; 10s keeps labels roughly fresh for ~0 cost.
 }
 
 /* ---------- icons ---------- */
@@ -587,6 +590,7 @@ async function renderQueries() {
   const tb = $("q-tbody");
   qTip.hide();
   qPage = { offset: 0, total: 0, ended: false, loading: false, rows: [] };
+  tb.innerHTML = ""; // append-only renderer: drop stale rows from prior filter
   propsInstanceOptions();
   await fetchQueryPage(tb);
 }
@@ -608,7 +612,7 @@ async function fetchQueryPage(tb) {
     qPage.offset += page.length;
     qPage.rows = qPage.rows.concat(page);
     qPage.ended = page.length < QL_PAGE || qPage.rows.length >= qPage.total;
-    renderQueryRows(tb);
+    renderQueryRows(tb, page);
   } catch (e) {
     tb.innerHTML = `<tr class="empty-row"><td colspan="7"><div class="empty"><div class="empty-ic">${IC.warn}</div><h4>Query log unavailable</h4><p>${esc(e.message)}</p></div></td></tr>`;
     qPage.ended = true;
@@ -618,18 +622,32 @@ async function fetchQueryPage(tb) {
   observeQuerySentinel();
 }
 
-function renderQueryRows(tb) {
+function renderQueryRows(tb, page) {
   if (!qPage.rows.length) {
     tb.innerHTML = `
       <tr class="empty-row"><td colspan="7"><div class="empty"><div class="empty-ic">${IC.query}</div><h4>No queries</h4><p>Nothing matched in the last 24 hours.</p></div></td></tr>
       <tr id="q-sentinel"><td colspan="7"></td></tr>`;
     return;
   }
-  const rows = qPage.rows.map((r) => queryRowHtml(r)).join("");
+  // ponytail: append-only (O(n) total, not O(n²)) — a full innerHTML rebuild
+  // per page re-parsed every row and spiked CPU while scrolling deep.
   const count = qPage.total > 0 ? qPage.total : qPage.rows.length;
   $("q-count").textContent = qPage.rows.length + " of " + count + " entries loaded";
-  tb.innerHTML = rows + `<tr id="q-sentinel"><td colspan="7"></td></tr>`;
-  tb.querySelectorAll(".t").forEach((t) => { t.textContent = timeAgo(t.dataset.t); });
+  if (!page.length) return;
+  const wrap = document.createElement("tbody");
+  wrap.innerHTML = page.map((r) => queryRowHtml(r)).join("");
+  wrap.querySelectorAll(".t").forEach((t) => { t.textContent = timeAgo(t.dataset.t); });
+  const sentinel = $("q-sentinel");
+  if (!sentinel) {
+    tb.innerHTML = "";
+    tb.append(...wrap.childNodes);
+    const s = document.createElement("tr");
+    s.id = "q-sentinel";
+    s.innerHTML = `<td colspan="7"></td>`;
+    tb.append(s);
+    return;
+  }
+  sentinel.before(...wrap.childNodes);
 }
 
 // Observe the sentinel <tr> at the bottom of the table; when it scrolls into

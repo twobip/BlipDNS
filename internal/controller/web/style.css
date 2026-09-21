@@ -370,9 +370,10 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
 #view-queries .tbl { font-size: 13.5px; table-layout: fixed; }
 #view-queries .tbl thead th {
   position: sticky; top: 0; z-index: 5;
-  background: rgba(24,27,34,.96); backdrop-filter: blur(6px);
+  background: var(--surface-2);
   padding: 11px 16px;
 }
+#view-queries .tbl tbody tr { transition: none; }
 #view-queries .tbl tbody td { padding: 13px 16px; }
 #view-queries .tbl>thead th:nth-child(1) { width: 96px; }
 #view-queries .tbl>thead th:nth-child(2) { width: auto; }
