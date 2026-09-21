@@ -2087,13 +2087,18 @@ $("bl-add").onclick = async () => {
 $("bl-add-input").addEventListener("keydown", (e) => { if (e.key === "Enter") $("bl-add").click(); });
 $("bl-url-input").addEventListener("keydown", (e) => { if (e.key === "Enter") $("bl-url-add").click(); });
 $("bl-url-add").onclick = () => {
-  const u = ($("bl-url-input").value || "").trim();
-  if (!u) return toast("enter a source URL", "err");
-  if (!/^https?:\/\//i.test(u)) return toast("URL must start with http(s)://", "err");
-  if (blSources.includes(u)) return toast("source already added", "err");
-  blSources.push(u);
+  // ponytail: split on whitespace so a pasted list of URLs is added in one go.
+  const parts = ($("bl-url-input").value || "").split(/\s+/).map((s) => s.trim()).filter(Boolean);
+  if (!parts.length) return toast("enter a source URL", "err");
+  let added = 0;
+  for (const u of parts) {
+    if (!/^https?:\/\//i.test(u)) { toast("skipped (not a URL): " + u.slice(0, 60), "err"); continue; }
+    if (blSources.includes(u)) continue;
+    blSources.push(u); added++;
+  }
   $("bl-url-input").value = "";
   renderSources();
+  toast(added ? `added ${added} source${added > 1 ? "s" : ""} — hit Update now` : "nothing new to add");
 };
 $("bl-update").onclick = updateBlocklist;
 $("bl-log-clear").onclick = async () => {

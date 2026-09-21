@@ -352,7 +352,7 @@ func NewQueryLogStore(dbPath string) (*QueryLogStore, error) {
 			return nil, fmt.Errorf("chmod query log db dir: %w", err)
 		}
 	}
-	db, err := sql.Open("sqlite", dbPath)
+	db, err := sql.Open("sqlite", withBusyTimeout(dbPath))
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
 	}

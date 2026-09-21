@@ -25,6 +25,20 @@ type BlocklistStore struct {
 	db *sql.DB
 }
 
+// withBusyTimeout appends a per-connection busy_timeout to the SQLite DSN so
+// concurrent background writers (import persist vs snapshot prune) wait on a
+// locked database instead of failing with SQLITE_BUSY and silently dropping
+// the write. It must ride the DSN, not a one-off PRAGMA Exec, because
+// database/sql pools connections. 30s: bulk persists hold the write lock for
+// seconds at multi-million-row scale.
+func withBusyTimeout(dbPath string) string {
+	sep := "?"
+	if strings.Contains(dbPath, "?") {
+		sep = "&"
+	}
+	return dbPath + sep + "_pragma=busy_timeout(30000)"
+}
+
 // NewBlocklistStore opens (creating if needed) the SQLite database at dbPath.
 func NewBlocklistStore(dbPath string) (*BlocklistStore, error) {
 	if dir := filepath.Dir(dbPath); dir != "" {
@@ -32,7 +46,7 @@ func NewBlocklistStore(dbPath string) (*BlocklistStore, error) {
 			return nil, fmt.Errorf("create blocklist db dir: %w", err)
 		}
 	}
-	db, err := sql.Open("sqlite", dbPath)
+	db, err := sql.Open("sqlite", withBusyTimeout(dbPath))
 	if err != nil {
 		return nil, fmt.Errorf("open blocklist db: %w", err)
 	}

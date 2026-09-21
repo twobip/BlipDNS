@@ -3,10 +3,12 @@ package controller
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -454,5 +456,49 @@ func TestSaveConfigDoesNotDuplicateDisabled(t *testing.T) {
 	}
 	if n := strings.Count(string(b), u); n != 1 {
 		t.Errorf("disabled URL appears %d times in saved config, want 1:\n%s", n, b)
+	}
+}
+
+func TestBlocklistStoreConcurrentWritesNoBusy(t *testing.T) {
+	store, err := NewBlocklistStore(filepath.Join(t.TempDir(), "blocklist.db"))
+	if err != nil {
+		t.Fatalf("NewBlocklistStore: %v", err)
+	}
+	defer store.db.Close()
+	ctx := context.Background()
+	mk := func(n int) []string {
+		out := make([]string, 0, n)
+		for i := 0; i < n; i++ {
+			out = append(out, fmt.Sprintf("d%d-%d.example.com", n, i))
+		}
+		return out
+	}
+	var wg sync.WaitGroup
+	errs := make(chan error, 32)
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			u := fmt.Sprintf("https://example.invalid/%d.txt", i)
+			if err := store.ReplaceSourceDomains(ctx, u, mk(2000)); err != nil {
+				errs <- err
+				return
+			}
+			if err := store.ReplaceAll(ctx, mk(2000)); err != nil {
+				errs <- err
+			}
+		}(i)
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := store.PruneSources(ctx, nil); err != nil {
+			errs <- err
+		}
+	}()
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Errorf("concurrent write failed: %v", err)
 	}
 }
