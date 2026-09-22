@@ -933,11 +933,14 @@ func TestBusRingBuffer(t *testing.T) {
 	if len(backlog) != 3 {
 		t.Fatalf("expected 3 backlog, got %d", len(backlog))
 	}
-	b.Publish(Event{Type: "block", Domain: "y", At: time.Now()})
+	b.Publish(Event{Type: "block", Domain: "y", At: time.Now(), Stats: &control.StatsResponse{}, Health: &control.HealthResponse{}})
 	select {
 	case e := <-ch:
 		if e.Domain != "y" {
 			t.Errorf("expected live event, got %+v", e)
+		}
+		if e.Stats != nil || e.Health != nil {
+			t.Error("Publish should strip stats/health from SSE events")
 		}
 	case <-time.After(time.Second):
 		t.Error("no live event")

@@ -75,6 +75,10 @@ func (b *Bus) Unsubscribe(ch chan Event) {
 // never serializes on subscriber sends. The buffer is a true ring (no
 // ever-growing backing array retained by slicing).
 func (b *Bus) Publish(e Event) {
+	// ponytail: SSE clients never render stats/health (and JSON.parse of a
+	// full StatsResponse costs ~500ms on the main thread); strip here so no
+	// publisher can bloat the stream or the backlog.
+	e.Stats, e.Health = nil, nil
 	b.mu.Lock()
 	if len(b.buffer) < b.cap {
 		b.buffer = append(b.buffer, e)
