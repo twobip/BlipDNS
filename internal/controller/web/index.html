@@ -795,7 +795,7 @@
         <div class="grid grid-2">
           <div class="panel">
             <div class="panel-head"><h3>VRRP pair</h3><span class="spacer"></span><span class="hint">LAN only</span></div>
-            <div class="panel-body form-grid">
+            <form class="panel-body form-grid" onsubmit="return false">
               <div class="ha-toggle-row">
                 <div>
                   <div class="ha-toggle-title">Enable HA</div>
@@ -814,7 +814,7 @@
               <label class="field"><span>Secondary priority</span><input class="input" id="ha-secondary-priority" type="number" min="1" max="254" value="100"></label>
               <label class="field"><span>Advert interval (seconds)</span><input class="input" id="ha-advert" type="number" min="1" max="60" value="1"></label>
               <label class="field"><span>LAN auth password (optional, max 8 chars)</span><input class="input" id="ha-auth" type="password" maxlength="8" autocomplete="new-password"></label>
-            </div>
+            </form>
           </div>
           <div class="panel">
             <div class="panel-head"><h3>Node networking</h3><span class="spacer"></span></div>
@@ -846,17 +846,17 @@
   <div class="modal">
     <div class="modal-head"><h3 id="inst-modal-title">Add Instance</h3><button class="icon-btn x" data-close="modal-instance">
       <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button></div>
-    <div class="modal-body">
+    <form class="modal-body" onsubmit="return false">
       <div class="form-grid">
         <div class="field"><label>ID</label><input class="input" id="i-id" placeholder="office-dns"/></div>
         <div class="field"><label>Label</label><input class="input" id="i-label" placeholder="Office"/></div>
       </div>
       <div class="field"><label>Management URL</label><input class="input" id="i-url" placeholder="http://10.0.0.5:8444"/></div>
       <div class="form-grid">
-        <div class="field"><label>Token <span class="faint">(or use claim code)</span></label><input class="input" id="i-token" type="password" placeholder="admin token"/></div>
+        <div class="field"><label>Token <span class="faint">(or use claim code)</span></label><input class="input" id="i-token" type="password" placeholder="admin token" autocomplete="new-password"/></div>
         <div class="field"><label>Claim code <span class="faint">(one-time bootstrap)</span></label><input class="input" id="i-claim" placeholder="ABCD-1234"/></div>
       </div>
-    </div>
+    </form>
     <div class="modal-foot">
       <button class="btn" data-close="modal-instance">Cancel</button>
       <button class="btn btn-primary" id="i-save">Add Instance</button>
