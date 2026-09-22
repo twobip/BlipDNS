@@ -1437,7 +1437,6 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
 
 	for _, e := range backlog {
 		fmt.Fprintf(w, "data: %s\n\n", control.MustJSON(e))
