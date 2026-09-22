@@ -195,7 +195,7 @@ body.sidebar-collapsed .main { margin-left: 60px; }
 .btn-spin svg { animation: spin .8s linear infinite; }
 
 .input {
-  width: 100%;
+  width: 100%; min-width: 0;
   padding: 8px 12px; border-radius: var(--radius-sm);
   border: 1px solid var(--border); background: var(--surface);
   color: var(--text); font-size: 13px; font-family: var(--font);
@@ -204,7 +204,8 @@ body.sidebar-collapsed .main { margin-left: 60px; }
 .input::placeholder { color: var(--faint); }
 .input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(79,140,255,.15); }
 
-.field { display: flex; flex-direction: column; gap: 6px; }
+.field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.field .select { width: 100%; min-width: 0; }
 .field label { font-size: 12px; font-weight: 550; color: var(--text-2); }
 .field .hint { font-size: 11.5px; color: var(--faint); }
 
