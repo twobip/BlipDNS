@@ -384,7 +384,12 @@ else
 fi
 # Only the install helper runs as root; the download (blipc-update) runs as blipc.
 # Both staged paths are pinned: the helper maps each to one fixed destination.
+# env_keep lets the verified checksum reach the helper so the root side can
+# re-verify (H2); without it sudo strips EXPECTED_SHA256 and updates proceed
+# without the root-side check. Narrower than a SETENV tag (which would also
+# permit LD_PRELOAD and friends).
 cat > /etc/sudoers.d/blipc-install <<'EOF'
+Defaults:blipc env_keep += "EXPECTED_SHA256"
 blipc ALL=(root) NOPASSWD: /usr/local/sbin/blipc-install /var/lib/blipc/update/blipc.new, /usr/local/sbin/blipc-install /var/lib/blipc/update/blipctl.new
 EOF
 chmod 0440 /etc/sudoers.d/blipc-install
@@ -452,7 +457,12 @@ UMask=0077
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
-ReadWritePaths=$STATE_DIR $CONFIG_DIR
+# /run/lock: the root install helper takes its lock there. Without this the
+# lock open fails with EROFS (children inherit the unit's mount namespace,
+# even via sudo) and every self-update dies with "cannot open lock".
+# DAC is unchanged (/run/lock stays root-owned), so the F-03 lock-placement
+# property holds; the helper still refuses pre-existing symlinks.
+ReadWritePaths=$STATE_DIR $CONFIG_DIR /run/lock
 LimitNOFILE=65536
 StandardOutput=journal
 StandardError=journal

@@ -371,6 +371,7 @@ if ! id blip >/dev/null 2>&1; then
 fi
 
 cat > /etc/sudoers.d/blipd-install <<'EOF'
+Defaults:blip env_keep += "EXPECTED_SHA256"
 blip ALL=(root) NOPASSWD: /usr/local/sbin/blipd-install /var/lib/blipd/update/blipd.new
 EOF
 chmod 0440 /etc/sudoers.d/blipd-install
@@ -493,7 +494,10 @@ UMask=0077
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
-ReadWritePaths=$STATE_DIR $CONFIG_DIR
+# /run/lock: the root install helper takes its lock there; without this the
+# lock open fails with EROFS (children inherit the unit's mount namespace,
+# even via sudo) and self-update dies with "cannot open lock".
+ReadWritePaths=$STATE_DIR $CONFIG_DIR /run/lock
 LimitNOFILE=65536
 StandardOutput=journal
 StandardError=journal
