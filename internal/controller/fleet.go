@@ -474,6 +474,9 @@ func (f *Fleet) setHAClusterPersisted(cluster control.HACluster) error {
 }
 
 func (f *Fleet) ValidateHA(ctx context.Context, cluster control.HACluster) error {
+	if !cluster.Enabled {
+		return nil // nothing saved yet: vacuous pass
+	}
 	if err := validateHACluster(cluster); err != nil {
 		return err
 	}
@@ -506,6 +509,9 @@ func (f *Fleet) ValidateHA(ctx context.Context, cluster control.HACluster) error
 }
 
 func (f *Fleet) ApplyHA(ctx context.Context, cluster control.HACluster) error {
+	if !cluster.Enabled {
+		return nil // nothing saved yet: nothing to apply
+	}
 	if err := f.ValidateHA(ctx, cluster); err != nil {
 		return err
 	}

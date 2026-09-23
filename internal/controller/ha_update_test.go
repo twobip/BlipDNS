@@ -297,3 +297,16 @@ func TestReducePriorityYieldsToPeer(t *testing.T) {
 		}
 	}
 }
+
+// Validating or applying before anything is saved (disabled, no member
+// instances) must be a vacuous pass, not "controller: unknown instance ".
+func TestHAValidateApplyDisabledEmpty(t *testing.T) {
+	fleet := NewFleet("")
+	ctx := context.Background()
+	if err := fleet.ValidateHA(ctx, control.HACluster{}); err != nil {
+		t.Fatalf("ValidateHA(disabled) = %v, want nil", err)
+	}
+	if err := fleet.ApplyHA(ctx, control.HACluster{}); err != nil {
+		t.Fatalf("ApplyHA(disabled) = %v, want nil", err)
+	}
+}
