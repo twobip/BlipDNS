@@ -302,18 +302,26 @@ func (s *Server) requireAuth(h http.HandlerFunc) http.HandlerFunc {
 }
 
 // csrfOriginAllowed checks Origin (falling back to Referer when Origin is
-// absent): when present it must match the client-facing host, otherwise the
-// request may be a cross-site form/fetch riding the session cookie. Behind a
-// reverse proxy the client-facing host comes from X-Forwarded-Host (trusted
-// peers only); direct access compares against r.Host.
+// absent): when present its scheme and host must match the client-facing
+// origin, otherwise the request may be a cross-site form/fetch riding the
+// session cookie. Behind a reverse proxy the client-facing host/scheme come
+// from X-Forwarded-Host/Proto (trusted peers only); direct access compares
+// against r.Host and r.TLS. Ports are compared (with default-port
+// normalization) and the scheme is compared: the old host-only comparison let
+// an http origin pass for an https dashboard and let a different port on the
+// same host pass.
 func (s *Server) csrfOriginAllowed(r *http.Request) bool {
-	expected := s.requestHost(r)
+	expectedHost := s.requestHost(r)
+	expectedScheme := "http"
+	if s.isSecure(r) {
+		expectedScheme = "https"
+	}
 	if origin := strings.TrimSpace(r.Header.Get("Origin")); origin != "" {
 		u, err := url.Parse(origin)
 		if err != nil {
 			return false
 		}
-		if !equalHost(u.Host, expected) {
+		if !equalOrigin(u.Scheme, u.Host, expectedScheme, expectedHost) {
 			return false
 		}
 		return true
@@ -323,7 +331,7 @@ func (s *Server) csrfOriginAllowed(r *http.Request) bool {
 		if err != nil {
 			return false
 		}
-		if !equalHost(u.Host, expected) {
+		if !equalOrigin(u.Scheme, u.Host, expectedScheme, expectedHost) {
 			return false
 		}
 	}
@@ -335,30 +343,41 @@ func csrfOriginAllowed(r *http.Request) bool {
 	return (&Server{}).csrfOriginAllowed(r)
 }
 
-func equalHost(a, b string) bool {
-	// Compare hostnames case-insensitively, ignoring ports: browsers send
-	// "Origin: http://host" (no port) while r.Host is "host:8500".
-	ah := hostOnly(a)
-	bh := hostOnly(b)
-	return strings.EqualFold(strings.Trim(ah, "[]"), strings.Trim(bh, "[]"))
+// equalOrigin reports whether an Origin/Referer (scheme + host[:port]) matches
+// the expected client-facing origin. Scheme must match exactly (http vs https);
+// hosts compare case-insensitively with default-port normalization, so
+// "https://host" matches "host" (443) but "http://host" does not match an
+// https dashboard, and "http://host" (port 80) does not match "host:8500".
+func equalOrigin(gotScheme, gotHost, wantScheme, wantHost string) bool {
+	if !strings.EqualFold(strings.TrimSpace(gotScheme), strings.TrimSpace(wantScheme)) {
+		return false
+	}
+	scheme := strings.ToLower(strings.TrimSpace(wantScheme))
+	return normalizeOriginHost(gotHost, scheme) == normalizeOriginHost(wantHost, scheme)
 }
 
-func hostOnly(h string) string {
+// normalizeOriginHost lowercases the hostname and makes the port explicit,
+// filling the scheme default when absent, so "host" and "host:443" compare
+// equal for https (and "host" vs "host:80" for http) while distinct
+// non-default ports stay distinct.
+func normalizeOriginHost(h, scheme string) string {
 	h = strings.TrimSpace(h)
-	if host, _, err := net.SplitHostPort(h); err == nil {
-		return host
+	host, port, err := net.SplitHostPort(h)
+	if err != nil {
+		host = h
+		port = ""
 	}
-	// No port present (or bare IPv6 without brackets handling above): strip a
-	// trailing :port when the suffix is numeric.
-	if i := strings.LastIndex(h, ":"); i >= 0 {
-		if _, perr := strconv.Atoi(h[i+1:]); perr == nil {
-			// Avoid chopping a bare IPv6 address (multiple colons).
-			if strings.Count(h, ":") == 1 {
-				return h[:i]
-			}
+	host = strings.ToLower(strings.Trim(strings.TrimSpace(host), "[]"))
+	host = strings.TrimSuffix(host, ".")
+	if port == "" {
+		switch scheme {
+		case "https":
+			port = "443"
+		case "http":
+			port = "80"
 		}
 	}
-	return h
+	return host + ":" + strings.ToLower(port)
 }
 
 // readScopeDenied reports whether a path is off-limits to read-scoped API

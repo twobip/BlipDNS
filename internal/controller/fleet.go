@@ -3170,6 +3170,11 @@ func (f *Fleet) saveConfig() error {
 		Username          string                       `yaml:"username"`
 		Password          string                       `yaml:"password"`
 		PasswordHash      string                       `yaml:"password_hash"`
+		DashboardTLS      bool                         `yaml:"dashboard_tls"`
+		TLSDir            string                       `yaml:"tls_dir"`
+		TLSCertFile       string                       `yaml:"tls_cert_file"`
+		TLSKeyFile        string                       `yaml:"tls_key_file"`
+		TLSSANs           []string                     `yaml:"tls_san"`
 		DefaultPolicy     *control.Policy              `yaml:"default_policy"`
 		InstancePolicies  map[string]*InstanceOverride `yaml:"instance_overrides"`
 		DoHHTTPAddr       string                       `yaml:"doh_http_addr"`

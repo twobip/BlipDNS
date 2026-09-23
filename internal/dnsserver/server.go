@@ -76,9 +76,13 @@ type Server struct {
 	// conditional-forwarding routes. nil only when no upstream is configured.
 	pool  *upstream.ResolverPool
 	logfn func(client, domain string)
-	udp   *dns.Server
-	tcp   *dns.Server
-	doch  *http.Server
+	// lifeMu guards udp/tcp/doch so Start (which publishes the listeners
+	// from a goroutine in tests) never races Shutdown (which reads them).
+	// The blocking Serve calls use the local copies taken under the lock.
+	lifeMu sync.RWMutex
+	udp    *dns.Server
+	tcp    *dns.Server
+	doch   *http.Server
 	// Optional plain-HTTP DoH listener, toggled at runtime by the controller.
 	dohPlainMu   sync.Mutex
 	dohPlain     *http.Server
@@ -995,16 +999,22 @@ func newHTTPServer(addr string, h http.Handler) *http.Server {
 // Start launches UDP, TCP and DoH listeners (DoH blocks).
 func (s *Server) Start() error {
 	dh := s.Handler()
-	s.doch = newHTTPServer(s.cfg.DoHAddr, dh)
+	doch := newHTTPServer(s.cfg.DoHAddr, dh)
 
 	udpH := dns.NewServeMux()
 	udpH.Handle(".", s)
-	s.udp = &dns.Server{Addr: s.cfg.DNSAddr, Net: "udp", Handler: udpH, ReadTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second, IdleTimeout: func() time.Duration { return 30 * time.Second }}
-	s.tcp = &dns.Server{Addr: s.cfg.DNSAddr, Net: "tcp", Handler: udpH, ReadTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second, IdleTimeout: func() time.Duration { return 30 * time.Second }}
+	udp := &dns.Server{Addr: s.cfg.DNSAddr, Net: "udp", Handler: udpH, ReadTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second, IdleTimeout: func() time.Duration { return 30 * time.Second }}
+	tcp := &dns.Server{Addr: s.cfg.DNSAddr, Net: "tcp", Handler: udpH, ReadTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second, IdleTimeout: func() time.Duration { return 30 * time.Second }}
+
+	s.lifeMu.Lock()
+	s.doch = doch
+	s.udp = udp
+	s.tcp = tcp
+	s.lifeMu.Unlock()
 
 	errCh := make(chan error, 2)
-	go func() { errCh <- s.udp.ListenAndServe() }()
-	go func() { errCh <- s.tcp.ListenAndServe() }()
+	go func() { errCh <- udp.ListenAndServe() }()
+	go func() { errCh <- tcp.ListenAndServe() }()
 
 	// give UDP/TCP a moment; any immediate error is fatal.
 	select {
@@ -1026,7 +1036,7 @@ func (s *Server) Start() error {
 			// passes the raw conns to Serve() with no h2 support at all.
 			// GetCertificate reads the current pair, so a certificate re-derived
 			// at runtime (VIP configured after startup) is served immediately.
-			s.doch.TLSConfig = &tls.Config{
+			doch.TLSConfig = &tls.Config{
 				MinVersion: tls.VersionTLS12,
 				// GCM/ChaCha only: exclude TLS1.2 CBC-SHA suites (Lucky13/ROBOT
 				// class) while keeping broad client compatibility. TLS1.3
@@ -1052,14 +1062,14 @@ func (s *Server) Start() error {
 			if err != nil {
 				return fmt.Errorf("blipd: doh listen: %w", err)
 			}
-			return s.doch.ServeTLS(ln, "", "")
+			return doch.ServeTLS(ln, "", "")
 		}
 		if s.cfg.CertFile != "" && s.cfg.KeyFile != "" {
-			return s.doch.ListenAndServeTLS(s.cfg.CertFile, s.cfg.KeyFile)
+			return doch.ListenAndServeTLS(s.cfg.CertFile, s.cfg.KeyFile)
 		}
 		return fmt.Errorf("blipd: doh_tls enabled but no certificate configured (set cert_file/key_file or tls_dir)")
 	}
-	return s.doch.ListenAndServe()
+	return doch.ListenAndServe()
 }
 
 // SetDoHHTTPAddr toggles the optional plain-HTTP DoH listener. An empty addr
@@ -1173,16 +1183,19 @@ func (s *Server) Shutdown() {
 		s.dohPlainMu.Lock()
 		s.stopDoHPlainLocked()
 		s.dohPlainMu.Unlock()
-		if s.udp != nil {
-			_ = s.udp.Shutdown()
+		s.lifeMu.RLock()
+		udp, tcp, doch := s.udp, s.tcp, s.doch
+		s.lifeMu.RUnlock()
+		if udp != nil {
+			_ = udp.Shutdown()
 		}
-		if s.tcp != nil {
-			_ = s.tcp.Shutdown()
+		if tcp != nil {
+			_ = tcp.Shutdown()
 		}
-		if s.doch != nil {
+		if doch != nil {
 			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cancel()
-			_ = s.doch.Shutdown(ctx)
+			_ = doch.Shutdown(ctx)
 		}
 	})
 }

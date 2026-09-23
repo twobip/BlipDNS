@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -813,12 +814,38 @@ func (b *Blocklist) SaveCache(path string) error {
 	if err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
+	// Unpredictable tmp name with O_EXCL (CreateTemp) in the same directory:
+	// a predictable path+".tmp" lets a local attacker pre-create a symlink
+	// and have the privileged writer truncate an arbitrary file on rename.
 	// 0600: cache may reflect queried domains; no group/world access.
-	if err := os.WriteFile(tmp, data, 0600); err != nil {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, ".blocklist-*.tmp")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if err := tmp.Chmod(0600); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	_ = tmp.Sync()
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return err
+	}
+	// Rename preserves the tmp mode on most filesystems, but re-apply 0600
+	// best-effort in case the destination pre-existed with wider perms.
+	if err := os.Chmod(path, 0600); err != nil {
+		return err
+	}
+	return nil
 }
 
 // LoadCache returns a blocklist restored from a previously saved cache file.

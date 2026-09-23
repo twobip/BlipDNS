@@ -122,7 +122,13 @@ func (c *Client) do(ctx context.Context, method, path string, body, out interfac
 		return fmt.Errorf("control: %s %s -> %d: %s", method, path, resp.StatusCode, string(b))
 	}
 	if out != nil {
-		return json.NewDecoder(resp.Body).Decode(out)
+		// Cap successful responses so a compromised/malicious instance
+		// cannot OOM the controller with a multi-GB body. Legitimate
+		// payloads (policies, stats with upstream tables, records) are
+		// kilobytes; 8 MiB leaves wide headroom while bounding allocation.
+		// A body larger than the cap fails the decode (truncated JSON)
+		// instead of growing the heap.
+		return json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(out)
 	}
 	return nil
 }

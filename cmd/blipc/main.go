@@ -164,8 +164,12 @@ func main() {
 		if tokenErr != nil {
 			log.Fatalf("blipc: generate setup token: %v", tokenErr)
 		}
-		log.Printf("blipc: first-run setup token: %s", setupToken)
-		log.Printf("blipc: open http%s://%s/setup#token=%s to create the administrator account", map[bool]string{true: "s", false: ""}[cfg.DashboardTLS || (cfg.TLSCertFile != "" && cfg.TLSKeyFile != "")], cfg.Listen, setupToken)
+		// First-run bootstrap: no admin exists yet, so the one-time token is
+		// printed once to the local log only (journal, blipc/root-readable).
+		// It is single-use and the /api/setup endpoint rate-limits guesses.
+		// Logged as a single setup URL (not a bare token plus a URL) so the
+		// secret appears once, not twice. Keep it private.
+		log.Printf("blipc: first-run setup (one-time, keep private): open http%s://%s/setup#token=%s to create the administrator account", map[bool]string{true: "s", false: ""}[cfg.DashboardTLS || (cfg.TLSCertFile != "" && cfg.TLSKeyFile != "")], cfg.Listen, setupToken)
 	}
 	if len(cfg.TrustedProxies) > 0 {
 		fleet.SetTrustedProxiesDefault(cfg.TrustedProxies)
