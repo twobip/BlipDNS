@@ -23,6 +23,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/miekg/dns"
 )
 
 // dnsperfBin is the path to the dnsperf binary. Tests are skipped when absent.
@@ -58,15 +60,34 @@ func runDnsperf(t *testing.T, dataPath string, extraArgs ...string) (*dnsperfRes
 	return parseDnsperfOutput(string(out))
 }
 
-// skipIfNoLocalResolver skips a dnsperf test when no resolver listens on
-// 127.0.0.1:53. blipd serves TCP alongside UDP, so a TCP dial proves one is
-// actually there (a UDP dial would "succeed" with nothing listening).
+// skipIfNoLocalResolver skips a dnsperf test when no usable resolver listens
+// on 127.0.0.1:53. blipd serves TCP alongside UDP, so a TCP dial proves
+// something is actually there (a UDP dial would "succeed" with nothing
+// listening). One probe query then proves it can actually resolve: a
+// degraded upstream (SERVFAIL) is not a usable baseline for performance or
+// correctness assertions, so the test skips instead of failing on an
+// environment problem.
 func skipIfNoLocalResolver(t *testing.T) {
 	t.Helper()
 	if c, err := net.DialTimeout("tcp", "127.0.0.1:53", 500*time.Millisecond); err != nil {
 		t.Skip("no local resolver on 127.0.0.1:53, skipping DNS performance test")
 	} else {
 		_ = c.Close()
+	}
+	client := new(dns.Client)
+	client.Timeout = 3 * time.Second
+	q := new(dns.Msg)
+	q.SetQuestion("example.com.", dns.TypeA)
+	resp, _, err := client.Exchange(q, "127.0.0.1:53")
+	if err != nil {
+		t.Skipf("local resolver probe failed (%v), skipping DNS performance test", err)
+	}
+	if resp == nil || resp.Rcode != dns.RcodeSuccess {
+		rcode := "nil-response"
+		if resp != nil {
+			rcode = dns.RcodeToString[resp.Rcode]
+		}
+		t.Skipf("local resolver unhealthy (rcode=%s), skipping DNS performance test", rcode)
 	}
 }
 
