@@ -83,13 +83,17 @@ func TestReadKeyDeniedQueryHistory(t *testing.T) {
 	}
 }
 
-// TestValidateInstanceURLRemoteHTTP proves remote management URLs must use
-// https: only loopback http stays allowed.
+// TestValidateInstanceURLRemoteHTTP proves remote management URLs are
+// accepted (blipd's management API is HTTP-only, so rejecting cleartext
+// would strand remote fleets with no working transport) while
+// isInsecureInstanceURL flags exactly the remote-cleartext ones for the
+// F-05 journal warning.
 func TestValidateInstanceURLRemoteHTTP(t *testing.T) {
 	for _, okURL := range []string{
 		"http://127.0.0.1:8444",
 		"http://localhost:8444",
 		"http://[::1]:8444",
+		"http://192.168.1.5:8444",
 		"https://192.168.1.5:8444",
 		"https://blipd.example.com:8444",
 	} {
@@ -98,12 +102,28 @@ func TestValidateInstanceURLRemoteHTTP(t *testing.T) {
 		}
 	}
 	for _, badURL := range []string{
-		"http://192.168.1.5:8444",
-		"http://10.0.0.5:8444",
-		"http://blipd.example.com:8444",
+		"",
+		"gopher://192.168.1.5:70",
+		"file:///etc/passwd",
+		"http://user:pass@192.168.1.5:8444",
+		"http:///no-host",
 	} {
 		if err := validateInstanceURL(badURL); err == nil {
 			t.Errorf("validate %q: expected error, got nil", badURL)
+		}
+	}
+	insecure := map[string]bool{
+		"http://127.0.0.1:8444":     false,
+		"http://localhost:8444":     false,
+		"http://[::1]:8444":         false,
+		"https://192.168.1.5:8444":  false,
+		"http://192.168.1.5:8444":   true,
+		"http://10.0.0.5:8444":      true,
+		"http://blipd.example:8444": true,
+	}
+	for raw, want := range insecure {
+		if got := isInsecureInstanceURL(raw); got != want {
+			t.Errorf("isInsecureInstanceURL(%q) = %v, want %v", raw, got, want)
 		}
 	}
 }

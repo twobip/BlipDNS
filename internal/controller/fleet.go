@@ -677,10 +677,12 @@ func (f *Fleet) OnEvent(fn func(Event)) { f.logfn = fn }
 // validateInstanceURL rejects non-HTTP(S) URLs, URLs with userinfo, and URLs
 // with an empty host, so a malicious or mistyped instance entry cannot turn
 // blipc into an open proxy / credential leak (e.g. file://, gopher://, or
-// http://user:pass@host). F-05: cleartext HTTP is accepted only for loopback
-// instance URLs (same-host management, ideally via Unix socket); any remote
-// (non-loopback) instance must use https so the blipd bearer token is never
-// sent in cleartext across the network.
+// http://user:pass@host). F-05: remote cleartext HTTP is accepted (blipd's
+// management API is HTTP-only, so rejecting it would leave remote fleets
+// with no working transport), but it is flagged by isInsecureInstanceURL
+// and warned about loudly at Add time: bearer tokens cross the network in
+// cleartext, so keep remote management on an isolated VLAN, a WireGuard
+// tunnel, or the same host (Unix socket preferred).
 func validateInstanceURL(raw string) error {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -699,10 +701,28 @@ func validateInstanceURL(raw string) error {
 	if u.Host == "" || u.Hostname() == "" {
 		return fmt.Errorf("invalid instance url: host required")
 	}
-	if u.Scheme == "http" && !isLoopbackHost(u.Hostname()) {
-		return fmt.Errorf("invalid instance url: remote instance %q must use https (http would send the bearer token in cleartext)", u.Host)
-	}
 	return nil
+}
+
+// isInsecureInstanceURL reports whether raw is a cleartext HTTP URL to a
+// non-loopback host (F-05): the blipd bearer token traverses the network
+// unencrypted. Same-host http (loopback) is fine; https is fine anywhere.
+func isInsecureInstanceURL(raw string) bool {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return false
+	}
+	return u.Scheme == "http" && !isLoopbackHost(u.Hostname())
+}
+
+// warnInsecureInstanceURL logs the F-05 warning for a remote cleartext
+// management URL: tokens, policies and query history cross the wire
+// unprotected. Emitted at Add time (startup and UI/API adds alike) so the
+// risk is visible in the journal on every configure, not buried in docs.
+func warnInsecureInstanceURL(id, raw string) {
+	if isInsecureInstanceURL(raw) {
+		log.Printf("blipc: WARNING instance %q uses cleartext http management to %q: bearer tokens are sniffable on the network path; isolate the management network (VLAN/WireGuard) or co-locate via Unix socket", id, raw)
+	}
 }
 
 // isLoopbackHost reports whether host is a loopback address or name: 127/8,
@@ -729,6 +749,7 @@ func (f *Fleet) Add(ctx context.Context, cfg InstanceConfig) error {
 	if err := validateInstanceURL(cfg.URL); err != nil {
 		return err
 	}
+	warnInsecureInstanceURL(cfg.ID, cfg.URL)
 	if cfg.Label == "" {
 		cfg.Label = cfg.ID
 	}
