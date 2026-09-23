@@ -627,8 +627,10 @@ type SourceStat struct {
 const (
 	// maxBlocklistSources caps how many source URLs an operator can configure.
 	// Each source is a full download + parse; unbounded lists serialize into
-	// very long imports and unbounded RAM during the merge.
-	maxBlocklistSources = 16
+	// very long imports and unbounded RAM during the merge. 32 comfortably
+	// covers large multi-feed setups (the merged-domain cap below remains the
+	// binding resource guard); the API rejects anything above this.
+	maxBlocklistSources = 32
 	// maxMergedBlocklistDomains caps the merged in-memory blocklist. Beyond
 	// this the import is refused with a clear error instead of OOMing the
 	// controller or shipping a multi-hundred-MB payload to every instance.

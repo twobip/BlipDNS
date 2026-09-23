@@ -76,6 +76,13 @@ func main() {
 	}
 
 	fleet := controller.NewFleet(*cfgPath)
+	// Restore persisted blocklist settings FIRST: several startup calls below
+	// (SetRecords, Add) persist the config, and saveConfig writes the source
+	// list from memory — restoring afterwards lets every restart clobber
+	// blocklist_sources on disk, and a second restart before any save then
+	// loses the sources permanently while the SQLite snapshot keeps
+	// blocking, masking the loss.
+	restoreBlocklistSettings(fleet, cfg.BlocklistSources, cfg.BlocklistDisabled, cfg.BlocklistUpdateHours)
 	if cfg.DefaultPolicy != nil {
 		fleet.SetDefault(cfg.DefaultPolicy)
 	}
@@ -125,16 +132,6 @@ func main() {
 		if err := fleet.Add(ctx, ic); err != nil {
 			log.Printf("blipc: instance %s: %v", ic.ID, err)
 		}
-	}
-	if cfg.BlocklistUpdateHours > 0 {
-		fleet.SetAutoUpdateHours(cfg.BlocklistUpdateHours)
-	}
-	if len(cfg.BlocklistSources) > 0 {
-		// Restore the lists without importing: restarts serve the persisted
-		// cache, and refreshes come from the auto-updater (when due) or an
-		// explicit operator action.
-		fleet.SetBlocklistDisabled(cfg.BlocklistDisabled)
-		fleet.SetBlocklistSourcesDefault(cfg.BlocklistSources)
 	}
 	fleet.StartAutoUpdater()
 
@@ -248,6 +245,22 @@ func main() {
 	log.Println("blipc: shutting down")
 	_ = httpSrv.Close()
 	fleet.Bus().Publish(controller.Event{Type: "status", At: time.Now(), Msg: "shutdown"})
+}
+
+// restoreBlocklistSettings loads the persisted blocklist source list,
+// disabled set and refresh interval into the fleet without importing.
+// Restarts serve the persisted cache; refreshes come from the auto-updater
+// (when due) or an explicit operator action. The no-save setters run first
+// and SetAutoUpdateHours (which persists) last, so a save can never observe
+// a half-restored fleet.
+func restoreBlocklistSettings(fleet *controller.Fleet, sources, disabled []string, updateHours int) {
+	if len(sources) > 0 {
+		fleet.SetBlocklistDisabled(disabled)
+		fleet.SetBlocklistSourcesDefault(sources)
+	}
+	if updateHours > 0 {
+		fleet.SetAutoUpdateHours(updateHours)
+	}
 }
 
 func load(path string) (*config, error) {
