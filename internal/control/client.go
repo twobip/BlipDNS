@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"time"
@@ -58,6 +59,24 @@ func NewClient(baseURL, token string) *Client {
 			Transport: newTransport(false),
 		},
 	}
+}
+
+// NewClientUnix creates a client that talks to a local blipd over its Unix
+// socket (see Server.LocalHandler). The socket's filesystem permissions are
+// the auth boundary, so token may be empty; when set it is still sent (and
+// ignored by the local handler).
+func NewClientUnix(socketPath, token string) *Client {
+	c := NewClient("http://localhost", token)
+	dial := func(ctx context.Context, _, _ string) (net.Conn, error) {
+		var d net.Dialer
+		return d.DialContext(ctx, "unix", socketPath)
+	}
+	for _, hc := range []*http.Client{c.http, c.slow, c.watch} {
+		if tr, ok := hc.Transport.(*http.Transport); ok {
+			tr.DialContext = dial
+		}
+	}
+	return c
 }
 
 // CloseIdleConnections drains pooled keepalives (fleet re-adopt path).

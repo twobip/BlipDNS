@@ -428,6 +428,9 @@ doh_addr: "127.0.0.1:443"
 doh_tls: true
 admin_addr: "127.0.0.1:8444"
 admin_token: "__BLIP_ADMIN_TOKEN__"
+# Local admin socket (passwordless box-local admin via file permissions;
+# `sudo blipctl --socket /var/lib/blipd/blipd.sock health`). "" disables it.
+admin_socket: "/var/lib/blipd/blipd.sock"
 upstream: "udp://1.1.1.1:53 https://1.1.1.1/dns-query"
 cache_size: 10000
 # Per-server upstream timeout (seconds before failing over to next priority server):

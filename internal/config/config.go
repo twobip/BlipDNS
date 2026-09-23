@@ -28,6 +28,7 @@ type Config struct {
 	DoHSANs              []string                  `yaml:"doh_san"`          // extra DNS names/IPs the generated self-signed DoH cert must cover (e.g. an HA VIP); changing it regenerates the pair
 	AdminAddr            string                    `yaml:"admin_addr"`
 	AdminToken           string                    `yaml:"admin_token"`
+	AdminSocket          string                    `yaml:"admin_socket"`    // local Unix socket for passwordless admin (0600, blipd user; "" = off)
 	TrustedProxies       []string                  `yaml:"trusted_proxies"` // CIDRs/IPs allowed to supply X-Forwarded-For / CF-Connecting-IP to DoH
 	StateFile            string                    `yaml:"state_file"`      // persists "adopted" so the claim code isn't regenerated
 	InstanceID           string                    `yaml:"instance_id"`     // stable id shown to the controller
@@ -54,6 +55,7 @@ func Default() *Config {
 		DoHTLS:             true,
 		TLSDir:             "/var/lib/blipd",
 		AdminAddr:          "127.0.0.1:8444",
+		AdminSocket:        "/var/lib/blipd/blipd.sock",
 		Upstream:           "udp://1.1.1.1:53 https://1.1.1.1/dns-query",
 		CacheCap:           1 * time.Hour,
 		CacheSize:          10000,

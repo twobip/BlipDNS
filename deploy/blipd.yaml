@@ -5,6 +5,10 @@ dns_addr: "0.0.0.0:53"
 doh_addr: "127.0.0.1:8443"
 admin_addr: "127.0.0.1:8444"
 admin_token: "__BLIP_ADMIN_TOKEN__"
+# Local admin socket: passwordless management for privileged local users
+# (Pi-hole model) — `sudo blipctl --socket /var/lib/blipd/blipd.sock health`.
+# The socket file is 0600 owned by the blipd user; "" disables it.
+admin_socket: "/var/lib/blipd/blipd.sock"
 # Persists "adopted" so the one-time claim code isn't regenerated on restart.
 # The controller uses the claim code (printed to the journal) to bootstrap trust.
 state_file: "/var/lib/blipd/adopted.json"

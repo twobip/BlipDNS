@@ -5,7 +5,9 @@ import (
 	"context"
 	"crypto/tls"
 	"flag"
+	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -236,6 +238,33 @@ func main() {
 		}()
 	}
 
+	// Local admin socket: passwordless management for privileged local users
+	// (Pi-hole model). The socket file's permissions (0600, blipd user) are
+	// the auth boundary, so no bearer token is required. Best-effort: a
+	// failure here never stops DNS or the TCP management API.
+	if cfg.AdminSocket != "" {
+		if ln, err := listenLocalSocket(cfg.AdminSocket); err != nil {
+			log.Printf("blipd: local admin socket: %v (continuing without it)", err)
+		} else {
+			defer ln.Close()
+			defer os.Remove(cfg.AdminSocket)
+			go func() {
+				local := &http.Server{
+					Handler:           srv.ControlServer().LocalHandler(),
+					ReadHeaderTimeout: 10 * time.Second,
+					ReadTimeout:       10 * time.Minute,
+					WriteTimeout:      10 * time.Minute,
+					IdleTimeout:       60 * time.Second,
+					MaxHeaderBytes:    1 << 20,
+				}
+				log.Printf("blipd: local admin socket on %s (no token required; file permissions apply)", cfg.AdminSocket)
+				if err := local.Serve(ln); err != nil && err != http.ErrServerClosed {
+					log.Printf("blipd: local admin socket: %v", err)
+				}
+			}()
+		}
+	}
+
 	if len(cfg.UpstreamServers) > 0 {
 		log.Printf("blipd: upstream pool = %d servers, %d routes", len(cfg.UpstreamServers), len(cfg.UpstreamRoutes))
 	} else {
@@ -263,4 +292,32 @@ func dohScheme(cfg *config.Config) string {
 		return "https"
 	}
 	return "http"
+}
+
+// listenLocalSocket binds the local admin Unix socket. A stale socket file
+// from an unclean shutdown is removed first, but only after verifying no live
+// blipd is behind it (a successful dial means another instance owns it, and
+// stealing it would hijack local admin). The socket is chmodded 0600 so only
+// the blipd user (and root) can use it without a token.
+func listenLocalSocket(path string) (net.Listener, error) {
+	if conn, err := net.DialTimeout("unix", path, time.Second); err == nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("socket %s is already served by another blipd", path)
+	}
+	if dir := filepath.Dir(path); dir != "" {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			return nil, fmt.Errorf("create socket dir: %w", err)
+		}
+	}
+	_ = os.Remove(path)
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.Chmod(path, 0600); err != nil {
+		_ = ln.Close()
+		_ = os.Remove(path)
+		return nil, fmt.Errorf("chmod socket: %w", err)
+	}
+	return ln, nil
 }

@@ -74,10 +74,13 @@ This is the "automatic verify between them, once" bootstrap: no pre-shared
 secret is needed to bring a new instance under management, but a rogue host on
 the LAN can't hijack it without the local-journal code.
 
-CLI equivalent:
+CLI equivalent (on the controller host an instance id is enough — the token
+is read from the local blipc config, so use sudo; on the blipd host itself
+`--socket` needs no token at all):
 ```
-blipctl http://host:8444 adopt-status        # is it claimed?
-blipctl http://host:8444 adopt <CODE>         # claim it; prints the admin token
+blipctl <id> adopt-status                # is it claimed?
+blipctl <id> adopt <CODE>                 # claim it; prints the admin token
+sudo blipctl --socket /var/lib/blipd/blipd.sock health   # box-local admin
 ```
 
 ## Controller API (also token-gated)

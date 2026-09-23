@@ -312,32 +312,58 @@ func (s *Server) Notify(e WatchEvent) {
 	}
 }
 
-// Handler returns the http.Handler for the management API.
+// Handler returns the http.Handler for the management API. Every route except
+// the adoption handshake requires the bearer token.
 func (s *Server) Handler() http.Handler {
+	return s.handler(false)
+}
+
+// LocalHandler returns the management API handler for the local Unix socket.
+// The peer is already authorized by the socket's filesystem permissions (0600,
+// owned by the blipd user — i.e. root or the service account), so the bearer
+// token and controller pin are not required. It serves the exact same routes;
+// only the auth gate differs. Never serve this handler on TCP.
+func (s *Server) LocalHandler() http.Handler {
+	return s.handler(true)
+}
+
+// handler builds the management API mux. local must only be true for the Unix
+// socket listener, where the OS filesystem permissions are the auth boundary
+// (Pi-hole model: privileged local access needs no password).
+func (s *Server) handler(local bool) http.Handler {
+	auth := s.auth
+	if local {
+		// The Unix socket's filesystem permissions are the auth boundary,
+		// so the bearer token (and controller pin) are not required. This
+		// also works when no token is configured at all.
+		auth = func(h http.HandlerFunc) http.HandlerFunc {
+			return func(w http.ResponseWriter, r *http.Request) { h(w, r) }
+		}
+	}
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/v1/health", s.auth(s.handleHealth))
-	mux.HandleFunc("/api/v1/stats", s.auth(s.handleStats))
-	mux.HandleFunc("/api/v1/policies", s.auth(s.handleListPolicies))
-	mux.HandleFunc("/api/v1/policy", s.auth(s.handlePolicy))
-	mux.HandleFunc("/api/v1/blocklist", s.auth(s.handleBlocklist))
-	mux.HandleFunc("/api/v1/doh", s.auth(s.handleDoH))             // toggle plain-HTTP DoH
-	mux.HandleFunc("/api/v1/ratelimit", s.auth(s.handleRateLimit)) // per-client QPS
-	mux.HandleFunc("/api/v1/upstream", s.auth(s.handleUpstream))   // conditional forwarding
-	mux.HandleFunc("/api/v1/cache", s.auth(s.handleCache))         // cache size + auto-refresh
-	mux.HandleFunc("/api/v1/cache/purge", s.auth(s.handleCachePurge))
-	mux.HandleFunc("/api/v1/records", s.auth(s.handleRecords)) // local DNS records
-	mux.HandleFunc("/api/v1/ha/status", s.auth(s.handleHAStatus))
-	mux.HandleFunc("/api/v1/ha", s.auth(s.handleHAConfig))
-	mux.HandleFunc("/api/v1/ha/validate", s.auth(s.handleHAValidate))
-	mux.HandleFunc("/api/v1/ha/apply", s.auth(s.handleHAApply))
-	mux.HandleFunc("/api/v1/ha/disable", s.auth(s.handleHADisable))
-	mux.HandleFunc("/api/v1/update", s.auth(s.handleUpdate))
-	mux.HandleFunc("/api/v1/restart", s.auth(s.handleRestart))
-	mux.HandleFunc("/api/v1/watch", s.auth(s.handleWatch))
+	mux.HandleFunc("/api/v1/health", auth(s.handleHealth))
+	mux.HandleFunc("/api/v1/stats", auth(s.handleStats))
+	mux.HandleFunc("/api/v1/policies", auth(s.handleListPolicies))
+	mux.HandleFunc("/api/v1/policy", auth(s.handlePolicy))
+	mux.HandleFunc("/api/v1/blocklist", auth(s.handleBlocklist))
+	mux.HandleFunc("/api/v1/doh", auth(s.handleDoH))             // toggle plain-HTTP DoH
+	mux.HandleFunc("/api/v1/ratelimit", auth(s.handleRateLimit)) // per-client QPS
+	mux.HandleFunc("/api/v1/upstream", auth(s.handleUpstream))   // conditional forwarding
+	mux.HandleFunc("/api/v1/cache", auth(s.handleCache))         // cache size + auto-refresh
+	mux.HandleFunc("/api/v1/cache/purge", auth(s.handleCachePurge))
+	mux.HandleFunc("/api/v1/records", auth(s.handleRecords)) // local DNS records
+	mux.HandleFunc("/api/v1/ha/status", auth(s.handleHAStatus))
+	mux.HandleFunc("/api/v1/ha", auth(s.handleHAConfig))
+	mux.HandleFunc("/api/v1/ha/validate", auth(s.handleHAValidate))
+	mux.HandleFunc("/api/v1/ha/apply", auth(s.handleHAApply))
+	mux.HandleFunc("/api/v1/ha/disable", auth(s.handleHADisable))
+	mux.HandleFunc("/api/v1/update", auth(s.handleUpdate))
+	mux.HandleFunc("/api/v1/restart", auth(s.handleRestart))
+	mux.HandleFunc("/api/v1/watch", auth(s.handleWatch))
 	// unauthenticated adoption handshake
 	mux.HandleFunc("/api/v1/adopt/status", s.handleAdoptStatus)
 	mux.HandleFunc("/api/v1/adopt", s.handleAdopt)
-	mux.HandleFunc("/api/v1/adopt/reset", s.auth(s.handleAdoptReset))
+	mux.HandleFunc("/api/v1/adopt/reset", auth(s.handleAdoptReset))
 	return s.withSecurityHeaders(mux)
 }
 
@@ -708,7 +734,7 @@ func RecordsHash(records []RecordEntry) uint64 {
 		h.Write([]byte{0})
 		h.Write([]byte(r.Value))
 		h.Write([]byte{0})
-		h.Write([]byte(fmt.Sprintf("%d", r.TTL)))
+		h.Write(fmt.Appendf(nil, "%d", r.TTL))
 		h.Write([]byte{0})
 	}
 	return h.Sum64()
