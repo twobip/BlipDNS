@@ -34,6 +34,29 @@ func (r *policyRec) snapshot() []*control.Policy {
 	return out
 }
 
+// policyGate, when passed to fakeBlipdWithRec, blocks /api/v1/policy writes
+// until released, letting tests observe pre-push state deterministically
+// (a reconcile push in flight must not flip ConfigSynced before it lands).
+// seen counts arrived pushes; ch is closed to release them all at once.
+type policyGate struct {
+	mu   sync.Mutex
+	seen int
+	ch   chan struct{}
+}
+
+func (g *policyGate) arrive() {
+	g.mu.Lock()
+	g.seen++
+	g.mu.Unlock()
+	<-g.ch
+}
+
+func (g *policyGate) count() int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.seen
+}
+
 // dohRec records every plain-HTTP DoH address pushed to a fake blipd and
 // reports it back from /api/v1/stats so the controller can converge it.
 type dohRec struct {
@@ -190,12 +213,15 @@ func fakeBlipdWithRec(t *testing.T, token, claimCode string, health *control.Hea
 	var up *upstreamRec
 	var cache *cacheRec
 	var recCtrl *recRec
+	var gate *policyGate
 	for _, r := range recs {
 		switch rv := r.(type) {
 		case *upstreamRec:
 			up = rv
 		case *cacheRec:
 			cache = rv
+		case *policyGate:
+			gate = rv
 		case *recRec:
 			recCtrl = rv
 		}
@@ -246,6 +272,11 @@ func fakeBlipdWithRec(t *testing.T, token, claimCode string, health *control.Hea
 		writeJSONH(w, policies)
 	})
 	mux.HandleFunc("/api/v1/policy", func(w http.ResponseWriter, r *http.Request) {
+		// A test gate blocks the push mid-flight so the pre-push state can
+		// be asserted deterministically (no race with the poll loop).
+		if gate != nil {
+			gate.arrive()
+		}
 		var req control.SetPolicyRequest
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		if rec != nil {
@@ -815,7 +846,12 @@ func TestFleetConfigSynced(t *testing.T) {
 	pollInterval = 100 * time.Millisecond
 	defer func() { pollInterval = 5 * time.Second }()
 	rec := &policyRec{}
-	srv := fakeBlipdWithRec(t, "t", "", &control.HealthResponse{OK: true}, &control.StatsResponse{}, &control.ListResponse{}, rec, nil)
+	// Gate the first push mid-flight: the negative assertion below must hold
+	// while a reconcile push is attempted but not yet landed. Without the
+	// gate this races the background poll loop (flaky "expected not synced
+	// before first push" under load/-race/-count).
+	gate := &policyGate{ch: make(chan struct{})}
+	srv := fakeBlipdWithRec(t, "t", "", &control.HealthResponse{OK: true}, &control.StatsResponse{}, &control.ListResponse{}, rec, nil, gate)
 	defer srv.Close()
 
 	fleet := NewFleet("/tmp/blip-test-config.yaml")
@@ -823,10 +859,21 @@ func TestFleetConfigSynced(t *testing.T) {
 	if err := fleet.Add(context.Background(), InstanceConfig{ID: "a", URL: srv.URL, Token: "t"}); err != nil {
 		t.Fatal(err)
 	}
-	// not synced until the first reconcile push lands
-	if st := fleet.List()[0]; st.ConfigSynced {
-		t.Error("expected not synced before first push")
+	// Wait for the push to actually arrive at the fake (still blocked), so
+	// the not-synced assertion below is meaningful, not a timing accident.
+	arrived := time.After(3 * time.Second)
+	for gate.count() == 0 {
+		select {
+		case <-arrived:
+			t.Fatal("reconcile push never arrived at the fake")
+		case <-time.After(20 * time.Millisecond):
+		}
 	}
+	// Not synced while the first push is still in flight.
+	if st := fleet.List()[0]; st.ConfigSynced {
+		t.Error("expected not synced before first push lands")
+	}
+	close(gate.ch) // let the push (and all subsequent polls) through
 	deadline := time.After(3 * time.Second)
 	for {
 		if st := fleet.List()[0]; st.ConfigSynced {
