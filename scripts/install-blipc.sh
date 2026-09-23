@@ -383,8 +383,9 @@ else
   chmod 0755 /usr/local/sbin/blipc-update /usr/local/sbin/blipc-install
 fi
 # Only the install helper runs as root; the download (blipc-update) runs as blipc.
+# Both staged paths are pinned: the helper maps each to one fixed destination.
 cat > /etc/sudoers.d/blipc-install <<'EOF'
-blipc ALL=(root) NOPASSWD: /usr/local/sbin/blipc-install /var/lib/blipc/update/blipc.new
+blipc ALL=(root) NOPASSWD: /usr/local/sbin/blipc-install /var/lib/blipc/update/blipc.new, /usr/local/sbin/blipc-install /var/lib/blipc/update/blipctl.new
 EOF
 chmod 0440 /etc/sudoers.d/blipc-install
 visudo -cf /etc/sudoers.d/blipc-install

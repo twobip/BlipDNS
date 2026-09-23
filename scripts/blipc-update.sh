@@ -2,10 +2,11 @@
 set -euo pipefail
 
 # Unprivileged half of the blipc self-updater. Runs as the 'blipc' service user
-# (never root): downloads the pre-built static binary for the chosen release
-# channel, verifies its SHA256 checksum, then asks root — via the minimal
-# /usr/local/sbin/blipc-install helper — to install and restart. The network
-# never runs with root privileges, and no Go toolchain or git is required.
+# (never root): downloads the pre-built static binaries (blipc + blipctl) for
+# the chosen release channel, verifies their SHA256 checksums, then asks root
+# — via the minimal /usr/local/sbin/blipc-install helper — to install and
+# restart. The network never runs with root privileges, and no Go toolchain
+# or git is required.
 
 readonly BASE="https://github.com/twobip/BlipDNS/releases/download"
 readonly RAW="https://raw.githubusercontent.com/twobip/BlipDNS"
@@ -81,6 +82,7 @@ echo "phase: downloading ($TAG)"
 DL="$(mktemp -d "$WORK/dl.XXXXXX")"
 trap 'rm -rf "$DL"' EXIT
 curl -fL --proto '=https' --tlsv1.2 "$BASE/$TAG/blipc-linux-amd64" -o "$DL/blipc-linux-amd64"
+curl -fL --proto '=https' --tlsv1.2 "$BASE/$TAG/blipctl-linux-amd64" -o "$DL/blipctl-linux-amd64"
 curl -fsSL --proto '=https' --tlsv1.2 "$BASE/$TAG/SHA256SUMS" -o "$DL/SHA256SUMS"
 
 echo "phase: verifying"
@@ -88,22 +90,41 @@ expected="$(awk '$2=="blipc-linux-amd64" {print $1; exit}' "$DL/SHA256SUMS")"
 [ -n "$expected" ] || { echo "error: no checksum entry for blipc-linux-amd64" >&2; exit 1; }
 actual="$(sha256sum "$DL/blipc-linux-amd64" | awk '{print $1}')"
 [ "$expected" = "$actual" ] || { echo "error: checksum verification failed — refusing to install" >&2; exit 1; }
+expected_ctl="$(awk '$2=="blipctl-linux-amd64" {print $1; exit}' "$DL/SHA256SUMS")"
+[ -n "$expected_ctl" ] || { echo "error: no checksum entry for blipctl-linux-amd64" >&2; exit 1; }
+actual_ctl="$(sha256sum "$DL/blipctl-linux-amd64" | awk '{print $1}')"
+[ "$expected_ctl" = "$actual_ctl" ] || { echo "error: checksum verification failed — refusing to install" >&2; exit 1; }
 
 install -m 0755 "$DL/blipc-linux-amd64" "$WORK/blipc.new"
+install -m 0755 "$DL/blipctl-linux-amd64" "$WORK/blipctl.new"
 
-# Hand the verified (unprivileged) binary to the root install helper.
-# Pass the verified checksum so the root side can re-verify (H2). Sudo
+# Hand the verified (unprivileged) binaries to the root install helper.
+# Pass the verified checksums so the root side can re-verify (H2). Sudo
 # without SETENV rejects VAR=val assignments, so retry bare only when sudo
 # itself complains about the environment (the helper warns and still
 # enforces path/ELF checks). Genuine install failures propagate as-is.
-install_out="$(sudo -n EXPECTED_SHA256="$expected" /usr/local/sbin/blipc-install "$WORK/blipc.new" 2>&1)" && install_rc=0 || install_rc=$?
-printf '%s\n' "$install_out"
-if [[ "$install_rc" -ne 0 && "$install_out" == *"environment"* ]]; then
-  echo "warning: sudo rejected the checksum env, retrying without it" >&2
-  sudo -n /usr/local/sbin/blipc-install "$WORK/blipc.new"
-elif [[ "$install_rc" -ne 0 ]]; then
-  exit "$install_rc"
+install_one() {
+  local staged="$1" expected_sum="$2" out rc=0
+  out="$(sudo -n EXPECTED_SHA256="$expected_sum" /usr/local/sbin/blipc-install "$staged" 2>&1)" || rc=$?
+  printf '%s\n' "$out"
+  if [[ "$rc" -ne 0 && "$out" == *"environment"* ]]; then
+    echo "warning: sudo rejected the checksum env, retrying without it" >&2
+    sudo -n /usr/local/sbin/blipc-install "$staged"
+    return $?
+  fi
+  return "$rc"
+}
+
+# blipctl first: installing blipc restarts the service, which can kill this
+# script mid-run (it is a child of the blipc unit). The CLI needs no restart.
+if ! install_one "$WORK/blipctl.new" "$expected_ctl"; then
+  # An older root helper (from before blipctl updates existed) only accepts
+  # blipc.new and rejects the blipctl path. The controller itself still
+  # updates below; one manual `install-blipc.sh` run refreshes the helper
+  # and sudoers so the next self-update covers blipctl too.
+  echo "warning: blipctl was not updated (is the install helper current? rerun install-blipc.sh once) — continuing with the blipc update" >&2
 fi
+install_one "$WORK/blipc.new" "$expected"
 # Record the installed version stamp for future downgrade checks (M14).
 if [[ "$TAG" != "dev" ]]; then
   printf '%s\n' "${TAG#v}" > "$WORK/.installed-version" 2>/dev/null || true

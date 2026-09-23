@@ -1,25 +1,43 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Root half of the blipc self-updater. Installs a binary that was already
-# built (unprivileged) and restarts the service. No network, no compiler — the
-# smallest possible privileged surface. The staged path is trusted only after
-# confirming it is a regular ELF file at a fixed location.
+# Root half of the blipc self-updater. Installs binaries that were already
+# built (unprivileged) and restarts the service when blipc itself was
+# replaced. No network, no compiler — the smallest possible privileged
+# surface. Each staged path is trusted only after confirming it is a regular
+# ELF file at a fixed location, and each maps to exactly one fixed
+# destination: arbitrary file writes are impossible by construction.
 STAGED="${1:-}"
-readonly BIN="/usr/local/bin/blipc"
-readonly PREVIOUS="/usr/local/bin/blipc.previous"
-readonly EXPECTED_STAGED="/var/lib/blipc/update/blipc.new"
-readonly EXPECTED_DIR="/var/lib/blipc/update"
+readonly BIN_DIR="/usr/local/bin"
+readonly EXPECTED_BLIPC_NEW="/var/lib/blipc/update/blipc.new"
+readonly EXPECTED_BLIPCTL_NEW="/var/lib/blipc/update/blipctl.new"
+readonly UPDATE_DIR="/var/lib/blipc/update"
 readonly LOCK_FILE="/var/lib/blipc/update/.install.lock"
 
 [[ "$(id -u)" -eq 0 ]] || { echo "must run as root" >&2; exit 1; }
-# H2: enforce the fixed staged path pinned in the sudoers rule. Reject
+# H2: enforce the fixed staged paths pinned in the sudoers rule. Reject
 # anything else so the NOPASSWD entry cannot be abused for arbitrary files.
-[[ "$STAGED" == "$EXPECTED_STAGED" ]] || { echo "staged path must be $EXPECTED_STAGED (got: ${STAGED:-<empty>})" >&2; exit 1; }
+case "$STAGED" in
+  "$EXPECTED_BLIPC_NEW")
+    readonly BIN="$BIN_DIR/blipc"
+    readonly PREVIOUS="$BIN_DIR/blipc.previous"
+    readonly RESTART_SERVICE=1
+    ;;
+  "$EXPECTED_BLIPCTL_NEW")
+    readonly BIN="$BIN_DIR/blipctl"
+    readonly PREVIOUS="$BIN_DIR/blipctl.previous"
+    # blipctl is a CLI: replacing it needs no service restart.
+    readonly RESTART_SERVICE=0
+    ;;
+  *)
+    echo "staged path must be $EXPECTED_BLIPC_NEW or $EXPECTED_BLIPCTL_NEW (got: ${STAGED:-<empty>})" >&2
+    exit 1
+    ;;
+esac
 [[ -n "$STAGED" && -f "$STAGED" && ! -L "$STAGED" ]] || { echo "staged binary missing or not a regular file" >&2; exit 1; }
 # O_NOFOLLOW-style check: staged file must live directly in the update dir
 # (dirname equality + symlink rejection above defeats dir/file swap tricks).
-[[ "$(dirname "$STAGED")" == "$EXPECTED_DIR" ]] || { echo "staged file must be inside $EXPECTED_DIR" >&2; exit 1; }
+[[ "$(dirname "$STAGED")" == "$UPDATE_DIR" ]] || { echo "staged file must be inside $UPDATE_DIR" >&2; exit 1; }
 [[ "$(head -c 4 "$STAGED" 2>/dev/null)" == $'\x7fELF' ]] || { echo "staged file is not an ELF binary" >&2; exit 1; }
 # Optional SHA256 re-verify: when the unprivileged updater exports the
 # checksum it verified, re-check it here before installing as root.
@@ -41,8 +59,9 @@ else
   USE_MKDIR_LOCK=1
 fi
 
-echo "phase: installing"
-tmp="$(mktemp /usr/local/bin/.blipc.XXXXXX)"
+NAME="$(basename "$BIN")"
+echo "phase: installing $NAME"
+tmp="$(mktemp /usr/local/bin/.blip.XXXXXX)"
 cleanup() {
   rm -f "$tmp"
   if [[ "${USE_MKDIR_LOCK:-0}" -eq 1 ]]; then
@@ -56,13 +75,17 @@ if [[ -x "$BIN" ]]; then
 fi
 mv -f "$tmp" "$BIN"
 
-echo "phase: restarting"
-if ! systemctl restart blipc || ! systemctl is-active --quiet blipc; then
-  if [[ -x "$PREVIOUS" ]]; then
-    install -o root -g root -m 0755 "$PREVIOUS" "$BIN"
-    systemctl restart blipc || true
+if [[ "$RESTART_SERVICE" -eq 1 ]]; then
+  echo "phase: restarting"
+  if ! systemctl restart blipc || ! systemctl is-active --quiet blipc; then
+    if [[ -x "$PREVIOUS" ]]; then
+      install -o root -g root -m 0755 "$PREVIOUS" "$BIN"
+      systemctl restart blipc || true
+    fi
+    echo "blipc restart/health check failed; previous binary restored" >&2
+    exit 1
   fi
-  echo "blipc restart/health check failed; previous binary restored" >&2
-  exit 1
+  printf '%s\n' "blipc installed and healthy"
+else
+  printf '%s\n' "blipctl installed"
 fi
-printf '%s\n' "blipc installed and healthy"
