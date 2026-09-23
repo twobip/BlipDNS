@@ -110,7 +110,10 @@ func main() {
 		fleet.SetCacheDefault(*cfg.CacheSize)
 	}
 	fleet.SetQueryLogRetentionDefault(cfg.QueryLogRetentionHours)
-	fleet.SetRecords(context.Background(), cfg.Records)
+	// Startup seeding uses the non-persisting Default variant: the persisting
+	// SetRecords would saveConfig with a still-empty fleet (the instance Add
+	// loop runs below) and permanently wipe the configured instances.
+	fleet.SetRecordsDefault(cfg.Records)
 	if cfg.HACluster.Enabled {
 		if err := fleet.SetHAClusterDefault(cfg.HACluster); err != nil {
 			log.Printf("blipc: high availability config: %v", err)
@@ -279,7 +282,9 @@ func restoreBlocklistSettings(fleet *controller.Fleet, sources, disabled []strin
 		fleet.SetBlocklistSourcesDefault(sources)
 	}
 	if updateHours > 0 {
-		fleet.SetAutoUpdateHours(updateHours)
+		// Default variant: persisting here would saveConfig with a
+		// still-empty fleet (Adds run later) and wipe the instances.
+		fleet.SetAutoUpdateHoursDefault(updateHours)
 	}
 }
 

@@ -1797,6 +1797,18 @@ func (f *Fleet) Records() []control.RecordEntry {
 // SetRecords records the fleet-wide local DNS records, persists them, and pushes
 // the effective value (default or per-instance override) to every adopted
 // instance. Returns the per-instance outcome.
+// SetRecordsDefault records the fleet-wide local DNS records without
+// persisting or distributing them. Used at startup from the controller
+// config; the poll reconcile distributes them to instances as they are
+// added. Unlike SetRecords it never calls saveConfig, so a startup that
+// runs before the instance Add loop cannot persist an empty fleet over
+// the configured instances.
+func (f *Fleet) SetRecordsDefault(recs []control.RecordEntry) {
+	f.mu.Lock()
+	f.records = append([]control.RecordEntry(nil), recs...)
+	f.mu.Unlock()
+}
+
 func (f *Fleet) SetRecords(ctx context.Context, recs []control.RecordEntry) map[string]string {
 	f.mu.Lock()
 	f.records = append([]control.RecordEntry(nil), recs...)
@@ -2303,6 +2315,20 @@ func (f *Fleet) AutoUpdateHours() int {
 
 // SetAutoUpdateHours configures the interval (hours) between automatic source
 // refreshes and persists it to the controller config. 0 disables auto-updates.
+// SetAutoUpdateHoursDefault records the refresh interval without
+// persisting it. Used at startup from the controller config; unlike
+// SetAutoUpdateHours it never calls saveConfig, so a startup that runs
+// before the instance Add loop cannot persist an empty fleet over the
+// configured instances.
+func (f *Fleet) SetAutoUpdateHoursDefault(h int) {
+	if h < 0 {
+		h = 0
+	}
+	f.blMu.Lock()
+	f.autoUpdateHours = h
+	f.blMu.Unlock()
+}
+
 func (f *Fleet) SetAutoUpdateHours(h int) {
 	if h < 0 {
 		h = 0

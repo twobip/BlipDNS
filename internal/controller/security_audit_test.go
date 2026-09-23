@@ -5,7 +5,11 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
+
+	"github.com/twobip/BlipDNS/internal/control"
 )
 
 // TestAPIKeysCSRF proves /api/keys enforces the same session CSRF checks as
@@ -80,6 +84,28 @@ func TestReadKeyDeniedQueryHistory(t *testing.T) {
 	h.ServeHTTP(r, req)
 	if r.Code != http.StatusOK {
 		t.Errorf("read key GET /api/health: status=%d, want 200", r.Code)
+	}
+}
+
+// TestStartupSeedingNeverPersists guards the prod data-loss incident where a
+// startup saveConfig with a still-empty fleet overwrote controller.yaml and
+// permanently wiped the configured instances. All startup seeding paths must
+// touch memory only; persistence happens on explicit Add/UI actions once the
+// fleet is loaded.
+func TestStartupSeedingNeverPersists(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "controller.yaml")
+	fleet := NewFleet(path)
+	fleet.SetRecordsDefault([]control.RecordEntry{{Domain: "x.test", Type: "A", Value: "1.2.3.4"}})
+	fleet.SetAutoUpdateHoursDefault(24)
+	fleet.SetCacheDefault(100)
+	fleet.SetRateLimitQPSDefault(10)
+	fleet.SetDoHDefault("")
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("startup seeding wrote %s (must not persist before Adds)", path)
+	}
+	// Seeding still takes effect in memory (reconcile distributes it later).
+	if got := fleet.Records(); len(got) != 1 || got[0].Domain != "x.test" {
+		t.Fatalf("seeded records not in memory: %+v", got)
 	}
 }
 
