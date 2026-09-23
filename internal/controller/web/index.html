@@ -645,6 +645,21 @@
           </div>
 
           <div class="panel">
+            <div class="panel-head"><h3>Reverse Proxy</h3><span class="spacer"></span><span class="badge accent" id="s-proxy-badge">controller</span></div>
+            <div class="panel-body">
+              <div class="field">
+                <label>Trusted proxies (CIDR or IP, comma/space separated)</label>
+                <input class="input" id="s-trusted-proxies" placeholder="127.0.0.1/32, ::1/128" autocapitalize="none" autocorrect="off" autocomplete="off" spellcheck="false"/>
+                <span class="hint">Peers allowed to supply X-Forwarded-For / X-Forwarded-Proto / X-Forwarded-Host for client-IP logging, brute-force buckets, Secure cookies and CSRF checks. Empty = trust none (direct access). Only list your reverse proxy (e.g. the off-host proxy IP). Applies immediately, persists to controller.yaml. See deploy/reverse-proxy.md.</span>
+              </div>
+              <div class="row mt">
+                <button class="btn btn-primary" id="s-save-proxies">Save</button>
+                <span class="hint" id="s-proxies-status"></span>
+              </div>
+            </div>
+          </div>
+
+          <div class="panel">
             <div class="panel-head"><h3>DoH (DNS over HTTPS)</h3><span class="spacer"></span><span class="badge accent" id="s-doh-badge">fleet-wide</span></div>
             <div class="panel-body">
               <div class="field">

@@ -141,6 +141,7 @@ type Fleet struct {
 	probeBootKey      string                       // fleet bootstrap spec the cached probe resolver was built from
 	probeBoot         upstream.Resolver            // reused probe bootstrap resolver: keeps its DoH keep-alive conns across Test clicks
 	qlRetentionHours  int                          // how long query log entries are kept (0 = 24h default)
+	trustedProxies    []string                     // reverse-proxy CIDRs/IPs trusted for X-Forwarded-* (controller-local)
 	records           []control.RecordEntry        // fleet-wide local DNS records
 	haCluster         control.HACluster            // LAN two-node VRRP desired state
 	releaseChannel    string                       // stable or dev
@@ -1519,6 +1520,51 @@ func (f *Fleet) SetQueryLogRetentionDefault(hours int) {
 	if f.queryLog != nil {
 		f.queryLog.SetRetention(time.Duration(f.QueryLogRetentionHours()) * time.Hour)
 	}
+}
+
+// TrustedProxies returns the reverse-proxy CIDRs/IPs trusted for
+// X-Forwarded-For/Proto/Host (controller-local, empty = trust none).
+func (f *Fleet) TrustedProxies() []string {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	out := make([]string, len(f.trustedProxies))
+	copy(out, f.trustedProxies)
+	return out
+}
+
+// SetTrustedProxiesDefault records trusted proxies without persisting.
+// Used at startup from the controller config.
+func (f *Fleet) SetTrustedProxiesDefault(proxies []string) {
+	f.mu.Lock()
+	f.trustedProxies = append([]string(nil), proxies...)
+	f.mu.Unlock()
+}
+
+// SetTrustedProxies validates, records and persists trusted proxies.
+func (f *Fleet) SetTrustedProxies(proxies []string) error {
+	if _, err := ParseTrustedProxies(proxies); err != nil {
+		return err
+	}
+	clean := make([]string, 0, len(proxies))
+	for _, v := range proxies {
+		if v = trimSpace(v); v != "" {
+			clean = append(clean, v)
+		}
+	}
+	f.mu.Lock()
+	f.trustedProxies = clean
+	f.mu.Unlock()
+	if f.configPath != "" {
+		if err := f.saveConfig(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func trimSpace(s string) string {
+	// local helper to avoid importing strings here (already imported).
+	return strings.TrimSpace(s)
 }
 
 // SetQueryLogRetention persists the query log retention and applies it to the
@@ -3024,6 +3070,7 @@ func (f *Fleet) saveConfig() error {
 		UpstreamBootstrap      []upstream.UpstreamServer    `yaml:"upstream_bootstrap"`
 		CacheSize              int                          `yaml:"cache_size"`
 		QueryLogRetentionHours int                          `yaml:"query_log_retention_hours"`
+		TrustedProxies         []string                     `yaml:"trusted_proxies"`
 		BlocklistSources       []string                     `yaml:"blocklist_sources"`
 		BlocklistDisabled      []string                     `yaml:"blocklist_disabled"`
 		BlocklistUpdateHours   int                          `yaml:"blocklist_update_hours"`
@@ -3063,6 +3110,7 @@ func (f *Fleet) saveConfig() error {
 	cfg.UpstreamBootstrap = f.UpstreamBootstrap()
 	cfg.CacheSize = f.CacheConfig()
 	cfg.QueryLogRetentionHours = f.QueryLogRetentionHours()
+	cfg.TrustedProxies = f.TrustedProxies()
 	cfg.BlocklistSources = blSources
 	// ponytail: reset, not append — cfg was unmarshaled from the file on
 	// disk, so appending re-added the stored entries on every save and the

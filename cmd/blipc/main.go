@@ -154,6 +154,9 @@ func main() {
 		log.Printf("blipc: first-run setup token: %s", setupToken)
 		log.Printf("blipc: open http%s://%s/setup#token=%s to create the administrator account", map[bool]string{true: "s", false: ""}[cfg.DashboardTLS || (cfg.TLSCertFile != "" && cfg.TLSKeyFile != "")], cfg.Listen, setupToken)
 	}
+	if len(cfg.TrustedProxies) > 0 {
+		fleet.SetTrustedProxiesDefault(cfg.TrustedProxies)
+	}
 	srv := controller.NewServerWithConfig(cfg.Username, authPass, fleet, controller.UI(), *cfgPath, setupToken)
 	if len(cfg.TrustedProxies) > 0 {
 		if err := srv.SetTrustedProxies(cfg.TrustedProxies); err != nil {

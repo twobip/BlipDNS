@@ -108,25 +108,28 @@ func (s *Server) SetTrustedProxies(values []string) error {
 	return nil
 }
 
-func (s *Server) clientIP(r *http.Request) string {
-	if s.trustedProxies != nil {
-		return s.trustedProxies.ClientIP(r)
+// getTrust returns the effective proxy trust: Fleet's persisted value when a
+// fleet is attached (UI-managed), else the startup-set Server value (tests /
+// API-only). Parsed per call — dashboard QPS is low, correctness over caching.
+func (s *Server) getTrust() *ProxyTrust {
+	if s.fleet != nil {
+		if pt, err := ParseTrustedProxies(s.fleet.TrustedProxies()); err == nil {
+			return pt
+		}
 	}
-	return ClientIP(r)
+	return s.trustedProxies
+}
+
+func (s *Server) clientIP(r *http.Request) string {
+	return s.getTrust().ClientIP(r)
 }
 
 func (s *Server) isSecure(r *http.Request) bool {
-	if s.trustedProxies != nil {
-		return s.trustedProxies.IsSecure(r)
-	}
-	return r.TLS != nil
+	return s.getTrust().IsSecure(r)
 }
 
 func (s *Server) requestHost(r *http.Request) string {
-	if s.trustedProxies != nil {
-		return s.trustedProxies.RequestHost(r)
-	}
-	return r.Host
+	return s.getTrust().RequestHost(r)
 }
 
 // Handler returns the controller's HTTP handler (API + UI).
@@ -836,6 +839,7 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			"upstream_bootstrap":        s.fleet.UpstreamBootstrap(),
 			"cache_size":                cacheSize,
 			"query_log_retention_hours": s.fleet.QueryLogRetentionHours(),
+			"trusted_proxies":           s.fleet.TrustedProxies(),
 			"records":                   s.fleet.Records(),
 			"release_channel":           s.fleet.ReleaseChannel(),
 		})
@@ -849,6 +853,7 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			RateLimitQPS           *int                       `json:"rate_limit_qps"`
 			CacheSize              *int                       `json:"cache_size"`
 			QueryLogRetentionHours *int                       `json:"query_log_retention_hours"`
+			TrustedProxies         *[]string                  `json:"trusted_proxies"`
 			UpstreamServers        *[]upstream.UpstreamServer `json:"upstream_servers"`
 			UpstreamRoutes         *[]upstream.UpstreamRoute  `json:"upstream_routes"`
 			UpstreamBootstrap      *[]upstream.UpstreamServer `json:"upstream_bootstrap"`
@@ -902,6 +907,21 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			}
 			applied := s.fleet.SetQueryLogRetention(r.Context(), hours)
 			writeJSON(w, map[string]interface{}{"ok": true, "applied": applied})
+			return
+		}
+		// Reverse-proxy trust (controller-local): which peers may supply
+		// X-Forwarded-For/Proto/Host. Validated as CIDRs/bare IPs; empty
+		// clears back to "trust none". Applies immediately (next request
+		// parses Fleet) and persists to controller.yaml.
+		if req.TrustedProxies != nil {
+			if err := s.fleet.SetTrustedProxies(*req.TrustedProxies); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			// Keep the startup-set Server trust in sync for paths without
+			// a fleet (tests) — getTrust prefers Fleet, so this is best-effort.
+			_ = s.SetTrustedProxies(*req.TrustedProxies)
+			writeJSON(w, map[string]interface{}{"ok": true, "trusted_proxies": s.fleet.TrustedProxies()})
 			return
 		}
 		// Per-client DNS rate limit (fleet-wide or per-instance).

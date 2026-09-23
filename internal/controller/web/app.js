@@ -1652,6 +1652,7 @@ function loadRlEditor() {
 let savedCacheSize = 0;          // fleet-wide max cached responses (0 = unlimited)
 let savedQLRetention = 720;      // how long query log entries are kept (hours)
 let savedReleaseChannel = "stable";
+let savedTrustedProxies = [];  // reverse-proxy CIDRs/IPs trusted for X-Forwarded-*
 let cacheScopeState = "default"; // "default" or an instance id
 function renderCacheScopeSelect() {
   const sel = $("s-cache-scope");
@@ -1814,6 +1815,9 @@ async function refreshSettings() {
     savedQLRetention = (d.query_log_retention_hours != null && d.query_log_retention_hours !== undefined) ? Number(d.query_log_retention_hours || 720) : 720;
     savedReleaseChannel = d.release_channel === "dev" ? "dev" : "stable";
     loadReleaseEditor();
+    // reverse-proxy trust (controller-local)
+    savedTrustedProxies = Array.isArray(d.trusted_proxies) ? d.trusted_proxies : [];
+    if ($("s-trusted-proxies")) $("s-trusted-proxies").value = savedTrustedProxies.join(", ");
     // fleet-wide local DNS records
     savedRecords = (d.records || []).map((r) => ({ ...r }));
     // fleet-wide default upstream pool + conditional-forwarding routes + bootstrap
@@ -2145,7 +2149,7 @@ function loadReleaseEditor() {
     "Query Log": "ql", "Reset & destroy": "ql",
     "DoH (DNS over HTTPS)": "dns", "Rate Limit": "dns", "Cache": "dns",
     "API Keys": "keys",
-    "Release Channel": "about", "Controller Update": "about", "About": "about"
+    "Release Channel": "about", "Controller Update": "about", "Reverse Proxy": "about", "About": "about"
   };
   const tabs = Array.from(document.querySelectorAll("#settings-tabs .settings-tab"));
   const panels = Array.from(document.querySelectorAll("#view-settings .panel"));
@@ -2216,6 +2220,19 @@ $("s-update-ctrl").onclick = async () => {
 };
 
 
+$("s-save-proxies").onclick = async () => {
+  const st = $("s-proxies-status");
+  st.textContent = "saving\u2026";
+  const raw = ($("s-trusted-proxies").value || "").split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
+  try {
+    const r = await API("/api/settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ trusted_proxies: raw }) });
+    const d = await r.json();
+    savedTrustedProxies = Array.isArray(d.trusted_proxies) ? d.trusted_proxies : raw;
+    if ($("s-trusted-proxies")) $("s-trusted-proxies").value = savedTrustedProxies.join(", ");
+    st.textContent = "saved" + (savedTrustedProxies.length ? "" : " (trust none — direct access)");
+    toast("trusted proxies saved");
+  } catch (e) { st.textContent = ""; toast("trusted proxies save failed: " + e.message, "err"); }
+};
 $("s-save-release").onclick = async () => {
   const channel = $("s-release-channel").value;
   const st = $("s-release-status");
@@ -2225,6 +2242,9 @@ $("s-save-release").onclick = async () => {
     const d = await r.json();
     savedReleaseChannel = d.release_channel === "dev" ? "dev" : "stable";
     loadReleaseEditor();
+    // reverse-proxy trust (controller-local)
+    savedTrustedProxies = Array.isArray(d.trusted_proxies) ? d.trusted_proxies : [];
+    if ($("s-trusted-proxies")) $("s-trusted-proxies").value = savedTrustedProxies.join(", ");
     st.textContent = "saved";
     toast("release channel set to " + savedReleaseChannel);
   } catch (e) { st.textContent = ""; toast("release channel save failed: " + e.message, "err"); }
