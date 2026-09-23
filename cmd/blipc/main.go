@@ -6,14 +6,17 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"flag"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
+	"github.com/twobip/BlipDNS/internal/certgen"
 	blipconfig "github.com/twobip/BlipDNS/internal/config"
 	"github.com/twobip/BlipDNS/internal/control"
 	"github.com/twobip/BlipDNS/internal/controller"
@@ -24,6 +27,11 @@ import (
 type config struct {
 	Listen                 string                                  `yaml:"listen"`
 	TrustedProxies         []string                                `yaml:"trusted_proxies"`
+	DashboardTLS           bool                                    `yaml:"dashboard_tls"`
+	TLSDir                 string                                  `yaml:"tls_dir"`
+	TLSCertFile            string                                  `yaml:"tls_cert_file"`
+	TLSKeyFile             string                                  `yaml:"tls_key_file"`
+	TLSSANs                []string                                `yaml:"tls_san"`
 	Username               string                                  `yaml:"username"`
 	Password               string                                  `yaml:"password"`
 	PasswordHash           string                                  `yaml:"password_hash"`
@@ -54,7 +62,6 @@ func main() {
 		log.Fatalf("blipc: %v", err)
 	}
 	blipconfig.WarnConfigPerms("blipc", *cfgPath)
-	blipconfig.WarnPlainHTTP("blipc", "dashboard", cfg.Listen, "session cookies")
 	if cfg.Username == "" {
 		cfg.Username = os.Getenv("BLIPC_USER")
 	}
@@ -145,7 +152,7 @@ func main() {
 			log.Fatalf("blipc: generate setup token: %v", tokenErr)
 		}
 		log.Printf("blipc: first-run setup token: %s", setupToken)
-		log.Printf("blipc: open http://%s/setup#token=%s to create the administrator account", cfg.Listen, setupToken)
+		log.Printf("blipc: open http%s://%s/setup#token=%s to create the administrator account", map[bool]string{true: "s", false: ""}[cfg.DashboardTLS || (cfg.TLSCertFile != "" && cfg.TLSKeyFile != "")], cfg.Listen, setupToken)
 	}
 	srv := controller.NewServerWithConfig(cfg.Username, authPass, fleet, controller.UI(), *cfgPath, setupToken)
 	if len(cfg.TrustedProxies) > 0 {
@@ -153,6 +160,42 @@ func main() {
 			log.Fatalf("blipc: trusted_proxies: %v", err)
 		}
 		log.Printf("blipc: trusting proxy headers from %v", cfg.TrustedProxies)
+	}
+	// Dashboard TLS: same self-signed mechanism as blipd DoH (certgen). When
+	// dashboard_tls is set (or explicit cert/key files are given), serve
+	// HTTPS; otherwise plain HTTP (loopback or behind a TLS proxy).
+	dashboardTLS := cfg.DashboardTLS || (cfg.TLSCertFile != "" && cfg.TLSKeyFile != "")
+	if !dashboardTLS {
+		blipconfig.WarnPlainHTTP("blipc", "dashboard", cfg.Listen, "session cookies")
+	}
+	var tlsCert *tls.Certificate
+	if dashboardTLS {
+		tlsDir := cfg.TLSDir
+		if tlsDir == "" {
+			tlsDir = "/var/lib/blipc"
+		}
+		if cfg.TLSCertFile != "" && cfg.TLSKeyFile != "" {
+			pair, err := tls.LoadX509KeyPair(cfg.TLSCertFile, cfg.TLSKeyFile)
+			if err != nil {
+				log.Fatalf("blipc: load tls cert/key: %v", err)
+			}
+			tlsCert = &pair
+		} else {
+			certPath := filepath.Join(tlsDir, "dashboard-cert.pem")
+			keyPath := filepath.Join(tlsDir, "dashboard-key.pem")
+			certPEM, keyPEM, persisted, err := certgen.EnsureFiles(certPath, keyPath, cfg.TLSSANs...)
+			if err != nil {
+				log.Printf("blipc: self-signed dashboard cert: %v (serving with in-memory cert this session)", err)
+			}
+			pair, err := tls.X509KeyPair(certPEM, keyPEM)
+			if err != nil {
+				log.Fatalf("blipc: build self-signed cert: %v", err)
+			}
+			tlsCert = &pair
+			if persisted {
+				log.Printf("blipc: dashboard serving HTTPS with certificate %s", certPath)
+			}
+		}
 	}
 	httpSrv := &http.Server{
 		Addr:              cfg.Listen,
@@ -163,9 +206,35 @@ func main() {
 		IdleTimeout:       60 * time.Second,
 		MaxHeaderBytes:    1 << 20,
 	}
-	log.Printf("blipc %s (pid %d) listening on %s (%d instances)", controller.ControllerVersion(), os.Getpid(), cfg.Listen, len(cfg.Instances))
+	if tlsCert != nil {
+		httpSrv.TLSConfig = &tls.Config{
+			MinVersion: tls.VersionTLS12,
+			CipherSuites: []uint16{
+				tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+				tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+				tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+				tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+				tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
+				tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
+			},
+			PreferServerCipherSuites: true,
+			CurvePreferences:         []tls.CurveID{tls.X25519, tls.CurveP256},
+			Certificates:             []tls.Certificate{*tlsCert},
+		}
+	}
+	scheme := "http"
+	if tlsCert != nil {
+		scheme = "https"
+	}
+	log.Printf("blipc %s (pid %d) listening on %s://%s (%d instances)", controller.ControllerVersion(), os.Getpid(), scheme, cfg.Listen, len(cfg.Instances))
 	go func() {
-		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		var err error
+		if tlsCert != nil {
+			err = httpSrv.ListenAndServeTLS("", "")
+		} else {
+			err = httpSrv.ListenAndServe()
+		}
+		if err != nil && err != http.ErrServerClosed {
 			log.Fatalf("blipc: %v", err)
 		}
 	}()

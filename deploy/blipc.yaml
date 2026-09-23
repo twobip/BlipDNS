@@ -9,6 +9,17 @@ listen: "127.0.0.1:8500"
 # CSRF Origin checks. Empty (default) = forwarded headers are ignored.
 # Example for local proxy: ["127.0.0.1/32", "::1/128"]
 # trusted_proxies: ["127.0.0.1/32"]
+# Dashboard HTTPS: same self-signed mechanism as blipd DoH (certgen, ECDSA
+# P-256, 398d). Set dashboard_tls: true to serve https:// with an
+# auto-generated cert persisted under tls_dir (or point tls_cert_file /
+# tls_key_file at your own cert, e.g. the blipd DoH pair when co-located).
+# tls_san lists extra names/IPs the cert must cover (proxy-facing hostname or
+# the LAN IP the proxy dials); changing it regenerates the pair.
+# dashboard_tls: true
+# tls_dir: "/var/lib/blipc"
+# tls_cert_file: ""
+# tls_key_file: ""
+# tls_san: ["dns-admin.example.com"]
 # Auth for the web UI / API. blipc uses username/password session auth: you log
 # in once via the web UI (or /api/login) and receive an HttpOnly + SameSite=Strict
 # Empty credentials keep the controller CLOSED until the one-time setup flow

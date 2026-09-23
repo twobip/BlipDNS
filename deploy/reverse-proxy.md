@@ -63,6 +63,45 @@ dns-admin.example.com {
 Caddy sets `X-Forwarded-For/Proto/Host` automatically; keep blipc's
 `trusted_proxies: ["127.0.0.1/32", "::1/128"]`.
 
+## 5. Proxy on a different host (backend over LAN)
+
+Plain `http://blipc:8500` across the LAN leaks session cookies + fleet tokens
+to passive sniffing. Serve the backend over HTTPS with the same self-signed
+mechanism as DoH:
+
+```yaml
+# /etc/blipc/blipc.yaml (on the blipc host)
+listen: "0.0.0.0:8500"  # or the LAN IP; firewall to proxy IP only
+trusted_proxies: ["<proxy-lan-ip>/32"]
+dashboard_tls: true
+tls_dir: "/var/lib/blipc"
+tls_san: ["dns-admin.example.com", "192.168.30.10"]
+```
+
+```nginx
+# on the proxy host: re-encrypt to the backend (self-signed, pin by default
+# off for internal hosts; or add proxy_ssl_trusted_certificate + verify on)
+location / {
+  proxy_pass https://blipc-lan:8500;
+  proxy_ssl_verify off;  # backend is self-signed TOFU; WG/VLAN is the real auth
+  proxy_set_header Host $host;
+  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+  proxy_set_header X-Forwarded-Proto $scheme;
+  proxy_set_header X-Forwarded-Host $host;
+}
+```
+
+To reuse the exact blipd DoH pair when co-located instead of a separate
+dashboard cert:
+
+```yaml
+tls_cert_file: "/etc/blipd/tls.crt"  # or /var/lib/blipd/doh-cert.pem
+tls_key_file: "/etc/blipd/tls.key"
+```
+
+Note: `blipc` (user `blipc`) must be able to read those paths — separate
+dashboard certs under `/var/lib/blipc` avoid cross-user key access.
+
 ## 4. Checks
 
 - `curl -Ik https://dns-admin.example.com/login` → `Secure` on
