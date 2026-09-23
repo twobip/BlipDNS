@@ -242,6 +242,20 @@ func (s *Server) requireAuth(h http.HandlerFunc) http.HandlerFunc {
 				http.Error(w, "read-only API key", http.StatusForbidden)
 				return
 			}
+			// F-12: a general read key must not become a query-history export
+			// credential. Query logs, client metadata, live event streams and
+			// upstream-error details stay admin-only even for GET.
+			if scope == APIKeyScopeRead && readScopeDenied(r.URL.Path) {
+				http.Error(w, "read-only API key cannot access query history", http.StatusForbidden)
+				return
+			}
+			// Per-instance query-log lives under /api/instances/<id>/query-log
+			// (same prefix as other instance reads), so it is enforced inside
+			// handleInstance rather than by path prefix here.
+			if scope == APIKeyScopeRead && strings.HasPrefix(r.URL.Path, "/api/instances/") && strings.HasSuffix(r.URL.Path, "/query-log") {
+				http.Error(w, "read-only API key cannot access query history", http.StatusForbidden)
+				return
+			}
 			h(w, r)
 			return
 		}
@@ -345,6 +359,23 @@ func hostOnly(h string) string {
 		}
 	}
 	return h
+}
+
+// readScopeDenied reports whether a path is off-limits to read-scoped API
+// keys. F-12: /api/queries returns queried domains, client IPs/IDs, instance
+// labels, answers and timing — privacy-sensitive query history that must not
+// ride on a general health/dashboard read credential. The same applies to the
+// client-activity, client-name, live-event and upstream-error feeds.
+func readScopeDenied(path string) bool {
+	switch path {
+	case "/api/queries",
+		"/api/clients",
+		"/api/client-names",
+		"/api/events",
+		"/api/upstream-errors":
+		return true
+	}
+	return false
 }
 
 // bearerToken extracts a "Bearer <token>" API key from the request.
@@ -498,6 +529,33 @@ func (s *Server) handleAPIKeys(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("WWW-Authenticate", "Bearer realm=\"blipc\"")
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
+	}
+	// F-13: /api/keys is registered outside the requireAuth wrapper, so it
+	// missed the normal session CSRF checks (Origin/Referer + Sec-Fetch-Site
+	// + JSON content-type). A session cookie rides automatically, so mutating
+	// calls (POST/DELETE) get the same checks here. SameSite=Strict + no CORS
+	// headers already blunt cross-origin reads; this closes the state-changing
+	// gap (key creation/revocation) in same-site-subdomain and legacy-browser
+	// scenarios.
+	if r.Method == http.MethodPost || r.Method == http.MethodDelete || r.Method == http.MethodPut || r.Method == http.MethodPatch {
+		if !s.csrfOriginAllowed(r) {
+			http.Error(w, "cross-site request rejected", http.StatusForbidden)
+			return
+		}
+		if fetchSite := r.Header.Get("Sec-Fetch-Site"); fetchSite == "cross-site" {
+			http.Error(w, "cross-site request rejected", http.StatusForbidden)
+			return
+		}
+		if ct := r.Header.Get("Content-Type"); ct != "" {
+			mt, _, err := mime.ParseMediaType(ct)
+			if err != nil || mt != "application/json" {
+				http.Error(w, "content-type must be application/json", http.StatusUnsupportedMediaType)
+				return
+			}
+		}
+		// Missing Content-Type with a body is allowed through so the handler
+		// returns its normal 400 (mirrors requireAuth: strict 415 broke
+		// existing clients/tests).
 	}
 	switch r.Method {
 	case http.MethodGet:

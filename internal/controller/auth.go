@@ -290,7 +290,9 @@ type apiKey struct {
 }
 
 // API key scopes: "admin" can call any /api/* route; "read" is limited to
-// safe GET/HEAD reads (enforced in requireAuth).
+// safe GET/HEAD reads (enforced in requireAuth) and additionally cannot read
+// query history, client metadata, live events or upstream-error details
+// (F-12: those stay admin-only even for GET).
 const (
 	APIKeyScopeAdmin = "admin"
 	APIKeyScopeRead  = "read"

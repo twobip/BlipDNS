@@ -55,12 +55,12 @@ func clientIPFromReq(r *http.Request, trusted []*net.IPNet) net.IP {
 	}
 	if isTrustedPeer(r, trusted) {
 		if cf := r.Header.Get("CF-Connecting-IP"); cf != "" {
-			if ip := net.ParseIP(firstToken(cf)); ip != nil {
+			if ip := net.ParseIP(lastToken(cf)); ip != nil {
 				return ip
 			}
 		}
 		if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
-			if ip := net.ParseIP(firstToken(fwd)); ip != nil {
+			if ip := net.ParseIP(lastToken(fwd)); ip != nil {
 				return ip
 			}
 		}
@@ -119,8 +119,30 @@ func parseTrustedProxies(values []string) ([]*net.IPNet, error) {
 }
 
 func firstToken(s string) string {
-	if i := strings.IndexAny(s, ", "); i >= 0 {
-		return s[:i]
+	return lastToken(s)
+}
+
+// lastToken returns the rightmost (closest-to-proxy) token of a comma/space
+// separated forwarded-header value. F-09: the old code trusted the FIRST
+// token, which is attacker-controlled whenever the trusted proxy appends
+// (e.g. nginx `$proxy_add_x_forwarded_for` preserves a client-supplied XFF
+// value and appends the real peer). The proxy-added address is last, so the
+// last token is the only one the trusted peer vouches for. Proxies must still
+// be configured to append (or overwrite); untrusted client input in earlier
+// positions is never honored.
+func lastToken(s string) string {
+	// Split on commas (the XFF separator); spaces alone do not separate
+	// addresses but trim them per-token.
+	parts := strings.Split(s, ",")
+	for i := len(parts) - 1; i >= 0; i-- {
+		if t := strings.TrimSpace(parts[i]); t != "" {
+			// A token may still carry a trailing space-separated remnant;
+			// take its last field.
+			if f := strings.Fields(t); len(f) > 0 {
+				return f[len(f)-1]
+			}
+			return t
+		}
 	}
-	return s
+	return ""
 }

@@ -15,8 +15,16 @@ trusted_proxies: ["127.0.0.1/32", "::1/128"]
 
 With `trusted_proxies` set, blipc:
 
-- uses `X-Forwarded-For` / `CF-Connecting-IP` for login rate-limit buckets,
-  probe limits and audit logs (untrusted peers: direct `RemoteAddr` only),
+- uses the LAST `X-Forwarded-For` / `CF-Connecting-IP` token for login
+  rate-limit buckets, probe limits and audit logs (untrusted peers: direct
+  `RemoteAddr` only). The last token is the address the trusted proxy
+  appended, so a client-supplied first token (e.g. preserved by nginx
+  `$proxy_add_x_forwarded_for`) is never honored. Configure the proxy to
+  append (default `$proxy_add_x_forwarded_for`) or overwrite — either is
+  safe, because only the proxy-added rightmost value is trusted. Never list
+  an untrusted network in `trusted_proxies`.
+- `CF-Connecting-IP` is honored only from a configured trusted peer: only
+  list Cloudflare Tunnel / proxy addresses there, never `0.0.0.0/0`.
 - sets `Secure` on the session cookie when `X-Forwarded-Proto: https`
   arrives from a trusted peer (plus `HttpOnly` + `SameSite=Strict` always),
 - sends `Strict-Transport-Security` when the client-facing proto is https,

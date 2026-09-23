@@ -125,6 +125,36 @@ func (i *Instance) hasToken() bool {
 	return i.Config.Token != ""
 }
 
+// snapshotConfig returns a copy of the instance's config under lock. F-11:
+// Instance.Config was read without holding i.mu on poll/watch/status paths
+// while SetLabel writes it under i.mu, causing data races. All readers must
+// use this (or hold the lock) instead of touching i.Config directly.
+func (i *Instance) snapshotConfig() InstanceConfig {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.Config
+}
+
+// id returns the instance ID under lock (IDs are immutable after Add, but the
+// accessor avoids racing with Label/Token writes that share the Config struct).
+func (i *Instance) id() string {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.Config.ID
+}
+
+// label returns the instance label under lock.
+func (i *Instance) label() string {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.Config.Label
+}
+
+// setLabelLocked sets the label; caller must hold i.mu for writing.
+func (i *Instance) setLabelLocked(label string) {
+	i.Config.Label = label
+}
+
 // configApplied reports whether the instance has applied the config with the
 // given hash (empty hash means no config has ever been pushed).
 func (i *Instance) configApplied(hash string) bool {
@@ -234,6 +264,7 @@ func (i *Instance) finishBlocklistPush(err error, hash uint64) {
 
 func (i *Instance) poll(ctx context.Context) {
 	c := i.ctl()
+	cfg := i.snapshotConfig()
 	start := time.Now()
 	// Fetch health and stats concurrently: they are independent HTTP calls and
 	// the 5-second poll cycle pays for both round-trips serially.
@@ -256,13 +287,13 @@ func (i *Instance) poll(ctx context.Context) {
 	latencyMs := float64(time.Since(start).Milliseconds())
 
 	if herr != nil && ctx.Err() == nil {
-		log.Printf("blipc: poll instance=%s health error: %v", i.Config.ID, herr)
+		log.Printf("blipc: poll instance=%s health error: %v", cfg.ID, herr)
 	}
 	if serr != nil && ctx.Err() == nil {
-		log.Printf("blipc: poll instance=%s stats error: %v", i.Config.ID, serr)
+		log.Printf("blipc: poll instance=%s stats error: %v", cfg.ID, serr)
 	}
 	if d := time.Since(start); d > time.Second && ctx.Err() == nil {
-		log.Printf("blipc: poll instance=%s slow: %s (health=%v stats=%v)", i.Config.ID, d.Round(time.Millisecond), herr, serr)
+		log.Printf("blipc: poll instance=%s slow: %s (health=%v stats=%v)", cfg.ID, d.Round(time.Millisecond), herr, serr)
 	}
 
 	i.mu.Lock()
@@ -290,15 +321,15 @@ func (i *Instance) poll(ctx context.Context) {
 	if serr == nil && i.fleet.queryLog != nil {
 		sample = &StatsSample{
 			Timestamp:  time.Now(),
-			Instance:   i.Config.ID,
+			Instance:   cfg.ID,
 			Queries:    s.QueriesTotal,
 			Blocked:    s.BlockedTotal,
 			Errors:     s.UpstreamErr,
 			DurationUs: s.DurationTotalUs,
 		}
 	}
-	instanceID := i.Config.ID
-	instanceLabel := i.Config.Label
+	instanceID := cfg.ID
+	instanceLabel := cfg.Label
 	i.mu.Unlock()
 	if sample != nil {
 		// Persist cumulative counters so the dashboard statistics survive
@@ -342,9 +373,10 @@ func (i *Instance) watch(ctx context.Context) {
 		default:
 		}
 		err := i.ctl().Watch(ctx, func(e control.WatchEvent) {
+			ecfg := i.snapshotConfig()
 			i.fleet.bus.Publish(Event{
-				InstanceID: i.Config.ID,
-				Instance:   i.Config.Label,
+				InstanceID: ecfg.ID,
+				Instance:   ecfg.Label,
 				Type:       e.Type,
 				At:         e.At,
 				Stats:      e.Stats,
@@ -367,7 +399,7 @@ func (i *Instance) watch(ctx context.Context) {
 				}
 				i.fleet.queryLog.Enqueue(QueryLogEntry{
 					Timestamp:  e.At,
-					Instance:   i.Config.Label,
+					Instance:   ecfg.Label,
 					Client:     e.Client,
 					Domain:     e.Domain,
 					Action:     strings.ToUpper(e.Type), // "BLOCK" or "PASS"
@@ -385,7 +417,7 @@ func (i *Instance) watch(ctx context.Context) {
 			if e.Type == "error" && i.fleet.queryLog != nil {
 				_ = i.fleet.queryLog.RecordUpstreamError(ctx, UpstreamError{
 					Timestamp: e.At,
-					Instance:  i.Config.Label,
+					Instance:  ecfg.Label,
 					Domain:    e.Domain,
 					Message:   e.Msg,
 				})
@@ -396,7 +428,8 @@ func (i *Instance) watch(ctx context.Context) {
 		// 100% CPU when the stream drops quickly, so every reconnect — error
 		// or not — waits at least a second.
 		if time.Since(lastLog) > 15*time.Second || reconnects%50 == 0 {
-			log.Printf("blipc: watch reconnect instance=%s count=%d err=%v", i.Config.ID, reconnects, err)
+			wcfg := i.snapshotConfig()
+			log.Printf("blipc: watch reconnect instance=%s count=%d err=%v", wcfg.ID, reconnects, err)
 			lastLog = time.Now()
 		}
 		reconnects++
@@ -432,10 +465,11 @@ func (i *Instance) status() *InstanceStatus {
 	applied := i.appliedHash
 	reportedUpstream := i.lastUpstr
 	repBlHash := reportedBlocklistHash(i.stats)
+	cfgID := i.Config.ID
 	i.mu.RUnlock()
 	// Snapshot the fleet's expected config hash and upstream outside the
 	// instance lock (they read fleet state) and mark synced when both match.
-	if want, ok := i.fleet.wantConfig(i.Config.ID); ok {
+	if want, ok := i.fleet.wantConfig(cfgID); ok {
 		synced := applied == want.hash
 		if synced && want.upstream != "" && reportedUpstream != want.upstream {
 			synced = false

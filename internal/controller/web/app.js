@@ -448,7 +448,7 @@ function renderEvents() {
     const kind = e.type === "block" ? { b: 'badge err', ic: IC.block } : e.type === "pass" ? { b: 'badge on', ic: IC.query } : { b: "badge accent", ic: IC.shield };
     const resp = e.type === "pass" ? respSummary(e) : "";
     return `<li><span class="t">${new Date(e.at).toLocaleTimeString()}</span>
-      <span class="badge ${kind.b}">${e.type}</span>
+      <span class="badge ${kind.b}">${esc(e.type)}</span>
       <div class="grow" style="min-width:0">
         <div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--mono)">${esc(e.domain || e.msg || e.type)}</div>
         ${resp ? `<div class="cell-sub">${resp}</div>` : `<div class="cell-sub">${esc(e.instance || e.instance_id || "")}${e.client ? " · " + esc(e.client) : ""}</div>`}

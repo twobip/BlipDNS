@@ -199,6 +199,21 @@ func load(certPath, keyPath string, extraHosts []string) ([]byte, []byte, error)
 	if time.Now().After(cert.NotAfter) {
 		return nil, nil, fmt.Errorf("self-signed cert: expired")
 	}
+	// F-15: reject certificates whose lifetime exceeds the current policy.
+	// A legacy 10-year cert would otherwise stay valid for a decade (long
+	// key-compromise window, stale SANs). Force regeneration on migration.
+	if lifetime := cert.NotAfter.Sub(cert.NotBefore); lifetime > validity+24*time.Hour {
+		return nil, nil, fmt.Errorf("self-signed cert: lifetime %s exceeds policy %s", lifetime.Round(time.Hour), validity)
+	}
+	// F-15: reject unexpected disclosing SANs. Current certs only cover
+	// stable (non-link-local, non-multicast) addresses; a legacy cert with
+	// link-local/docker-bridge/multicast identities discloses topology and
+	// keeps unintended identities valid. Force regeneration.
+	for _, ip := range cert.IPAddresses {
+		if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() {
+			return nil, nil, fmt.Errorf("self-signed cert: contains disallowed SAN IP %s", ip.String())
+		}
+	}
 	// Rotate before the hard expiry so clients see a planned renewal, not a
 	// flag-day fingerprint change. Regeneration also picks up SAN changes.
 	if time.Now().After(cert.NotBefore.Add(renewAfter)) {

@@ -719,6 +719,15 @@ func (s *Server) handleBlocklist(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	// F-16: bound the decoded domain count as well as the byte count: a
+	// crafted payload under 256 MiB can still decode into tens of millions of
+	// strings and OOM the resolver. The controller caps merged lists at 5M;
+	// refuse anything clearly beyond that here instead of building it.
+	const maxPushDomains = 6_000_000
+	if len(req.Domains) > maxPushDomains || len(req.Allowed) > maxPushDomains {
+		http.Error(w, "blocklist too large", http.StatusRequestEntityTooLarge)
+		return
+	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		host = r.RemoteAddr

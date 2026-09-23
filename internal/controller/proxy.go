@@ -64,13 +64,27 @@ func (t *ProxyTrust) IsTrustedPeer(r *http.Request) bool {
 }
 
 func firstForwardedToken(s string) string {
-	if i := strings.Index(s, ","); i >= 0 {
-		s = s[:i]
-	}
-	return strings.TrimSpace(s)
+	return lastForwardedToken(s)
 }
 
-// ClientIP returns the real client IP: the first X-Forwarded-For /
+// lastForwardedToken returns the rightmost token of a forwarded-header value.
+// F-09: trusting the first token lets a client spoof its address whenever the
+// trusted proxy appends (nginx `$proxy_add_x_forwarded_for`). The last token
+// is the address the trusted peer appended, so it is the only one honored.
+func lastForwardedToken(s string) string {
+	parts := strings.Split(s, ",")
+	for i := len(parts) - 1; i >= 0; i-- {
+		if t := strings.TrimSpace(parts[i]); t != "" {
+			if f := strings.Fields(t); len(f) > 0 {
+				return f[len(f)-1]
+			}
+			return t
+		}
+	}
+	return ""
+}
+
+// ClientIP returns the real client IP: the last X-Forwarded-For /
 // CF-Connecting-IP token when the peer is trusted, else the direct peer.
 func (t *ProxyTrust) ClientIP(r *http.Request) string {
 	if t != nil && t.IsTrustedPeer(r) {
@@ -101,9 +115,8 @@ func (t *ProxyTrust) IsSecure(r *http.Request) bool {
 	}
 	if t != nil && t.IsTrustedPeer(r) {
 		if proto := strings.ToLower(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto"))); proto != "" {
-			if i := strings.Index(proto, ","); i >= 0 {
-				proto = strings.TrimSpace(proto[:i])
-			}
+			// Rightmost token: the value the trusted proxy appended.
+			proto = lastForwardedToken(proto)
 			return proto == "https"
 		}
 	}
@@ -115,9 +128,7 @@ func (t *ProxyTrust) IsSecure(r *http.Request) bool {
 func (t *ProxyTrust) RequestHost(r *http.Request) string {
 	if t != nil && t.IsTrustedPeer(r) {
 		if h := strings.TrimSpace(r.Header.Get("X-Forwarded-Host")); h != "" {
-			if i := strings.Index(h, ","); i >= 0 {
-				h = strings.TrimSpace(h[:i])
-			}
+			h = lastForwardedToken(h)
 			if h != "" {
 				return h
 			}

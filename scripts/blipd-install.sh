@@ -10,7 +10,12 @@ readonly BIN="/usr/local/bin/blipd"
 readonly PREVIOUS="/usr/local/bin/blipd.previous"
 readonly EXPECTED_STAGED="/var/lib/blipd/update/blipd.new"
 readonly EXPECTED_DIR="/var/lib/blipd/update"
-readonly LOCK_FILE="/var/lib/blipd/update/.install.lock"
+# F-03: the lock must NOT live in the service-writable update dir. That dir is
+# owned by the unprivileged service account, so a lock file there can be
+# swapped for a symlink and the root helper would follow it (truncating an
+# attacker-chosen path). /run/lock is root-owned (tmpfs), so only root can
+# create/rename entries there.
+readonly LOCK_FILE="/run/lock/blipd-install.lock"
 
 [[ "$(id -u)" -eq 0 ]] || { echo "must run as root" >&2; exit 1; }
 # H2: enforce the fixed staged path pinned in the sudoers rule. Reject
@@ -30,7 +35,11 @@ else
   echo "warning: EXPECTED_SHA256 not set, skipping root-side re-verify" >&2
 fi
 # Serialize installs. Use flock when available; fall back to a mkdir lock.
+# The lock dir is root-owned, and the lock file itself is symlink-rejected
+# before opening so a pre-existing attacker symlink is never followed.
 USE_MKDIR_LOCK=0
+if [[ -L "$LOCK_FILE" ]]; then echo "lock $LOCK_FILE is a symlink — refusing" >&2; exit 1; fi
+mkdir -p "$(dirname "$LOCK_FILE")"
 if command -v flock >/dev/null 2>&1; then
   exec 9>"$LOCK_FILE" || { echo "cannot open lock $LOCK_FILE" >&2; exit 1; }
   flock -n 9 || { echo "another install is in progress ($LOCK_FILE held)" >&2; exit 1; }

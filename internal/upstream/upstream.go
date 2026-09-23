@@ -316,11 +316,13 @@ func NewDoHWithBootstrap(endpoint string, timeout time.Duration, bootstrap Resol
 		ExpectContinueTimeout: 1 * time.Second,
 	}
 	if bootstrap != nil {
+		// F-01: DialContext only. DialTLSContext must stay nil so net/http
+		// performs the TLS handshake + certificate verification itself.
+		// Installing a raw-TCP dialer as DialTLSContext returns a plaintext
+		// conn where TLS is expected (DoH sent as cleartext HTTP).
 		tr.DialContext = bootstrapDialContext(bootstrap, timeout)
-		tr.DialTLSContext = bootstrapDialContext(bootstrap, timeout)
 	} else {
 		tr.DialContext = validatingDialContext(timeout)
-		tr.DialTLSContext = validatingDialContext(timeout)
 	}
 	return &DoHResolver{
 		endpoint: endpoint,

@@ -419,18 +419,23 @@ type chainBlockedError struct {
 
 func (e *chainBlockedError) Error() string { return "blipd: cname target blocked: " + e.target }
 
-// chainBlocked inspects up to 8 CNAME/DNAME targets in m's answer section and
+// maxChainInspect bounds CNAME/DNAME chain inspection. Chains longer than
+// this are treated as blocked (fail-closed) rather than silently allowed:
+// an unbounded upstream-constructed chain must never evade filtering, and an
+// unbounded walk is itself a CPU concern on attacker-controlled responses.
+const maxChainInspect = 64
+
+// chainBlocked inspects every CNAME/DNAME target in m's answer section and
 // reports whether any of them is blocked per classify (the same
-// policy/blocklist function used for the qname).
+// policy/blocklist function used for the qname). F-08: the old code stopped
+// after 8 targets, so a blocked domain placed 9th (or later) evaded filtering
+// and poisoned the cache. Over-long chains (>maxChainInspect) fail closed.
 func chainBlocked(m *dns.Msg, classify func(string) bool) bool {
 	if m == nil {
 		return false
 	}
 	checked := 0
 	for _, rr := range m.Answer {
-		if checked >= 8 {
-			break
-		}
 		var target string
 		switch v := rr.(type) {
 		case *dns.CNAME:
@@ -447,6 +452,9 @@ func chainBlocked(m *dns.Msg, classify func(string) bool) bool {
 			return true
 		}
 		checked++
+		if checked > maxChainInspect {
+			return true
+		}
 	}
 	return false
 }
@@ -683,7 +691,7 @@ func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, prot
 		do = true
 	}
 	stripSubnet(req)
-	key := cache.KeyOfNormalized(q.Name, q.Qtype, q.Qclass, do)
+	key := cache.KeyOfNormalized(q.Name, q.Qtype, q.Qclass, do, req.CheckingDisabled, req.AuthenticatedData)
 	if upstreamLabel != "" {
 		// Partition the cache by the resolver that will answer: routes and
 		// per-policy overrides can give different clients different answers

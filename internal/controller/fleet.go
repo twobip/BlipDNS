@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -277,7 +278,7 @@ func (f *Fleet) HAStatuses(ctx context.Context) map[string]*control.HAStatus {
 				defer func() { <-sem }()
 			case <-ctx.Done():
 				mu.Lock()
-				out[in.Config.ID] = &control.HAStatus{State: "UNAVAILABLE", LastError: ctx.Err().Error()}
+				out[in.id()] = &control.HAStatus{State: "UNAVAILABLE", LastError: ctx.Err().Error()}
 				mu.Unlock()
 				return
 			}
@@ -286,9 +287,9 @@ func (f *Fleet) HAStatuses(ctx context.Context) map[string]*control.HAStatus {
 			st, err := in.ctl().HAStatus(ictx)
 			mu.Lock()
 			if err != nil {
-				out[in.Config.ID] = &control.HAStatus{State: "UNAVAILABLE", LastError: err.Error()}
+				out[in.id()] = &control.HAStatus{State: "UNAVAILABLE", LastError: err.Error()}
 			} else {
-				out[in.Config.ID] = st
+				out[in.id()] = st
 			}
 			mu.Unlock()
 		}(inst)
@@ -676,7 +677,10 @@ func (f *Fleet) OnEvent(fn func(Event)) { f.logfn = fn }
 // validateInstanceURL rejects non-HTTP(S) URLs, URLs with userinfo, and URLs
 // with an empty host, so a malicious or mistyped instance entry cannot turn
 // blipc into an open proxy / credential leak (e.g. file://, gopher://, or
-// http://user:pass@host).
+// http://user:pass@host). F-05: cleartext HTTP is accepted only for loopback
+// instance URLs (same-host management, ideally via Unix socket); any remote
+// (non-loopback) instance must use https so the blipd bearer token is never
+// sent in cleartext across the network.
 func validateInstanceURL(raw string) error {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -695,7 +699,24 @@ func validateInstanceURL(raw string) error {
 	if u.Host == "" || u.Hostname() == "" {
 		return fmt.Errorf("invalid instance url: host required")
 	}
+	if u.Scheme == "http" && !isLoopbackHost(u.Hostname()) {
+		return fmt.Errorf("invalid instance url: remote instance %q must use https (http would send the bearer token in cleartext)", u.Host)
+	}
 	return nil
+}
+
+// isLoopbackHost reports whether host is a loopback address or name: 127/8,
+// ::1, or localhost. Remote HTTP management is rejected; these stay allowed
+// for same-host setups (prefer the Unix socket where possible).
+func isLoopbackHost(host string) bool {
+	h := strings.Trim(strings.TrimSpace(host), "[]")
+	if strings.EqualFold(h, "localhost") {
+		return true
+	}
+	if ip := net.ParseIP(h); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
 }
 
 func (f *Fleet) Add(ctx context.Context, cfg InstanceConfig) error {
@@ -859,6 +880,57 @@ func clonePolicy(p *control.Policy) *control.Policy {
 	out.Clients = append([]string(nil), p.Clients...)
 	out.Block = append([]string(nil), p.Block...)
 	out.Allow = append([]string(nil), p.Allow...)
+	return &out
+}
+
+// cloneInstanceOverride deep-copies an override so saveConfig can marshal it
+// after releasing f.mu without aliasing live state (F-11). Pointer fields get
+// fresh pointees; slice fields get fresh backing arrays.
+func cloneInstanceOverride(o *InstanceOverride) *InstanceOverride {
+	if o == nil {
+		return nil
+	}
+	out := *o
+	if o.Upstream != nil {
+		v := *o.Upstream
+		out.Upstream = &v
+	}
+	if o.BlockAction != nil {
+		v := *o.BlockAction
+		out.BlockAction = &v
+	}
+	if o.Log != nil {
+		v := *o.Log
+		out.Log = &v
+	}
+	if o.DoHHTTPAddr != nil {
+		v := *o.DoHHTTPAddr
+		out.DoHHTTPAddr = &v
+	}
+	if o.RateLimitQPS != nil {
+		v := *o.RateLimitQPS
+		out.RateLimitQPS = &v
+	}
+	if o.UpstreamServers != nil {
+		v := append([]upstream.UpstreamServer(nil), *o.UpstreamServers...)
+		out.UpstreamServers = &v
+	}
+	if o.UpstreamRoutes != nil {
+		v := append([]upstream.UpstreamRoute(nil), *o.UpstreamRoutes...)
+		out.UpstreamRoutes = &v
+	}
+	if o.UpstreamBootstrap != nil {
+		v := append([]upstream.UpstreamServer(nil), *o.UpstreamBootstrap...)
+		out.UpstreamBootstrap = &v
+	}
+	if o.CacheSize != nil {
+		v := *o.CacheSize
+		out.CacheSize = &v
+	}
+	if o.Records != nil {
+		v := append([]control.RecordEntry(nil), *o.Records...)
+		out.Records = &v
+	}
 	return &out
 }
 
@@ -1218,19 +1290,21 @@ func (f *Fleet) fanOut(ctx context.Context, fn func(ctx context.Context, inst *I
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 8)
 	for _, inst := range insts {
+		instID := inst.id()
 		if !inst.hasToken() {
-			results[inst.Config.ID] = "not adopted"
+			results[instID] = "not adopted"
 			continue
 		}
 		wg.Add(1)
 		go func(in *Instance) {
 			defer wg.Done()
+			inID := in.id()
 			select {
 			case sem <- struct{}{}:
 				defer func() { <-sem }()
 			case <-ctx.Done():
 				mu.Lock()
-				results[in.Config.ID] = ctx.Err().Error()
+				results[inID] = ctx.Err().Error()
 				mu.Unlock()
 				return
 			}
@@ -1238,7 +1312,7 @@ func (f *Fleet) fanOut(ctx context.Context, fn func(ctx context.Context, inst *I
 			defer cancel()
 			res := fn(ictx, in)
 			mu.Lock()
-			results[in.Config.ID] = res
+			results[inID] = res
 			mu.Unlock()
 		}(inst)
 	}
@@ -1248,7 +1322,7 @@ func (f *Fleet) fanOut(ctx context.Context, fn func(ctx context.Context, inst *I
 
 func (f *Fleet) pushUpstream(ctx context.Context) map[string]string {
 	return f.fanOut(ctx, func(ictx context.Context, i *Instance) string {
-		wantServers, wantRoutes, wantBootstrap := f.effectiveUpstream(i.Config.ID)
+		wantServers, wantRoutes, wantBootstrap := f.effectiveUpstream(i.id())
 		if len(wantServers) == 0 && len(wantRoutes) == 0 {
 			return "no upstream configured"
 		}
@@ -1265,7 +1339,7 @@ func (f *Fleet) pushUpstream(ctx context.Context) map[string]string {
 // Skips instances whose effective upstream is empty (the fleet is not managing
 // upstream for them).
 func (f *Fleet) maybePushUpstream(ctx context.Context, i *Instance, reported *control.StatsResponse) {
-	wantServers, wantRoutes, wantBootstrap := f.effectiveUpstream(i.Config.ID)
+	wantServers, wantRoutes, wantBootstrap := f.effectiveUpstream(i.id())
 	if len(wantServers) == 0 && len(wantRoutes) == 0 {
 		return
 	}
@@ -1278,7 +1352,7 @@ func (f *Fleet) maybePushUpstream(ctx context.Context, i *Instance, reported *co
 		return
 	}
 	if err := i.ctl().SetUpstream(ctx, wantServers, wantRoutes, wantBootstrap); err != nil {
-		log.Printf("blipc: reconcile upstream for %s: %v", i.Config.ID, err)
+		log.Printf("blipc: reconcile upstream for %s: %v", i.id(), err)
 	}
 }
 
@@ -1365,7 +1439,7 @@ func (f *Fleet) SetRateLimitQPS(ctx context.Context, qps int) map[string]string 
 // pushRateLimit distributes the effective DNS rate limit to every instance.
 func (f *Fleet) pushRateLimit(ctx context.Context) map[string]string {
 	return f.fanOut(ctx, func(ictx context.Context, i *Instance) string {
-		qps := f.effectiveRateLimitQPS(i.Config.ID)
+		qps := f.effectiveRateLimitQPS(i.id())
 		if err := i.ctl().SetRateLimit(ictx, qps, 0); err != nil {
 			return err.Error()
 		}
@@ -1376,7 +1450,7 @@ func (f *Fleet) pushRateLimit(ctx context.Context) map[string]string {
 // pushDoH distributes the effective plain-HTTP DoH address to every instance.
 func (f *Fleet) pushDoH(ctx context.Context) map[string]string {
 	return f.fanOut(ctx, func(ictx context.Context, i *Instance) string {
-		want := f.effectiveDoHHTTPAddr(i.Config.ID)
+		want := f.effectiveDoHHTTPAddr(i.id())
 		if err := i.ctl().SetDoHHTTPAddr(ictx, want); err != nil {
 			return err.Error()
 		}
@@ -1388,7 +1462,7 @@ func (f *Fleet) pushDoH(ctx context.Context) map[string]string {
 // default (or per-instance override) when the instance reports a divergent
 // value — e.g. after a restart it reverted to its own YAML.
 func (f *Fleet) maybePushDoH(ctx context.Context, i *Instance, reported *control.StatsResponse) {
-	want := f.effectiveDoHHTTPAddr(i.Config.ID)
+	want := f.effectiveDoHHTTPAddr(i.id())
 	rep := ""
 	if reported != nil {
 		rep = reported.DohHTTPAddr
@@ -1397,7 +1471,7 @@ func (f *Fleet) maybePushDoH(ctx context.Context, i *Instance, reported *control
 		return
 	}
 	if err := i.ctl().SetDoHHTTPAddr(ctx, want); err != nil {
-		log.Printf("blipc: reconcile doh for %s: %v", i.Config.ID, err)
+		log.Printf("blipc: reconcile doh for %s: %v", i.id(), err)
 	}
 }
 
@@ -1405,7 +1479,7 @@ func (f *Fleet) maybePushDoH(ctx context.Context, i *Instance, reported *control
 // (or per-instance override) when the instance reports a divergent value — e.g
 // after a restart it reverted to its own YAML.
 func (f *Fleet) maybePushRateLimit(ctx context.Context, i *Instance, reported *control.StatsResponse) {
-	want := f.effectiveRateLimitQPS(i.Config.ID)
+	want := f.effectiveRateLimitQPS(i.id())
 	rep := -1
 	if reported != nil {
 		rep = reported.RateLimitQPS
@@ -1414,7 +1488,7 @@ func (f *Fleet) maybePushRateLimit(ctx context.Context, i *Instance, reported *c
 		return
 	}
 	if err := i.ctl().SetRateLimit(ctx, want, 0); err != nil {
-		log.Printf("blipc: reconcile rate limit for %s: %v", i.Config.ID, err)
+		log.Printf("blipc: reconcile rate limit for %s: %v", i.id(), err)
 	}
 }
 
@@ -1462,7 +1536,7 @@ func haConfigHash(cfg *control.HAConfig) string {
 // stale priority and there is no other mechanism to retry. The periodic poll
 // calls this so a transient reload failure is corrected on the next tick.
 func (f *Fleet) maybePushHA(ctx context.Context, i *Instance) {
-	cfg, ok := f.effectiveHABConfig(i.Config.ID)
+	cfg, ok := f.effectiveHABConfig(i.id())
 	if !ok || !i.hasToken() {
 		return
 	}
@@ -1471,19 +1545,19 @@ func (f *Fleet) maybePushHA(ctx context.Context, i *Instance) {
 	// poll loop re-applied the desired config mid-update, it would undo the
 	// degradation and the peer wouldn't take over the VIP.
 	f.updateMu.Lock()
-	updating := f.updateJob.Running && f.updateJob.Current == i.Config.ID
+	updating := f.updateJob.Running && f.updateJob.Current == i.id()
 	f.updateMu.Unlock()
 	if updating {
 		return
 	}
-	if i.haConfigApplied(f.haHashFor(i.Config.ID)) {
+	if i.haConfigApplied(f.haHashFor(i.id())) {
 		return
 	}
 	if err := f.setAndApplyHA(ctx, i, *cfg); err != nil {
-		log.Printf("blipc: reconcile HA for %s: %v", i.Config.ID, err)
+		log.Printf("blipc: reconcile HA for %s: %v", i.id(), err)
 		return
 	}
-	i.markHAApplied(f.haHashFor(i.Config.ID))
+	i.markHAApplied(f.haHashFor(i.id()))
 }
 
 // QueryLogRetentionHours returns how long query log entries are kept on blipc.
@@ -1647,7 +1721,7 @@ func (f *Fleet) SetCache(ctx context.Context, size int) map[string]string {
 // pushCache distributes the effective cache size to every adopted instance.
 func (f *Fleet) pushCache(ctx context.Context) map[string]string {
 	return f.fanOut(ctx, func(ictx context.Context, i *Instance) string {
-		size := f.effectiveCacheConfig(i.Config.ID)
+		size := f.effectiveCacheConfig(i.id())
 		if err := i.ctl().SetCacheConfig(ictx, size); err != nil {
 			return err.Error()
 		}
@@ -1661,10 +1735,10 @@ func (f *Fleet) pushCache(ctx context.Context) map[string]string {
 // configured any cache setting (neither fleet-wide nor per-instance), the
 // instance's own blipd YAML defaults are left in place.
 func (f *Fleet) maybePushCache(ctx context.Context, i *Instance, reported *control.StatsResponse) {
-	if !f.cacheConfiguredFor(i.Config.ID) {
+	if !f.cacheConfiguredFor(i.id()) {
 		return
 	}
-	wantSize := f.effectiveCacheConfig(i.Config.ID)
+	wantSize := f.effectiveCacheConfig(i.id())
 	repSize := -1
 	if reported != nil {
 		repSize = reported.CacheSize
@@ -1673,7 +1747,7 @@ func (f *Fleet) maybePushCache(ctx context.Context, i *Instance, reported *contr
 		return
 	}
 	if err := i.ctl().SetCacheConfig(ctx, wantSize); err != nil {
-		log.Printf("blipc: reconcile cache for %s: %v", i.Config.ID, err)
+		log.Printf("blipc: reconcile cache for %s: %v", i.id(), err)
 	}
 }
 
@@ -1737,7 +1811,7 @@ func (f *Fleet) effectiveRecords(instID string) []control.RecordEntry {
 // instance.
 func (f *Fleet) pushRecords(ctx context.Context) map[string]string {
 	return f.fanOut(ctx, func(ictx context.Context, i *Instance) string {
-		want := f.effectiveRecords(i.Config.ID)
+		want := f.effectiveRecords(i.id())
 		if err := i.ctl().SetRecords(ictx, want); err != nil {
 			return err.Error()
 		}
@@ -1757,9 +1831,9 @@ func (f *Fleet) maybePushRecords(ctx context.Context, i *Instance, reported *con
 	if repHash == wantHash || !i.hasToken() {
 		return
 	}
-	want := f.effectiveRecords(i.Config.ID)
+	want := f.effectiveRecords(i.id())
 	if err := i.ctl().SetRecords(ctx, want); err != nil {
-		log.Printf("blipc: reconcile records for %s: %v", i.Config.ID, err)
+		log.Printf("blipc: reconcile records for %s: %v", i.id(), err)
 	}
 }
 
@@ -1774,8 +1848,8 @@ func (f *Fleet) pushConfigs(ctx context.Context) map[string]string {
 	f.mu.RLock()
 	wants := make([]want, 0, len(f.instances))
 	for _, i := range f.instances {
-		eff, _ := f.effectivePolicy(i.Config.ID)
-		wants = append(wants, want{id: i.Config.ID, eff: eff})
+		eff, _ := f.effectivePolicy(i.id())
+		wants = append(wants, want{id: i.id(), eff: eff})
 	}
 	f.mu.RUnlock()
 	byID := make(map[string]*control.Policy, len(wants))
@@ -1783,14 +1857,14 @@ func (f *Fleet) pushConfigs(ctx context.Context) map[string]string {
 		byID[w.id] = w.eff
 	}
 	return f.fanOut(ctx, func(ictx context.Context, i *Instance) string {
-		eff := byID[i.Config.ID]
+		eff := byID[i.id()]
 		if eff == nil {
 			return "no config"
 		}
 		if err := i.ctl().SetPolicy(ictx, eff); err != nil {
 			return err.Error()
 		}
-		i.markConfigAppliedWith(f.appliedHashFor(i.Config.ID), eff.Upstream)
+		i.markConfigAppliedWith(f.appliedHashFor(i.id()), eff.Upstream)
 		return "ok"
 	})
 }
@@ -1897,7 +1971,7 @@ func (f *Fleet) appliedHashFor(instID string) string {
 // its own config). Called from the instance poll loop.
 func (f *Fleet) maybePushConfig(ctx context.Context, i *Instance, reported *control.StatsResponse) {
 	f.mu.RLock()
-	eff, hash := f.effectivePolicy(i.Config.ID)
+	eff, hash := f.effectivePolicy(i.id())
 	f.mu.RUnlock()
 	if eff == nil || hash == "" || !i.hasToken() {
 		return
@@ -1938,10 +2012,10 @@ func (f *Fleet) SetPolicy(ctx context.Context, id string, p *control.Policy) err
 	if inst == nil {
 		return fmt.Errorf("controller: unknown instance %s", id)
 	}
-	if err := inst.client.SetPolicy(ctx, p); err != nil {
+	if err := inst.ctl().SetPolicy(ctx, p); err != nil {
 		return err
 	}
-	f.bus.Publish(Event{InstanceID: id, Instance: inst.Config.Label, Type: "policy", At: f.now(), Msg: "set " + p.ID, Domain: p.ID})
+	f.bus.Publish(Event{InstanceID: id, Instance: inst.label(), Type: "policy", At: f.now(), Msg: "set " + p.ID, Domain: p.ID})
 	return nil
 }
 
@@ -1955,7 +2029,7 @@ func (f *Fleet) Adopt(ctx context.Context, id, code string) error {
 	if code == "" && inst.claimCode != "" {
 		code = inst.claimCode // controller was pre-seeded with the code
 	}
-	resp, err := inst.client.Adopt(ctx, code)
+	resp, err := inst.ctl().Adopt(ctx, code)
 	if err != nil {
 		return err
 	}
@@ -1981,7 +2055,7 @@ func (f *Fleet) Adopt(ctx context.Context, id, code string) error {
 		f.maybePushConfig(context.Background(), inst, nil)
 		f.maybePushBlocklist(context.Background(), inst, nil)
 	}
-	f.bus.Publish(Event{InstanceID: id, Instance: inst.Config.Label, Type: "status", At: f.now(), Msg: "adopted"})
+	f.bus.Publish(Event{InstanceID: id, Instance: inst.label(), Type: "status", At: f.now(), Msg: "adopted"})
 	return nil
 }
 
@@ -2002,7 +2076,7 @@ func (f *Fleet) GetAdoptStatus(id string) (*control.AdoptStatus, error) {
 	if inst == nil {
 		return nil, fmt.Errorf("controller: unknown instance %s", id)
 	}
-	return inst.client.AdoptStatus(context.Background())
+	return inst.ctl().AdoptStatus(context.Background())
 }
 
 // ResetAdoption resets a managed instance's adoption state.
@@ -2011,10 +2085,10 @@ func (f *Fleet) ResetAdoption(ctx context.Context, id string) error {
 	if inst == nil {
 		return fmt.Errorf("controller: unknown instance %s", id)
 	}
-	if err := inst.client.ResetAdoption(ctx); err != nil {
+	if err := inst.ctl().ResetAdoption(ctx); err != nil {
 		return err
 	}
-	f.bus.Publish(Event{InstanceID: id, Instance: inst.Config.Label, Type: "status", At: f.now(), Msg: "adoption reset"})
+	f.bus.Publish(Event{InstanceID: id, Instance: inst.label(), Type: "status", At: f.now(), Msg: "adoption reset"})
 	return nil
 }
 
@@ -2030,7 +2104,7 @@ func (f *Fleet) SetLabel(ctx context.Context, id, label string) error {
 		label = label[:maxInstanceLabelLen]
 	}
 	inst.mu.Lock()
-	inst.Config.Label = label
+	inst.setLabelLocked(label)
 	inst.mu.Unlock()
 	f.bus.Publish(Event{InstanceID: id, Instance: label, Type: "status", At: f.now(), Msg: "label updated"})
 	return nil
@@ -2042,7 +2116,7 @@ func (f *Fleet) DeletePolicy(ctx context.Context, id, policyID string) error {
 	if inst == nil {
 		return fmt.Errorf("controller: unknown instance %s", id)
 	}
-	return inst.client.DeletePolicy(ctx, policyID)
+	return inst.ctl().DeletePolicy(ctx, policyID)
 }
 
 // ListPolicies returns policies from a managed instance.
@@ -2051,7 +2125,7 @@ func (f *Fleet) ListPolicies(ctx context.Context, id string) (*control.ListRespo
 	if inst == nil {
 		return nil, fmt.Errorf("controller: unknown instance %s", id)
 	}
-	return inst.client.ListPolicies(ctx)
+	return inst.ctl().ListPolicies(ctx)
 }
 
 // Health returns aggregated fleet health.
@@ -2841,6 +2915,18 @@ func (f *Fleet) runBlocklistImport(ctx context.Context, gen int) {
 		if !current() {
 			return
 		}
+		// F-16: enforce the merge budget incrementally, not only at the end:
+		// abort before further per-source SQLite snapshot writes and before
+		// the merged map (+ distribution payload) grows without bound.
+		if len(merged) > maxMergedBlocklistDomains {
+			msg := fmt.Sprintf("merged list too large: %d domains exceeds cap of %d after source %d/%d — keeping previous list", len(merged), maxMergedBlocklistDomains, i+1, len(urls))
+			f.blMu.Lock()
+			f.blStatus.Errors = append(f.blStatus.Errors, msg)
+			f.sourceStats = append([]SourceStat(nil), stats...)
+			f.blMu.Unlock()
+			f.logImport("%s", msg)
+			return // keep the last good merged list untouched
+		}
 		f.blMu.Lock()
 		f.blStatus.CurrentURL = u
 		f.blStatus.SourceDone = i + 1
@@ -2947,7 +3033,7 @@ func (f *Fleet) pushBlocklist(ctx context.Context) map[string]string {
 	sem := make(chan struct{}, 8)
 	for _, inst := range insts {
 		if !inst.hasToken() {
-			results[inst.Config.ID] = "not adopted"
+			results[inst.id()] = "not adopted"
 			continue
 		}
 		wg.Add(1)
@@ -2958,7 +3044,7 @@ func (f *Fleet) pushBlocklist(ctx context.Context) map[string]string {
 				defer func() { <-sem }()
 			case <-ctx.Done():
 				mu.Lock()
-				results[in.Config.ID] = ctx.Err().Error()
+				results[in.id()] = ctx.Err().Error()
 				mu.Unlock()
 				return
 			}
@@ -2967,16 +3053,16 @@ func (f *Fleet) pushBlocklist(ctx context.Context) map[string]string {
 			ictx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 			defer cancel()
 			if err := in.ctl().SetBlocklist(ictx, domains, allowed); err != nil {
-				log.Printf("blipc: distribute blocklist instance=%s FAILED after %s: %v", in.Config.ID, f.now().Sub(t0).Round(time.Millisecond), err)
+				log.Printf("blipc: distribute blocklist instance=%s FAILED after %s: %v", in.id(), f.now().Sub(t0).Round(time.Millisecond), err)
 				mu.Lock()
-				results[in.Config.ID] = err.Error()
+				results[in.id()] = err.Error()
 				mu.Unlock()
 				return
 			}
 			in.markBlocklistApplied(hash)
-			log.Printf("blipc: distribute blocklist instance=%s ok in %s (domains=%d)", in.Config.ID, f.now().Sub(t0).Round(time.Millisecond), len(domains))
+			log.Printf("blipc: distribute blocklist instance=%s ok in %s (domains=%d)", in.id(), f.now().Sub(t0).Round(time.Millisecond), len(domains))
 			mu.Lock()
-			results[in.Config.ID] = "ok"
+			results[in.id()] = "ok"
 			mu.Unlock()
 		}(inst)
 	}
@@ -3013,20 +3099,20 @@ func (f *Fleet) maybePushBlocklist(ctx context.Context, i *Instance, reported *c
 	// instance — warn loudly once so an external writer can't hide.
 	if rep != i.pushedBlocklistHash() && i.foreignBlocklistDetected() {
 		log.Printf("blipc: WARNING instance=%s url=%s blocklist changed by an external writer: reported=%016x fleet=%016x last-pushed=%016x",
-			i.Config.ID, i.Config.URL, rep, hash, i.pushedBlocklistHash())
+			i.id(), i.snapshotConfig().URL, rep, hash, i.pushedBlocklistHash())
 	}
 	// Don't re-upload the whole list while a previous push is still in flight,
 	// and back off after a failure so a stuck instance (or one that rejects the
 	// payload) doesn't get hammered with full-list uploads every poll.
 	if !i.tryBeginBlocklistPush(f.now()) {
-		log.Printf("blipc: reconcile blocklist instance=%s url=%s SKIP (push in flight or backing off) fleet=%016x reported=%016x", i.Config.ID, i.Config.URL, hash, rep)
+		log.Printf("blipc: reconcile blocklist instance=%s url=%s SKIP (push in flight or backing off) fleet=%016x reported=%016x", i.id(), i.snapshotConfig().URL, hash, rep)
 		return
 	}
-	log.Printf("blipc: reconcile blocklist instance=%s url=%s PUSH fleet=%016x reported=%016x domains=%d allowed=%d", i.Config.ID, i.Config.URL, hash, rep, f.blocklist.Count(), len(f.blocklist.Allowed()))
+	log.Printf("blipc: reconcile blocklist instance=%s url=%s PUSH fleet=%016x reported=%016x domains=%d allowed=%d", i.id(), i.snapshotConfig().URL, hash, rep, f.blocklist.Count(), len(f.blocklist.Allowed()))
 	err := i.ctl().SetBlocklist(ctx, f.blocklist.List(), f.blocklist.Allowed())
 	i.finishBlocklistPush(err, hash)
 	if err != nil {
-		log.Printf("blipc: reconcile blocklist for %s: %v", i.Config.ID, err)
+		log.Printf("blipc: reconcile blocklist for %s: %v", i.id(), err)
 	}
 }
 
@@ -3059,27 +3145,30 @@ func (f *Fleet) saveConfig() error {
 	}
 
 	type fullConfig struct {
-		Listen                 string                       `yaml:"listen"`
-		Username               string                       `yaml:"username"`
-		Password               string                       `yaml:"password"`
-		PasswordHash           string                       `yaml:"password_hash"`
-		DefaultPolicy          *control.Policy              `yaml:"default_policy"`
-		InstancePolicies       map[string]*InstanceOverride `yaml:"instance_overrides"`
-		DoHHTTPAddr            string                       `yaml:"doh_http_addr"`
-		RateLimitQPS           int                          `yaml:"rate_limit_qps"`
-		UpstreamServers        []upstream.UpstreamServer    `yaml:"upstream_servers"`
-		UpstreamRoutes         []upstream.UpstreamRoute     `yaml:"upstream_routes"`
-		UpstreamBootstrap      []upstream.UpstreamServer    `yaml:"upstream_bootstrap"`
-		CacheSize              int                          `yaml:"cache_size"`
-		QueryLogRetentionHours int                          `yaml:"query_log_retention_hours"`
-		TrustedProxies         []string                     `yaml:"trusted_proxies"`
-		BlocklistSources       []string                     `yaml:"blocklist_sources"`
-		BlocklistDisabled      []string                     `yaml:"blocklist_disabled"`
-		BlocklistUpdateHours   int                          `yaml:"blocklist_update_hours"`
-		Instances              []InstanceConfig             `yaml:"instances"`
-		Records                []control.RecordEntry        `yaml:"records"`
-		HACluster              control.HACluster            `yaml:"high_availability"`
-		ReleaseChannel         string                       `yaml:"release_channel"`
+		Listen            string                       `yaml:"listen"`
+		Username          string                       `yaml:"username"`
+		Password          string                       `yaml:"password"`
+		PasswordHash      string                       `yaml:"password_hash"`
+		DefaultPolicy     *control.Policy              `yaml:"default_policy"`
+		InstancePolicies  map[string]*InstanceOverride `yaml:"instance_overrides"`
+		DoHHTTPAddr       string                       `yaml:"doh_http_addr"`
+		RateLimitQPS      int                          `yaml:"rate_limit_qps"`
+		UpstreamServers   []upstream.UpstreamServer    `yaml:"upstream_servers"`
+		UpstreamRoutes    []upstream.UpstreamRoute     `yaml:"upstream_routes"`
+		UpstreamBootstrap []upstream.UpstreamServer    `yaml:"upstream_bootstrap"`
+		// F-18: pointer + omitempty so an explicit `cache_size: 0`
+		// (unlimited) round-trips, while an unconfigured fleet omits the
+		// field instead of persisting a misleading zero.
+		CacheSize              *int                  `yaml:"cache_size,omitempty"`
+		QueryLogRetentionHours int                   `yaml:"query_log_retention_hours"`
+		TrustedProxies         []string              `yaml:"trusted_proxies"`
+		BlocklistSources       []string              `yaml:"blocklist_sources"`
+		BlocklistDisabled      []string              `yaml:"blocklist_disabled"`
+		BlocklistUpdateHours   int                   `yaml:"blocklist_update_hours"`
+		Instances              []InstanceConfig      `yaml:"instances"`
+		Records                []control.RecordEntry `yaml:"records"`
+		HACluster              control.HACluster     `yaml:"high_availability"`
+		ReleaseChannel         string                `yaml:"release_channel"`
 	}
 
 	var cfg fullConfig
@@ -3096,23 +3185,54 @@ func (f *Fleet) saveConfig() error {
 		instances = append(instances, inst.Config)
 		inst.mu.RUnlock()
 	}
-	def := f.defaultPolicy
-	overs := f.overrides
+	// F-11: deep-copy everything marshaled after the lock is released.
+	// The old code retained the live `overrides` map (and the shared
+	// defaultPolicy pointer); a concurrent SetInstanceOverride mutated the
+	// same map while yaml.Marshal read it -> concurrent map read/write
+	// (panic / lost updates). Copies below own their memory, so saveMu
+	// alone serializes writers without holding f.mu across YAML + disk I/O.
+	def := clonePolicy(f.defaultPolicy)
+	overs := make(map[string]*InstanceOverride, len(f.overrides))
+	for id, o := range f.overrides {
+		overs[id] = cloneInstanceOverride(o)
+	}
+	dohAddr := f.dohHTTPAddr
+	rateQPS := f.rateLimitQPS
+	upServers := append([]upstream.UpstreamServer(nil), f.upstreamServers...)
+	upRoutes := append([]upstream.UpstreamRoute(nil), f.upstreamRoutes...)
+	upBootstrap := append([]upstream.UpstreamServer(nil), f.upstreamBootstrap...)
+	cacheSize := f.cacheSize
+	cacheConfigured := f.cacheConfigured
+	qlRetention := f.qlRetentionHours
+	trusted := append([]string(nil), f.trustedProxies...)
+	recs := append([]control.RecordEntry(nil), f.records...)
+	ha := f.haCluster
+	relChannel := f.releaseChannel
+	if !control.ValidUpdateChannel(relChannel) {
+		relChannel = string(control.ChannelStable)
+	}
 	f.mu.RUnlock()
 	blSources := f.BlocklistSources()
 	autoHours := f.AutoUpdateHours()
 	cfg.Instances = instances
 	cfg.DefaultPolicy = def
 	cfg.InstancePolicies = overs
-	cfg.DoHHTTPAddr = f.DoHHTTPAddr()
-	cfg.RateLimitQPS = f.RateLimitQPS()
-	upstreamServers, upstreamRoutes := f.Upstream()
+	cfg.DoHHTTPAddr = dohAddr
+	cfg.RateLimitQPS = rateQPS
+	upstreamServers, upstreamRoutes := upServers, upRoutes
 	cfg.UpstreamServers = upstreamServers
 	cfg.UpstreamRoutes = upstreamRoutes
-	cfg.UpstreamBootstrap = f.UpstreamBootstrap()
-	cfg.CacheSize = f.CacheConfig()
-	cfg.QueryLogRetentionHours = f.QueryLogRetentionHours()
-	cfg.TrustedProxies = f.TrustedProxies()
+	cfg.UpstreamBootstrap = upBootstrap
+	// F-18: only persist cache_size when the operator explicitly configured
+	// it (fleet-wide or per-instance); otherwise omit so a fresh load keeps
+	// blipd's own default instead of inheriting a misleading zero.
+	if cacheConfigured {
+		cfg.CacheSize = &cacheSize
+	} else {
+		cfg.CacheSize = nil
+	}
+	cfg.QueryLogRetentionHours = qlRetention
+	cfg.TrustedProxies = trusted
 	cfg.BlocklistSources = blSources
 	// ponytail: reset, not append — cfg was unmarshaled from the file on
 	// disk, so appending re-added the stored entries on every save and the
@@ -3124,9 +3244,9 @@ func (f *Fleet) saveConfig() error {
 	}
 	f.blMu.Unlock()
 	cfg.BlocklistUpdateHours = autoHours
-	cfg.Records = f.Records()
-	cfg.HACluster = f.HACluster()
-	cfg.ReleaseChannel = f.ReleaseChannel()
+	cfg.Records = recs
+	cfg.HACluster = ha
+	cfg.ReleaseChannel = relChannel
 
 	out, err := yaml.Marshal(cfg)
 	if err != nil {

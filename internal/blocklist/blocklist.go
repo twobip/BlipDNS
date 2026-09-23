@@ -27,6 +27,13 @@ import (
 // rejects received lists over 256 MiB, so a source bigger than that is useless.
 const maxSourceBytes = 256 << 20
 
+// maxSourceDomains caps how many domains a single source may contribute.
+// F-16: parsing used to grow a per-source map without bound (up to 256 MiB of
+// lines) before the merged-list cap was ever checked, so one malicious feed
+// could exhaust controller memory via per-source maps + SQLite snapshots.
+// Aborting a source early keeps the last good snapshot (existing fallback).
+const maxSourceDomains = 5_000_000
+
 // maxLineLen bounds a single list line; real hosts/ABP entries are <2 KiB.
 const maxLineLen = 64 * 1024
 
@@ -620,12 +627,21 @@ func FetchSource(ctx context.Context, rawURL string, v Validators) (*FetchResult
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("unexpected status code %d", resp.StatusCode)
 	}
+	// F-16: fail fast on a declared absurd size before reading the body.
+	if resp.ContentLength > maxSourceBytes {
+		return nil, fmt.Errorf("source too large: declared %d bytes exceeds %d MiB cap", resp.ContentLength, maxSourceBytes>>20)
+	}
 
 	set := make(map[string]struct{})
 	sc := bufio.NewScanner(io.LimitReader(resp.Body, maxSourceBytes))
 	sc.Buffer(make([]byte, 8*1024), maxLineLen)
 	for sc.Scan() {
 		parseLine(sc.Text(), set)
+		// F-16: abort an exploding source early instead of growing the map
+		// (plus its SQLite snapshot) without bound.
+		if len(set) > maxSourceDomains {
+			return nil, fmt.Errorf("source too large: exceeds %d domain cap", maxSourceDomains)
+		}
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}

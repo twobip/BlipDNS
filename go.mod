@@ -1,6 +1,6 @@
 module github.com/twobip/BlipDNS
 
-go 1.25.0
+go 1.25.13
 
 require (
 	github.com/miekg/dns v1.1.62

@@ -68,7 +68,7 @@ func New(ttlCap time.Duration, maxEntries int) *Cache {
 }
 
 // Key identifies a cached response by (name, type, class) plus the upstream
-// partition label and the DNSSEC DO bit. It is a comparable struct used
+// partition label and the DNSSEC DO/CD/AD bits. It is a comparable struct used
 // directly as the map key: building it allocates nothing (unlike a formatted
 // string) and lookups hash a few fixed words instead of re-hashing the whole
 // encoded name.
@@ -78,6 +78,8 @@ type Key struct {
 	QType  uint16
 	QClass uint16
 	DO     bool // DNSSEC OK bit from the query OPT (DO=1 answers differ: RRSIGs)
+	CD     bool // Checking-Disabled bit: CD=1 answers skip validation
+	AD     bool // Authenticated-Data bit: AD=1 signals validated data
 }
 
 // KeyOf returns the cache key for the first question of m.
@@ -86,7 +88,7 @@ func KeyOf(m *dns.Msg) Key {
 		return Key{}
 	}
 	q := m.Question[0]
-	return KeyOfNormalized(q.Name, q.Qtype, q.Qclass, doBit(m))
+	return KeyOfNormalized(q.Name, q.Qtype, q.Qclass, doBit(m), m.CheckingDisabled, m.AuthenticatedData)
 }
 
 // doBit reports the DNSSEC DO bit from the query OPT (DO=1 answers carry
@@ -99,9 +101,11 @@ func doBit(m *dns.Msg) bool {
 }
 
 // KeyOfNormalized returns the cache key for an already-lowercased FQDN plus
-// type/class/DO. Use it when the caller already normalized the qname (e.g. the
+// type/class/DO/CD/AD. Use it when the caller already normalized the qname (e.g. the
 // DNS serve path) to avoid a second strings.ToLower allocation per query.
-func KeyOfNormalized(fqdn string, qtype, qclass uint16, do bool) Key {
+// F-10: CD and AD are part of the key so responses generated under one
+// validation semantic are never served to a client requesting another.
+func KeyOfNormalized(fqdn string, qtype, qclass uint16, do, cd, ad bool) Key {
 	// DNS names are ASCII: fast-path the common already-lowercase case.
 	lower := fqdn
 	for i := 0; i < len(fqdn); i++ {
@@ -110,21 +114,29 @@ func KeyOfNormalized(fqdn string, qtype, qclass uint16, do bool) Key {
 			break
 		}
 	}
-	return Key{Name: lower, QType: qtype, QClass: qclass, DO: do}
+	return Key{Name: lower, QType: qtype, QClass: qclass, DO: do, CD: cd, AD: ad}
 }
 
-// String renders the key as "name|qtype|qclass|label|do". Not used on the cache
+// String renders the key as "name|qtype|qclass|label|do|cd|ad". Not used on the cache
 // read path — it exists for the singleflight coalescing key (string-keyed)
 // and for logs. The label (upstream partition) is included so concurrent
 // identical queries routed to different upstreams are not coalesced onto one
-// fetch that would answer both partitions from a single upstream. The DO bit
-// is included so DNSSEC and non-DNSSEC queries are not coalesced either.
+// fetch that would answer both partitions from a single upstream. The DO/CD/AD
+// bits are included so DNSSEC and non-DNSSEC queries are not coalesced either.
 func (k Key) String() string {
 	do := "0"
 	if k.DO {
 		do = "1"
 	}
-	return k.Name + "|" + strconv.Itoa(int(k.QType)) + "|" + strconv.Itoa(int(k.QClass)) + "|" + k.Label + "|" + do
+	cd := "0"
+	if k.CD {
+		cd = "1"
+	}
+	ad := "0"
+	if k.AD {
+		ad = "1"
+	}
+	return k.Name + "|" + strconv.Itoa(int(k.QType)) + "|" + strconv.Itoa(int(k.QClass)) + "|" + k.Label + "|" + do + cd + ad
 }
 
 func minTTL(m *dns.Msg) time.Duration {
