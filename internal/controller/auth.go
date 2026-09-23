@@ -227,13 +227,20 @@ func (a *Auth) Destroy(r *http.Request) {
 
 // ClearCookie writes an expired cookie so the browser forgets the session.
 func (a *Auth) ClearCookie(w http.ResponseWriter, r *http.Request) {
+	a.ClearCookieSecure(w, r, r.TLS != nil)
+}
+
+// ClearCookieSecure is ClearCookie with an explicit Secure flag so callers
+// behind a TLS-terminating reverse proxy can mark the cookie Secure when
+// X-Forwarded-Proto=https came from a trusted proxy.
+func (a *Auth) ClearCookieSecure(w http.ResponseWriter, _ *http.Request, secure bool) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookie,
 		Value:    "",
 		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteStrictMode,
-		Secure:   r.TLS != nil,
+		Secure:   secure,
 		MaxAge:   -1,
 		Expires:  time.Unix(1, 0),
 	})
@@ -241,13 +248,19 @@ func (a *Auth) ClearCookie(w http.ResponseWriter, r *http.Request) {
 
 // MintCookie writes a fresh session cookie for the given session id.
 func (a *Auth) MintCookie(w http.ResponseWriter, r *http.Request, id string) {
+	a.MintCookieSecure(w, r, id, r.TLS != nil)
+}
+
+// MintCookieSecure is MintCookie with an explicit Secure flag for
+// reverse-proxy deployments (Secure when the client-facing proto is https).
+func (a *Auth) MintCookieSecure(w http.ResponseWriter, _ *http.Request, id string, secure bool) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookie,
 		Value:    id,
 		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteStrictMode,
-		Secure:   r.TLS != nil,
+		Secure:   secure,
 		MaxAge:   int(sessionTTL.Seconds()),
 		Expires:  time.Now().Add(sessionTTL),
 	})

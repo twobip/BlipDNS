@@ -6,8 +6,10 @@ package dnsserver
 
 import (
 	"context"
+	cryptorand "crypto/rand"
 	"crypto/tls"
 	"encoding/base64"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -449,6 +451,20 @@ func chainBlocked(m *dns.Msg, classify func(string) bool) bool {
 	return false
 }
 
+// freshUpstreamID returns a random DNS ID (crypto/rand, fallback to
+// time-mixed input on failure). Never returns the caller's ID on the fast
+// path so a retry does not reuse a known value.
+func freshUpstreamID(caller uint16) uint16 {
+	var b [2]byte
+	if _, err := cryptorand.Read(b[:]); err == nil {
+		id := binary.BigEndian.Uint16(b[:])
+		if id != caller {
+			return id
+		}
+	}
+	return caller + 0x9e37 + uint16(time.Now().UnixNano()&0xffff)
+}
+
 // stripSubnet removes the EDNS0 client-subnet option (RFC 7871) from req so a
 // client subnet is never forwarded upstream. Other OPT options (e.g. DO) are
 // preserved.
@@ -692,7 +708,12 @@ func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, prot
 		return false, "", "", false
 	}
 	fetch := func() (*dns.Msg, error) {
-		m, err := resolver.Resolve(ctx, req)
+		// Per-upstream TXID: the client chose req.Id (attacker-known for
+		// their own queries). Copy and re-randomize so off-path spoofers
+		// cannot use the known ID against plaintext UDP upstreams.
+		upReq := req.Copy()
+		upReq.Id = freshUpstreamID(req.Id)
+		m, err := resolver.Resolve(ctx, upReq)
 		if err != nil {
 			return nil, err
 		}

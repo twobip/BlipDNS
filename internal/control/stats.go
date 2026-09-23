@@ -77,7 +77,7 @@ func (c *Counters) Stats() *StatsResponse {
 
 // SetToken enables authentication with the given bearer token.
 func (s *Server) SetToken(tok string) {
-	s.mu.Lock()
+	s.tokenMu.Lock()
 	s.token = tok
-	s.mu.Unlock()
+	s.tokenMu.Unlock()
 }

@@ -1287,14 +1287,25 @@ func mergeOverride(existing, partial *InstanceOverride) *InstanceOverride {
 		return existing
 	}
 	if existing == nil {
-		return partial
+		existing = &InstanceOverride{}
 	}
 	merged := *existing
+	// Empty-string string fields mean "clear back to fleet default" so a
+	// stuck BlockAction:allow / Upstream override can be removed without
+	// deleting the whole per-instance override (other categories preserved).
 	if partial.Upstream != nil {
-		merged.Upstream = partial.Upstream
+		if *partial.Upstream == "" {
+			merged.Upstream = nil
+		} else {
+			merged.Upstream = partial.Upstream
+		}
 	}
 	if partial.BlockAction != nil {
-		merged.BlockAction = partial.BlockAction
+		if *partial.BlockAction == "" {
+			merged.BlockAction = nil
+		} else {
+			merged.BlockAction = partial.BlockAction
+		}
 	}
 	if partial.Log != nil {
 		merged.Log = partial.Log

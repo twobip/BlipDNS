@@ -2,6 +2,7 @@
 package config
 
 import (
+	"bytes"
 	"fmt"
 	"log"
 	"net"
@@ -56,7 +57,7 @@ func Default() *Config {
 		TLSDir:             "/var/lib/blipd",
 		AdminAddr:          "127.0.0.1:8444",
 		AdminSocket:        "/var/lib/blipd/blipd.sock",
-		Upstream:           "udp://1.1.1.1:53 https://1.1.1.1/dns-query",
+		Upstream:           "https://1.1.1.1/dns-query udp://1.1.1.1:53",
 		CacheCap:           1 * time.Hour,
 		CacheSize:          10000,
 		BlocklistCacheFile: "/var/lib/blipd/blocklist.cache",
@@ -71,7 +72,9 @@ func Load(path string) (*Config, error) {
 		if err != nil {
 			return nil, fmt.Errorf("config: read %s: %w", path, err)
 		}
-		if err := yaml.Unmarshal(b, c); err != nil {
+		dec := yaml.NewDecoder(bytes.NewReader(b))
+		dec.KnownFields(true)
+		if err := dec.Decode(c); err != nil {
 			return nil, fmt.Errorf("config: parse %s: %w", path, err)
 		}
 	}

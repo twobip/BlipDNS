@@ -4,6 +4,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"flag"
 	"log"
@@ -22,6 +23,7 @@ import (
 
 type config struct {
 	Listen                 string                                  `yaml:"listen"`
+	TrustedProxies         []string                                `yaml:"trusted_proxies"`
 	Username               string                                  `yaml:"username"`
 	Password               string                                  `yaml:"password"`
 	PasswordHash           string                                  `yaml:"password_hash"`
@@ -146,6 +148,12 @@ func main() {
 		log.Printf("blipc: open http://%s/setup#token=%s to create the administrator account", cfg.Listen, setupToken)
 	}
 	srv := controller.NewServerWithConfig(cfg.Username, authPass, fleet, controller.UI(), *cfgPath, setupToken)
+	if len(cfg.TrustedProxies) > 0 {
+		if err := srv.SetTrustedProxies(cfg.TrustedProxies); err != nil {
+			log.Fatalf("blipc: trusted_proxies: %v", err)
+		}
+		log.Printf("blipc: trusting proxy headers from %v", cfg.TrustedProxies)
+	}
 	httpSrv := &http.Server{
 		Addr:              cfg.Listen,
 		Handler:           srv.Handler(),
@@ -178,7 +186,9 @@ func load(path string) (*config, error) {
 		log.Printf("blipc: no config at %s (continuing with none): %v", path, err)
 		return c, nil
 	}
-	if err := yaml.Unmarshal(b, c); err != nil {
+	dec := yaml.NewDecoder(bytes.NewReader(b))
+	dec.KnownFields(true)
+	if err := dec.Decode(c); err != nil {
 		return nil, err
 	}
 	return c, nil

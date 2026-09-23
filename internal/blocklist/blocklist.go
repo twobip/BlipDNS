@@ -35,7 +35,10 @@ const maxLineLen = 64 * 1024
 // multicast, and cloud-metadata ranges. The check happens at connect time, so
 // DNS rebinding does not bypass it.
 var safeBlocklistTransport = &http.Transport{
-	Proxy: http.ProxyFromEnvironment,
+	// No ProxyFromEnvironment: with a proxy set, DialContext only sees the
+	// proxy address and the proxy fetches the target (incl. link-local /
+	// metadata) on our behalf, neutering the dial-time SSRF guard.
+	Proxy: nil,
 	DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 		if !ssrfEnabled {
 			return (&net.Dialer{}).DialContext(ctx, network, addr)
@@ -130,13 +133,28 @@ var FetchTransport http.RoundTripper = safeBlocklistTransport
 // FetchTransport is swapped by tests (httptest needs http.DefaultTransport),
 // so fetchClientFor returns the shared client on the fast path and a throwaway
 // only when the transport was swapped.
-var sharedFetchClient = &http.Client{Transport: safeBlocklistTransport, Timeout: 2 * time.Minute}
+var sharedFetchClient = &http.Client{Transport: safeBlocklistTransport, Timeout: 2 * time.Minute, CheckRedirect: checkBlocklistRedirect}
+
+func checkBlocklistRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= 10 {
+		return fmt.Errorf("too many redirects")
+	}
+	// Validate every hop, not just the initial URL: refuse non-http(s) and
+	// https->http downgrades (feed content sniffable / injectable).
+	if err := validateSourceURL(req.URL.String()); err != nil {
+		return err
+	}
+	if len(via) > 0 && via[0].URL.Scheme == "https" && req.URL.Scheme == "http" {
+		return fmt.Errorf("refusing https->http redirect to %q", req.URL.Host)
+	}
+	return nil
+}
 
 func fetchClientFor() *http.Client {
 	if FetchTransport == sharedFetchClient.Transport {
 		return sharedFetchClient
 	}
-	return &http.Client{Transport: FetchTransport, Timeout: 2 * time.Minute}
+	return &http.Client{Transport: FetchTransport, Timeout: 2 * time.Minute, CheckRedirect: checkBlocklistRedirect}
 }
 
 // Progress reports incremental fetch/parse progress while loading sources.
@@ -354,6 +372,33 @@ func (b *Blocklist) List() []string {
 		out = append(out, "*."+r)
 	}
 	return out
+}
+
+// WriteLimited streams up to limit domains (exact then "*.root" wildcards)
+// without materializing the full list, so exports cannot OOM on multi-million
+// lists. Returns the number written.
+func (b *Blocklist) WriteLimited(w io.Writer, limit int) int {
+	if limit <= 0 {
+		return 0
+	}
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	n := 0
+	for d := range b.exact {
+		if n >= limit {
+			return n
+		}
+		_, _ = io.WriteString(w, d+"\n")
+		n++
+	}
+	for r := range b.wild {
+		if n >= limit {
+			return n
+		}
+		_, _ = io.WriteString(w, "*."+r+"\n")
+		n++
+	}
+	return n
 }
 
 // Checksum returns an order-independent fingerprint of the list, so two lists

@@ -70,28 +70,24 @@ func (b *Bus) Unsubscribe(ch chan Event) {
 	b.mu.Unlock()
 }
 
-// Publish broadcasts an event and appends it to the ring buffer. Subscribers
-// are copied under lock and notified outside it so a slow/high-rate publisher
-// never serializes on subscriber sends. The buffer is a true ring (no
-// ever-growing backing array retained by slicing).
+// Publish broadcasts an event and appends it to the ring buffer. Sends hold
+// the lock (non-blocking via select/default) so Unsubscribe cannot close a
+// channel mid-send. The buffer is a true ring (no ever-growing backing array
+// retained by slicing).
 func (b *Bus) Publish(e Event) {
 	// ponytail: SSE clients never render stats/health (and JSON.parse of a
 	// full StatsResponse costs ~500ms on the main thread); strip here so no
 	// publisher can bloat the stream or the backlog.
 	e.Stats, e.Health = nil, nil
 	b.mu.Lock()
+	defer b.mu.Unlock()
 	if len(b.buffer) < b.cap {
 		b.buffer = append(b.buffer, e)
 	} else {
 		copy(b.buffer, b.buffer[1:])
 		b.buffer[len(b.buffer)-1] = e
 	}
-	subs := make([]chan Event, 0, len(b.subs))
 	for ch := range b.subs {
-		subs = append(subs, ch)
-	}
-	b.mu.Unlock()
-	for _, ch := range subs {
 		select {
 		case ch <- e:
 		default:

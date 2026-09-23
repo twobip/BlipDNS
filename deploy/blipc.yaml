@@ -1,6 +1,14 @@
-# H4: loopback-first default. Change to 0.0.0.0:8500 only behind an isolated
-# mgmt VLAN (or reverse proxy with auth/TLS).
+# H4: loopback-first default. Bind 127.0.0.1:8500 and put a TLS-terminating
+# reverse proxy (nginx/caddy, see deploy/reverse-proxy.md) in front for remote
+# access. Binding 0.0.0.0:8500 without a proxy exposes session cookies in
+# cleartext on the LAN.
 listen: "127.0.0.1:8500"
+# Reverse proxy: when blipc sits behind nginx/caddy on the same host (or a
+# known proxy), list the proxy addresses here so X-Forwarded-For/Proto/Host
+# are trusted for client-IP logging, brute-force buckets, Secure cookies and
+# CSRF Origin checks. Empty (default) = forwarded headers are ignored.
+# Example for local proxy: ["127.0.0.1/32", "::1/128"]
+# trusted_proxies: ["127.0.0.1/32"]
 # Auth for the web UI / API. blipc uses username/password session auth: you log
 # in once via the web UI (or /api/login) and receive an HttpOnly + SameSite=Strict
 # Empty credentials keep the controller CLOSED until the one-time setup flow
@@ -26,7 +34,7 @@ doh_http_addr: ""
 # upstream supports the same spec + |priority syntax as blipd (see blipd.yaml).
 default_policy:
   id: "default"
-  upstream: "udp://1.1.1.1:53|1 https://1.1.1.1/dns-query|2"
+  upstream: "https://1.1.1.1/dns-query|1 udp://1.1.1.1:53|2"
   block_action: "nxdomain"
   log: true
 # Fleet-wide named upstream pool + conditional-forwarding routes. When set,

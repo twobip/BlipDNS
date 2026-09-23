@@ -27,6 +27,7 @@ import (
 // controller can bootstrap trust once without the operator copying tokens.
 type Server struct {
 	token     string
+	tokenMu   sync.RWMutex
 	store     *filter.Store
 	cache     *cache.Cache
 	stats     *Counters
@@ -232,7 +233,10 @@ func (s *Server) ConfigureAdoption(stateFile, instanceID string) {
 	// trust relationship. Do not require the claim-code bootstrap in that case;
 	// otherwise instances added with their admin_token remain misleadingly
 	// "pending" forever in the controller.
-	if s.token != "" {
+	s.tokenMu.RLock()
+	hasToken := s.token != ""
+	s.tokenMu.RUnlock()
+	if hasToken {
 		s.adopted = true
 		s.claimCode = ""
 		s.persistAdopted(true)
@@ -240,7 +244,9 @@ func (s *Server) ConfigureAdoption(stateFile, instanceID string) {
 		return
 	}
 
+	s.tokenMu.Lock()
 	s.token = genToken()
+	s.tokenMu.Unlock()
 	log.Printf("blipd: WARNING no admin_token configured; generated ephemeral token (set admin_token in config to persist)")
 	s.genClaim()
 }
@@ -265,7 +271,7 @@ func (s *Server) persistAdopted(adopted bool) {
 		Token        string    `json:"token,omitempty"`
 		ControllerIP string    `json:"controller_ip,omitempty"`
 		AdoptedAt    time.Time `json:"adopted_at"`
-	}{Adopted: true, InstanceID: s.instanceID, Token: s.token, ControllerIP: s.adoptedBy, AdoptedAt: time.Now()})
+	}{Adopted: true, InstanceID: s.instanceID, Token: s.currentToken(), ControllerIP: s.adoptedBy, AdoptedAt: time.Now()})
 	// 0600: state holds the management token, so no group/world access.
 	if err := os.WriteFile(s.stateFile, b, 0600); err != nil {
 		log.Printf("blipd: warning: cannot persist adoption state to %s: %v", s.stateFile, err)
@@ -289,21 +295,16 @@ func (s *Server) HasWatchers() bool {
 }
 
 // Notify pushes a WatchEvent to all connected watchers. Sends are
-// non-blocking: a consumer that cannot keep up has events dropped and counted
-// (see droppedEvents) rather than stalling the caller. Watchers are copied
-// under watchMu and notified outside the lock so Notify never blocks
-// Set*Controller writers or handleWatch.
+// non-blocking and hold watchMu so handleWatch cannot close a channel
+// mid-send (send-on-closed panic). A consumer that cannot keep up has events
+// dropped and counted (see droppedEvents) rather than stalling the caller.
 func (s *Server) Notify(e WatchEvent) {
 	if s == nil || !s.HasWatchers() {
 		return
 	}
 	s.watchMu.Lock()
-	subs := make([]chan WatchEvent, 0, len(s.watchers))
+	defer s.watchMu.Unlock()
 	for ch := range s.watchers {
-		subs = append(subs, ch)
-	}
-	s.watchMu.Unlock()
-	for _, ch := range subs {
 		select {
 		case ch <- e:
 		default:
@@ -419,25 +420,58 @@ func checkToken(hdr, want string) bool {
 	return diff == 0
 }
 
+func checkClaimCode(got, want string) bool {
+	if got == "" || want == "" || len(got) != len(want) {
+		return false
+	}
+	var diff byte
+	for i := 0; i < len(got); i++ {
+		diff |= got[i] ^ want[i]
+	}
+	return diff == 0
+}
+
 func (s *Server) auth(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if s.token == "" {
+		s.tokenMu.RLock()
+		tok := s.token
+		s.tokenMu.RUnlock()
+		if tok == "" {
 			http.Error(w, "management API disabled", http.StatusServiceUnavailable)
 			return
 		}
 		src := adoptIP(r)
 		// Brute-force guard: 5 bad tokens from one IP => 5min 429.
 		s.authMu.Lock()
+		sweepAuthFailsLocked(s.authFails)
 		if f := s.authFails[src]; f != nil && time.Now().Before(f.until) {
 			s.authMu.Unlock()
 			http.Error(w, "too many attempts; try again later", http.StatusTooManyRequests)
 			return
 		}
 		s.authMu.Unlock()
-		if !checkToken(r.Header.Get("Authorization"), s.token) {
+		if !checkToken(r.Header.Get("Authorization"), tok) {
 			s.authMu.Lock()
 			if s.authFails == nil {
 				s.authFails = make(map[string]*adoptFail)
+			}
+			// Bound the table so rotating source IPs cannot grow it forever.
+			if len(s.authFails) >= maxAuthFailEntries {
+				sweepAuthFailsLocked(s.authFails)
+			}
+			if len(s.authFails) >= maxAuthFailEntries {
+				for k, f := range s.authFails {
+					if time.Now().After(f.until) || f.until.IsZero() {
+						delete(s.authFails, k)
+						break
+					}
+				}
+				if len(s.authFails) >= maxAuthFailEntries {
+					for k := range s.authFails {
+						delete(s.authFails, k)
+						break
+					}
+				}
 			}
 			f := s.authFails[src]
 			if f == nil {
@@ -995,10 +1029,17 @@ func (s *Server) handleAdoptStatus(w http.ResponseWriter, r *http.Request) {
 // authenticated reports whether the request carries the instance's management
 // bearer token (i.e. the operator, not a casual visitor).
 func (s *Server) authenticated(r *http.Request) bool {
-	if s.token == "" {
+	tok := s.currentToken()
+	if tok == "" {
 		return false
 	}
-	return checkToken(r.Header.Get("Authorization"), s.token)
+	return checkToken(r.Header.Get("Authorization"), tok)
+}
+
+func (s *Server) currentToken() string {
+	s.tokenMu.RLock()
+	defer s.tokenMu.RUnlock()
+	return s.token
 }
 
 func (s *Server) handleAdopt(w http.ResponseWriter, r *http.Request) {
@@ -1020,12 +1061,22 @@ func (s *Server) handleAdopt(w http.ResponseWriter, r *http.Request) {
 	if s.adoptFails == nil {
 		s.adoptFails = make(map[string]*adoptFail)
 	}
+	sweepAuthFailsLocked(s.adoptFails)
 	src := adoptIP(r)
 	if f := s.adoptFails[src]; f != nil && time.Now().Before(f.until) {
 		http.Error(w, "too many attempts; try again later", http.StatusTooManyRequests)
 		return
 	}
-	if req.Code == "" || req.Code != s.claimCode {
+	if req.Code == "" || !checkClaimCode(req.Code, s.claimCode) {
+		if len(s.adoptFails) >= maxAuthFailEntries {
+			sweepAuthFailsLocked(s.adoptFails)
+		}
+		if len(s.adoptFails) >= maxAuthFailEntries {
+			for k := range s.adoptFails {
+				delete(s.adoptFails, k)
+				break
+			}
+		}
 		f := s.adoptFails[src]
 		if f == nil {
 			f = &adoptFail{}
@@ -1044,7 +1095,7 @@ func (s *Server) handleAdopt(w http.ResponseWriter, r *http.Request) {
 	s.adoptedBy = src // pin the management API to the adopting controller
 	s.persistAdopted(true)
 	log.Printf("blipd: instance adopted via claim code")
-	writeJSON(w, AdoptResponse{Adopted: true, Token: s.token})
+	writeJSON(w, AdoptResponse{Adopted: true, Token: s.currentToken()})
 }
 
 func (s *Server) handleAdoptReset(w http.ResponseWriter, r *http.Request) {
@@ -1066,6 +1117,29 @@ func (s *Server) handleAdoptReset(w http.ResponseWriter, r *http.Request) {
 type adoptFail struct {
 	count int
 	until time.Time
+}
+
+// maxAuthFailEntries bounds the brute-force tables so rotating source IPs
+// cannot grow them without bound. Expired entries are swept first.
+const maxAuthFailEntries = 10000
+
+// sweepAuthFailsLocked drops expired entries. Caller holds authMu or adoptMu.
+func sweepAuthFailsLocked(m map[string]*adoptFail) {
+	if len(m) == 0 {
+		return
+	}
+	now := time.Now()
+	for k, f := range m {
+		if f == nil || (!f.until.IsZero() && now.After(f.until)) {
+			// Keep recent non-locked counters; drop only expired locks.
+			// Counters without a lock (until zero) are kept unless the
+			// table is over budget (handled by the caller).
+			if f != nil && f.until.IsZero() {
+				continue
+			}
+			delete(m, k)
+		}
+	}
 }
 
 // adoptIP keys guess tracking on the immediate peer, not X-Forwarded-For

@@ -26,6 +26,13 @@ UMask=0077
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictRealtime=true
+LockPersonality=true
+SystemCallArchitectures=native
 ReadWritePaths=/etc/blipc /var/lib/blipc /var/cache/blipc-update
 LimitNOFILE=65536
 

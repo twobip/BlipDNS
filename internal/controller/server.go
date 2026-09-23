@@ -37,6 +37,9 @@ type Server struct {
 	setupMu    sync.Mutex
 	sweepOnce  sync.Once
 	selfUpdate *SelfUpdater
+	// trustedProxies gates X-Forwarded-For/Proto/Host for reverse-proxy
+	// deployments. Nil/empty = forwarded headers are never trusted.
+	trustedProxies *ProxyTrust
 	// probeMu guards probeHits: per-IP sliding-window counts for
 	// /api/upstream/test (10/min each), so the endpoint cannot be used as
 	// an unthrottled LAN port-scan oracle.
@@ -91,6 +94,39 @@ func NewSetupToken() (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(b), nil
+}
+
+// SetTrustedProxies configures which immediate peers may supply
+// X-Forwarded-For/Proto/Host (reverse proxy / Cloudflare Tunnel).
+// Empty clears the trust (forwarded headers ignored).
+func (s *Server) SetTrustedProxies(values []string) error {
+	pt, err := ParseTrustedProxies(values)
+	if err != nil {
+		return err
+	}
+	s.trustedProxies = pt
+	return nil
+}
+
+func (s *Server) clientIP(r *http.Request) string {
+	if s.trustedProxies != nil {
+		return s.trustedProxies.ClientIP(r)
+	}
+	return ClientIP(r)
+}
+
+func (s *Server) isSecure(r *http.Request) bool {
+	if s.trustedProxies != nil {
+		return s.trustedProxies.IsSecure(r)
+	}
+	return r.TLS != nil
+}
+
+func (s *Server) requestHost(r *http.Request) string {
+	if s.trustedProxies != nil {
+		return s.trustedProxies.RequestHost(r)
+	}
+	return r.Host
 }
 
 // Handler returns the controller's HTTP handler (API + UI).
@@ -164,6 +200,9 @@ func (s *Server) Handler() http.Handler {
 // securityHeaders applies defense-in-depth headers to every response.
 func (s *Server) securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.isSecure(r) {
+			w.Header().Set("Strict-Transport-Security", "max-age=31536000")
+		}
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Referrer-Policy", "no-referrer")
@@ -212,7 +251,7 @@ func (s *Server) requireAuth(h http.HandlerFunc) http.HandlerFunc {
 		// / API key present): a cross-site form/fetch cannot set a JSON
 		// Content-Type or a matching Origin, so require both.
 		if r.Method == http.MethodPost || r.Method == http.MethodPut || r.Method == http.MethodDelete || r.Method == http.MethodPatch {
-			if !csrfOriginAllowed(r) {
+			if !s.csrfOriginAllowed(r) {
 				http.Error(w, "cross-site request rejected", http.StatusForbidden)
 				return
 			}
@@ -246,15 +285,18 @@ func (s *Server) requireAuth(h http.HandlerFunc) http.HandlerFunc {
 }
 
 // csrfOriginAllowed checks Origin (falling back to Referer when Origin is
-// absent): when present it must match the request Host, otherwise the request
-// may be a cross-site form/fetch riding the session cookie.
-func csrfOriginAllowed(r *http.Request) bool {
+// absent): when present it must match the client-facing host, otherwise the
+// request may be a cross-site form/fetch riding the session cookie. Behind a
+// reverse proxy the client-facing host comes from X-Forwarded-Host (trusted
+// peers only); direct access compares against r.Host.
+func (s *Server) csrfOriginAllowed(r *http.Request) bool {
+	expected := s.requestHost(r)
 	if origin := strings.TrimSpace(r.Header.Get("Origin")); origin != "" {
 		u, err := url.Parse(origin)
 		if err != nil {
 			return false
 		}
-		if !equalHost(u.Host, r.Host) {
+		if !equalHost(u.Host, expected) {
 			return false
 		}
 		return true
@@ -264,11 +306,16 @@ func csrfOriginAllowed(r *http.Request) bool {
 		if err != nil {
 			return false
 		}
-		if !equalHost(u.Host, r.Host) {
+		if !equalHost(u.Host, expected) {
 			return false
 		}
 	}
 	return true
+}
+
+// csrfOriginAllowed is the package-level helper for tests without a Server.
+func csrfOriginAllowed(r *http.Request) bool {
+	return (&Server{}).csrfOriginAllowed(r)
 }
 
 func equalHost(a, b string) bool {
@@ -326,7 +373,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "authentication not configured", http.StatusForbidden)
 		return
 	}
-	id, err := s.auth.Login(req.Username, req.Password, ClientIP(r))
+	id, err := s.auth.Login(req.Username, req.Password, s.clientIP(r))
 	if err != nil {
 		if err == errLocked {
 			http.Error(w, "too many attempts", http.StatusTooManyRequests)
@@ -335,7 +382,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid credentials", http.StatusUnauthorized)
 		return
 	}
-	s.auth.MintCookie(w, r, id)
+	s.auth.MintCookieSecure(w, r, id, s.isSecure(r))
 	writeJSON(w, map[string]bool{"ok": true})
 }
 
@@ -349,7 +396,7 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 	// Rate-limit setup attempts with the same per-IP brute-force limiter as
 	// login: the setup token is a high-value secret and must not be guessable
 	// at line rate.
-	ip := ClientIP(r)
+	ip := s.clientIP(r)
 	if !s.auth.allowLogin(ip) {
 		http.Error(w, "too many attempts", http.StatusTooManyRequests)
 		return
@@ -406,12 +453,12 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "setup already completed", http.StatusForbidden)
 		return
 	}
-	id, err := s.auth.Login(req.Username, req.Password, ClientIP(r))
+	id, err := s.auth.Login(req.Username, req.Password, s.clientIP(r))
 	if err != nil {
 		http.Error(w, "could not start session", http.StatusInternalServerError)
 		return
 	}
-	s.auth.MintCookie(w, r, id)
+	s.auth.MintCookieSecure(w, r, id, s.isSecure(r))
 	writeJSON(w, map[string]bool{"ok": true})
 }
 
@@ -421,8 +468,19 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	// Logout rides the session cookie, so require the same Origin check as
+	// other mutating routes; otherwise any cross-site auto-POST logs the
+	// operator out (annoyance + forced re-auth phishing window).
+	if s.auth.Authed(r) && !s.csrfOriginAllowed(r) {
+		http.Error(w, "cross-site request rejected", http.StatusForbidden)
+		return
+	}
+	if fetchSite := r.Header.Get("Sec-Fetch-Site"); fetchSite == "cross-site" {
+		http.Error(w, "cross-site request rejected", http.StatusForbidden)
+		return
+	}
 	s.auth.Destroy(r)
-	s.auth.ClearCookie(w, r)
+	s.auth.ClearCookieSecure(w, r, s.isSecure(r))
 	writeJSON(w, map[string]bool{"ok": true})
 }
 
@@ -1053,7 +1111,7 @@ func (s *Server) handleQueries(w http.ResponseWriter, r *http.Request) {
 	if bearerToken(r) != "" {
 		authKind = "api-key"
 	}
-	log.Printf("blipc: audit: /api/queries access from %s via %s instance=%q filter=%q", ClientIP(r), authKind, r.URL.Query().Get("instance"), r.URL.Query().Get("filter"))
+	log.Printf("blipc: audit: /api/queries access from %s via %s instance=%q filter=%q", s.clientIP(r), authKind, r.URL.Query().Get("instance"), r.URL.Query().Get("filter"))
 	if s.fleet.queryLog == nil {
 		http.Error(w, "query log not available", http.StatusServiceUnavailable)
 		return
@@ -1169,7 +1227,17 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	}
 	instance := r.URL.Query().Get("instance")
 	bucketSize := boundedDuration(r, "bucket", 5*time.Minute, time.Second, 24*time.Hour)
-	since := time.Now().Add(-boundedDuration(r, "since", 24*time.Hour, time.Minute, 30*24*time.Hour))
+	sinceDur := boundedDuration(r, "since", 24*time.Hour, time.Minute, 30*24*time.Hour)
+	// Bound analytics cost: cap time-series buckets so ?since=720h&bucket=1s
+	// cannot build a multi-million-entry map (OOM/CPU DoS by an authenticated
+	// caller). 2000 buckets max; grow the bucket to fit the range.
+	if sinceDur/bucketSize > 2000 {
+		bucketSize = (sinceDur + 1999) / 2000
+		if bucketSize < time.Second {
+			bucketSize = time.Second
+		}
+	}
+	since := time.Now().Add(-sinceDur)
 	agg, err := s.fleet.queryLog.AggregateStats(r.Context(), instance, bucketSize, since)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
@@ -1340,7 +1408,7 @@ func (s *Server) handleUpstreamTest(w http.ResponseWriter, r *http.Request) {
 	// Rate-limit probes per client IP (10/min): each request fans out to up to
 	// 32 upstreams from blipc's network vantage, so an unthrottled endpoint
 	// is a LAN port-scan oracle for anyone holding a session/key.
-	if !s.probeAllowed(ClientIP(r)) {
+	if !s.probeAllowed(s.clientIP(r)) {
 		http.Error(w, "probe rate limit exceeded; try again later", http.StatusTooManyRequests)
 		return
 	}
@@ -1352,7 +1420,7 @@ func (s *Server) handleUpstreamTest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "domain too long", http.StatusBadRequest)
 		return
 	}
-	log.Printf("blipc: audit: /api/upstream/test from %s servers=%d domain=%q", ClientIP(r), len(req.Servers), domain)
+	log.Printf("blipc: audit: /api/upstream/test from %s servers=%d domain=%q", s.clientIP(r), len(req.Servers), domain)
 	// Cap the whole fan-out; individual probes time out sooner via their own
 	// per-server timeout.
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
@@ -1528,15 +1596,10 @@ func (s *Server) handleBlocklistExport(w http.ResponseWriter, r *http.Request) {
 	}
 	// Cap the export so a multi-million-domain list cannot OOM the controller
 	// or the browser: ?limit= pages through it (default 100k, max 1M).
+	// Stream directly without materializing the full list first.
 	limit := boundedLimit(r, 100_000, 1_000_000)
-	domains := s.fleet.Blocklist().List()
-	if len(domains) > limit {
-		domains = domains[:limit]
-	}
 	w.Header().Set("Content-Type", "text/plain")
-	for _, d := range domains {
-		fmt.Fprintln(w, d)
-	}
+	s.fleet.Blocklist().WriteLimited(w, limit)
 }
 
 // handleBlocklistSources manages the Pi-hole style source URLs.
