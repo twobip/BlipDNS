@@ -24,13 +24,30 @@ function haNodeIP(instId) {
   try { return new URL(inst.url).hostname; } catch (e) { return ""; }
 }
 
+function renderHAStatus() {
+  const c = haData.cluster || {};
+  const statuses = haData.statuses || {};
+  const active = Object.values(statuses).some((v) => v && v.active);
+  const status = $("ha-status");
+  if (status) { status.textContent = c.enabled ? (active ? "active" : "configured") : "disabled"; status.className = "badge " + (active ? "on" : c.enabled ? "warn" : "off"); }
+  const rows = $("ha-node-status");
+  if (rows) rows.innerHTML = instances.map((i) => {
+    const st = statuses[i.id] || {};
+    const updating = st.updating ? ' <span class="cell-sub">updating…</span>' : "";
+    return `<div class="ha-status-row"><span class="dot ${st.active ? "on" : st.state === "FAULT" ? "err" : "off"}"></span><strong>${esc(i.label || i.id)}</strong><span class="muted">${esc(st.state || "unknown")}</span><span class="cell-sub">${esc(st.message || st.last_error || "")}${updating}</span></div>`;
+  }).join("") || `<div class="muted">Add and adopt two blipd instances first.</div>`;
+}
+
+async function refreshHAStatus() {
+  const r = await API("/api/high-availability");
+  haData = await r.json();
+  renderHAStatus();
+}
+
 function renderHighAvailability() {
   const c = haData.cluster || {};
   const p = c.primary || {}, s = c.secondary || {};
-  const status = $("ha-status");
-  const statuses = haData.statuses || {};
-  const active = Object.values(statuses).some((v) => v && v.active);
-  if (status) { status.textContent = c.enabled ? (active ? "active" : "configured") : "disabled"; status.className = "badge " + (active ? "on" : c.enabled ? "warn" : "off"); }
+  renderHAStatus();
   const set = (id, value) => { const el = $(id); if (el) el.value = value ?? ""; };
   const check = (id, value) => { const el = $(id); if (el) el.checked = !!value; };
   check("ha-enabled", c.enabled);
@@ -61,12 +78,6 @@ function renderHighAvailability() {
   const pip = $("ha-primary-ip"), sip = $("ha-secondary-ip");
   if (pip && !pip.value && psel && psel.value) pip.value = haNodeIP(psel.value);
   if (sip && !sip.value && ssel && ssel.value) sip.value = haNodeIP(ssel.value);
-  const rows = $("ha-node-status");
-  if (rows) rows.innerHTML = instances.map((i) => {
-    const st = statuses[i.id] || {};
-    const updating = st.updating ? ' <span class="cell-sub">updating…</span>' : "";
-    return `<div class="ha-status-row"><span class="dot ${st.active ? "on" : st.state === "FAULT" ? "err" : "off"}"></span><strong>${esc(i.label || i.id)}</strong><span class="muted">${esc(st.state || "unknown")}</span><span class="cell-sub">${esc(st.message || st.last_error || "")}${updating}</span></div>`;
-  }).join("") || `<div class="muted">Add and adopt two blipd instances first.</div>`;
 }
 
 function buildHACluster() {
@@ -89,10 +100,19 @@ async function saveHA() {
 }
 
 async function haAction(action) {
-  const r = await API(`/api/high-availability?action=${encodeURIComponent(action)}`, { method: "POST" });
+  // Validate checks the unsaved draft (what you typed), not stored state.
+  const opts = { method: "POST" };
+  if (action === "validate") {
+    opts.headers = { "Content-Type": "application/json" };
+    opts.body = JSON.stringify({ cluster: buildHACluster() });
+  }
+  const r = await API(`/api/high-availability?action=${encodeURIComponent(action)}`, opts);
   if (!r.ok) throw new Error(await r.text());
   toast(action === "apply" ? "VRRP applied" : `keepalived ${action} complete`);
-  await loadHighAvailability();
+  // Validate/Apply change no stored state: refresh statuses only so the
+  // draft stays intact. Disable rewrites stored state: full reload.
+  if (action === "disable") await loadHighAvailability();
+  else await refreshHAStatus().catch(() => {});
 }
 
 function initHA() {

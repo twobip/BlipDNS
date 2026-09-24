@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -308,5 +309,79 @@ func TestHAValidateApplyDisabledEmpty(t *testing.T) {
 	}
 	if err := fleet.ApplyHA(ctx, control.HACluster{}); err != nil {
 		t.Fatalf("ApplyHA(disabled) = %v, want nil", err)
+	}
+}
+
+// POST validate must check the unsaved draft body when one is sent (the UI
+// validates what you typed before saving), keep working body-less for older
+// callers, and never wipe anything: it changes no stored state.
+func TestHAValidateDraftBody(t *testing.T) {
+	fleet := NewFleet("")
+	srv := NewServer("admin", "secret", fleet, nil)
+	h := srv.Handler()
+
+	good, _ := json.Marshal(map[string]string{"username": "admin", "password": "secret"})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("POST", "/api/login", bytes.NewReader(good)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("login = %d, want 200", rec.Code)
+	}
+	var sid string
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == sessionCookie {
+			sid = c.Value
+		}
+	}
+	if sid == "" {
+		t.Fatal("no session cookie")
+	}
+	doValidate := func(body string) *httptest.ResponseRecorder {
+		var rdr *bytes.Reader
+		if body == "" {
+			rdr = bytes.NewReader(nil)
+		} else {
+			rdr = bytes.NewReader([]byte(body))
+		}
+		req := httptest.NewRequest("POST", "/api/high-availability?action=validate", rdr)
+		if body != "" {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		req.AddCookie(&http.Cookie{Name: sessionCookie, Value: sid})
+		out := httptest.NewRecorder()
+		h.ServeHTTP(out, req)
+		return out
+	}
+
+	// No body (older callers): stored cluster is disabled/empty -> vacuous pass.
+	if rec := doValidate(""); rec.Code != http.StatusOK {
+		t.Errorf("validate body-less = %d (%s), want 200", rec.Code, rec.Body.String())
+	}
+
+	validDraft := func(primary, secondary string) string {
+		raw, _ := json.Marshal(map[string]any{"cluster": map[string]any{
+			"enabled": true, "primary_instance": primary, "secondary_instance": secondary,
+			"primary": map[string]any{"enabled": true, "mode": "unicast", "node_role": "primary",
+				"interface": "eth0", "source_ip": "192.0.2.10", "peer_ip": "192.0.2.11",
+				"virtual_ip": "192.0.2.100/24", "virtual_router_id": 51, "priority": 101,
+				"advert_interval_sec": 1, "auth_pass": "x"},
+			"secondary": map[string]any{"enabled": true, "mode": "unicast", "node_role": "secondary",
+				"interface": "eth0", "source_ip": "192.0.2.11", "peer_ip": "192.0.2.10",
+				"virtual_ip": "192.0.2.100/24", "virtual_router_id": 51, "priority": 100,
+				"advert_interval_sec": 1, "auth_pass": "x"},
+		}})
+		return string(raw)
+	}
+
+	// Unknown member instances in the draft must be reported, proving the
+	// body (not stored state) was validated.
+	if rec := doValidate(validDraft("nope", "nope2")); rec.Code != http.StatusBadRequest {
+		t.Errorf("validate unknown draft = %d, want 400", rec.Code)
+	} else if got := rec.Body.String(); !bytes.Contains([]byte(got), []byte("unknown instance nope")) {
+		t.Errorf("validate unknown draft = %q, want unknown-instance error", got)
+	}
+
+	// Structurally invalid draft (no members picked yet) is a 400, not a pass.
+	if rec := doValidate(validDraft("", "")); rec.Code != http.StatusBadRequest {
+		t.Errorf("validate empty draft = %d, want 400", rec.Code)
 	}
 }

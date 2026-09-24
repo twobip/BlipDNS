@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"mime"
@@ -1166,6 +1167,21 @@ func (s *Server) handleHighAvailability(w http.ResponseWriter, r *http.Request) 
 	case http.MethodPost:
 		action := r.URL.Query().Get("action")
 		cluster := s.fleet.HACluster()
+		if action == "validate" {
+			// Validate the unsaved draft when the UI sends one: the point
+			// of Validate is checking what you typed before saving it.
+			// Absent body (older callers) falls back to stored state.
+			var req struct {
+				Cluster *control.HACluster `json:"cluster"`
+			}
+			if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 128<<10)).Decode(&req); err != nil && err != io.EOF {
+				http.Error(w, "bad request", http.StatusBadRequest)
+				return
+			}
+			if req.Cluster != nil {
+				cluster = *req.Cluster
+			}
+		}
 		var err error
 		switch action {
 		case "validate":
