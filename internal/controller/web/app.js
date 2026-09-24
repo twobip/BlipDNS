@@ -2221,9 +2221,20 @@ $("s-update-ctrl").onclick = async () => {
 
 
 $("s-save-proxies").onclick = async () => {
-  const st = $("s-proxies-status");
-  st.textContent = "saving\u2026";
   const raw = ($("s-trusted-proxies").value || "").split(/[\s,]+/).map((s) => s.trim()).filter(Boolean);
+  if (!raw.length && savedTrustedProxies.length) {
+    // Empty input with proxies still saved: deliberate clear or a
+    // stale/unloaded field. Confirm so a misclick or stale tab cannot
+    // silently wipe proxy trust (real client IPs, Secure cookies,
+    // public-scheme CSRF all go with it).
+    confirmDialog("Clear all trusted proxies?", "Currently trusting: " + savedTrustedProxies.join(", ") + ". Afterwards forwarded headers are ignored.", () => putTrustedProxies([]));
+    return;
+  }
+  putTrustedProxies(raw);
+};
+async function putTrustedProxies(raw) {
+  const st = $("s-proxies-status");
+  st.textContent = "saving…";
   try {
     const r = await API("/api/settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ trusted_proxies: raw }) });
     const d = await r.json();
