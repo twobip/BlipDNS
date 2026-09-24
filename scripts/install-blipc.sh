@@ -462,7 +462,10 @@ PrivateTmp=true
 # even via sudo) and every self-update dies with "cannot open lock".
 # DAC is unchanged (/run/lock stays root-owned), so the F-03 lock-placement
 # property holds; the helper still refuses pre-existing symlinks.
-ReadWritePaths=$STATE_DIR $CONFIG_DIR /run/lock
+# /usr/local/bin: the helper stages (mktemp) and installs there. Same
+# reasoning: the dir stays root-owned, so the service user gains nothing,
+# but root can write through its own mount namespace.
+ReadWritePaths=$STATE_DIR $CONFIG_DIR /run/lock /usr/local/bin
 LimitNOFILE=65536
 StandardOutput=journal
 StandardError=journal

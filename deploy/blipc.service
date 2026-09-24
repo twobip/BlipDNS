@@ -36,7 +36,9 @@ SystemCallArchitectures=native
 # /run/lock: the root install helper takes its lock there; without this the
 # lock open fails with EROFS (children inherit the unit's mount namespace,
 # even via sudo) and self-update dies with "cannot open lock".
-ReadWritePaths=/etc/blipc /var/lib/blipc /var/cache/blipc-update /run/lock
+# /usr/local/bin: the helper stages (mktemp) and installs there. Both stay
+# root-owned, so the service user gains no write access; only root passes.
+ReadWritePaths=/etc/blipc /var/lib/blipc /var/cache/blipc-update /run/lock /usr/local/bin
 LimitNOFILE=65536
 
 StandardOutput=journal

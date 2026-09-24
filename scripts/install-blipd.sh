@@ -497,7 +497,10 @@ PrivateTmp=true
 # /run/lock: the root install helper takes its lock there; without this the
 # lock open fails with EROFS (children inherit the unit's mount namespace,
 # even via sudo) and self-update dies with "cannot open lock".
-ReadWritePaths=$STATE_DIR $CONFIG_DIR /run/lock
+# /usr/local/bin: the helper stages (mktemp) and installs there.
+# Both stay root-owned, so the service user gains no write access (DAC
+# unchanged); only the mount flag changes, letting the root helper through.
+ReadWritePaths=$STATE_DIR $CONFIG_DIR /run/lock /usr/local/bin
 LimitNOFILE=65536
 StandardOutput=journal
 StandardError=journal
