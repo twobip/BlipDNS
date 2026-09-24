@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -20,6 +21,12 @@ type fakeUpdaterNode struct {
 	started int
 	running bool
 	stop    chan struct{}
+	// failMsg, once set with failAfter, makes update-status GETs report a
+	// failure after failAfter successful Running reports: models an updater
+	// that starts fine then fails (e.g. root install refused).
+	failMsg   string
+	failAfter int
+	gets      int
 }
 
 func newFakeUpdaterNode(token string) *fakeUpdaterNode {
@@ -71,7 +78,11 @@ func (n *fakeUpdaterNode) server(t *testing.T) *httptest.Server {
 			writeJSONH(w, map[string]bool{"ok": true})
 		case http.MethodGet:
 			n.mu.Lock()
+			n.gets++
 			status := control.UpdateStatus{Running: n.running}
+			if n.failMsg != "" && n.gets > n.failAfter {
+				status = control.UpdateStatus{LastError: n.failMsg}
+			}
 			n.mu.Unlock()
 			writeJSONH(w, status)
 		default:
@@ -145,6 +156,31 @@ func TestSerializedUpdateWaitsForEachNode(t *testing.T) {
 		status := fleet.UpdateJob()
 		return !status.Running && status.Completed == 2
 	}, "serialized update did not complete")
+}
+
+// An updater that fails after reporting running must fail the node update:
+// the health gate alone cannot tell "restarted" from "never restarted"
+// (the old process still answers), so LastError has to win over phase.
+func TestUpdateFailAfterRunning(t *testing.T) {
+	node := newFakeUpdaterNode("tok")
+	node.failMsg = "cannot open lock /run/lock/blipd-install.lock"
+	node.failAfter = 1
+	srv := node.server(t)
+	defer srv.Close()
+	fleet := NewFleet("")
+	if err := fleet.Add(context.Background(), InstanceConfig{ID: "a", URL: srv.URL, Token: "tok"}); err != nil {
+		t.Fatal(err)
+	}
+	inst := fleet.get("a")
+	if inst == nil {
+		t.Fatal("missing instance")
+	}
+	err := fleet.updateOne(inst, "stable")
+	if err == nil {
+		t.Fatal("updateOne = nil, want remote updater error")
+	} else if !strings.Contains(err.Error(), "cannot open lock") {
+		t.Fatalf("updateOne = %v, want lock failure", err)
+	}
 }
 
 // waitFor polls cond until it holds or the deadline passes. Deadlines on

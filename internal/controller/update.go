@@ -154,16 +154,16 @@ func (f *Fleet) updateOne(inst *Instance, channel string) error {
 			}
 		} else if status.Running {
 			phase = "updating"
-		} else if phase == "updating" || phase == "restart" {
-			phase = "restart"
 		} else if status.LastError != "" {
+			// A failed updater must fail the job even when an earlier poll
+			// already saw it running: otherwise any failure after startup
+			// rides the health gate below (the old process still answers)
+			// to a false "updated".
 			return fmt.Errorf("remote updater: %s", status.LastError)
-		} else if phase == "start" {
-			// The updater finished before our first status poll observed it
-			// running. StartUpdate sets Running synchronously (before the
-			// POST response), so a successful start followed by "not
-			// running" means the update already completed — fall through to
-			// the health gate instead of polling until the full timeout.
+		} else {
+			// Not running and no error: finished before the first poll
+			// observed it, or completed after running — either way wait
+			// for the restart's health gate below.
 			phase = "restart"
 		}
 
