@@ -32,6 +32,13 @@ const fmtQPS = (v) => {
 const timeAgo = (t) => {
   if (!t) return "—";
   const s = (Date.now() - new Date(t).getTime()) / 1000;
+  if (s < 0) {
+    const f = -s;
+    if (f < 60) return "in " + Math.round(f) + "s";
+    if (f < 3600) return "in " + Math.round(f / 60) + "m";
+    if (f < 86400) return "in " + Math.round(f / 3600) + "h";
+    return "in " + Math.round(f / 86400) + "d";
+  }
   if (s < 60) return Math.max(0, Math.round(s)) + "s ago";
   if (s < 3600) return Math.round(s / 60) + "m ago";
   if (s < 86400) return Math.round(s / 3600) + "h ago";
