@@ -141,6 +141,32 @@ func TestClientIDPolicy(t *testing.T) {
 	}
 }
 
+// Client IDs listed on the DEFAULT policy must verify like any other
+// policy: a fleet-wide default carrying per-device IDs is the common simple
+// setup, and the verified-only log identity turned every such client into
+// "unverified-id".
+func TestDefaultPolicyClientIDsVerify(t *testing.T) {
+	def := &Policy{ID: "default", Networks: []string{"192.168.1.0/24"}, Clients: []string{"laptop", "phone"}}
+	s := NewStore(def)
+	if !s.ClientIDSelected(mustIP("192.168.1.10"), "laptop") {
+		t.Error("default-policy client ID inside its networks should verify")
+	}
+	if s.ClientIDSelected(mustIP("10.9.9.9"), "laptop") {
+		t.Error("default-policy client ID outside its networks must not verify")
+	}
+	// Same via SetDefault after construction.
+	s2 := NewStore(nil)
+	s2.SetDefault(def)
+	if !s2.ClientIDSelected(mustIP("192.168.1.10"), "phone") {
+		t.Error("SetDefault client ID inside its networks should verify")
+	}
+	// Clearing the default un-indexes its IDs.
+	s2.SetDefault(nil)
+	if s2.ClientIDSelected(mustIP("192.168.1.10"), "phone") {
+		t.Error("cleared default must not verify IDs")
+	}
+}
+
 // A client-ID-only policy (no networks) must never match: the ID is
 // self-asserted, so honouring it would let any source claim that policy —
 // including an allowlist that overrides the global blocklist.

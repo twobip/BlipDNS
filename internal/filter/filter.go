@@ -144,7 +144,7 @@ type compiledPolicy struct {
 	Policy
 	allowM *matcher
 	blockM *matcher
-	nets   []*net.IPNet // parsed from Networks once in SetPolicy
+	nets   []*net.IPNet // parsed from Networks once at Set time
 }
 
 func compile(p *Policy) *compiledPolicy {
@@ -177,8 +177,9 @@ func NewStore(def *Policy) *Store {
 		byClient: make(map[string]*compiledPolicy),
 	}
 	if def != nil {
-		s.defaults = compile(def)
+		s.defaults = compileDefault(def)
 	}
+	s.rebuildLocked()
 	return s
 }
 
@@ -188,9 +189,22 @@ func (s *Store) SetDefault(p *Policy) {
 	defer s.mu.Unlock()
 	if p == nil {
 		s.defaults = nil
+		s.rebuildLocked()
 		return
 	}
-	s.defaults = compile(p)
+	s.defaults = compileDefault(p)
+	s.rebuildLocked()
+}
+
+// compileDefault compiles the fallback policy including its networks (best
+// effort) so IDs listed on it verify. Named policies stay strict via
+// SetPolicy; a bad default CIDR fails closed to no networks.
+func compileDefault(p *Policy) *compiledPolicy {
+	cp := compile(p)
+	if nets, err := parseNetworks(p); err == nil {
+		cp.nets = nets
+	}
+	return cp
 }
 
 // SetPolicy adds or replaces a policy by ID and (re)builds its network table.
@@ -199,18 +213,31 @@ func (s *Store) SetPolicy(p *Policy) error {
 		return ErrPolicyID
 	}
 	cp := compile(p)
-	for _, n := range p.Networks {
-		_, ipnet, err := net.ParseCIDR(n)
-		if err != nil {
-			return &NetError{Net: n, Err: err}
-		}
-		cp.nets = append(cp.nets, ipnet)
+	nets, err := parseNetworks(p)
+	if err != nil {
+		return err
 	}
+	cp.nets = nets
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.policies[p.ID] = cp
 	s.rebuildLocked()
 	return nil
+}
+
+// parseNetworks parses p.Networks once. SetPolicy is strict (bad CIDR is an
+// error); the default path is best-effort — a bad default CIDR fails closed
+// to no networks, exactly as before, when defaults never parsed Networks.
+func parseNetworks(p *Policy) ([]*net.IPNet, error) {
+	var nets []*net.IPNet
+	for _, n := range p.Networks {
+		_, ipnet, err := net.ParseCIDR(n)
+		if err != nil {
+			return nil, &NetError{Net: n, Err: err}
+		}
+		nets = append(nets, ipnet)
+	}
+	return nets, nil
 }
 
 // RemovePolicy deletes a policy by ID.
@@ -228,6 +255,9 @@ func (s *Store) rebuildLocked() {
 		totalNets += len(cp.nets)
 		totalClients += len(cp.Clients)
 	}
+	if s.defaults != nil {
+		totalClients += len(s.defaults.Clients)
+	}
 	nets := make([]netEntry, 0, totalNets)
 	byClient := make(map[string]*compiledPolicy, totalClients)
 	// Iterate in a stable order so a client ID claimed by several policies
@@ -243,6 +273,20 @@ func (s *Store) rebuildLocked() {
 			ones, _ := ipnet.Mask.Size()
 			nets = append(nets, netEntry{net: ipnet, ones: ones, policy: cp})
 		}
+	}
+	// Index the default's client IDs first (named policies overwrite on
+	// collision): IDs on the fleet-wide default verify like any other
+	// policy. Its networks stay out of the table above: the default remains
+	// a fallback and only ever matches its explicit IDs — still requiring
+	// the source IP inside its networks, enforced at lookup.
+	ordered := make([]*compiledPolicy, 0, len(ids)+1)
+	if s.defaults != nil {
+		ordered = append(ordered, s.defaults)
+	}
+	for _, id := range ids {
+		ordered = append(ordered, s.policies[id])
+	}
+	for _, cp := range ordered {
 		for _, c := range cp.Clients {
 			// Accept the documented "/dns-query/<id>" form as well as the bare
 			// id: clientIDFromPath yields the bare path segment, so a policy
