@@ -192,7 +192,37 @@ func (f *Fleet) UpdateAvailable(version string) bool {
 	if r == nil {
 		return false
 	}
-	return r.available(channel, version)
+	if r.available(channel, version) {
+		return true
+	}
+	// Rolling dev tag: VERSION is frozen, so semver never advances and the
+	// check above stays silent. Dev builds stamp the commit, so an instance
+	// whose commit differs from this controller's is flagged — direction is
+	// not established (no ordering on a rolling tag), it signals drift.
+	if channel == string(control.ChannelDev) {
+		return devCommitDiffers(version, ControllerVersion())
+	}
+	return false
+}
+
+// devCommitDiffers reports whether two stamped versions name different
+// commits. Missing commits never report available.
+func devCommitDiffers(a, b string) bool {
+	ca := commitOf(a)
+	cb := commitOf(b)
+	return ca != "" && cb != "" && ca != cb
+}
+
+// commitOf extracts the +hex build metadata (the form extractVersion
+// strips) from a version string such as "blipd/0.7.0+47cf192".
+func commitOf(v string) string {
+	if i := strings.LastIndex(v, "/"); i >= 0 {
+		v = v[i+1:]
+	}
+	if i := strings.IndexByte(v, '+'); i >= 0 && isHexSHA(v[i+1:]) {
+		return v[i+1:]
+	}
+	return ""
 }
 
 // LatestVersion returns the latest release version for the configured release

@@ -1,6 +1,10 @@
 package controller
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/twobip/BlipDNS/internal/control"
+)
 
 func TestExtractVersion(t *testing.T) {
 	cases := []struct {
@@ -84,5 +88,35 @@ func TestBranchForChannel(t *testing.T) {
 	}
 	if got := branchForChannel("dev"); got != "dev" {
 		t.Errorf("dev -> %q, want dev", got)
+	}
+}
+
+// VERSION is frozen on the dev channel, so semver never advances: an
+// instance behind by commits must still badge via commit metadata.
+func TestUpdateAvailableDevCommit(t *testing.T) {
+	old := version
+	version = "0.7.0+267a6af"
+	defer func() { version = old }()
+	f := NewFleet("")
+	f.releaseChannel = string(control.ChannelDev)
+	f.release.mu.Lock()
+	f.release.versions["dev"] = "0.7.0"
+	f.release.mu.Unlock()
+	if !f.UpdateAvailable("blipd/0.7.0+47cf192") {
+		t.Error("stale dev commit should show update available")
+	}
+	if f.UpdateAvailable("blipd/0.7.0+267a6af") {
+		t.Error("matching dev commit should not show update available")
+	}
+	if f.UpdateAvailable("blipd/0.7.0") {
+		t.Error("unstamped instance version should not show update available")
+	}
+	// Stable channel: semver-equal never badges, whatever the commits.
+	f.releaseChannel = string(control.ChannelStable)
+	f.release.mu.Lock()
+	f.release.versions["stable"] = "0.7.0"
+	f.release.mu.Unlock()
+	if f.UpdateAvailable("blipd/0.7.0+47cf192") {
+		t.Error("stable semver-equal should not show update available")
 	}
 }
