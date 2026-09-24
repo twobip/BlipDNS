@@ -335,6 +335,35 @@ func TestServeClientIDPolicyAndIdentity(t *testing.T) {
 	}
 }
 
+// An asserted ID no policy claims renders as-is (nothing to impersonate);
+// an ID claimed by a policy whose networks miss the source stays
+// "unverified-id".
+func TestServeUnknownClientIDShownAsIs(t *testing.T) {
+	srv, _ := newTestServer(t)
+	if err := srv.cfg.Store.SetPolicy(&filter.Policy{
+		ID: "kids", Networks: []string{"10.0.0.0/8"}, Clients: []string{"kids-tablet"}, Log: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := srv.cfg.Store.SetPolicy(&filter.Policy{
+		ID: "lan", Networks: []string{"192.168.1.0/24"}, Log: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var got string
+	srv.logfn = func(client, _ string) { got = client }
+	q := new(dns.Msg)
+	q.SetQuestion("allowed.test.", dns.TypeA)
+	srv.serve(context.Background(), net.ParseIP("192.168.1.5"), "testmac", "dns", q)
+	if got != "testmac" {
+		t.Errorf("unknown client id logged as %q, want it shown as-is", got)
+	}
+	srv.serve(context.Background(), net.ParseIP("192.168.1.5"), "kids-tablet", "dns", q)
+	if got != "unverified-id" {
+		t.Errorf("unscoped known client id logged as %q, want %q", got, "unverified-id")
+	}
+}
+
 func TestClientIDFromPath(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{"/dns-query", ""},

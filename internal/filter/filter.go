@@ -380,11 +380,27 @@ func (s *Store) lookupLocked(ip net.IP, clientID string) *compiledPolicy {
 	return s.defaults
 }
 
+// KnowsClientID reports whether any policy (including the default) lists
+// clientID, ignoring networks. It answers "is this name claimed anywhere",
+// letting callers tell an unknown asserted ID (safe to display as-is —
+// there is no identity to impersonate) from a known-but-unscoped one, which
+// must stay "unverified-id".
+func (s *Store) KnowsClientID(clientID string) bool {
+	if clientID == "" {
+		return false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	_, ok := s.byClient[clientID]
+	return ok
+}
+
 // ClientIDSelected reports whether clientID actually selected its policy for
 // ip: the ID is known and the source IP falls inside that policy's networks.
 // A self-asserted DoH client-ID must only be attributed in logs and query-log
-// events when it really selected the policy; otherwise the query is logged as
-// "unverified-id" so one client cannot impersonate another's identity.
+// events when it really selected the policy; a claimed-but-unscoped ID is
+// logged as "unverified-id" so one client cannot impersonate another's
+// identity.
 func (s *Store) ClientIDSelected(ip net.IP, clientID string) bool {
 	if clientID == "" || ip == nil {
 		return false

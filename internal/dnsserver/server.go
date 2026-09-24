@@ -392,10 +392,12 @@ func (s *Server) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
 }
 
 // serve is the unified query path: filter -> cache -> upstream. clientID is
-// the optional DoH client identity from /dns-query/{client-id}; it is only
+// the optional DoH client identity from /dns-query/{client-id}; it is
 // attributed in logs and query-log events when it actually selected its
-// policy (see ClientIDSelected), otherwise the query is logged as
-// "unverified-id". proto is the receiving listener (control.ProtoDoH or
+// policy (see ClientIDSelected). An ID claimed by a policy but arriving from
+// outside its networks is logged as "unverified-id" so one client cannot
+// impersonate another's identity; an ID no policy claims is shown as-is.
+// proto is the receiving listener (control.ProtoDoH or
 // control.ProtoDNS) for query-log events. Classic-DNS callers that go through
 // ServeDNS use serveInner directly with a precise UDP flag; direct serve()
 // calls assume classic DNS is UDP so large responses are still truncated.
@@ -513,9 +515,10 @@ func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, prot
 		return resp
 	}
 	// Only attribute the self-asserted DoH client-ID when it actually
-	// selected its policy (IP inside that policy's networks). Otherwise the
-	// query is logged as "unverified-id" so one client cannot impersonate
-	// another's identity to escape its own policy. The log identity renders
+	// selected its policy (IP inside that policy's networks). A claimed-but-
+	// unscoped ID renders as "unverified-id" so one client cannot impersonate
+	// another's identity to escape its own policy; an ID no policy claims
+	// renders as-is. The log identity renders
 	// lazily: the unlimited default path with no logging must not pay for
 	// IP.String(), and the no-id case reuses one rendering.
 	verifiedID := ""
@@ -529,8 +532,15 @@ func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, prot
 			if verifiedID != "" {
 				client = verifiedID
 			} else if clientID != "" {
-				log.Printf("blipd: unverified client-id %q from %s", clientID, clientIP.String())
-				client = "unverified-id"
+				if s.cfg.Store != nil && s.cfg.Store.KnowsClientID(clientID) {
+					log.Printf("blipd: unverified client-id %q from %s", clientID, clientIP.String())
+					client = "unverified-id"
+				} else {
+					// No policy claims this ID, so there is no identity to
+					// impersonate: display the assertion as-is and keep
+					// per-device attribution working with zero configuration.
+					client = clientID
+				}
 			} else {
 				client = clientIP.String()
 			}

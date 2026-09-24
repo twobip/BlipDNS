@@ -141,6 +141,25 @@ func TestClientIDPolicy(t *testing.T) {
 	}
 }
 
+// KnowsClientID distinguishes a name no policy claims (safe to display
+// as-is) from a claimed-but-unscoped one (must stay "unverified-id").
+func TestKnowsClientID(t *testing.T) {
+	s := NewStore(&Policy{ID: "default", Networks: []string{"192.168.1.0/24"}, Clients: []string{"laptop"}})
+	if err := s.SetPolicy(&Policy{ID: "kids", Networks: []string{"10.0.0.0/8"}, Clients: []string{"kids-tablet"}}); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"laptop", "kids-tablet"} {
+		if !s.KnowsClientID(id) {
+			t.Errorf("KnowsClientID(%q) = false, want true", id)
+		}
+	}
+	for _, id := range []string{"", "testmac", "/dns-query/laptop"} {
+		if s.KnowsClientID(id) {
+			t.Errorf("KnowsClientID(%q) = true, want false", id)
+		}
+	}
+}
+
 // Client IDs listed on the DEFAULT policy must verify like any other
 // policy: a fleet-wide default carrying per-device IDs is the common simple
 // setup, and the verified-only log identity turned every such client into
