@@ -2466,7 +2466,8 @@ func TestBlocklistAddAcceptsSpaceSeparated(t *testing.T) {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
 	got := fleet.ManualDomains()
-	want := []string{"a.example.com", "b.example.com", "c.example.net"}
+	// Single-label names (a, not, domain) are valid blocks (localhost/lan support).
+	want := []string{"a", "a.example.com", "b.example.com", "c.example.net", "domain", "not"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("ManualDomains() = %v, want %v", got, want)
 	}

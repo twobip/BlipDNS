@@ -34,6 +34,11 @@ type QueryLogStore struct {
 const (
 	batchMax      = 500
 	batchInterval = 100 * time.Millisecond
+	// maxAnswersJSON caps the per-event answers JSON stored in SQLite so a
+	// single huge response (e.g. a large TXT set) cannot bloat the DB or
+	// stall the batch writer. Entries exceeding it are truncated from the
+	// tail before enqueue/insert.
+	maxAnswersJSON = 16 * 1024
 )
 
 // defaultQueryLogRetention is how long query log entries are kept unless the
@@ -445,17 +450,38 @@ func NewQueryLogStore(dbPath string) (*QueryLogStore, error) {
 		stop: make(chan struct{}),
 	}
 	store.retention.Store(int64(defaultQueryLogRetention))
-	store.wg.Add(1)
+	store.wg.Add(2)
 	go store.batchWriter()
 	go store.cleanupLoop()
 
 	return store, nil
 }
 
+// truncateAnswersForJSON drops trailing answers until the JSON encoding fits
+// within maxAnswersJSON (or the slice is empty). It bounds per-event storage
+// before Enqueue/insert so one huge answer set cannot bloat SQLite.
+func truncateAnswersForJSON(answers []control.Answer) []control.Answer {
+	if len(answers) == 0 {
+		return answers
+	}
+	b, _ := json.Marshal(answers)
+	if len(b) <= maxAnswersJSON {
+		return answers
+	}
+	for len(answers) > 0 {
+		answers = answers[:len(answers)-1]
+		b, _ := json.Marshal(answers)
+		if len(b) <= maxAnswersJSON {
+			break
+		}
+	}
+	return answers
+}
+
 // row renders the columns shared by the single- and batched-insert paths.
 func (e QueryLogEntry) row() (ips, ans string, cached int) {
 	ips = strings.Join(e.IPs, ",")
-	b, _ := json.Marshal(e.Answers)
+	b, _ := json.Marshal(truncateAnswersForJSON(e.Answers))
 	ans = string(b)
 	if e.Cached {
 		cached = 1
@@ -810,13 +836,20 @@ func (s *QueryLogStore) ClearStatsSamples(ctx context.Context) error {
 // cleanupLoop removes old query log entries (retention window, which also
 // covers upstream errors) and stats samples (1 month).
 func (s *QueryLogStore) cleanupLoop() {
+	defer s.wg.Done()
+	defer recoverLog("querylog cleanup")
 	ticker := time.NewTicker(1 * time.Hour)
 	defer ticker.Stop()
-	for range ticker.C {
-		ctx := context.Background()
-		s.db.ExecContext(ctx, `DELETE FROM query_log WHERE timestamp < ?`, time.Now().Add(-s.Retention()))
-		s.db.ExecContext(ctx, `DELETE FROM upstream_errors WHERE timestamp < ?`, time.Now().Add(-s.Retention()))
-		s.db.ExecContext(ctx, `DELETE FROM stats_samples WHERE timestamp < ?`, time.Now().Add(-31*24*time.Hour))
+	for {
+		select {
+		case <-s.stop:
+			return
+		case <-ticker.C:
+			ctx := context.Background()
+			s.db.ExecContext(ctx, `DELETE FROM query_log WHERE timestamp < ?`, time.Now().Add(-s.Retention()))
+			s.db.ExecContext(ctx, `DELETE FROM upstream_errors WHERE timestamp < ?`, time.Now().Add(-s.Retention()))
+			s.db.ExecContext(ctx, `DELETE FROM stats_samples WHERE timestamp < ?`, time.Now().Add(-31*24*time.Hour))
+		}
 	}
 }
 
@@ -842,6 +875,7 @@ func (s *QueryLogStore) SetRetention(d time.Duration) {
 // caller (the watch-stream consumer): if the buffer is full the entry is
 // dropped (and counted) rather than stalling event delivery.
 func (s *QueryLogStore) Enqueue(e QueryLogEntry) {
+	e.Answers = truncateAnswersForJSON(e.Answers)
 	select {
 	case s.buf <- e:
 	default:

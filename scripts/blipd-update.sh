@@ -95,16 +95,16 @@ actual="$(sha256sum "$DL/blipd-linux-amd64" | awk '{print $1}')"
 install -m 0755 "$DL/blipd-linux-amd64" "$WORK/blipd.new"
 
 # Hand the verified (unprivileged) binary to the root install helper.
-# Pass the verified checksum so the root side can re-verify (H2). Sudo
-# without SETENV rejects VAR=val assignments, so retry bare only when sudo
-# itself complains about the environment (the helper warns and still
-# enforces path/ELF checks). Genuine install failures propagate as-is.
+# Pass the verified checksum so the root side re-verifies the SAME inode (H2).
+# The helper fails closed when the env is stripped (no downgrade to ELF-only):
+# that means the sudoers rule lacks env_keep — re-run install-blipd.sh to
+# refresh it. Never retry without the checksum.
 install_out="$(sudo -n EXPECTED_SHA256="$expected" /usr/local/sbin/blipd-install "$WORK/blipd.new" 2>&1)" && install_rc=0 || install_rc=$?
 printf '%s\n' "$install_out"
-if [[ "$install_rc" -ne 0 && "$install_out" == *"environment"* ]]; then
-  echo "warning: sudo rejected the checksum env, retrying without it" >&2
-  sudo -n /usr/local/sbin/blipd-install "$WORK/blipd.new"
-elif [[ "$install_rc" -ne 0 ]]; then
+if [[ "$install_rc" -ne 0 ]]; then
+  if [[ "$install_out" == *"environment"* || "$install_out" == *"EXPECTED_SHA256 not set"* ]]; then
+    echo "error: sudo stripped EXPECTED_SHA256 (sudoers missing env_keep); re-run install-blipd.sh to refresh sudoers, then retry" >&2
+  fi
   exit "$install_rc"
 fi
 # Record the installed version stamp for future downgrade checks (M14).

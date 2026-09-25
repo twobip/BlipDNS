@@ -25,6 +25,14 @@ const rlShards = 16
 // against spoofed/rotating source IPs.
 const maxLiveClients = 1 << 14
 
+// rlIdleEvict is how idle a bucket must be before it becomes an eviction
+// victim when the table is saturated. Fail-closed under an active spoof flood
+// (fresh buckets keep the table full), but once the flood stops the oldest
+// entries age out and legitimate new clients are admitted again — without
+// this a transient flood would deny new clients forever until the next
+// SetRateLimit push reset the table.
+const rlIdleEvict = 60 * time.Second
+
 type rlShard struct {
 	mu      sync.Mutex
 	buckets map[string]*tokenBucket
@@ -33,8 +41,10 @@ type rlShard struct {
 // rateLimiter enforces a per-client QPS limit. A qps of 0 disables limiting.
 // Clients are keyed by their source IP (post trusted-proxy resolution), never
 // by the self-asserted DoH client-id: an attacker could rotate the id to mint
-// fresh buckets. Buckets are evicted after they go idle to bound memory
-// against spoofed/rotating source IPs.
+// fresh buckets. When the table saturates, idle buckets (no query for
+// rlIdleEvict) are evicted to admit new clients; when every bucket is fresh
+// the limiter fails closed (denies) rather than evict-then-admit, so an
+// attacker rotating source IPs gets no free pass. set() resets all buckets.
 type rateLimiter struct {
 	qpsVal   atomic.Int64 // 0 = disabled
 	burstVal atomic.Int64
@@ -113,21 +123,25 @@ func (rl *rateLimiter) allow(client string) bool {
 	now := time.Now()
 	b, ok := sh.buckets[client]
 	if !ok {
-		// bound tracked clients; if saturated with no idle entry to evict,
-		// fail closed (deny) rather than fail open: an attacker rotating
-		// source IPs must not get a free pass once the table is full.
+		// Bound tracked clients. When saturated, evict the oldest entry if
+		// it has been idle long enough; otherwise fail closed (deny) rather
+		// than evict-then-admit: an attacker rotating source IPs must not get
+		// a free pass once the table is full, but a transient flood must not
+		// deny legitimate new clients forever either.
 		if len(sh.buckets) >= maxLiveClients/rlShards {
-			// O(1) probabilistic eviction: drop one arbitrary entry instead of
-			// scanning up to 1024 entries under the shard lock (spoofed-IP DoS
-			// amplified the old hold time).
-			for k := range sh.buckets {
-				delete(sh.buckets, k)
-				break
+			var victim string
+			var oldest time.Time
+			first := true
+			for k, v := range sh.buckets {
+				if first || v.last.Before(oldest) {
+					victim, oldest, first = k, v.last, false
+				}
 			}
-			if len(sh.buckets) >= maxLiveClients/rlShards {
+			if first || now.Sub(oldest) <= rlIdleEvict {
 				sh.mu.Unlock()
 				return false
 			}
+			delete(sh.buckets, victim)
 		}
 		b = &tokenBucket{tokens: float64(burst), last: now}
 		sh.buckets[client] = b

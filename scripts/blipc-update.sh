@@ -99,20 +99,21 @@ install -m 0755 "$DL/blipc-linux-amd64" "$WORK/blipc.new"
 install -m 0755 "$DL/blipctl-linux-amd64" "$WORK/blipctl.new"
 
 # Hand the verified (unprivileged) binaries to the root install helper.
-# Pass the verified checksums so the root side can re-verify (H2). Sudo
-# without SETENV rejects VAR=val assignments, so retry bare only when sudo
-# itself complains about the environment (the helper warns and still
-# enforces path/ELF checks). Genuine install failures propagate as-is.
+# Pass the verified checksums so the root side re-verifies the SAME inode (H2).
+# The helper fails closed when the env is stripped (no downgrade to ELF-only):
+# that means the sudoers rule lacks env_keep — re-run install-blipc.sh to
+# refresh it. Never retry without the checksum.
 install_one() {
   local staged="$1" expected_sum="$2" out rc=0
   out="$(sudo -n EXPECTED_SHA256="$expected_sum" /usr/local/sbin/blipc-install "$staged" 2>&1)" || rc=$?
   printf '%s\n' "$out"
-  if [[ "$rc" -ne 0 && "$out" == *"environment"* ]]; then
-    echo "warning: sudo rejected the checksum env, retrying without it" >&2
-    sudo -n /usr/local/sbin/blipc-install "$staged"
-    return $?
+  if [[ "$rc" -ne 0 ]]; then
+    if [[ "$out" == *"environment"* || "$out" == *"EXPECTED_SHA256 not set"* ]]; then
+      echo "error: sudo stripped EXPECTED_SHA256 (sudoers missing env_keep); re-run install-blipc.sh to refresh sudoers, then retry" >&2
+    fi
+    return "$rc"
   fi
-  return "$rc"
+  return 0
 }
 
 # blipctl first: installing blipc restarts the service, which can kill this

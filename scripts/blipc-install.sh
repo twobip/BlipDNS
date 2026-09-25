@@ -41,15 +41,38 @@ esac
 # O_NOFOLLOW-style check: staged file must live directly in the update dir
 # (dirname equality + symlink rejection above defeats dir/file swap tricks).
 [[ "$(dirname "$STAGED")" == "$UPDATE_DIR" ]] || { echo "staged file must be inside $UPDATE_DIR" >&2; exit 1; }
-[[ "$(head -c 4 "$STAGED" 2>/dev/null)" == $'\x7fELF' ]] || { echo "staged file is not an ELF binary" >&2; exit 1; }
-# Optional SHA256 re-verify: when the unprivileged updater exports the
-# checksum it verified, re-check it here before installing as root.
-if [[ -n "${EXPECTED_SHA256:-}" ]]; then
-  actual_sum="$(sha256sum "$STAGED" | awk '{print $1}')"
-  [[ "$actual_sum" == "$EXPECTED_SHA256" ]] || { echo "staged SHA256 mismatch — refusing to install" >&2; exit 1; }
-else
-  echo "warning: EXPECTED_SHA256 not set, skipping root-side re-verify" >&2
+# H2: REQUIRE the verified checksum — never downgrade to ELF-only.
+# The unprivileged updater passes its verified SHA256 via sudo env_keep
+# (EXPECTED_SHA256) or via a hash file (EXPECTED_SHA256_FILE). Without
+# signatures the checksum itself is only as trusted as the updater (F-U1
+# checksum-only), but re-verifying here still binds the installed bytes to
+# what was verified. If sudo stripped the env (old sudoers without env_keep),
+# abort instead of installing unverified — re-run install-blipc.sh to refresh
+# the sudoers rule.
+if [[ -n "${EXPECTED_SHA256_FILE:-}" ]]; then
+  [[ -f "$EXPECTED_SHA256_FILE" && ! -L "$EXPECTED_SHA256_FILE" ]] || { echo "hash file missing or not a regular file" >&2; exit 1; }
+  if [[ "$(stat -c %u "$EXPECTED_SHA256_FILE" 2>/dev/null || echo 99)" != "0" ]]; then
+    echo "hash file not owned by root — refusing to install" >&2; exit 1
+  fi
+  if [[ "$(stat -c %a "$EXPECTED_SHA256_FILE" 2>/dev/null || echo 777)" -gt 644 ]]; then
+    echo "hash file too permissive — refusing to install" >&2; exit 1
+  fi
+  EXPECTED_SHA256="$(tr -d '[:space:]' < "$EXPECTED_SHA256_FILE")"
 fi
+[[ -n "${EXPECTED_SHA256:-}" ]] || { echo "error: EXPECTED_SHA256 not set (sudo stripped env? re-run install-blipc.sh to refresh sudoers with env_keep) — refusing to install" >&2; exit 1; }
+[[ "$EXPECTED_SHA256" =~ ^[0-9a-fA-F]{64}$ ]] || { echo "error: malformed EXPECTED_SHA256 — refusing to install" >&2; exit 1; }
+# H2 TOCTOU: the stage dir is service-writable, so pin the staged inode once
+# and verify+install the SAME inode via fd (no re-read of the path). Any
+# swap of $STAGED after this open does not affect /proc/self/fd/3.
+exec 3<"$STAGED" || { echo "cannot open staged file" >&2; exit 1; }
+if [[ -e /proc/self/fd/3 ]]; then
+  FD_SRC="/proc/self/fd/3"
+else
+  FD_SRC="/dev/fd/3"
+fi
+[[ "$(head -c 4 "$FD_SRC" 2>/dev/null)" == $'\x7fELF' ]] || { echo "staged file is not an ELF binary" >&2; exit 1; }
+actual_sum="$(sha256sum "$FD_SRC" | awk '{print $1}')"
+[[ "$actual_sum" == "$EXPECTED_SHA256" ]] || { echo "staged SHA256 mismatch — refusing to install" >&2; exit 1; }
 # Serialize installs. Use flock when available; fall back to a mkdir lock.
 # Symlink-reject first: never open a pre-existing attacker symlink as root.
 USE_MKDIR_LOCK=0
@@ -70,12 +93,16 @@ echo "phase: installing $NAME"
 tmp="$(mktemp /usr/local/bin/.blip.XXXXXX)"
 cleanup() {
   rm -f "$tmp"
+  exec 3<&- 2>/dev/null || true
   if [[ "${USE_MKDIR_LOCK:-0}" -eq 1 ]]; then
     rmdir "${LOCK_FILE}.d" 2>/dev/null || true
   fi
 }
 trap cleanup EXIT
-install -o root -g root -m 0755 "$STAGED" "$tmp"
+# Same-inode install: copy from the pinned fd, not the service-writable path.
+cat "$FD_SRC" > "$tmp" || { echo "staged read failed" >&2; exit 1; }
+chmod 0755 "$tmp"
+chown root:root "$tmp"
 if [[ -x "$BIN" ]]; then
   cp -p "$BIN" "$PREVIOUS"
 fi

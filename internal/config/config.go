@@ -95,6 +95,7 @@ func Load(path string) (*Config, error) {
 // world-readable, since it may hold tokens or credentials.
 func WarnConfigPerms(prog, path string) {
 	if path == "" {
+		WarnEnvCredentials(prog)
 		return
 	}
 	fi, err := os.Stat(path)
@@ -102,10 +103,29 @@ func WarnConfigPerms(prog, path string) {
 		if !os.IsNotExist(err) {
 			log.Printf("%s: cannot stat config %s: %v", prog, path, err)
 		}
+		WarnEnvCredentials(prog)
 		return
 	}
 	if m := fi.Mode().Perm(); m&0o077 != 0 {
 		log.Printf("%s: WARNING: config file %s is group/world-accessible (mode %04o); it may contain credentials. Use `chmod 600 %s`.", prog, path, m, path)
+	}
+	WarnEnvCredentials(prog)
+}
+
+// WarnEnvCredentials warns when dashboard credentials travel via the
+// environment (BLIPC_USER/BLIPC_PASS/BLIPC_PASS_HASH): they are visible in
+// /proc/<pid>/environ, process audit logs and (when exported in a shell)
+// shell history. Prefer the config file with mode 0600. Mirrors the
+// blipctl --token/BLIP_TOKEN ps warning.
+func WarnEnvCredentials(prog string) {
+	for _, kv := range []struct{ key, hint string }{
+		{"BLIPC_USER", "username"},
+		{"BLIPC_PASS", "password"},
+		{"BLIPC_PASS_HASH", "password hash"},
+	} {
+		if os.Getenv(kv.key) != "" {
+			log.Printf("%s: WARNING: %s is set in the environment (%s visible via /proc/<pid>/environ and process audit); prefer the config file with mode 0600.", prog, kv.key, kv.hint)
+		}
 	}
 }
 

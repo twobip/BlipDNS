@@ -18,6 +18,7 @@ import (
 	"github.com/twobip/BlipDNS/internal/blocklist"
 	"github.com/twobip/BlipDNS/internal/certgen"
 	"github.com/twobip/BlipDNS/internal/config"
+	"github.com/twobip/BlipDNS/internal/control"
 	"github.com/twobip/BlipDNS/internal/dnsserver"
 	"github.com/twobip/BlipDNS/internal/filter"
 	"github.com/twobip/BlipDNS/internal/ha"
@@ -47,6 +48,17 @@ func blocklistSources(cfg *config.Config) []string {
 
 func main() {
 	cfgPath := flag.String("config", "", "path to YAML config")
+	// H1: management-API TLS. The config struct has no admin_tls fields, so
+	// flags are the surface: when both are set the management API serves
+	// HTTPS (bearer tokens protected); otherwise plain HTTP with the existing
+	// WarnPlainHTTP notice for non-loopback binds. The controller dials
+	// https:// instance URLs with the system roots (control.NewClient): a
+	// self-signed management cert must be installed into the system trust or
+	// the controller poll fails — for isolated/LAN use prefer plain HTTP on
+	// a trusted network or the local Unix socket. control.NewClientWithTLS /
+	// SetTLSConfig remain available for custom roots.
+	adminTLSCert := flag.String("admin-tls-cert", "", "path to TLS certificate for the management API (enables HTTPS with -admin-tls-key)")
+	adminTLSKey := flag.String("admin-tls-key", "", "path to TLS key for the management API")
 	flag.Parse()
 
 	cfg, err := config.Load(*cfgPath)
@@ -54,7 +66,21 @@ func main() {
 		log.Fatalf("blipd: %v", err)
 	}
 	config.WarnConfigPerms("blipd", *cfgPath)
-	config.WarnPlainHTTP("blipd", "management API", cfg.AdminAddr, "bearer tokens")
+	adminTLS := *adminTLSCert != "" || *adminTLSKey != ""
+	if *adminTLSCert != "" != (*adminTLSKey != "") {
+		log.Fatalf("blipd: -admin-tls-cert and -admin-tls-key must be set together")
+	}
+	if adminTLS {
+		if _, err := os.Stat(*adminTLSCert); err != nil {
+			log.Fatalf("blipd: admin-tls-cert: %v", err)
+		}
+		if _, err := os.Stat(*adminTLSKey); err != nil {
+			log.Fatalf("blipd: admin-tls-key: %v", err)
+		}
+		log.Printf("blipd: management API TLS enabled (https)")
+	} else {
+		config.WarnPlainHTTP("blipd", "management API", cfg.AdminAddr, "bearer tokens")
+	}
 
 	store := filter.NewStore(cfg.Default)
 	for _, p := range cfg.Policies {
@@ -210,13 +236,28 @@ func main() {
 	if cfg.AdminToken != "" || cfg.StateFile != "" {
 		srv.SetMgmtToken(cfg.AdminToken)
 		srv.ControlServer().ConfigureAdoption(cfg.StateFile, cfg.InstanceID)
+		// M9: expose the one-time claim code box-locally via the 0600 file.
+		// Stdout printing is TTY-only: under systemd stdout is the journal
+		// (StandardOutput=journal), so printing the secret there would defeat
+		// the "not in journal" guarantee. The control server never logs the
+		// code value; operators read the file box-locally.
+		if code := srv.ControlServer().CurrentClaimCode(); code != "" {
+			if err := srv.ControlServer().WriteAdoptCodeFile(control.DefaultAdoptCodeFile); err != nil {
+				log.Printf("blipd: adopt-code file: %v", err)
+			} else {
+				log.Printf("blipd: adoption code generated (written to %s 0600)", control.DefaultAdoptCodeFile)
+			}
+			if isTerminal() {
+				fmt.Printf("blipd: ADOPTION CODE (one-time, keep private): %s\n", code)
+			}
+		}
 		if cfg.BlocklistCacheFile != "" {
 			srv.ControlServer().SetBlocklistCache(cfg.BlocklistCacheFile)
 		}
 		go func() {
 			admin := &http.Server{
 				Addr:    cfg.AdminAddr,
-				Handler: srv.ControlServer().Handler(),
+				Handler: adoptAudit(srv.ControlServer(), srv.ControlServer().Handler()),
 				// The controller ships the blocklist over this API as a single
 				// multi-tens-of-MB JSON body (it caps at 2 GiB server-side).
 				// A 30s Read/WriteTimeout cuts such an upload off on any link
@@ -231,7 +272,14 @@ func main() {
 				IdleTimeout:       60 * time.Second,
 				MaxHeaderBytes:    1 << 20,
 			}
-			log.Printf("blipd: management API on %s", cfg.AdminAddr)
+			if adminTLS {
+				log.Printf("blipd: management API on https://%s (TLS)", cfg.AdminAddr)
+				if err := admin.ListenAndServeTLS(*adminTLSCert, *adminTLSKey); err != nil && err != http.ErrServerClosed {
+					log.Printf("blipd: admin server: %v", err)
+				}
+				return
+			}
+			log.Printf("blipd: management API on http://%s", cfg.AdminAddr)
 			if err := admin.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 				log.Printf("blipd: admin server: %v", err)
 			}
@@ -242,26 +290,35 @@ func main() {
 	// (Pi-hole model). The socket file's permissions (0600, blipd user) are
 	// the auth boundary, so no bearer token is required. Best-effort: a
 	// failure here never stops DNS or the TCP management API.
+	// M10: LocalHandler must ONLY serve this Unix socket — never TCP. The
+	// MustBeUnixListener guard aborts instead of exposing unauthenticated
+	// admin to the network if the listener ever stops being a unix socket.
 	if cfg.AdminSocket != "" {
 		if ln, err := listenLocalSocket(cfg.AdminSocket); err != nil {
 			log.Printf("blipd: local admin socket: %v (continuing without it)", err)
 		} else {
-			defer ln.Close()
-			defer os.Remove(cfg.AdminSocket)
-			go func() {
-				local := &http.Server{
-					Handler:           srv.ControlServer().LocalHandler(),
-					ReadHeaderTimeout: 10 * time.Second,
-					ReadTimeout:       10 * time.Minute,
-					WriteTimeout:      10 * time.Minute,
-					IdleTimeout:       60 * time.Second,
-					MaxHeaderBytes:    1 << 20,
-				}
-				log.Printf("blipd: local admin socket on %s (no token required; file permissions apply)", cfg.AdminSocket)
-				if err := local.Serve(ln); err != nil && err != http.ErrServerClosed {
-					log.Printf("blipd: local admin socket: %v", err)
-				}
-			}()
+			if err := control.MustBeUnixListener(ln); err != nil {
+				log.Printf("blipd: local admin socket: %v (continuing without it)", err)
+				_ = ln.Close()
+				_ = os.Remove(cfg.AdminSocket)
+			} else {
+				defer ln.Close()
+				defer os.Remove(cfg.AdminSocket)
+				go func() {
+					local := &http.Server{
+						Handler:           srv.ControlServer().LocalHandler(),
+						ReadHeaderTimeout: 10 * time.Second,
+						ReadTimeout:       10 * time.Minute,
+						WriteTimeout:      10 * time.Minute,
+						IdleTimeout:       60 * time.Second,
+						MaxHeaderBytes:    1 << 20,
+					}
+					log.Printf("blipd: local admin socket on %s (no token required; file permissions apply)", cfg.AdminSocket)
+					if err := local.Serve(ln); err != nil && err != http.ErrServerClosed {
+						log.Printf("blipd: local admin socket: %v", err)
+					}
+				}()
+			}
 		}
 	}
 
@@ -287,11 +344,81 @@ func main() {
 	srv.Shutdown()
 }
 
+// statusRecorder captures the response status for audit logging.
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (r *statusRecorder) WriteHeader(code int) {
+	r.status = code
+	r.ResponseWriter.WriteHeader(code)
+}
+
+// adoptAudit wraps the management handler with claim-code audit logging (M9).
+// Every POST to /api/v1/adopt or /api/v1/adopt/reset is logged with the peer
+// and outcome (adopted / rejected / rate-limited / reset) — never the code
+// value. It also keeps the 0600 adopt-code file in sync: removed on successful
+// adoption, rewritten after a reset that mints a fresh code (idempotent with
+// handleAdoptReset's own rewrite, which covers the Unix-socket path that
+// never passes through here).
+func adoptAudit(cs *control.Server, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" || (r.URL.Path != "/api/v1/adopt" && r.URL.Path != "/api/v1/adopt/reset") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		wasAdopted := cs.IsAdopted()
+		rec := &statusRecorder{ResponseWriter: w, status: 200}
+		next.ServeHTTP(rec, r)
+		peer := r.RemoteAddr
+		switch r.URL.Path {
+		case "/api/v1/adopt":
+			switch {
+			case rec.status == http.StatusTooManyRequests:
+				log.Printf("blipd: adopt rejected (rate-limited) from %s status=%d", peer, rec.status)
+			case !wasAdopted && cs.IsAdopted():
+				control.ClearAdoptCodeFile(control.DefaultAdoptCodeFile)
+				log.Printf("blipd: adopt succeeded from %s (claim code consumed, file removed)", peer)
+			case wasAdopted:
+				log.Printf("blipd: adopt probe from %s (already adopted) status=%d", peer, rec.status)
+			default:
+				log.Printf("blipd: adopt rejected (invalid code) from %s status=%d", peer, rec.status)
+			}
+		case "/api/v1/adopt/reset":
+			if rec.status < 400 {
+				if code := cs.CurrentClaimCode(); code != "" {
+					if err := cs.WriteAdoptCodeFile(control.DefaultAdoptCodeFile); err != nil {
+						log.Printf("blipd: adopt reset from %s: cannot rewrite code file: %v", peer, err)
+					} else {
+						log.Printf("blipd: adopt reset from %s: new code generated (file %s 0600)", peer, control.DefaultAdoptCodeFile)
+					}
+				} else {
+					log.Printf("blipd: adopt reset from %s status=%d", peer, rec.status)
+				}
+			} else {
+				log.Printf("blipd: adopt reset rejected from %s status=%d", peer, rec.status)
+			}
+		}
+	})
+}
+
 func dohScheme(cfg *config.Config) string {
 	if cfg.DoHTLS {
 		return "https"
 	}
 	return "http"
+}
+
+// isTerminal reports whether stdout is an interactive terminal. Under systemd
+// (StandardOutput=journal) stdout is a socket/pipe to the journal, so secrets
+// must never be printed there — the 0600 adopt-code file is the retrieval path.
+func isTerminal() bool {
+	fi, err := os.Stdout.Stat()
+	if err != nil {
+		return false
+	}
+	return fi.Mode()&os.ModeCharDevice != 0
 }
 
 // listenLocalSocket binds the local admin Unix socket. A stale socket file

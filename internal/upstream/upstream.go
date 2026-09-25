@@ -6,6 +6,7 @@ package upstream
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -58,7 +59,7 @@ func NewUDP(addr string, timeout time.Duration) *UDPResolver {
 	}
 }
 
-func (r *UDPResolver) getConn(ctx context.Context) (*dns.Conn, error) {
+func (r *UDPResolver) getConnWithIPs(ctx context.Context, port string, ips []net.IP) (*dns.Conn, error) {
 	r.mu.Lock()
 	n := len(r.conns)
 	if n > 0 {
@@ -69,9 +70,7 @@ func (r *UDPResolver) getConn(ctx context.Context) (*dns.Conn, error) {
 	}
 	r.mu.Unlock()
 	// Dial outside the lock so concurrent queries dial in parallel.
-	d := &net.Dialer{Timeout: r.timeout}
-	// Prefer ctx deadline when tighter than the per-server timeout.
-	conn, err := d.DialContext(ctx, "udp", r.addr)
+	conn, err := dialPinnedUDPWithIPs(ctx, port, ips, r.timeout)
 	if err != nil {
 		return nil, err
 	}
@@ -104,13 +103,18 @@ func (r *UDPResolver) CloseIdleConnections() {
 }
 
 func (r *UDPResolver) Resolve(ctx context.Context, q *dns.Msg) (*dns.Msg, error) {
-	if err := guardUpstreamAddr(ctx, r.addr); err != nil {
+	// Single resolution per query (replaces guardUpstreamAddr + dial-time
+	// re-resolve): pinnedIPs fails closed on lookup error and enforces the
+	// blocked-IP checks, so no separate guard pass is needed. The same IPs
+	// back the UDP dial and the TCP truncation fallback.
+	_, port, ips, err := pinnedIPs(ctx, r.addr)
+	if err != nil {
 		return nil, errUpstream(r.addr, err)
 	}
 	// Bound by ctx when the caller set one (pool budget), else the per-server
 	// timeout. ExchangeWithConnContext honors the deadline; the old Exchange
 	// used Background and ignored ctx entirely.
-	c, err := r.getConn(ctx)
+	c, err := r.getConnWithIPs(ctx, port, ips)
 	if err != nil {
 		return nil, errUpstream(r.addr, err)
 	}
@@ -119,15 +123,22 @@ func (r *UDPResolver) Resolve(ctx context.Context, q *dns.Msg) (*dns.Msg, error)
 		_ = c.Close()
 		return nil, errUpstream(r.addr, err)
 	}
+	if err := verifyClassicResponse(q, resp); err != nil {
+		_ = c.Close()
+		return nil, errUpstream(r.addr, err)
+	}
 	if !resp.Truncated {
 		r.putConn(c)
 		return resp, nil
 	}
-	// Truncated: return the UDP conn and fall back to TCP (rare path keeps a
-	// per-query dial to avoid a second pool).
+	// Truncated: return the UDP conn and fall back to TCP over the same
+	// pinned IPs (no second resolution).
 	r.putConn(c)
-	resp2, _, err := r.tcp.ExchangeContext(ctx, q, r.addr)
+	resp2, err := exchangePinnedTCPWithIPs(ctx, &r.tcp, q, port, ips)
 	if err != nil {
+		return nil, errUpstream(r.addr, err)
+	}
+	if err := verifyClassicResponse(q, resp2); err != nil {
 		return nil, errUpstream(r.addr, err)
 	}
 	return resp2, nil
@@ -169,9 +180,10 @@ func (r *TLSResolver) getConn(ctx context.Context) (*dns.Conn, error) {
 		return c, nil
 	}
 	r.mu.Unlock()
-	// DialContext honors ctx (pool budget) and falls back to Client.Timeout
-	// when ctx has no deadline; old Dial ignored ctx entirely.
-	c, err := r.tls.DialContext(ctx, r.addr)
+	// Pinned-IP dial with SNI preserved for hostname endpoints (no TOCTOU
+	// between guard and dial). DialContext honors ctx (pool budget) and falls
+	// back to Client.Timeout when ctx has no deadline; old Dial ignored ctx.
+	c, err := dialPinnedTLS(ctx, r.addr, r.tls.Timeout, r.tls.TLSConfig, r.tls.Dialer)
 	if err != nil {
 		return nil, err
 	}
@@ -210,9 +222,9 @@ func (r *TLSResolver) CloseIdleConnections() {
 }
 
 func (r *TLSResolver) Resolve(ctx context.Context, q *dns.Msg) (*dns.Msg, error) {
-	if err := guardUpstreamAddr(ctx, r.addr); err != nil {
-		return nil, errUpstream(r.addr, err)
-	}
+	// No separate guardUpstreamAddr pass: dialPinnedTLS resolves via pinnedIPs
+	// (fail-closed + blocked-IP checks), so a guard would only double the
+	// system-resolver cost — including on pooled-conn hits that dial nothing.
 	// A server-closed idle connection only fails the exchange, never the
 	// dial — so drop a dead connection and redial once before giving up.
 	var err error
@@ -223,12 +235,174 @@ func (r *TLSResolver) Resolve(ctx context.Context, q *dns.Msg) (*dns.Msg, error)
 		}
 		var resp *dns.Msg
 		if resp, _, err = r.tls.ExchangeWithConnContext(ctx, q, c); err == nil {
+			if verr := verifyClassicResponse(q, resp); verr != nil {
+				_ = c.Close()
+				return nil, errUpstream(r.addr, verr)
+			}
 			r.putConn(c)
 			return resp, nil
 		}
 		_ = c.Close()
 	}
 	return nil, errUpstream(r.addr, err)
+}
+
+// verifyClassicResponse checks that a classic-DNS (UDP/TCP/DoT) response
+// answers q: matching ID, QR set, and a first-question echo (owner + type)
+// identical to the query. Mirrors verifyDoHResponse; mismatches fail closed
+// (cache poison / pooled-connection mixup) instead of being served.
+func verifyClassicResponse(q, resp *dns.Msg) error {
+	if q == nil || resp == nil {
+		return fmt.Errorf("upstream: nil query or response")
+	}
+	if resp.Id != q.Id {
+		return fmt.Errorf("upstream: response ID mismatch (got %d, want %d)", resp.Id, q.Id)
+	}
+	if !resp.Response {
+		return fmt.Errorf("upstream: response missing QR bit")
+	}
+	if len(q.Question) == 0 || len(resp.Question) == 0 {
+		return fmt.Errorf("upstream: response question missing")
+	}
+	qname := strings.ToLower(q.Question[0].Name)
+	rname := strings.ToLower(resp.Question[0].Name)
+	if qname != rname || q.Question[0].Qtype != resp.Question[0].Qtype {
+		return fmt.Errorf("upstream: question echo mismatch (got %s %d, want %s %d)", resp.Question[0].Name, resp.Question[0].Qtype, q.Question[0].Name, q.Question[0].Qtype)
+	}
+	return nil
+}
+
+// pinnedIPs resolves addr (host:port) to dialable IPs with per-IP blocked
+// checks. Literal IPs are checked directly; hostnames are resolved via the
+// system resolver and filtered to non-blocked addresses. Lookup failures fail
+// closed (return error) so a transient resolver hiccup cannot become a
+// fail-open dial of an unchecked address.
+func pinnedIPs(ctx context.Context, addr string) (host, port string, ips []net.IP, err error) {
+	host, port, err = net.SplitHostPort(addr)
+	if err != nil {
+		return "", "", nil, err
+	}
+	trimmed := strings.Trim(host, "[]")
+	if ip := net.ParseIP(trimmed); ip != nil {
+		if blockedUpstreamIP(ip) {
+			return "", "", nil, fmt.Errorf("refusing link-local/metadata upstream address %s", host)
+		}
+		warnLocalUpstream(ip)
+		return host, port, []net.IP{ip}, nil
+	}
+	resolved, lerr := net.DefaultResolver.LookupIP(ctx, "ip", host)
+	if lerr != nil {
+		return "", "", nil, lerr
+	}
+	for _, ip := range resolved {
+		if blockedUpstreamIP(ip) {
+			continue
+		}
+		warnLocalUpstream(ip)
+		ips = append(ips, ip)
+	}
+	if len(ips) == 0 {
+		return "", "", nil, fmt.Errorf("refusing link-local/metadata upstream address %s (resolved to %v)", host, resolved)
+	}
+	return host, port, ips, nil
+}
+
+// dialPinnedUDP dials a UDP upstream by pinned IP (resolve, per-IP blocked
+// check, dial that IP) to eliminate the guard-to-dial TOCTOU.
+func dialPinnedUDP(ctx context.Context, addr string, timeout time.Duration) (net.Conn, error) {
+	_, port, ips, err := pinnedIPs(ctx, addr)
+	if err != nil {
+		return nil, err
+	}
+	return dialPinnedUDPWithIPs(ctx, port, ips, timeout)
+}
+
+// dialPinnedUDPWithIPs dials UDP against an already-resolved IP set (single
+// resolution per query — the caller resolved once via pinnedIPs).
+func dialPinnedUDPWithIPs(ctx context.Context, port string, ips []net.IP, timeout time.Duration) (net.Conn, error) {
+	d := &net.Dialer{Timeout: timeout}
+	var lastErr error
+	for _, ip := range ips {
+		c, derr := d.DialContext(ctx, "udp", net.JoinHostPort(ip.String(), port))
+		if derr == nil {
+			return c, nil
+		}
+		lastErr = derr
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("no dialable addresses on port %s", port)
+	}
+	return nil, lastErr
+}
+
+// dialPinnedTLS dials a DoT upstream by pinned IP while preserving SNI for
+// hostname endpoints. The TLS handshake verifies against the original hostname,
+// not the dialed IP.
+func dialPinnedTLS(ctx context.Context, addr string, timeout time.Duration, baseCfg *tls.Config, baseDialer *net.Dialer) (*dns.Conn, error) {
+	host, port, ips, err := pinnedIPs(ctx, addr)
+	if err != nil {
+		return nil, err
+	}
+	hostTrimmed := strings.Trim(host, "[]")
+	isIPLiteral := net.ParseIP(hostTrimmed) != nil
+	var lastErr error
+	for _, ip := range ips {
+		// Clone the base TLS config so per-dial ServerName does not race.
+		var cfg *tls.Config
+		if baseCfg != nil {
+			cfg = baseCfg.Clone()
+		}
+		if !isIPLiteral {
+			if cfg == nil {
+				cfg = &tls.Config{}
+			}
+			if cfg.ServerName == "" {
+				cfg.ServerName = hostTrimmed
+			}
+		}
+		dialer := baseDialer
+		if dialer == nil {
+			dialer = &net.Dialer{Timeout: timeout}
+		}
+		td := tls.Dialer{NetDialer: dialer, Config: cfg}
+		conn, derr := td.DialContext(ctx, "tcp", net.JoinHostPort(ip.String(), port))
+		if derr == nil {
+			return &dns.Conn{Conn: conn}, nil
+		}
+		lastErr = derr
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("no dialable addresses for %q", addr)
+	}
+	return nil, lastErr
+}
+
+// exchangePinnedTCP performs a classic-DNS TCP exchange against a pinned IP
+// (for UDP truncation fallback) instead of re-resolving the hostname.
+func exchangePinnedTCP(ctx context.Context, client *dns.Client, q *dns.Msg, addr string) (*dns.Msg, error) {
+	_, port, ips, err := pinnedIPs(ctx, addr)
+	if err != nil {
+		return nil, err
+	}
+	return exchangePinnedTCPWithIPs(ctx, client, q, port, ips)
+}
+
+// exchangePinnedTCPWithIPs runs the TCP fallback against an already-resolved
+// IP set so the truncation path costs no second resolution.
+func exchangePinnedTCPWithIPs(ctx context.Context, client *dns.Client, q *dns.Msg, port string, ips []net.IP) (*dns.Msg, error) {
+	var lastErr error
+	for _, ip := range ips {
+		target := net.JoinHostPort(ip.String(), port)
+		resp, _, derr := client.ExchangeContext(ctx, q, target)
+		if derr == nil {
+			return resp, nil
+		}
+		lastErr = derr
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("no dialable addresses on port %s", port)
+	}
+	return nil, lastErr
 }
 
 // upErr labels an upstream failure with its endpoint and gives it a stable
@@ -471,50 +645,6 @@ func validatingDialContext(timeout time.Duration) func(ctx context.Context, netw
 		}
 		return nil, lastErr
 	}
-}
-
-// guardUpstreamAddr validates a host:port upstream before a classic-DNS
-// (UDP/TCP/DoT) exchange. Literal blocked IPs are rejected immediately;
-// hostnames are resolved via the system resolver and at least one dialable
-// (non-blocked) address must exist. Loopback/private targets are allowed but
-// logged. This covers dns.Client paths that cannot take a custom DialContext
-// (Client.Dialer is a concrete *net.Dialer) — the check runs before Exchange
-// so the guard still applies on every query (TOCTOU aside).
-func guardUpstreamAddr(ctx context.Context, addr string) error {
-	host, _, err := net.SplitHostPort(addr)
-	if err != nil {
-		// Let the dial report malformed addresses; only guard what we parse.
-		return nil
-	}
-	if ip := net.ParseIP(strings.Trim(host, "[]")); ip != nil {
-		if blockedUpstreamIP(ip) {
-			return fmt.Errorf("refusing link-local/metadata upstream address %s", host)
-		}
-		warnLocalUpstream(ip)
-		return nil
-	}
-	ips, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
-	if err != nil {
-		// Unresolvable here: let the exchange surface the DNS error rather
-		// than failing closed on a transient resolver hiccup when the target
-		// is a normal public hostname. Blocked-IP enforcement for this path
-		// still happens per-connection via the dialer timeout path; the
-		// validating dialer is authoritative for DoH. Only fail closed when
-		// we positively resolved into blocked space.
-		return nil
-	}
-	allowed := false
-	for _, ip := range ips {
-		if blockedUpstreamIP(ip) {
-			continue
-		}
-		allowed = true
-		warnLocalUpstream(ip)
-	}
-	if !allowed && len(ips) > 0 {
-		return fmt.Errorf("refusing link-local/metadata upstream address %s (resolved to %v)", host, ips)
-	}
-	return nil
 }
 
 // bootstrapCache caches bootstrap host->IPs with TTL to avoid paying 2

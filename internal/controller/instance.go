@@ -11,6 +11,16 @@ import (
 	"github.com/twobip/BlipDNS/internal/control"
 )
 
+// errText returns a log-safe rendering of err: "<nil>" when nil, else the
+// error text (callers quote it with %q so embedded newlines cannot forge log
+// lines).
+func errText(err error) string {
+	if err == nil {
+		return "<nil>"
+	}
+	return err.Error()
+}
+
 // InstanceStatus is a point-in-time view of an instance.
 type InstanceStatus struct {
 	ID              string                  `json:"id"`
@@ -287,13 +297,13 @@ func (i *Instance) poll(ctx context.Context) {
 	latencyMs := float64(time.Since(start).Milliseconds())
 
 	if herr != nil && ctx.Err() == nil {
-		log.Printf("blipc: poll instance=%s health error: %v", cfg.ID, herr)
+		log.Printf("blipc: poll instance=%q health error: %q", cfg.ID, herr)
 	}
 	if serr != nil && ctx.Err() == nil {
-		log.Printf("blipc: poll instance=%s stats error: %v", cfg.ID, serr)
+		log.Printf("blipc: poll instance=%q stats error: %q", cfg.ID, serr)
 	}
 	if d := time.Since(start); d > time.Second && ctx.Err() == nil {
-		log.Printf("blipc: poll instance=%s slow: %s (health=%v stats=%v)", cfg.ID, d.Round(time.Millisecond), herr, serr)
+		log.Printf("blipc: poll instance=%q slow: %s (health=%q stats=%q)", cfg.ID, d.Round(time.Millisecond), errText(herr), errText(serr))
 	}
 
 	i.mu.Lock()
@@ -429,7 +439,7 @@ func (i *Instance) watch(ctx context.Context) {
 		// or not — waits at least a second.
 		if time.Since(lastLog) > 15*time.Second || reconnects%50 == 0 {
 			wcfg := i.snapshotConfig()
-			log.Printf("blipc: watch reconnect instance=%s count=%d err=%v", wcfg.ID, reconnects, err)
+			log.Printf("blipc: watch reconnect instance=%q count=%d err=%q", wcfg.ID, reconnects, errText(err))
 			lastLog = time.Now()
 		}
 		reconnects++

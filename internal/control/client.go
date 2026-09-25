@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -43,7 +44,8 @@ func newTransport(disableCompression bool) *http.Transport {
 }
 
 // NewClient creates a controller client for baseURL (e.g.
-// http://host:8444) guarded by token.
+// http://host:8444) guarded by token. An https:// baseURL uses TLS with the
+// system roots; use NewClientWithTLS/SetTLSConfig for self-signed certs.
 func NewClient(baseURL, token string) *Client {
 	return &Client{
 		base:  baseURL,
@@ -58,6 +60,38 @@ func NewClient(baseURL, token string) *Client {
 		watch: &http.Client{
 			Transport: newTransport(false),
 		},
+	}
+}
+
+// NewClientWithTLS is NewClient with a custom TLS config for https:// base
+// URLs — e.g. a RootCAs pool trusting blipd's self-signed management cert,
+// or InsecureSkipVerify for lab networks. A nil config means the system
+// roots. Plain http:// use is unaffected.
+func NewClientWithTLS(baseURL, token string, tlsConf *tls.Config) *Client {
+	c := NewClient(baseURL, token)
+	c.SetTLSConfig(tlsConf)
+	return c
+}
+
+// SetTLSConfig installs cfg as the TLS config on every transport (nil restores
+// the default: system roots). Existing http:// loopback use is unaffected.
+// Each transport gets its own clone so a later mutation of one
+// TLSClientConfig never aliases the others.
+func (c *Client) SetTLSConfig(cfg *tls.Config) {
+	if c == nil {
+		return
+	}
+	for _, hc := range []*http.Client{c.http, c.slow, c.watch} {
+		if hc == nil {
+			continue
+		}
+		if tr, ok := hc.Transport.(*http.Transport); ok {
+			if cfg == nil {
+				tr.TLSClientConfig = nil
+			} else {
+				tr.TLSClientConfig = cfg.Clone()
+			}
+		}
 	}
 }
 
@@ -194,7 +228,7 @@ func (c *Client) SetBlocklist(ctx context.Context, domains, allowed []string) er
 }
 
 func (c *Client) DeletePolicy(ctx context.Context, id string) error {
-	return c.do(ctx, http.MethodDelete, "/api/v1/policy?id="+id, nil, nil)
+	return c.do(ctx, http.MethodDelete, "/api/v1/policy?id="+url.QueryEscape(id), nil, nil)
 }
 
 // SetDoHHTTPAddr toggles the instance's optional plain-HTTP DoH listener. An

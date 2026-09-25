@@ -7,6 +7,7 @@ package filter
 
 import (
 	"errors"
+	"log"
 	"net"
 	"sort"
 	"strings"
@@ -59,16 +60,33 @@ func buildMatcher(domains []string) *matcher {
 			continue
 		}
 		if strings.HasPrefix(d, "*.") {
-			root := d[2:]
-			if root != "" {
-				if m.subOnly == nil {
-					m.subOnly = make(map[string]struct{}, len(domains))
-				}
-				m.subOnly[root] = struct{}{}
+			root := strings.TrimSuffix(d[2:], ".")
+			// A leading-dot remainder (e.g. "*..example.com") is a typo, not
+			// a subdomain: reject it rather than liberalising a malformed
+			// allow entry into a broad match.
+			if root == "" || strings.HasPrefix(root, ".") || strings.Contains(root, "..") {
+				continue
 			}
+			if m.subOnly == nil {
+				m.subOnly = make(map[string]struct{}, len(domains))
+			}
+			m.subOnly[root] = struct{}{}
 			continue
 		}
+		// Leading-dot form (".example.com") is equivalent to "example.com"
+		// (exact + subdomains), not "never match". Strip leading dots.
+		if strings.HasPrefix(d, ".") {
+			d = strings.TrimLeft(d, ".")
+			if d == "" {
+				continue
+			}
+		}
 		d = strings.TrimSuffix(d, ".")
+		if d == "" {
+			continue
+		}
+		// Strip any residual leading dot after trailing-dot removal.
+		d = strings.TrimPrefix(d, ".")
 		if d == "" {
 			continue
 		}
@@ -80,6 +98,78 @@ func buildMatcher(domains []string) *matcher {
 		m.suffix[d] = struct{}{}
 	}
 	return m
+}
+
+// broadPublicSuffixes is a minimal set of public suffixes used only to warn
+// when an allowlist entry is dangerously broad. Matching semantics are
+// unchanged; this only drives a loud log warning.
+var broadPublicSuffixes = map[string]struct{}{
+	"com": {}, "org": {}, "net": {}, "io": {}, "dev": {}, "app": {},
+	"co": {}, "ne": {}, "or": {},
+	"co.uk": {}, "org.uk": {}, "me.uk": {}, "co.jp": {}, "com.au": {},
+	"com.br": {}, "co.in": {}, "co.nz": {}, "com.cn": {},
+}
+
+// isBroadAllowEntry reports whether an allowlist entry is dangerously broad:
+// a single-label TLD (e.g. "com"), a public suffix (e.g. "co.uk"), a bare
+// "*" wildcard, or a "*.TLD" / "*.public-suffix" entry that would allow
+// millions of domains. Callers must not change matching semantics based on
+// this; it only drives a warning log.
+func isBroadAllowEntry(d string) bool {
+	s := strings.ToLower(strings.TrimSpace(d))
+	if s == "" {
+		return false
+	}
+	s = strings.TrimSuffix(s, ".")
+	if s == "*" {
+		return true
+	}
+	if strings.HasPrefix(s, "*.") {
+		root := strings.TrimSuffix(s[2:], ".")
+		root = strings.TrimPrefix(root, ".")
+		if root == "" {
+			return true
+		}
+		if !strings.Contains(root, ".") {
+			// "*.com" covers a whole TLD.
+			return true
+		}
+		if _, ok := broadPublicSuffixes[root]; ok {
+			return true
+		}
+		// Very short roots (e.g. "*.a.bc") are almost certainly public.
+		if len(root) <= 5 {
+			return true
+		}
+		return false
+	}
+	if strings.HasPrefix(s, ".") {
+		s = strings.TrimLeft(s, ".")
+		s = strings.TrimSuffix(s, ".")
+		if s == "" {
+			return true
+		}
+	}
+	if !strings.Contains(s, ".") {
+		// Single-label allow (e.g. "com") matches the TLD and all subdomains.
+		return true
+	}
+	if _, ok := broadPublicSuffixes[s]; ok {
+		return true
+	}
+	return false
+}
+
+// IsBroadAllowEntry reports whether an allowlist entry is dangerously broad.
+// Exported for tests and management tooling; matching semantics are unchanged.
+func IsBroadAllowEntry(d string) bool { return isBroadAllowEntry(d) }
+
+func warnBroadAllow(policyID string, allow []string) {
+	for _, a := range allow {
+		if isBroadAllowEntry(a) {
+			log.Printf("filter: WARNING policy %q allow entry %q is very broad (matches a TLD/public-suffix or millions of domains); refine it to avoid bypassing the blocklist", policyID, a)
+		}
+	}
 }
 
 // NormalizeName lowercases a DNS name and strips the root dot (wire format
@@ -185,6 +275,9 @@ func NewStore(def *Policy) *Store {
 
 // SetDefault replaces the default (fallback) policy.
 func (s *Store) SetDefault(p *Policy) {
+	if p != nil {
+		warnBroadAllow("default", p.Allow)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if p == nil {
@@ -212,6 +305,7 @@ func (s *Store) SetPolicy(p *Policy) error {
 	if p == nil || p.ID == "" {
 		return ErrPolicyID
 	}
+	warnBroadAllow(p.ID, p.Allow)
 	cp := compile(p)
 	nets, err := parseNetworks(p)
 	if err != nil {

@@ -9,11 +9,20 @@ import (
 
 // ProxyTrust gates which immediate peers may supply X-Forwarded-* headers.
 // Empty/nil means forwarded headers are never trusted (direct-access default).
+// A catch-all CIDR (0.0.0.0/0, ::/0) is never a valid trust entry: it would
+// honor attacker-controlled X-Forwarded-For/Proto/Host on every request
+// (client-IP spoofing, Secure-cookie downgrade, CSRF origin bypass), so
+// ParseTrustedProxies rejects it. To accept direct internet clients, leave
+// trusted_proxies empty — forwarded headers are then ignored entirely.
 type ProxyTrust struct {
 	nets []*net.IPNet
 }
 
 // ParseTrustedProxies parses CIDRs or bare IPs ("127.0.0.1", "10.0.0.0/8").
+// Catch-all CIDRs (a /0 mask: 0.0.0.0/0, ::/0) are rejected outright, because
+// trusting the whole internet as a proxy would let any client spoof the
+// forwarded headers (IP, scheme, host) the controller bases auth-adjacent
+// decisions on.
 func ParseTrustedProxies(values []string) (*ProxyTrust, error) {
 	out := &ProxyTrust{}
 	for _, v := range values {
@@ -36,6 +45,9 @@ func ParseTrustedProxies(values []string) (*ProxyTrust, error) {
 		_, n, err := net.ParseCIDR(v)
 		if err != nil {
 			return nil, fmt.Errorf("invalid trusted proxy %q: %w", v, err)
+		}
+		if ones, _ := n.Mask.Size(); ones == 0 {
+			return nil, fmt.Errorf("invalid trusted proxy %q: catch-all CIDR would trust the whole internet; leave trusted_proxies empty instead", v)
 		}
 		out.nets = append(out.nets, n)
 	}

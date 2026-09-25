@@ -46,6 +46,14 @@ type Server struct {
 	// an unthrottled LAN port-scan oracle.
 	probeMu   sync.Mutex
 	probeHits map[string][]time.Time
+	// StrictCSRF, when true, fails closed on state-changing session-authed
+	// requests that carry no Origin/Referer/Sec-Fetch-Site (indistinguishable
+	// from forged legacy-browser posts) and rejects bodies without
+	// Content-Type: application/json. Default false for backward
+	// compatibility: existing API clients and tests omit Origin, while the
+	// dashboard always sends Origin or Sec-Fetch-Site. Enable in production
+	// where all legitimate callers are browsers or JSON API clients.
+	StrictCSRF bool
 }
 
 // probeAllowed reports whether ip may probe upstreams now (10 requests per
@@ -226,26 +234,41 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 	})
 }
 
+const (
+	maxControllerRateLimitQPS = 100000
+	maxControllerCacheSize    = 1000000
+)
+
 func (s *Server) requireAuth(h http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		bearer := bearerToken(r)
 		// Session-only routes (key management) never accept bearer keys, so a
 		// key cannot mint more keys — enforced in handleAPIKeys itself.
 		if bearer != "" {
+			ip := s.clientIP(r)
+			// Brute-force guard on bearer keys: 5 bad keys from one IP
+			// => 5min 429 (mirrors blipd's management-API guard).
+			if !s.auth.allowAPIKey(ip) {
+				http.Error(w, "too many attempts", http.StatusTooManyRequests)
+				return
+			}
 			scope, ok := s.auth.apiKeyScope(bearer)
 			if !ok {
+				s.auth.recordAPIKeyFail(ip)
 				w.Header().Set("WWW-Authenticate", "Bearer realm=\"blipc\"")
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
 				return
 			}
+			s.auth.clearAPIKeyFails(ip)
 			// Read-scoped keys are limited to safe GET/HEAD reads.
 			if scope == APIKeyScopeRead && r.Method != http.MethodGet && r.Method != http.MethodHead {
 				http.Error(w, "read-only API key", http.StatusForbidden)
 				return
 			}
 			// F-12: a general read key must not become a query-history export
-			// credential. Query logs, client metadata, live event streams and
-			// upstream-error details stay admin-only even for GET.
+			// credential. Query logs, client metadata, live event streams,
+			// upstream-error details, and the query-derived aggregates
+			// (top-domains, cache-stats, stats) stay admin-only even for GET.
 			if scope == APIKeyScopeRead && readScopeDenied(r.URL.Path) {
 				http.Error(w, "read-only API key cannot access query history", http.StatusForbidden)
 				return
@@ -285,11 +308,18 @@ func (s *Server) requireAuth(h http.HandlerFunc) http.HandlerFunc {
 						http.Error(w, "content-type must be application/json", http.StatusUnsupportedMediaType)
 						return
 					}
+				} else if s.StrictCSRF {
+					// Fail closed: a body without a content type is the
+					// shape of a header-stripped cross-site fetch (simple
+					// requests need no preflight). The dashboard always
+					// sends application/json.
+					http.Error(w, "content-type must be application/json", http.StatusUnsupportedMediaType)
+					return
 				}
-				// Missing Content-Type with a body is allowed through so the
-				// handler returns its normal 400; strict 415 broke existing
-				// clients/tests. Simple cross-site form posts still send
-				// urlencoded/multipart and are rejected below.
+				// Missing Content-Type with a body is allowed through (unless
+				// StrictCSRF) so the handler returns its normal 400; strict
+				// 415 broke existing clients/tests. Simple cross-site form
+				// posts still send urlencoded/multipart and are rejected below.
 			} else if ct := r.Header.Get("Content-Type"); ct != "" {
 				mt, _, err := mime.ParseMediaType(ct)
 				if err != nil || mt != "application/json" {
@@ -335,8 +365,25 @@ func (s *Server) csrfOriginAllowed(r *http.Request) bool {
 		if !equalOrigin(u.Scheme, u.Host, expectedScheme, expectedHost) {
 			return false
 		}
+		return true
+	}
+	// Both Origin and Referer are absent. By default this passes (curl-style
+	// API clients and existing tests send neither), but under StrictCSRF a
+	// state-changing request with no Sec-Fetch-Site hint either is
+	// indistinguishable from a forged legacy-browser post, so fail closed.
+	if s.StrictCSRF && stateChangingMethod(r.Method) && strings.TrimSpace(r.Header.Get("Sec-Fetch-Site")) == "" {
+		return false
 	}
 	return true
+}
+
+// stateChangingMethod reports whether method mutates state (CSRF-relevant).
+func stateChangingMethod(method string) bool {
+	switch method {
+	case http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodPatch:
+		return true
+	}
+	return false
 }
 
 // csrfOriginAllowed is the package-level helper for tests without a Server.
@@ -385,14 +432,20 @@ func normalizeOriginHost(h, scheme string) string {
 // keys. F-12: /api/queries returns queried domains, client IPs/IDs, instance
 // labels, answers and timing — privacy-sensitive query history that must not
 // ride on a general health/dashboard read credential. The same applies to the
-// client-activity, client-name, live-event and upstream-error feeds.
+// client-activity, client-name, live-event and upstream-error feeds, and to
+// the query-derived aggregates: /api/top-domains (most-queried domains),
+// /api/cache-stats (top cached domains plus hit rates) and /api/stats
+// (bucketed query/block counts) all reveal query history in summary form.
 func readScopeDenied(path string) bool {
 	switch path {
 	case "/api/queries",
 		"/api/clients",
 		"/api/client-names",
 		"/api/events",
-		"/api/upstream-errors":
+		"/api/upstream-errors",
+		"/api/top-domains",
+		"/api/cache-stats",
+		"/api/stats":
 		return true
 	}
 	return false
@@ -572,10 +625,13 @@ func (s *Server) handleAPIKeys(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "content-type must be application/json", http.StatusUnsupportedMediaType)
 				return
 			}
+		} else if s.StrictCSRF && r.ContentLength != 0 {
+			http.Error(w, "content-type must be application/json", http.StatusUnsupportedMediaType)
+			return
 		}
-		// Missing Content-Type with a body is allowed through so the handler
-		// returns its normal 400 (mirrors requireAuth: strict 415 broke
-		// existing clients/tests).
+		// Missing Content-Type with a body is allowed through (unless
+		// StrictCSRF) so the handler returns its normal 400 (mirrors
+		// requireAuth: strict 415 broke existing clients/tests).
 	}
 	switch r.Method {
 	case http.MethodGet:
@@ -777,6 +833,7 @@ func (s *Server) handleInstance(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		log.Printf("blipc: audit: adopt/status for instance %q from %s", id, s.clientIP(r))
 		st, err := s.fleet.GetAdoptStatus(id)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
@@ -793,9 +850,11 @@ func (s *Server) handleInstance(w http.ResponseWriter, r *http.Request) {
 		}
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		if err := s.fleet.Adopt(ctx, id, req.Code); err != nil {
+			log.Printf("blipc: audit: adopt instance %q from %s failed: %v", id, s.clientIP(r), err)
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		log.Printf("blipc: audit: adopt instance %q from %s", id, s.clientIP(r))
 		writeJSON(w, map[string]string{"ok": "adopted", "id": id})
 	case "adopt/reset":
 		if r.Method != http.MethodPost {
@@ -806,6 +865,7 @@ func (s *Server) handleInstance(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
 		}
+		log.Printf("blipc: audit: adopt/reset instance %q from %s", id, s.clientIP(r))
 		writeJSON(w, map[string]string{"ok": "reset", "id": id})
 	case "label":
 		if r.Method != http.MethodPut {
@@ -1006,7 +1066,15 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 		if req.RateLimitQPS != nil {
 			qps := *req.RateLimitQPS
 			if qps < 0 {
-				qps = 0
+				http.Error(w, "rate_limit_qps must be >= 0", http.StatusBadRequest)
+				return
+			}
+			// Upper bound: an absurd QPS silently neuters the limiter
+			// (effectively off). Mirrors blipd's maxMgmtRateLimit (100k) so
+			// every value the controller accepts is pushable.
+			if qps > maxControllerRateLimitQPS {
+				http.Error(w, "rate_limit_qps too large (max 100000)", http.StatusBadRequest)
+				return
 			}
 			if req.Scope == "instance" && req.Instance != "" {
 				existing := s.fleet.InstanceOverrideOf(req.Instance)
@@ -1029,6 +1097,12 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			cacheSize := *req.CacheSize
 			if cacheSize < 0 {
 				http.Error(w, "cache size must be >= 0", http.StatusBadRequest)
+				return
+			}
+			// Upper bound: 0 already means unlimited, so a huge value can
+			// only balloon RAM (or neuter the cache via overflow).
+			if cacheSize > maxControllerCacheSize {
+				http.Error(w, "cache size too large (max 1000000)", http.StatusBadRequest)
 				return
 			}
 			if req.Scope == "instance" && req.Instance != "" {
@@ -1137,6 +1211,12 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleHighAvailability(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
+		// Audit: HA topology is infrastructure-sensitive; log who reads it.
+		authKind := "session"
+		if bearerToken(r) != "" {
+			authKind = "api-key"
+		}
+		log.Printf("blipc: audit: /api/high-availability read from %s via %s", s.clientIP(r), authKind)
 		cluster := s.fleet.HACluster()
 		// VRRP passwords are write-only: the UI keeps any value already typed
 		// locally, while API reads never disclose credentials.
@@ -1272,6 +1352,12 @@ func (s *Server) handleClients(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	// Audit: per-client activity is privacy-sensitive; log who reads it.
+	authKind := "session"
+	if bearerToken(r) != "" {
+		authKind = "api-key"
+	}
+	log.Printf("blipc: audit: /api/clients access from %s via %s instance=%q", s.clientIP(r), authKind, r.URL.Query().Get("instance"))
 	if s.fleet.queryLog == nil {
 		http.Error(w, "query log not available", http.StatusServiceUnavailable)
 		return
@@ -1376,6 +1462,12 @@ func (s *Server) handleTopDomains(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	// Audit: most-queried domains are query history; log who reads it.
+	authKind := "session"
+	if bearerToken(r) != "" {
+		authKind = "api-key"
+	}
+	log.Printf("blipc: audit: /api/top-domains access from %s via %s instance=%q action=%q", s.clientIP(r), authKind, r.URL.Query().Get("instance"), r.URL.Query().Get("action"))
 	if s.fleet.queryLog == nil {
 		http.Error(w, "query log not available", http.StatusServiceUnavailable)
 		return

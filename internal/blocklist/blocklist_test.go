@@ -221,8 +221,8 @@ func TestFromDomainsMap(t *testing.T) {
 	if !b.IsBlocked("evil.com") || !b.IsBlocked("x.wild.net") || b.IsBlocked("wild.net") {
 		t.Error("FromDomainsMap normalization failed")
 	}
-	if b.IsBlocked("bad") {
-		t.Error("single-label domain should be rejected")
+	if !b.IsBlocked("bad") {
+		t.Error("single-label domain should be blocked (localhost/lan support)")
 	}
 }
 
@@ -297,18 +297,18 @@ plain.example.org
 	if err != nil {
 		t.Fatalf("LoadFromURLs: %v", err)
 	}
-	if res.Failed != 0 || res.Domains != 5 {
-		t.Fatalf("result = %+v, want 0 failed / 5 domains", res)
+	if res.Failed != 0 || res.Domains != 6 {
+		t.Fatalf("result = %+v, want 0 failed / 6 domains", res)
 	}
 	if !progressed {
 		t.Error("progress callback was not invoked")
 	}
-	for _, d := range []string{"ads.example.com", "tracker.example.net", "plain.example.org", "banner.example.com", "hostfile.example.io"} {
+	for _, d := range []string{"ads.example.com", "tracker.example.net", "plain.example.org", "banner.example.com", "hostfile.example.io", "localhost"} {
 		if !b.IsBlocked(d) {
 			t.Errorf("expected %q blocked", d)
 		}
 	}
-	if b.IsBlocked("example.com") || b.IsBlocked("localhost") {
+	if b.IsBlocked("example.com") {
 		t.Error("unexpected entries blocked")
 	}
 }

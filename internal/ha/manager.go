@@ -2,6 +2,7 @@
 package ha
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -12,6 +13,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/twobip/BlipDNS/internal/control"
 )
@@ -45,6 +47,10 @@ type Manager struct {
 	// certRefresher, when set, re-derives the DoH certificate after the HA
 	// config changes (the VIP is a name the cert must cover). Nil-safe.
 	certRefresher func()
+	// cachedStatus caches the last HAStatus briefly so concurrent dashboard
+	// polls do not spawn a systemctl storm; guarded by mu.
+	cachedStatus control.HAStatus
+	cachedAt     time.Time
 }
 
 // NewManager creates a manager using the default persistent state path only
@@ -87,6 +93,8 @@ func (m *Manager) SetHAConfig(cfg control.HAConfig) error {
 	prevVIP := m.cfg.VirtualIP
 	m.cfg = cfg
 	m.lastError = ""
+	// Config changed: drop the cached HAStatus so the next read recomputes.
+	m.cachedAt = time.Time{}
 	refresh := m.certRefresher
 	m.mu.Unlock()
 	// The VIP is a DoH identity this node now serves, so the certificate must
@@ -123,7 +131,15 @@ func (m *Manager) VirtualIP() string {
 func (m *Manager) HAStatus() control.HAStatus {
 	m.mu.RLock()
 	cfg, path, lastErr := m.cfg, m.path, m.lastError
+	cached, cachedAt := m.cachedStatus, m.cachedAt
 	m.mu.RUnlock()
+	// Cache briefly (5s) so concurrent dashboard polls do not spawn a
+	// systemctl storm. Refresh the live Updating bit on the cached copy.
+	if !cachedAt.IsZero() && time.Since(cachedAt) < 5*time.Second {
+		cached.Updating = m.isUpdating()
+		cached.LastError = lastErr
+		return cached
+	}
 	_, statErr := os.Stat(path)
 	installed := commandAvailable("keepalived")
 	active := installed && commandSucceeds("systemctl", "is-active", "--quiet", "keepalived")
@@ -146,7 +162,7 @@ func (m *Manager) HAStatus() control.HAStatus {
 	} else if cfg.Enabled && statErr != nil {
 		msg = "keepalived configuration has not been applied"
 	}
-	return control.HAStatus{
+	st := control.HAStatus{
 		Installed:  installed,
 		Configured: statErr == nil,
 		Active:     active,
@@ -156,15 +172,23 @@ func (m *Manager) HAStatus() control.HAStatus {
 		LastError:  lastErr,
 		Updating:   m.isUpdating(),
 	}
+	m.mu.Lock()
+	m.cachedStatus = st
+	m.cachedAt = time.Now()
+	m.mu.Unlock()
+	return st
 }
 
 // isUpdating reports whether the local node's update controller has a
 // self-update in flight. Returns false if no update controller is wired.
 func (m *Manager) isUpdating() bool {
-	if m.updateController == nil {
+	m.mu.RLock()
+	c := m.updateController
+	m.mu.RUnlock()
+	if c == nil {
 		return false
 	}
-	return m.updateController.UpdateStatus().Running
+	return c.UpdateStatus().Running
 }
 
 // SetUpdateController wires the local update manager so HAStatus() can report
@@ -513,20 +537,29 @@ func (m *Manager) persistState(cfg control.HAConfig) error {
 func (m *Manager) recordError(err error) {
 	m.mu.Lock()
 	m.lastError = err.Error()
+	m.cachedAt = time.Time{}
 	m.mu.Unlock()
 }
 func (m *Manager) clearError() {
 	m.mu.Lock()
 	m.lastError = ""
+	m.cachedAt = time.Time{}
 	m.mu.Unlock()
 }
 func commandAvailable(name string) bool { _, err := exec.LookPath(name); return err == nil }
 func commandSucceeds(name string, args ...string) bool {
-	return exec.Command(name, args...).Run() == nil
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return exec.CommandContext(ctx, name, args...).Run() == nil
 }
 func runCommand(name string, args ...string) error {
-	cmd := exec.Command(name, args...)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, name, args...)
 	out, err := cmd.CombinedOutput()
+	if ctx.Err() == context.DeadlineExceeded {
+		return fmt.Errorf("%s: timeout after 10s: %w", name, ctx.Err())
+	}
 	if err != nil {
 		msg := strings.TrimSpace(string(out))
 		if msg != "" {

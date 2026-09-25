@@ -28,6 +28,12 @@ const (
 	// brute-force guard
 	maxLoginFails   = 5
 	loginLockWindow = 5 * time.Minute
+
+	// brute-force guard for bearer API keys (mirrors blipd's management-API
+	// guard: 5 bad keys from one IP => 5min 429).
+	maxAPIKeyFails       = 5
+	apiKeyLockWindow     = 5 * time.Minute
+	maxAPIKeyFailEntries = 10000
 )
 
 var (
@@ -53,6 +59,9 @@ type Auth struct {
 
 	flMu sync.Mutex
 	fl   map[string]*loginFails // client IP -> failure state
+
+	apiFlMu sync.Mutex
+	apiFl   map[string]*apiKeyFail // client IP -> bearer-key failure state
 }
 
 // Sweep removes expired sessions, expired API keys, and stale login-failure records.
@@ -77,6 +86,13 @@ func (a *Auth) Sweep() {
 		}
 	}
 	a.flMu.Unlock()
+	a.apiFlMu.Lock()
+	for ip, f := range a.apiFl {
+		if f == nil || (!f.until.IsZero() && now.After(f.until)) || (f.until.IsZero() && now.Sub(f.last) > apiKeyLockWindow) {
+			delete(a.apiFl, ip)
+		}
+	}
+	a.apiFlMu.Unlock()
 }
 
 // NewAuth builds an Auth from a username + password. The password may be either
@@ -413,6 +429,95 @@ func (a *Auth) clearFails(ip string) {
 	a.flMu.Lock()
 	delete(a.fl, ip)
 	a.flMu.Unlock()
+}
+
+// ---- bearer API-key brute-force guard (5 fails => 5min 429 per IP) ----
+
+// apiKeyFail is one client IP's bad-bearer-key state.
+type apiKeyFail struct {
+	count int
+	until time.Time
+	last  time.Time // last failure; unlocked counters expire apiKeyLockWindow after it
+}
+
+// allowAPIKey reports whether ip may attempt bearer auth now.
+func (a *Auth) allowAPIKey(ip string) bool {
+	a.apiFlMu.Lock()
+	defer a.apiFlMu.Unlock()
+	f, ok := a.apiFl[ip]
+	if !ok {
+		return true
+	}
+	now := time.Now()
+	if !f.until.IsZero() {
+		if now.Before(f.until) {
+			return false
+		}
+		delete(a.apiFl, ip)
+		return true
+	}
+	if now.Sub(f.last) > apiKeyLockWindow {
+		delete(a.apiFl, ip)
+	}
+	return true
+}
+
+// recordAPIKeyFail records one bad bearer key from ip, locking the IP for
+// apiKeyLockWindow once the failure budget is spent.
+func (a *Auth) recordAPIKeyFail(ip string) {
+	a.apiFlMu.Lock()
+	defer a.apiFlMu.Unlock()
+	if a.apiFl == nil {
+		a.apiFl = make(map[string]*apiKeyFail)
+	}
+	now := time.Now()
+	if len(a.apiFl) >= maxAPIKeyFailEntries {
+		for k, f := range a.apiFl {
+			if f == nil || (!f.until.IsZero() && now.After(f.until)) || (f.until.IsZero() && now.Sub(f.last) > apiKeyLockWindow) {
+				delete(a.apiFl, k)
+			}
+		}
+	}
+	for len(a.apiFl) >= maxAPIKeyFailEntries {
+		// LRU: evict the stalest entry so rotating IPs stay bounded.
+		victim := ""
+		var oldest time.Time
+		first := true
+		for k, f := range a.apiFl {
+			var t time.Time
+			if f != nil {
+				t = f.last
+			}
+			if first || t.Before(oldest) {
+				victim, oldest, first = k, t, false
+			}
+		}
+		if victim == "" {
+			break
+		}
+		delete(a.apiFl, victim)
+	}
+	f := a.apiFl[ip]
+	if f == nil {
+		f = &apiKeyFail{}
+		a.apiFl[ip] = f
+	} else if now.Sub(f.last) > apiKeyLockWindow {
+		f.count = 0
+		f.until = time.Time{}
+	}
+	f.count++
+	f.last = now
+	if f.count >= maxAPIKeyFails {
+		f.until = now.Add(apiKeyLockWindow)
+		f.count = 0
+	}
+}
+
+// clearAPIKeyFails resets ip's bearer failure state after a successful auth.
+func (a *Auth) clearAPIKeyFails(ip string) {
+	a.apiFlMu.Lock()
+	delete(a.apiFl, ip)
+	a.apiFlMu.Unlock()
 }
 
 // ClientIP returns the immediate peer address. Forwarded headers are NOT

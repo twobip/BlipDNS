@@ -8,6 +8,15 @@
 #           append --build-from-source to clone + build instead of downloading release binaries.
 #           append --local to build from the current checkout instead of downloading or cloning.
 #
+# M16: avoid blind curl|sh when you can. Prefer downloading the installer,
+# verifying it against the pinned git ref, then running it:
+#   curl -fsSL --proto '=https' --tlsv1.2 \
+#     https://raw.githubusercontent.com/twobip/BlipDNS/master/scripts/install-blipc.sh -o /tmp/install-blipc.sh
+#   # verify: compare sha256 against the value published for the release/tag,
+#   # or `git show master:scripts/install-blipc.sh | sha256sum` from a clone,
+#   # then inspect before running:
+#   sudo bash /tmp/install-blipc.sh --install-deps
+#
 set -euo pipefail
 
 REPO="github.com/twobip/BlipDNS"
@@ -335,12 +344,14 @@ elif [ "$BUILD_FROM_SOURCE" -eq 1 ]; then
   SRC_DIR="$TMPDIR/src"
   # M13: pin the clone. REF is allow-listed by the channel case above
   # (stable|master|dev|vX.Y.Z); refuse an empty REF so we never clone a
-  # default branch implicitly.
+  # default branch implicitly. Fail hard when the pinned ref cannot be
+  # fetched — never fall back to an unpinned default branch (H2: the fallback
+  # would silently install unaudited code when the pin is unavailable).
   [ -n "${REF:-}" ] || err "internal error: empty REF — refusing to clone"
   log "cloning $REPO @ $REF"
   git clone --depth 1 --branch "$REF" \
     "https://${REPO}.git" "$SRC_DIR" || \
-    git clone "https://${REPO}.git" "$SRC_DIR"
+    err "failed to clone $REPO @ $REF (refusing unpinned fallback)"
   # Log the pinned commit so installs are auditable.
   log "pinned to commit $(git -C "$SRC_DIR" rev-parse HEAD)"
   # Best-effort signed-tag check for version pins (warn-only: release tags

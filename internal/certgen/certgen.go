@@ -14,6 +14,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"fmt"
+	"log"
 	"math/big"
 	"net"
 	"os"
@@ -109,12 +110,52 @@ func expectedSANs(extraHosts []string) ([]string, []net.IP) {
 		}
 		if ip := net.ParseIP(h); ip != nil {
 			ips = append(ips, ip)
-		} else {
-			names = append(names, h)
+			continue
 		}
+		if !isValidSANHostname(h) {
+			log.Printf("certgen: warning: skipping invalid DNS SAN %q", h)
+			continue
+		}
+		names = append(names, h)
 	}
 	ips = append(ips, stableLocalIPs()...)
 	return dedupeStrings(names), dedupeIPs(ips)
+}
+
+// isValidSANHostname reports whether h is a valid DNS SAN per RFC 1035/1123:
+// total length 1-253, labels 1-63 of [A-Za-z0-9-] not starting/ending with
+// '-'. A single trailing dot (FQDN form) is accepted and stripped by the
+// caller contract (validation only here). IPs must use ParseIP above.
+func isValidSANHostname(h string) bool {
+	if len(h) == 0 || len(h) > 253 {
+		return false
+	}
+	// Allow a single trailing dot for FQDN form, but not a bare ".".
+	if strings.HasSuffix(h, ".") {
+		if len(h) == 1 {
+			return false
+		}
+		h = strings.TrimSuffix(h, ".")
+		if len(h) == 0 || len(h) > 253 {
+			return false
+		}
+	}
+	for _, label := range strings.Split(h, ".") {
+		if len(label) == 0 || len(label) > 63 {
+			return false
+		}
+		if label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for i := 0; i < len(label); i++ {
+			c := label[i]
+			if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' {
+				continue
+			}
+			return false
+		}
+	}
+	return true
 }
 
 // EnsureFiles returns a usable certificate/key pair, loading them from disk

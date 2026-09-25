@@ -123,6 +123,10 @@ func (rs *RecordStore) SetRecords(records []control.RecordEntry) error {
 			return fmt.Errorf("record %d: %w", i, err)
 		}
 		key := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(r.Domain), "."))
+		key = strings.TrimLeft(key, ".")
+		if key == "" {
+			continue
+		}
 		cr, ok := compileRecord(r)
 		if !ok {
 			// Validated above, so this is unreachable; keep the entry for
@@ -130,8 +134,10 @@ func (rs *RecordStore) SetRecords(records []control.RecordEntry) error {
 			raw = append(raw, r)
 			continue
 		}
-		// Precompute PTR owner target once.
-		cr.target = dns.Fqdn(strings.ToLower(strings.TrimSuffix(strings.TrimSpace(r.Domain), ".")))
+		// Precompute PTR owner target once. Leading-dot domains are
+		// normalized to their bare form (".example.com" == "example.com").
+		cleanDomain := strings.TrimLeft(strings.ToLower(strings.TrimSuffix(strings.TrimSpace(r.Domain), ".")), ".")
+		cr.target = dns.Fqdn(cleanDomain)
 		// CNAME target is the rdata, not the owner.
 		if cr.rrType == dns.TypeCNAME {
 			cr.target = dns.Fqdn(strings.TrimSpace(r.Value))
@@ -162,6 +168,7 @@ func (rs *RecordStore) SetRecords(records []control.RecordEntry) error {
 
 func validateRecordEntry(r control.RecordEntry) error {
 	domain := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(r.Domain), "."))
+	domain = strings.TrimLeft(domain, ".")
 	if domain == "" {
 		return fmt.Errorf("empty domain")
 	}
@@ -204,6 +211,7 @@ func validateRecordEntry(r control.RecordEntry) error {
 		}
 	case "CNAME":
 		target := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(r.Value), "."))
+		target = strings.TrimLeft(target, ".")
 		if target == "" || strings.Contains(target, "*") || !validHostname(target) {
 			return fmt.Errorf("invalid CNAME target %q", r.Value)
 		}
@@ -265,13 +273,18 @@ func (rs *RecordStore) GetRecords() ([]control.RecordEntry, error) {
 // false otherwise. A, AAAA and CNAME queries are answered locally; PTR
 // queries are synthesized from the A/AAAA entries (see lookupPTR).
 func (rs *RecordStore) Lookup(req *dns.Msg) (*dns.Msg, bool) {
-	if len(req.Question) == 0 {
+	if req == nil || len(req.Question) == 0 {
+		return nil, false
+	}
+	if rs == nil {
 		return nil, false
 	}
 	q := req.Question[0]
 	// ASCII fast-path normalize (DNS is ASCII): avoid ToLower alloc when
-	// already lowercase.
+	// already lowercase. Leading-dot queries (".example.com") are treated as
+	// their bare form for equivalence.
 	domain := strings.TrimSuffix(q.Name, ".")
+	domain = strings.TrimLeft(domain, ".")
 	needLower := false
 	for i := 0; i < len(domain); i++ {
 		if c := domain[i]; c >= 'A' && c <= 'Z' {
@@ -365,6 +378,9 @@ func (rs *RecordStore) Lookup(req *dns.Msg) (*dns.Msg, bool) {
 // the rest. Only exact records participate; a wildcard (*.lan) has no single
 // name to return, so it is skipped.
 func (rs *RecordStore) lookupPTR(req *dns.Msg, qname string) (*dns.Msg, bool) {
+	if rs == nil || req == nil {
+		return nil, false
+	}
 	ip, ok := ptrIPFromArpa(qname)
 	if !ok {
 		return nil, false
@@ -399,7 +415,7 @@ func (rs *RecordStore) lookupPTR(req *dns.Msg, qname string) (*dns.Msg, bool) {
 		}
 		resp.Answer = append(resp.Answer, &dns.PTR{
 			Hdr: dns.RR_Header{Name: qname, Rrtype: dns.TypePTR, Class: dns.ClassINET, Ttl: ttl},
-			Ptr: dns.Fqdn(strings.ToLower(strings.TrimSuffix(r.Domain, "."))),
+			Ptr: dns.Fqdn(strings.TrimLeft(strings.ToLower(strings.TrimSuffix(strings.TrimSpace(r.Domain), ".")), ".")),
 		})
 	}
 	if len(resp.Answer) == 0 {

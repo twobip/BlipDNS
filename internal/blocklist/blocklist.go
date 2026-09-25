@@ -426,7 +426,8 @@ func (b *Blocklist) IsBlocked(host string) bool {
 	if host == "" {
 		return false
 	}
-	h := strings.ToLower(strings.TrimSuffix(host, "."))
+	h := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), "."))
+	h = strings.TrimLeft(h, ".")
 	if h == "" {
 		return false
 	}
@@ -774,6 +775,11 @@ func NormalizeDomain(s string) string { return normalizeDomain(s) }
 // It returns empty string if the input is empty or not a valid domain.
 // Single pass, no per-label allocation: anything except the dot structure
 // goes (punycode is already ASCII by the time we see it).
+// Single-label names (e.g. "localhost", "lan") are valid: via the ancestor
+// walk in IsBlocked an exact single-label entry also covers its subdomains
+// (e.g. storing "localhost" blocks "x.localhost").
+// A leading-dot form (".example.com") is normalized to "example.com" so it is
+// equivalent to "example.com" (exact + subdomains) instead of never matching.
 func normalizeDomain(s string) string {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -781,8 +787,13 @@ func normalizeDomain(s string) string {
 	}
 	s = strings.ToLower(s)
 	s = strings.TrimSuffix(s, ".")
+	// Leading-dot equivalence: ".example.com" -> "example.com".
+	s = strings.TrimLeft(s, ".")
+	if s == "" {
+		return ""
+	}
 	dots := 0
-	prevDot := true // leading dot is invalid
+	prevDot := false
 	for i := 0; i < len(s); i++ {
 		if s[i] == '.' {
 			if prevDot {
@@ -794,10 +805,42 @@ func normalizeDomain(s string) string {
 			prevDot = false
 		}
 	}
-	if prevDot || dots < 1 {
+	if prevDot {
 		return ""
 	}
+	if dots < 1 {
+		// Single-label: must be a valid hostname label.
+		if !validSingleLabel(s) {
+			return ""
+		}
+		return s
+	}
 	return s
+}
+
+// validSingleLabel reports whether s is a valid single DNS label
+// ([a-z0-9-], 1-63 chars, no leading/trailing hyphen).
+func validSingleLabel(s string) bool {
+	if len(s) == 0 || len(s) > 63 {
+		return false
+	}
+	if s[0] == '-' || s[len(s)-1] == '-' {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c >= 'a' && c <= 'z' {
+			continue
+		}
+		if c >= '0' && c <= '9' {
+			continue
+		}
+		if c == '-' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 // cacheFile is the on-disk snapshot: the blocked set plus the allowed set that

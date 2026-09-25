@@ -62,6 +62,7 @@ type Config struct {
 	Blocklist         *blocklist.Blocklist // global blocklist applied before per-client policy
 	BlockAction       filter.BlockAction   // response for global-blocklist hits ("" = nxdomain)
 	TrustedProxies    []string             // CIDRs/IPs trusted for X-Forwarded-For
+	AllowedNetworks   []string             // recursion ACL: CIDRs/IPs allowed to recurse; empty = allow all (open, with warning)
 }
 
 // Server is the DNS + DoH resolver.
@@ -106,6 +107,10 @@ type Server struct {
 	cacheMu        sync.RWMutex
 	cacheSize      int // max cached responses (0 = unlimited)
 	trustedProxies []*net.IPNet
+	// aclMu guards the recursion ACL (allowedNetworks). Empty/nil means
+	// allow all (open recursion, backward-compat with warning).
+	aclMu           sync.RWMutex
+	allowedNetworks []*net.IPNet
 }
 
 // New builds a Server. If cfg.Store is nil a permissive default is used.
@@ -121,19 +126,34 @@ func New(cfg Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	allowed, err := parseAllowedNetworks(cfg.AllowedNetworks)
+	if err != nil {
+		return nil, err
+	}
+	if len(allowed) == 0 && len(cfg.AllowedNetworks) == 0 {
+		log.Printf("blipd: WARNING open recursion: no allowed_networks configured, answering all clients (restrict with allowed_networks to loopback/private LANs)")
+	}
 	c := cache.New(cfg.CacheCap, cfg.CacheSize)
+	// cache.New maps 0 to a bounded default to prevent unbounded growth for
+	// generic callers; an explicit blipd cache_size of 0 still means
+	// unlimited (backward compat with the config + management API), so opt
+	// back into it here.
+	if cfg.CacheSize == 0 {
+		c.SetMaxEntries(0)
+	}
 	cnt := &control.Counters{}
 	ctrl := control.NewServerWithBlocklist("", cfg.Store, c, cnt, cfg.Version, cfg.Blocklist)
 	s := &Server{
-		cfg:            cfg,
-		cache:          c,
-		pool:           up,
-		ctrl:           ctrl,
-		cnt:            cnt,
-		rl:             newRateLimiter(),
-		rec:            NewRecordStore(),
-		cacheSize:      cfg.CacheSize,
-		trustedProxies: trusted,
+		cfg:             cfg,
+		cache:           c,
+		pool:            up,
+		ctrl:            ctrl,
+		cnt:             cnt,
+		rl:              newRateLimiter(),
+		rec:             NewRecordStore(),
+		cacheSize:       cfg.CacheSize,
+		trustedProxies:  trusted,
+		allowedNetworks: allowed,
 	}
 	if cfg.TLSCert != nil {
 		s.cert.Store(cfg.TLSCert)
@@ -173,6 +193,87 @@ func (s *Server) SetTLSCert(c *tls.Certificate) {
 // SetBlockLogger registers a callback invoked for blocked queries when the
 // matching policy has Log enabled.
 func (s *Server) SetBlockLogger(fn func(client, domain string)) { s.logfn = fn }
+
+// parseAllowedNetworks parses recursion-ACL CIDRs/IPs. Empty input means
+// allow all (open recursion, backward-compat). Single IPs are treated as
+// /32 (/128 for IPv6).
+func parseAllowedNetworks(values []string) ([]*net.IPNet, error) {
+	out := make([]*net.IPNet, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if !strings.Contains(value, "/") {
+			ip := net.ParseIP(value)
+			if ip == nil {
+				return nil, fmt.Errorf("invalid allowed network %q", value)
+			}
+			if ip4 := ip.To4(); ip4 != nil {
+				ip = ip4
+				out = append(out, &net.IPNet{IP: ip, Mask: net.CIDRMask(32, 32)})
+			} else {
+				out = append(out, &net.IPNet{IP: ip, Mask: net.CIDRMask(128, 128)})
+			}
+			continue
+		}
+		_, n, err := net.ParseCIDR(value)
+		if err != nil {
+			return nil, fmt.Errorf("invalid allowed network %q: %w", value, err)
+		}
+		out = append(out, n)
+	}
+	return out, nil
+}
+
+// SetAllowedNetworks replaces the recursion ACL at runtime. Empty/nil allows
+// all (open recursion). Returns an error for invalid CIDRs without changing
+// the current ACL.
+func (s *Server) SetAllowedNetworks(values []string) error {
+	nets, err := parseAllowedNetworks(values)
+	if err != nil {
+		return err
+	}
+	s.aclMu.Lock()
+	s.allowedNetworks = nets
+	// Keep cfg in sync for readback.
+	s.cfg.AllowedNetworks = append([]string(nil), values...)
+	s.aclMu.Unlock()
+	if len(nets) == 0 {
+		log.Printf("blipd: WARNING open recursion: allowed_networks cleared, answering all clients")
+	}
+	return nil
+}
+
+// isRecursionAllowed reports whether clientIP may recurse. Empty ACL allows
+// all (backward-compat). A nil Server (tests constructing Server literals
+// without New) also allows all.
+func (s *Server) isRecursionAllowed(clientIP net.IP) bool {
+	if s == nil {
+		return true
+	}
+	s.aclMu.RLock()
+	nets := s.allowedNetworks
+	s.aclMu.RUnlock()
+	if len(nets) == 0 {
+		return true
+	}
+	if clientIP == nil {
+		return false
+	}
+	// Normalize like filter.lookupLocked (4-in-6 mapped to 4B) so CIDR
+	// containment matches the policy path exactly; Contains handles it, but
+	// an explicit To4 keeps the two paths byte-identical.
+	if ip4 := clientIP.To4(); ip4 != nil {
+		clientIP = ip4
+	}
+	for _, n := range nets {
+		if n.Contains(clientIP) {
+			return true
+		}
+	}
+	return false
+}
 
 // Handler returns the DoH handler (RFC 8484). Requests to
 // /dns-query/{client-id} carry a client identity used for per-client policy
@@ -274,6 +375,10 @@ func (s *Server) handleDoH(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	resp := s.serve(ctx, clientIP, clientID, control.ProtoDoH, req)
+	if resp == nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
 	buf, err := resp.Pack()
 	if err != nil {
 		http.Error(w, "pack error", http.StatusInternalServerError)
@@ -340,9 +445,15 @@ func unescapeQueryValue(v string) (string, error) {
 // negative reply (the SOA of an NXDOMAIN). Zero means there is no TTL to
 // promise, so the caller answers "no-store" (RFC 8484 §5.1).
 func dohMaxAge(resp *dns.Msg) uint32 {
+	if resp == nil {
+		return 0
+	}
 	min, seen := uint32(0), false
 	for _, sec := range [][]dns.RR{resp.Answer, resp.Ns} {
 		for _, rr := range sec {
+			if rr == nil || rr.Header() == nil {
+				continue
+			}
 			if t := rr.Header().Ttl; !seen || t < min {
 				min, seen = t, true
 			}
@@ -359,26 +470,30 @@ func (s *Server) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
 	// Zero-alloc client IP: type-assert the packet address instead of
 	// String()+SplitHostPort+ParseIP (3 allocs per query on the old path).
 	var clientIP net.IP
-	switch a := w.RemoteAddr().(type) {
-	case *net.UDPAddr:
-		clientIP = a.IP
-	case *net.TCPAddr:
-		clientIP = a.IP
-	default:
-		if host, _, err := net.SplitHostPort(w.RemoteAddr().String()); err == nil {
-			clientIP = net.ParseIP(host)
-		} else {
-			clientIP = net.ParseIP(w.RemoteAddr().String())
+	if w != nil && w.RemoteAddr() != nil {
+		switch a := w.RemoteAddr().(type) {
+		case *net.UDPAddr:
+			clientIP = a.IP
+		case *net.TCPAddr:
+			clientIP = a.IP
+		default:
+			if host, _, err := net.SplitHostPort(w.RemoteAddr().String()); err == nil {
+				clientIP = net.ParseIP(host)
+			} else {
+				clientIP = net.ParseIP(w.RemoteAddr().String())
+			}
 		}
 	}
 	isUDP := false
 	// The mux serves both UDP and TCP on the same handler; only UDP needs
 	// truncation to 1232 (DNS flag day) to avoid IP fragmentation. TCP can
 	// carry the full response.
-	if la := w.LocalAddr(); la != nil && la.Network() == "udp" {
-		isUDP = true
-	} else if ra := w.RemoteAddr(); ra != nil && ra.Network() == "udp" {
-		isUDP = true
+	if w != nil {
+		if la := w.LocalAddr(); la != nil && la.Network() == "udp" {
+			isUDP = true
+		} else if ra := w.RemoteAddr(); ra != nil && ra.Network() == "udp" {
+			isUDP = true
+		}
 	}
 	ctx, cancel := queryCtx()
 	defer cancel()
@@ -387,6 +502,9 @@ func (s *Server) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
 	// local answer over UDP must still fit the path MTU.
 	if isUDP && resp != nil && resp.Len() > 1232 {
 		resp.Truncate(1232)
+	}
+	if w == nil {
+		return
 	}
 	_ = w.WriteMsg(resp)
 }
@@ -431,52 +549,185 @@ func (e *chainBlockedError) Error() string { return "blipd: cname target blocked
 // unbounded walk is itself a CPU concern on attacker-controlled responses.
 const maxChainInspect = 64
 
-// chainBlocked inspects every CNAME/DNAME target in m's answer section and
-// reports whether any of them is blocked per classify (the same
-// policy/blocklist function used for the qname). F-08: the old code stopped
-// after 8 targets, so a blocked domain placed 9th (or later) evaded filtering
-// and poisoned the cache. Over-long chains (>maxChainInspect) fail closed.
+// chainBlocked inspects every CNAME/DNAME target in all sections (Answer, Ns,
+// Extra) and every A/AAAA owner name, reporting whether any of them is blocked
+// per classify (the same policy/blocklist function used for the qname).
+// F-08: the old code stopped after 8 targets, so a blocked domain placed 9th
+// (or later) evaded filtering and poisoned the cache. Over-long chains
+// (>maxChainInspect) fail closed.
 func chainBlocked(m *dns.Msg, classify func(string) bool) bool {
 	if m == nil {
 		return false
 	}
 	checked := 0
-	for _, rr := range m.Answer {
-		var target string
-		switch v := rr.(type) {
-		case *dns.CNAME:
-			target = v.Target
-		case *dns.DNAME:
-			target = v.Target
-		default:
-			continue
-		}
-		if target == "" {
-			continue
-		}
-		if classify(target) {
-			return true
-		}
-		checked++
-		if checked > maxChainInspect {
-			return true
+	// Check CNAME/DNAME targets in all sections plus A/AAAA owner names.
+	sections := [][]dns.RR{m.Answer, m.Ns, m.Extra}
+	for _, sec := range sections {
+		for _, rr := range sec {
+			switch v := rr.(type) {
+			case *dns.CNAME:
+				if v.Target == "" {
+					continue
+				}
+				if classify(v.Target) {
+					return true
+				}
+				checked++
+				if checked > maxChainInspect {
+					return true
+				}
+			case *dns.DNAME:
+				if v.Target == "" {
+					continue
+				}
+				if classify(v.Target) {
+					return true
+				}
+				checked++
+				if checked > maxChainInspect {
+					return true
+				}
+			case *dns.A, *dns.AAAA:
+				owner := rr.Header().Name
+				if owner == "" {
+					continue
+				}
+				if classify(owner) {
+					return true
+				}
+				checked++
+				if checked > maxChainInspect {
+					return true
+				}
+			default:
+				continue
+			}
 		}
 	}
 	return false
 }
 
-// freshUpstreamID returns a random DNS ID (crypto/rand, fallback to
-// time-mixed input on failure). Never returns the caller's ID on the fast
-// path so a retry does not reuse a known value.
-func freshUpstreamID(caller uint16) uint16 {
-	var b [2]byte
-	if _, err := cryptorand.Read(b[:]); err == nil {
-		id := binary.BigEndian.Uint16(b[:])
-		if id != caller {
-			return id
+// sanitizeBailiwick strips out-of-bailiwick glue before cache+serve. Only the
+// Answer section plus in-bailiwick Ns records are kept; Extra is dropped
+// except OPT (which carries no addresses). At minimum this drops Extra
+// A/AAAA whose owner is out-of-bailiwick of the query name and Ns records
+// whose owner is out-of-zone.
+func sanitizeBailiwick(qname string, m *dns.Msg) {
+	if m == nil {
+		return
+	}
+	qn := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(qname), "."))
+	qn = strings.TrimLeft(qn, ".")
+	if qn == "" {
+		// Without a query name we cannot judge bailiwick: drop Ns/Extra
+		// except OPT rather than serve attacker glue.
+		var keptNs []dns.RR
+		_ = keptNs
+		m.Ns = nil
+		keptExtra := m.Extra[:0]
+		for _, rr := range m.Extra {
+			if _, ok := rr.(*dns.OPT); ok {
+				keptExtra = append(keptExtra, rr)
+			}
+		}
+		m.Extra = keptExtra
+		return
+	}
+	// Keep Ns records whose owner is in-bailiwick: owner == qname, owner is an
+	// ancestor of qname (qname is subdomain of owner), or owner is a subdomain
+	// of qname (delegation child). Anything else is out-of-zone glue.
+	keptNs := m.Ns[:0]
+	for _, rr := range m.Ns {
+		owner := strings.ToLower(strings.TrimSuffix(rr.Header().Name, "."))
+		owner = strings.TrimLeft(owner, ".")
+		if owner == "" {
+			continue
+		}
+		if owner == qn || strings.HasSuffix(qn, "."+owner) || strings.HasSuffix(owner, "."+qn) {
+			keptNs = append(keptNs, rr)
+			continue
+		}
+		// Out-of-bailiwick Ns: drop. For NS-type records this also drops the
+		// delegation; for SOA (negative answers) the owner is the qname's
+		// ancestor and already kept above. Unknown out-of-zone owners are
+		// never cached or served.
+	}
+	// Clear the tail so dropped records are not retained via the backing array.
+	for i := len(keptNs); i < len(m.Ns); i++ {
+		m.Ns[i] = nil
+	}
+	m.Ns = keptNs
+	// Drop all Extra except OPT. Glue A/AAAA (even in-bailiwick) is not needed
+	// by a stub-facing resolver and is the classic cache-poison vector.
+	keptExtra := m.Extra[:0]
+	for _, rr := range m.Extra {
+		if _, ok := rr.(*dns.OPT); ok {
+			keptExtra = append(keptExtra, rr)
 		}
 	}
-	return caller + 0x9e37 + uint16(time.Now().UnixNano()&0xffff)
+	for i := len(keptExtra); i < len(m.Extra); i++ {
+		m.Extra[i] = nil
+	}
+	m.Extra = keptExtra
+}
+
+// freshUpstreamID returns a random DNS ID (crypto/rand). It never returns the
+// caller's ID so a retry does not reuse a known value. On crypto/rand failure
+// it returns an error instead of a predictable fallback (caller+time) which an
+// off-path spoofer could predict.
+func freshUpstreamID(caller uint16) (uint16, error) {
+	var b [2]byte
+	if _, err := cryptorand.Read(b[:]); err != nil {
+		return 0, fmt.Errorf("blipd: crypto/rand failed: %w", err)
+	}
+	id := binary.BigEndian.Uint16(b[:])
+	if id == caller {
+		// Extremely unlikely collision: flip a bit instead of falling back to
+		// a predictable value.
+		id ^= 0x8000
+		if id == caller {
+			id ^= 0x0001
+		}
+	}
+	return id, nil
+}
+
+// classifyName applies the same policy/blocklist decision used for the qname
+// to an arbitrary name (CNAME/DNAME target or A/AAAA owner).
+func (s *Server) classifyName(clientIP net.IP, clientID, target string) (bool, filter.BlockAction, string, bool) {
+	if s == nil {
+		return false, "", "", false
+	}
+	bare := filter.NormalizeName(target)
+	var allowed, blocked bool
+	var action filter.BlockAction
+	var doLog bool
+	var source string
+	if s.cfg.Store != nil {
+		allowed, blocked, action, _, doLog, source = s.cfg.Store.Check(clientIP, clientID, bare)
+	} else {
+		action = filter.DefaultAction
+	}
+	if s.cfg.Blocklist != nil && s.cfg.Blocklist.IsBlocked(bare) && !allowed {
+		return true, s.cfg.BlockAction, "global", true
+	}
+	if blocked {
+		return true, action, source, doLog
+	}
+	return false, "", "", false
+}
+
+// isLocalBlocked reports whether a local-record response contains a blocked
+// CNAME/DNAME target or a blocked A/AAAA owner.
+func (s *Server) isLocalBlocked(m *dns.Msg, clientIP net.IP, clientID string) bool {
+	if m == nil {
+		return false
+	}
+	classify := func(target string) bool {
+		ok, _, _, _ := s.classifyName(clientIP, clientID, target)
+		return ok
+	}
+	return chainBlocked(m, classify)
 }
 
 // stripSubnet removes the EDNS0 client-subnet option (RFC 7871) from req so a
@@ -502,6 +753,21 @@ func stripSubnet(req *dns.Msg) {
 
 func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, proto string, isUDP bool, req *dns.Msg) *dns.Msg {
 	start := time.Now()
+	// Nil guards: never dereference a nil request or server. A nil request
+	// cannot be replied to meaningfully; refuse with an empty message.
+	if req == nil {
+		resp := new(dns.Msg)
+		resp.RecursionAvailable = true
+		resp.Rcode = dns.RcodeFormatError
+		return resp
+	}
+	if s == nil {
+		resp := new(dns.Msg)
+		resp.SetReply(req)
+		resp.RecursionAvailable = true
+		resp.Rcode = dns.RcodeServerFailure
+		return resp
+	}
 	// A nil source IP must never be routed, cached or rate-bucketed: refuse
 	// immediately. (DoH with an unparseable RemoteAddr, or a spoofed classic
 	// query, would otherwise mint a "<nil>" bucket or bypass policy CIDRs.)
@@ -510,6 +776,15 @@ func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, prot
 		if req != nil {
 			resp.SetReply(req)
 		}
+		resp.RecursionAvailable = true
+		resp.Rcode = dns.RcodeRefused
+		return resp
+	}
+	// H4 open recursion: refuse non-allowlisted sources before any recursion
+	// (filter/cache/upstream). Empty ACL means allow all (backward-compat).
+	if !s.isRecursionAllowed(clientIP) {
+		resp := new(dns.Msg)
+		resp.SetReply(req)
 		resp.RecursionAvailable = true
 		resp.Rcode = dns.RcodeRefused
 		return resp
@@ -607,7 +882,15 @@ func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, prot
 
 	// Single filter evaluation: one lookup + one allow walk + one block walk.
 	// Replaces the old Allowed+Classify+BlockSource triple (2-3x CIDR scans).
-	allowed, blocked, action, upstreamOverride, doLog, source := s.cfg.Store.Check(clientIP, clientID, domain)
+	var allowed, blocked bool
+	var action filter.BlockAction
+	var upstreamOverride, source string
+	var doLog bool
+	if s.cfg.Store != nil {
+		allowed, blocked, action, upstreamOverride, doLog, source = s.cfg.Store.Check(clientIP, clientID, domain)
+	} else {
+		action = filter.DefaultAction
+	}
 
 	// Check global blocklist first (applied to all clients). A per-client
 	// allowlist always wins: a domain the client's policy whitelists is never
@@ -646,6 +929,58 @@ func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, prot
 	pool := s.safePool()
 	if s.rec != nil {
 		if recResp, ok := s.rec.Lookup(req); ok {
+			// M2 AD: local records are not DNSSEC-validated; clear AD.
+			if recResp != nil {
+				recResp.AuthenticatedData = false
+			}
+			// M5: enforce the same CNAME/DNAME + A/AAAA-owner block checks
+			// on local records as on upstream answers. A local CNAME
+			// pointing at a blocked domain (or a local A for a blocked
+			// owner) must be blocked, not served.
+			if recResp != nil && s.isLocalBlocked(recResp, clientIP, clientID) {
+				s.cnt.AddBlocked()
+				blockedResp := new(dns.Msg)
+				blockedResp.SetReply(req)
+				blockedResp.RecursionAvailable = true
+				blockedResp.AuthenticatedData = false
+				c := renderClient()
+				s.notifyBlock(req, blockedResp, c, domain, "local", proto, start)
+				// Attribute to the first blocked chain target when possible
+				// so the query log shows what was actually blocked.
+				var act filter.BlockAction
+				found := false
+				for _, sec := range [][]dns.RR{recResp.Answer, recResp.Ns, recResp.Extra} {
+					for _, rr := range sec {
+						if rr == nil || rr.Header() == nil {
+							continue
+						}
+						var target string
+						switch v := rr.(type) {
+						case *dns.CNAME:
+							target = v.Target
+						case *dns.DNAME:
+							target = v.Target
+						case *dns.A, *dns.AAAA:
+							target = rr.Header().Name
+						default:
+							continue
+						}
+						if target == "" {
+							continue
+						}
+						if ok, a, _, _ := s.classifyName(clientIP, clientID, target); ok {
+							act = a
+							found = true
+							break
+						}
+					}
+					if found {
+						break
+					}
+				}
+				applyBlockAction(blockedResp, q, act)
+				return blockedResp
+			}
 			if s.ctrl.HasWatchers() {
 				s.ctrl.Notify(control.WatchEvent{
 					Type:       "pass",
@@ -661,6 +996,11 @@ func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, prot
 				})
 			}
 			out := recResp
+			if out != nil {
+				out.Id = req.Id
+				out.Question = req.Question
+				out.AuthenticatedData = false
+			}
 			return out
 		}
 	}
@@ -715,12 +1055,20 @@ func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, prot
 		key.Label = upstreamLabel
 	}
 	// classifyTarget applies the same policy/blocklist decision used for the
-	// qname to a CNAME/DNAME target. Single Check evaluation on the normalized
-	// target (one lookup + one allow/block walk) instead of the
-	// Allowed+Classify+BlockSource triple.
+	// qname to a CNAME/DNAME target or A/AAAA owner. Single Check evaluation
+	// on the normalized target (one lookup + one allow/block walk) instead of
+	// the Allowed+Classify+BlockSource triple.
 	classifyTarget := func(target string) (bool, filter.BlockAction, string, bool) {
 		bare := filter.NormalizeName(target)
-		allowed, blocked, action, _, doLog, source := s.cfg.Store.Check(clientIP, clientID, bare)
+		var allowed, blocked bool
+		var action filter.BlockAction
+		var doLog bool
+		var source string
+		if s.cfg.Store != nil {
+			allowed, blocked, action, _, doLog, source = s.cfg.Store.Check(clientIP, clientID, bare)
+		} else {
+			action = filter.DefaultAction
+		}
 		if s.cfg.Blocklist != nil && s.cfg.Blocklist.IsBlocked(bare) && !allowed {
 			return true, s.cfg.BlockAction, "global", true
 		}
@@ -729,35 +1077,25 @@ func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, prot
 		}
 		return false, "", "", false
 	}
-	fetch := func() (*dns.Msg, error) {
-		// Per-upstream TXID: the client chose req.Id (attacker-known for
-		// their own queries). Copy and re-randomize so off-path spoofers
-		// cannot use the known ID against plaintext UDP upstreams.
-		upReq := req.Copy()
-		upReq.Id = freshUpstreamID(req.Id)
-		m, err := resolver.Resolve(ctx, upReq)
-		if err != nil {
-			return nil, err
-		}
+	// findBlockedTarget returns the first blocked CNAME/DNAME target or
+	// blocked A/AAAA owner across all sections for attribution.
+	findBlockedTarget := func(m *dns.Msg) (bool, filter.BlockAction, string, bool, string) {
 		if m == nil {
-			return nil, fmt.Errorf("upstream returned nil response")
+			return false, "", "", false, ""
 		}
-		// CNAME/DNAME chain inspection before the response is cached: a
-		// qname that is allowed but aliases to a blocked domain must be
-		// blocked the same way, without poisoning the cache with the
-		// upstream's alias.
-		if chainBlocked(m, func(target string) bool {
-			ok, _, _, _ := classifyTarget(target)
-			return ok
-		}) {
-			// Find the first blocked target to attribute the block.
-			for _, rr := range m.Answer {
+		for _, sec := range [][]dns.RR{m.Answer, m.Ns, m.Extra} {
+			for _, rr := range sec {
+				if rr == nil || rr.Header() == nil {
+					continue
+				}
 				var target string
 				switch v := rr.(type) {
 				case *dns.CNAME:
 					target = v.Target
 				case *dns.DNAME:
 					target = v.Target
+				case *dns.A, *dns.AAAA:
+					target = rr.Header().Name
 				default:
 					continue
 				}
@@ -765,14 +1103,61 @@ func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, prot
 					continue
 				}
 				if ok, act, src, lg := classifyTarget(target); ok {
-					return nil, &chainBlockedError{target: strings.TrimSuffix(target, "."), action: act, source: src, shouldLog: lg}
+					return true, act, src, lg, strings.TrimSuffix(target, ".")
 				}
+			}
+		}
+		return false, "", "", false, ""
+	}
+	fetch := func() (*dns.Msg, error) {
+		// Per-upstream TXID: the client chose req.Id (attacker-known for
+		// their own queries). Copy and re-randomize so off-path spoofers
+		// cannot use the known ID against plaintext UDP upstreams. Fail
+		// closed if crypto/rand fails instead of using a predictable ID.
+		upReq := req.Copy()
+		newID, idErr := freshUpstreamID(req.Id)
+		if idErr != nil {
+			return nil, idErr
+		}
+		upReq.Id = newID
+		m, err := resolver.Resolve(ctx, upReq)
+		if err != nil {
+			return nil, err
+		}
+		if m == nil {
+			return nil, fmt.Errorf("upstream returned nil response")
+		}
+		// M2 AD: never cache or serve upstream AD=1 as validated. We do not
+		// validate DNSSEC, so clear AD on all upstream answers (CD/DO bits
+		// are still forwarded via the query and the cache key).
+		m.AuthenticatedData = false
+		// H5 bailiwick: strip out-of-bailiwick Ns/Extra glue before
+		// cache+serve. Only Answer + in-bailiwick Ns are kept; Extra is
+		// dropped except OPT.
+		sanitizeBailiwick(q.Name, m)
+		// CNAME/DNAME chain inspection before the response is cached: a
+		// qname that is allowed but aliases to a blocked domain must be
+		// blocked the same way, without poisoning the cache with the
+		// upstream's alias. Also inspects Ns/Extra targets and A/AAAA
+		// owners (glue for blocked names).
+		if chainBlocked(m, func(target string) bool {
+			ok, _, _, _ := classifyTarget(target)
+			return ok
+		}) {
+			if ok, act, src, lg, target := findBlockedTarget(m); ok {
+				return nil, &chainBlockedError{target: target, action: act, source: src, shouldLog: lg}
 			}
 			return nil, &chainBlockedError{target: domain, action: "", source: "", shouldLog: false}
 		}
 		return m, nil
 	}
-	out, cached, err := s.cache.DoHit(ctx, key, fetch)
+	out, cached, err := func() (*dns.Msg, bool, error) {
+		if s.cache == nil {
+			m, ferr := fetch()
+			return m, false, ferr
+		}
+		return s.cache.DoHit(ctx, key, fetch)
+	}()
 	if err != nil {
 		var cbe *chainBlockedError
 		if errors.As(err, &cbe) {
@@ -780,6 +1165,7 @@ func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, prot
 			blockedResp := new(dns.Msg)
 			blockedResp.SetReply(req)
 			blockedResp.RecursionAvailable = true
+			blockedResp.AuthenticatedData = false
 			notifyDomain := cbe.target
 			if notifyDomain == "" {
 				notifyDomain = domain
@@ -795,6 +1181,7 @@ func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, prot
 		s.cnt.AddUpErr()
 		s.notifyUpstreamError(renderClient(), domain, upstreamErrText(upstreamLabel, err))
 		resp.Rcode = dns.RcodeServerFailure
+		resp.AuthenticatedData = false
 		return resp
 	}
 	// A cached entry may predate a policy/blocklist change: re-inspect its
@@ -805,29 +1192,17 @@ func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, prot
 		return ok
 	}) {
 		var cbe *chainBlockedError
-		for _, rr := range out.Answer {
-			var target string
-			switch v := rr.(type) {
-			case *dns.CNAME:
-				target = v.Target
-			case *dns.DNAME:
-				target = v.Target
-			default:
-				continue
-			}
-			if target == "" {
-				continue
-			}
-			if ok, act, src, lg := classifyTarget(target); ok {
-				cbe = &chainBlockedError{target: strings.TrimSuffix(target, "."), action: act, source: src, shouldLog: lg}
-				break
-			}
+		if ok, act, src, lg, target := findBlockedTarget(out); ok {
+			cbe = &chainBlockedError{target: target, action: act, source: src, shouldLog: lg}
 		}
-		s.cache.Delete(key)
+		if s.cache != nil {
+			s.cache.Delete(key)
+		}
 		s.cnt.AddBlocked()
 		blockedResp := new(dns.Msg)
 		blockedResp.SetReply(req)
 		blockedResp.RecursionAvailable = true
+		blockedResp.AuthenticatedData = false
 		notifyDomain := domain
 		var act filter.BlockAction
 		var src string
@@ -845,8 +1220,17 @@ func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, prot
 		applyBlockAction(blockedResp, q, act)
 		return blockedResp
 	}
+	if out == nil {
+		resp.Rcode = dns.RcodeServerFailure
+		resp.AuthenticatedData = false
+		return resp
+	}
 	out.Id = req.Id
 	out.Question = req.Question
+	// M2 AD: we never validate DNSSEC, so clear AD on all served responses
+	// (never serve cached AD=1 as validated). CD/DO forwarding is preserved
+	// via the query and cache key.
+	out.AuthenticatedData = false
 	// UDP path-MTU safety (DNS flag day 1232): truncate large responses so
 	// they fit without IP fragmentation; the client retries over TCP (TC bit).
 	if isUDP && out.Len() > 1232 {
@@ -887,7 +1271,7 @@ func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, prot
 // renders every answer record, so it is skipped entirely when nobody is
 // streaming events.
 func (s *Server) notifyBlock(req, resp *dns.Msg, client, domain, list, proto string, start time.Time) {
-	if !s.ctrl.HasWatchers() {
+	if s == nil || !s.ctrl.HasWatchers() {
 		return
 	}
 	s.ctrl.Notify(control.WatchEvent{
@@ -902,7 +1286,7 @@ func (s *Server) notifyBlock(req, resp *dns.Msg, client, domain, list, proto str
 // qType returns the textual RR-type mnemonic of the query question (e.g.
 // "A", "AAAA", "TXT"); falls back to the numeric code if unknown.
 func qType(req *dns.Msg) string {
-	if len(req.Question) == 0 {
+	if req == nil || len(req.Question) == 0 {
 		return ""
 	}
 	return dns.TypeToString[req.Question[0].Qtype]
@@ -923,6 +1307,9 @@ func answersFor(req *dns.Msg, resp *dns.Msg) []control.Answer {
 	}
 	out := make([]control.Answer, 0, len(resp.Answer))
 	for _, rr := range resp.Answer {
+		if rr == nil || rr.Header() == nil {
+			continue
+		}
 		ttl := int(rr.Header().Ttl)
 		switch a := rr.(type) {
 		case *dns.A:
@@ -948,6 +1335,9 @@ func answersFor(req *dns.Msg, resp *dns.Msg) []control.Answer {
 // Timeouts say so plainly (keeping which upstream) instead of leaking Go
 // http internals like "context deadline exceeded".
 func upstreamErrText(upstream string, err error) string {
+	if err == nil {
+		return "upstream error"
+	}
 	var nerr net.Error
 	if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &nerr) && nerr.Timeout()) {
 		if upstream != "" {
@@ -962,7 +1352,7 @@ func upstreamErrText(upstream string, err error) string {
 // be shown on the Upstream Errors page. Skipped entirely when nobody is
 // streaming (which is exactly when upstream is down and this would hurt most).
 func (s *Server) notifyUpstreamError(client, domain, msg string) {
-	if !s.ctrl.HasWatchers() {
+	if s == nil || !s.ctrl.HasWatchers() {
 		return
 	}
 	s.ctrl.Notify(control.WatchEvent{
@@ -1129,10 +1519,34 @@ func (s *Server) DoHHTTPAddr() string {
 	return s.dohPlainAddr
 }
 
+// maxRateLimitQPS bounds the per-client QPS to prevent a misconfigured push
+// from effectively disabling the limiter via absurd values or exhausting
+// memory via burst. Complements the control-layer >=0 check.
+const maxRateLimitQPS = 100000
+
+// maxRateLimitBurst bounds the per-client burst.
+const maxRateLimitBurst = 100000
+
+// maxCacheSize bounds the runtime cache size to prevent a misconfigured push
+// from exhausting memory. Complements the control-layer >=0 check.
+const maxCacheSize = 1000000
+
 // SetRateLimit configures the per-client DNS query rate limit (QPS). A qps of 0
 // disables rate limiting. burst is the per-client burst above qps; <= 0 means
 // auto (qps, min 1).
 func (s *Server) SetRateLimit(qps, burst int) error {
+	if qps < 0 {
+		return fmt.Errorf("qps must be >= 0")
+	}
+	if burst < 0 {
+		burst = 0
+	}
+	if qps > maxRateLimitQPS {
+		return fmt.Errorf("qps %d exceeds max %d", qps, maxRateLimitQPS)
+	}
+	if burst > maxRateLimitBurst {
+		return fmt.Errorf("burst %d exceeds max %d", burst, maxRateLimitBurst)
+	}
 	if s.rl == nil {
 		return nil
 	}
@@ -1149,15 +1563,20 @@ func (s *Server) RateLimitQPS() int {
 }
 
 // SetCacheConfig tunes the response cache size at runtime: the max cached
-// responses (0 = unlimited). Must be >= 0.
+// responses (0 = unlimited). Must be >= 0 and <= maxCacheSize.
 func (s *Server) SetCacheConfig(size int) error {
 	if size < 0 {
 		return fmt.Errorf("cache size must be >= 0")
 	}
+	if size > maxCacheSize {
+		return fmt.Errorf("cache size %d exceeds max %d", size, maxCacheSize)
+	}
 	s.cacheMu.Lock()
 	s.cacheSize = size
 	s.cacheMu.Unlock()
-	s.cache.SetMaxEntries(size)
+	if s.cache != nil {
+		s.cache.SetMaxEntries(size)
+	}
 	return nil
 }
 
@@ -1170,6 +1589,9 @@ func (s *Server) CacheSize() int {
 
 // PurgeCache drops every cached response (e.g. from the settings page).
 func (s *Server) PurgeCache() {
+	if s == nil || s.cache == nil {
+		return
+	}
 	s.cache.Purge()
 }
 

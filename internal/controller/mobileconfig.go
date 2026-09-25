@@ -41,10 +41,11 @@ func (s *Server) handleDoHMobileConfig(w http.ResponseWriter, r *http.Request) {
 		port = n
 	}
 	clientID := strings.TrimSpace(q.Get("client_id"))
-	// Same rules blipd enforces on /dns-query/<id> (helper.go): short
-	// printable token, no path separators or query characters.
-	if len(clientID) > 64 || strings.ContainsAny(clientID, "/?# \t") {
-		http.Error(w, "invalid client_id (max 64 chars, no /?# or spaces)", http.StatusBadRequest)
+	// Same allowlist blipd enforces on /dns-query/<id> (helper.go
+	// clientIDFromPath): ^[A-Za-z0-9._-]{1,64}$. Blocklist-only checks let
+	// control bytes/newlines through; the allowlist rejects them.
+	if err := validateMobileClientID(clientID); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	serverURL := "https://" + host
@@ -59,6 +60,25 @@ func (s *Server) handleDoHMobileConfig(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/x-apple-aspen-config")
 	w.Header().Set("Content-Disposition", `attachment; filename="doh.mobileconfig"`)
 	_, _ = w.Write(body)
+}
+
+// validateMobileClientID enforces the same allowlist blipd uses for
+// /dns-query/<id>: empty (no identity) or ^[A-Za-z0-9._-]{1,64}$.
+func validateMobileClientID(id string) error {
+	if id == "" {
+		return nil
+	}
+	if len(id) > 64 {
+		return fmt.Errorf("invalid client_id (max 64 chars, A-Za-z0-9._-)")
+	}
+	for i := 0; i < len(id); i++ {
+		c := id[i]
+		if c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '.' || c == '_' || c == '-' {
+			continue
+		}
+		return fmt.Errorf("invalid client_id (allowed: A-Za-z0-9._-, max 64 chars)")
+	}
+	return nil
 }
 
 // normalizeProfileHost validates a profile hostname/IP and returns it in URL

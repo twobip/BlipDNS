@@ -3,6 +3,8 @@ package control
 import (
 	"bytes"
 	"crypto/rand"
+	"crypto/subtle"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
@@ -254,7 +256,9 @@ func (s *Server) ConfigureAdoption(stateFile, instanceID string) {
 func (s *Server) genClaim() {
 	s.claimCode = genClaimCode()
 	s.adopted = false
-	log.Printf("blipd: ADOPTION CODE = %s  (use it ONCE in the controller to claim this instance; printed to the local journal only)", s.claimCode)
+	// M9: do NOT log the code value — it is a secret. Box-local retrieval is
+	// via the 0600 adopt-code file + one-time stdout in cmd/blipd.
+	log.Printf("blipd: adoption code generated (see %s 0600, printed once to stdout)", DefaultAdoptCodeFile)
 }
 
 func (s *Server) persistAdopted(adopted bool) {
@@ -326,6 +330,32 @@ func (s *Server) Handler() http.Handler {
 // only the auth gate differs. Never serve this handler on TCP.
 func (s *Server) LocalHandler() http.Handler {
 	return s.handler(true)
+}
+
+// ServeTLS serves the management API over TLS (e.g. when the operator
+// provides a management certificate via certFile/keyFile). Plain-HTTP serving
+// via Handler()/LocalHandler() is unchanged — this only adds the opt-in TLS
+// listener, so existing http:// loopback and LAN use keeps working.
+func (s *Server) ServeTLS(addr, certFile, keyFile string) error {
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           s.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	return srv.ListenAndServeTLS(certFile, keyFile)
+}
+
+// ServeTLSConfig is ServeTLS with an explicit tls.Config instead of cert/key
+// files (in-memory certificates, custom roots, mTLS). The config must carry a
+// certificate (Certificates or GetCertificate); pass "" cert/key files.
+func (s *Server) ServeTLSConfig(addr string, tlsConf *tls.Config) error {
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           s.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+		TLSConfig:         tlsConf,
+	}
+	return srv.ListenAndServeTLS("", "")
 }
 
 // handler builds the management API mux. local must only be true for the Unix
@@ -402,33 +432,23 @@ func (s *Server) withSecurityHeaders(next http.Handler) http.Handler {
 }
 
 // checkToken compares the Authorization header against the bearer token in
-// constant time ("Bearer " prefix optional). XOR-fold over bytes avoids the
-// two []byte conversions that allocated on every authenticated request; the
-// loop always runs len(tok) iterations for equal-length inputs.
+// constant time ("Bearer " prefix optional).
 func checkToken(hdr, want string) bool {
 	tok := hdr
 	if len(tok) > 7 && tok[:7] == "Bearer " {
 		tok = tok[7:]
 	}
-	if tok == "" || len(tok) != len(want) {
+	if tok == "" || want == "" {
 		return false
 	}
-	var diff byte
-	for i := 0; i < len(tok); i++ {
-		diff |= tok[i] ^ want[i]
-	}
-	return diff == 0
+	return subtle.ConstantTimeCompare([]byte(tok), []byte(want)) == 1
 }
 
 func checkClaimCode(got, want string) bool {
-	if got == "" || want == "" || len(got) != len(want) {
+	if got == "" || want == "" {
 		return false
 	}
-	var diff byte
-	for i := 0; i < len(got); i++ {
-		diff |= got[i] ^ want[i]
-	}
-	return diff == 0
+	return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
 }
 
 func (s *Server) auth(h http.HandlerFunc) http.HandlerFunc {
@@ -458,19 +478,8 @@ func (s *Server) auth(h http.HandlerFunc) http.HandlerFunc {
 			// Bound the table so rotating source IPs cannot grow it forever.
 			if len(s.authFails) >= maxAuthFailEntries {
 				sweepAuthFailsLocked(s.authFails)
-			}
-			if len(s.authFails) >= maxAuthFailEntries {
-				for k, f := range s.authFails {
-					if time.Now().After(f.until) || f.until.IsZero() {
-						delete(s.authFails, k)
-						break
-					}
-				}
 				if len(s.authFails) >= maxAuthFailEntries {
-					for k := range s.authFails {
-						delete(s.authFails, k)
-						break
-					}
+					evictOldestAuthFailLocked(s.authFails)
 				}
 			}
 			f := s.authFails[src]
@@ -479,6 +488,7 @@ func (s *Server) auth(h http.HandlerFunc) http.HandlerFunc {
 				s.authFails[src] = f
 			}
 			f.count++
+			f.seen = time.Now()
 			if f.count >= 5 {
 				f.until = time.Now().Add(5 * time.Minute)
 				f.count = 0
@@ -620,8 +630,20 @@ func (s *Server) handleRateLimit(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "qps must be >= 0", http.StatusBadRequest)
 			return
 		}
+		// Upper bound: an absurd QPS is either a typo or abuse — it would
+		// effectively disable the limiter and can overflow downstream burst
+		// math. The controller enforces the same bound, so accepted fleet
+		// values are always pushable.
+		if req.QPS > maxMgmtRateLimit {
+			http.Error(w, "qps too large (max 100000)", http.StatusBadRequest)
+			return
+		}
 		if req.Burst < 0 {
 			req.Burst = 0
+		}
+		if req.Burst > maxMgmtRateLimit {
+			http.Error(w, "burst too large (max 100000)", http.StatusBadRequest)
+			return
 		}
 		if err := rc.SetRateLimit(req.QPS, req.Burst); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -1057,6 +1079,9 @@ func (s *Server) handleAdopt(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req AdoptRequest
+	// Bound the body like every other management endpoint so a giant payload
+	// cannot be slurped (the claim code itself is a few dozen bytes).
+	r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
@@ -1079,11 +1104,8 @@ func (s *Server) handleAdopt(w http.ResponseWriter, r *http.Request) {
 	if req.Code == "" || !checkClaimCode(req.Code, s.claimCode) {
 		if len(s.adoptFails) >= maxAuthFailEntries {
 			sweepAuthFailsLocked(s.adoptFails)
-		}
-		if len(s.adoptFails) >= maxAuthFailEntries {
-			for k := range s.adoptFails {
-				delete(s.adoptFails, k)
-				break
+			if len(s.adoptFails) >= maxAuthFailEntries {
+				evictOldestAuthFailLocked(s.adoptFails)
 			}
 		}
 		f := s.adoptFails[src]
@@ -1092,6 +1114,7 @@ func (s *Server) handleAdopt(w http.ResponseWriter, r *http.Request) {
 			s.adoptFails[src] = f
 		}
 		f.count++
+		f.seen = time.Now()
 		if f.count >= 5 {
 			f.until = time.Now().Add(5 * time.Minute)
 			f.count = 0
@@ -1103,6 +1126,7 @@ func (s *Server) handleAdopt(w http.ResponseWriter, r *http.Request) {
 	s.claimCode = ""  // one-time: invalidate immediately
 	s.adoptedBy = src // pin the management API to the adopting controller
 	s.persistAdopted(true)
+	ClearAdoptCodeFile("")
 	log.Printf("blipd: instance adopted via claim code")
 	writeJSON(w, AdoptResponse{Adopted: true, Token: s.currentToken()})
 }
@@ -1119,35 +1143,92 @@ func (s *Server) handleAdoptReset(w http.ResponseWriter, r *http.Request) {
 	s.persistAdopted(false)
 	s.genClaim()
 	s.adoptMu.Unlock()
-	writeJSON(w, AckResponse{OK: true, Msg: "reset; new adoption code generated (see journal)"})
+	// Rewrite the 0600 code file here (not in the TCP-only adoptAudit
+	// wrapper) so resets over the local Unix socket also leave a readable
+	// code behind. adoptAudit's rewrite stays as an idempotent best-effort.
+	if err := s.WriteAdoptCodeFile(""); err != nil {
+		log.Printf("blipd: adopt reset: cannot write code file: %v", err)
+	}
+	writeJSON(w, AckResponse{OK: true, Msg: "reset; new adoption code generated"})
 }
 
-// adoptFail is one source IP's bad-guess state for the claim-code handshake.
+// adoptFail is one source IP's bad-guess state for the claim-code handshake
+// (and, via the same shape, for bearer-token guesses on the management API).
 type adoptFail struct {
 	count int
 	until time.Time
+	// seen is the last failure time. Unlocked counters expire authFailWindow
+	// after it (sliding window, mirroring the controller login limiter) so
+	// stale guesses age out instead of accumulating forever.
+	seen time.Time
 }
 
 // maxAuthFailEntries bounds the brute-force tables so rotating source IPs
-// cannot grow them without bound. Expired entries are swept first.
+// cannot grow them without bound. Expired entries are swept first, then the
+// least-recently-used entry is evicted.
 const maxAuthFailEntries = 10000
 
-// sweepAuthFailsLocked drops expired entries. Caller holds authMu or adoptMu.
+// authFailWindow is the sliding window after which an unlocked (never locked)
+// failure counter expires. It mirrors the controller login limiter's
+// loginLockWindow so a slow trickle of guesses cannot build up indefinitely.
+const authFailWindow = 5 * time.Minute
+
+// maxMgmtRateLimit caps QPS/burst accepted by /api/v1/ratelimit. Anything
+// above is a typo or abuse (it would effectively disable the limiter).
+const maxMgmtRateLimit = 100_000
+
+// sweepAuthFailsLocked drops expired locks and stale unlocked counters.
+// Caller holds authMu or adoptMu.
 func sweepAuthFailsLocked(m map[string]*adoptFail) {
 	if len(m) == 0 {
 		return
 	}
 	now := time.Now()
 	for k, f := range m {
-		if f == nil || (!f.until.IsZero() && now.After(f.until)) {
-			// Keep recent non-locked counters; drop only expired locks.
-			// Counters without a lock (until zero) are kept unless the
-			// table is over budget (handled by the caller).
-			if f != nil && f.until.IsZero() {
-				continue
+		if f == nil {
+			delete(m, k)
+			continue
+		}
+		if !f.until.IsZero() {
+			// Locked: drop only once the lock itself expired.
+			if now.After(f.until) {
+				delete(m, k)
 			}
+			continue
+		}
+		// Unlocked counter: expire after a sliding window with no new
+		// failures (mirrors the login limiter's window).
+		if f.seen.IsZero() || now.Sub(f.seen) > authFailWindow {
 			delete(m, k)
 		}
+	}
+}
+
+// evictOldestAuthFailLocked removes the least-recently-used entry so the
+// brute-force tables stay bounded under rotating-IP attacks. Entries without
+// an active lock are preferred victims; an active lock is evicted only when
+// the whole table is locked. Caller holds authMu or adoptMu.
+func evictOldestAuthFailLocked(m map[string]*adoptFail) {
+	now := time.Now()
+	victim := ""
+	var oldest time.Time
+	for pass := 0; pass < 2 && victim == ""; pass++ {
+		first := true
+		for k, f := range m {
+			if f == nil {
+				victim = k
+				break
+			}
+			if pass == 0 && !f.until.IsZero() && now.Before(f.until) {
+				continue // active lock: only a second-pass victim
+			}
+			if first || f.seen.Before(oldest) {
+				victim, oldest, first = k, f.seen, false
+			}
+		}
+	}
+	if victim != "" {
+		delete(m, victim)
 	}
 }
 

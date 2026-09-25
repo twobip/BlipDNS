@@ -761,6 +761,21 @@ func warnInsecureInstanceURL(id, raw string) {
 	}
 }
 
+// warnMgmtTLSInstanceURL logs what to expect for https:// management URLs:
+// the controller dials with the system roots, so a self-signed blipd
+// management cert (-admin-tls-cert) must be installed into the system trust
+// first. Without that the poll fails TLS verification — use plain HTTP on an
+// isolated network or co-locate via Unix socket instead.
+func warnMgmtTLSInstanceURL(id, raw string) {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return
+	}
+	if u.Scheme == "https" {
+		log.Printf("blipc: instance %q uses https management to %q: certificate must chain to the system roots (install self-signed management certs into the system trust); polling fails otherwise", id, raw)
+	}
+}
+
 // isLoopbackHost reports whether host is a loopback address or name: 127/8,
 // ::1, or localhost. Remote HTTP management is rejected; these stay allowed
 // for same-host setups (prefer the Unix socket where possible).
@@ -775,9 +790,57 @@ func isLoopbackHost(host string) bool {
 	return false
 }
 
-func (f *Fleet) Add(ctx context.Context, cfg InstanceConfig) error {
-	if cfg.ID == "" {
+// validateInstanceID rejects empty, overlong or unsafe instance IDs. IDs flow
+// into log lines, map keys and API paths, so only the allowlist charset
+// [A-Za-z0-9._-] (1-64 chars, same as DoH client IDs) is accepted: slashes,
+// query characters, spaces, newlines and control bytes are rejected.
+func validateInstanceID(id string) error {
+	if id == "" {
 		return fmt.Errorf("controller: instance requires id")
+	}
+	if len(id) > 64 {
+		return fmt.Errorf("controller: instance id too long (max 64 chars)")
+	}
+	for i := 0; i < len(id); i++ {
+		c := id[i]
+		if c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '.' || c == '_' || c == '-' {
+			continue
+		}
+		if c == '\n' || c == '\r' {
+			return fmt.Errorf("controller: instance id must not contain newlines")
+		}
+		return fmt.Errorf("controller: invalid instance id %q (allowed: A-Za-z0-9._-, max 64 chars)", id)
+	}
+	return nil
+}
+
+// validateInstanceLabel rejects overlong labels and embedded newlines/control
+// characters that could forge log lines or break the dashboard. Empty is
+// allowed (Add defaults it to the ID).
+func validateInstanceLabel(label string) error {
+	if label == "" {
+		return nil
+	}
+	if len(label) > 128 {
+		return fmt.Errorf("controller: instance label too long (max 128 chars)")
+	}
+	for _, r := range label {
+		if r == '\n' || r == '\r' {
+			return fmt.Errorf("controller: instance label must not contain newlines")
+		}
+		if r < 0x20 || r == 0x7f {
+			return fmt.Errorf("controller: instance label must not contain control characters")
+		}
+	}
+	return nil
+}
+
+func (f *Fleet) Add(ctx context.Context, cfg InstanceConfig) error {
+	if err := validateInstanceID(cfg.ID); err != nil {
+		return err
+	}
+	if err := validateInstanceLabel(cfg.Label); err != nil {
+		return err
 	}
 	if cfg.URL == "" {
 		return fmt.Errorf("controller: instance %s requires url", cfg.ID)
@@ -786,6 +849,7 @@ func (f *Fleet) Add(ctx context.Context, cfg InstanceConfig) error {
 		return err
 	}
 	warnInsecureInstanceURL(cfg.ID, cfg.URL)
+	warnMgmtTLSInstanceURL(cfg.ID, cfg.URL)
 	if cfg.Label == "" {
 		cfg.Label = cfg.ID
 	}
@@ -1074,10 +1138,18 @@ func (f *Fleet) RateLimitQPS() int {
 }
 
 // SetRateLimitQPSDefault records the fleet-wide DNS per-client QPS limit
-// without pushing it. Used at startup from the controller config.
+// without pushing it. Used at startup from the controller config. Out-of-range
+// values are clamped to [0, maxControllerRateLimitQPS] (mirroring blipd's
+// 100k cap) so a hand-edited controller.yaml can never persist an unpushable
+// value that fails every reconcile.
 func (f *Fleet) SetRateLimitQPSDefault(qps int) {
 	if qps < 0 {
+		log.Printf("blipc: warning: negative startup rate_limit_qps %d; clamping to 0 (disabled)", qps)
 		qps = 0
+	}
+	if qps > maxControllerRateLimitQPS {
+		log.Printf("blipc: warning: startup rate_limit_qps %d exceeds max %d; clamping", qps, maxControllerRateLimitQPS)
+		qps = maxControllerRateLimitQPS
 	}
 	f.mu.Lock()
 	f.rateLimitQPS = qps
@@ -1149,8 +1221,14 @@ func bootstrapKey(servers []upstream.UpstreamServer) string {
 
 // SetUpstreamDefault records the fleet-wide default upstream pool, routes and
 // bootstrap servers without distributing them. Used at startup from the
-// controller config.
+// controller config. An invalid startup value is dropped (not stored) with a
+// warning so every poll reconcile does not fail pushing it; use the Settings
+// UI (which validates via SetUpstream) to correct it.
 func (f *Fleet) SetUpstreamDefault(servers []upstream.UpstreamServer, routes []upstream.UpstreamRoute, bootstrap []upstream.UpstreamServer) {
+	if err := validateUpstreamPool(servers, routes, bootstrap); err != nil {
+		log.Printf("blipc: warning: ignoring invalid startup upstream config: %q", err)
+		return
+	}
 	f.mu.Lock()
 	f.upstreamServers = servers
 	f.upstreamRoutes = routes
@@ -1158,10 +1236,31 @@ func (f *Fleet) SetUpstreamDefault(servers []upstream.UpstreamServer, routes []u
 	f.mu.Unlock()
 }
 
+// validateUpstreamPool checks the pool/routes/bootstrap via the same
+// constructor blipd uses, so an invalid fleet value is caught on the
+// controller instead of failing on every instance.
+func validateUpstreamPool(servers []upstream.UpstreamServer, routes []upstream.UpstreamRoute, bootstrap []upstream.UpstreamServer) error {
+	if _, err := upstream.NewPoolWithBootstrap(servers, routes, "", bootstrap); err != nil {
+		return err
+	}
+	return nil
+}
+
 // SetUpstream sets the fleet-wide default upstream pool, routes and bootstrap
 // servers, persists them, and pushes the effective value (default or
 // per-instance override) to every adopted instance.
 func (f *Fleet) SetUpstream(ctx context.Context, servers []upstream.UpstreamServer, routes []upstream.UpstreamRoute, bootstrap []upstream.UpstreamServer) map[string]string {
+	if err := validateUpstreamPool(servers, routes, bootstrap); err != nil {
+		log.Printf("blipc: warning: refusing invalid upstream: %q", err)
+		out := make(map[string]string)
+		for _, inst := range f.snapshotInstances() {
+			out[inst.id()] = "invalid upstream: " + err.Error()
+		}
+		if len(out) == 0 {
+			out[""] = "invalid upstream: " + err.Error()
+		}
+		return out
+	}
 	prev, _ := f.Upstream()
 	f.SetUpstreamDefault(servers, routes, bootstrap)
 	if f.configPath != "" {
@@ -1409,7 +1508,7 @@ func (f *Fleet) maybePushUpstream(ctx context.Context, i *Instance, reported *co
 		return
 	}
 	if err := i.ctl().SetUpstream(ctx, wantServers, wantRoutes, wantBootstrap); err != nil {
-		log.Printf("blipc: reconcile upstream for %s: %v", i.id(), err)
+		log.Printf("blipc: reconcile upstream for %q: %q", i.id(), err)
 	}
 }
 
@@ -1528,7 +1627,7 @@ func (f *Fleet) maybePushDoH(ctx context.Context, i *Instance, reported *control
 		return
 	}
 	if err := i.ctl().SetDoHHTTPAddr(ctx, want); err != nil {
-		log.Printf("blipc: reconcile doh for %s: %v", i.id(), err)
+		log.Printf("blipc: reconcile doh for %q: %q", i.id(), err)
 	}
 }
 
@@ -1545,7 +1644,7 @@ func (f *Fleet) maybePushRateLimit(ctx context.Context, i *Instance, reported *c
 		return
 	}
 	if err := i.ctl().SetRateLimit(ctx, want, 0); err != nil {
-		log.Printf("blipc: reconcile rate limit for %s: %v", i.id(), err)
+		log.Printf("blipc: reconcile rate limit for %q: %q", i.id(), err)
 	}
 }
 
@@ -1611,7 +1710,7 @@ func (f *Fleet) maybePushHA(ctx context.Context, i *Instance) {
 		return
 	}
 	if err := f.setAndApplyHA(ctx, i, *cfg); err != nil {
-		log.Printf("blipc: reconcile HA for %s: %v", i.id(), err)
+		log.Printf("blipc: reconcile HA for %q: %q", i.id(), err)
 		return
 	}
 	i.markHAApplied(f.haHashFor(i.id()))
@@ -1668,15 +1767,54 @@ func (f *Fleet) TrustedProxies() []string {
 // SetTrustedProxiesDefault records trusted proxies without persisting.
 // Used at startup from the controller config.
 func (f *Fleet) SetTrustedProxiesDefault(proxies []string) {
+	clean, dropped := filterBroadProxies(proxies)
+	for _, d := range dropped {
+		log.Printf("blipc: warning: ignoring overly broad trusted proxy %q (would trust all peers via forwarded headers)", d)
+	}
 	f.mu.Lock()
-	f.trustedProxies = append([]string(nil), proxies...)
+	f.trustedProxies = append([]string(nil), clean...)
 	f.mu.Unlock()
+}
+
+// isBroadProxyCIDR reports whether v is a CIDR that matches all addresses
+// (e.g. 0.0.0.0/0 or ::/0): trusting it would honor spoofed forwarded
+// headers from any peer.
+func isBroadProxyCIDR(v string) bool {
+	v = strings.TrimSpace(v)
+	if !strings.Contains(v, "/") {
+		return false
+	}
+	_, n, err := net.ParseCIDR(v)
+	if err != nil {
+		return false
+	}
+	ones, _ := n.Mask.Size()
+	return ones == 0
+}
+
+// filterBroadProxies drops overly broad CIDRs (warn+ignore at startup).
+func filterBroadProxies(proxies []string) (keep, dropped []string) {
+	for _, v := range proxies {
+		if v = strings.TrimSpace(v); v == "" {
+			continue
+		} else if isBroadProxyCIDR(v) {
+			dropped = append(dropped, v)
+			continue
+		}
+		keep = append(keep, v)
+	}
+	return keep, dropped
 }
 
 // SetTrustedProxies validates, records and persists trusted proxies.
 func (f *Fleet) SetTrustedProxies(proxies []string) error {
 	if _, err := ParseTrustedProxies(proxies); err != nil {
 		return err
+	}
+	for _, v := range proxies {
+		if isBroadProxyCIDR(v) {
+			return fmt.Errorf("invalid trusted proxy %q: overly broad CIDR would trust all peers", strings.TrimSpace(v))
+		}
 	}
 	clean := make([]string, 0, len(proxies))
 	for _, v := range proxies {
@@ -1804,7 +1942,7 @@ func (f *Fleet) maybePushCache(ctx context.Context, i *Instance, reported *contr
 		return
 	}
 	if err := i.ctl().SetCacheConfig(ctx, wantSize); err != nil {
-		log.Printf("blipc: reconcile cache for %s: %v", i.id(), err)
+		log.Printf("blipc: reconcile cache for %q: %q", i.id(), err)
 	}
 }
 
@@ -1902,7 +2040,7 @@ func (f *Fleet) maybePushRecords(ctx context.Context, i *Instance, reported *con
 	}
 	want := f.effectiveRecords(i.id())
 	if err := i.ctl().SetRecords(ctx, want); err != nil {
-		log.Printf("blipc: reconcile records for %s: %v", i.id(), err)
+		log.Printf("blipc: reconcile records for %q: %q", i.id(), err)
 	}
 }
 
@@ -2765,7 +2903,7 @@ func (f *Fleet) logImport(format string, args ...interface{}) {
 		f.importLog = append([]string(nil), f.importLog[len(f.importLog)-300:]...)
 	}
 	f.blMu.Unlock()
-	log.Printf("blipc: import: %s", line)
+	log.Printf("blipc: import: %q", line)
 }
 
 // ClearImportLog drops all buffered import output.
@@ -2890,7 +3028,7 @@ func (f *Fleet) runBlocklistImport(ctx context.Context, gen int) {
 			}
 			defer func() { <-sem }()
 			t0 := f.now()
-			f.logImport("[%d/%d] fetching %s", idx+1, len(urls), u)
+			f.logImport("[%d/%d] fetching %q", idx+1, len(urls), u)
 			// Echo the stored validators so an unchanged list costs a 304
 			// instead of a full download.
 			var v blocklist.Validators
@@ -3136,14 +3274,14 @@ func (f *Fleet) pushBlocklist(ctx context.Context) map[string]string {
 			ictx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 			defer cancel()
 			if err := in.ctl().SetBlocklist(ictx, domains, allowed); err != nil {
-				log.Printf("blipc: distribute blocklist instance=%s FAILED after %s: %v", in.id(), f.now().Sub(t0).Round(time.Millisecond), err)
+				log.Printf("blipc: distribute blocklist instance=%q FAILED after %s: %q", in.id(), f.now().Sub(t0).Round(time.Millisecond), err)
 				mu.Lock()
 				results[in.id()] = err.Error()
 				mu.Unlock()
 				return
 			}
 			in.markBlocklistApplied(hash)
-			log.Printf("blipc: distribute blocklist instance=%s ok in %s (domains=%d)", in.id(), f.now().Sub(t0).Round(time.Millisecond), len(domains))
+			log.Printf("blipc: distribute blocklist instance=%q ok in %s (domains=%d)", in.id(), f.now().Sub(t0).Round(time.Millisecond), len(domains))
 			mu.Lock()
 			results[in.id()] = "ok"
 			mu.Unlock()
@@ -3181,21 +3319,21 @@ func (f *Fleet) maybePushBlocklist(ctx context.Context, i *Instance, reported *c
 	// pushed successfully, another controller (or process) has overwritten the
 	// instance — warn loudly once so an external writer can't hide.
 	if rep != i.pushedBlocklistHash() && i.foreignBlocklistDetected() {
-		log.Printf("blipc: WARNING instance=%s url=%s blocklist changed by an external writer: reported=%016x fleet=%016x last-pushed=%016x",
+		log.Printf("blipc: WARNING instance=%q url=%q blocklist changed by an external writer: reported=%016x fleet=%016x last-pushed=%016x",
 			i.id(), i.snapshotConfig().URL, rep, hash, i.pushedBlocklistHash())
 	}
 	// Don't re-upload the whole list while a previous push is still in flight,
 	// and back off after a failure so a stuck instance (or one that rejects the
 	// payload) doesn't get hammered with full-list uploads every poll.
 	if !i.tryBeginBlocklistPush(f.now()) {
-		log.Printf("blipc: reconcile blocklist instance=%s url=%s SKIP (push in flight or backing off) fleet=%016x reported=%016x", i.id(), i.snapshotConfig().URL, hash, rep)
+		log.Printf("blipc: reconcile blocklist instance=%q url=%q SKIP (push in flight or backing off) fleet=%016x reported=%016x", i.id(), i.snapshotConfig().URL, hash, rep)
 		return
 	}
-	log.Printf("blipc: reconcile blocklist instance=%s url=%s PUSH fleet=%016x reported=%016x domains=%d allowed=%d", i.id(), i.snapshotConfig().URL, hash, rep, f.blocklist.Count(), len(f.blocklist.Allowed()))
+	log.Printf("blipc: reconcile blocklist instance=%q url=%q PUSH fleet=%016x reported=%016x domains=%d allowed=%d", i.id(), i.snapshotConfig().URL, hash, rep, f.blocklist.Count(), len(f.blocklist.Allowed()))
 	err := i.ctl().SetBlocklist(ctx, f.blocklist.List(), f.blocklist.Allowed())
 	i.finishBlocklistPush(err, hash)
 	if err != nil {
-		log.Printf("blipc: reconcile blocklist for %s: %v", i.id(), err)
+		log.Printf("blipc: reconcile blocklist for %q: %q", i.id(), err)
 	}
 }
 

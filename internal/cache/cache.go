@@ -8,6 +8,7 @@ package cache
 import (
 	"container/list"
 	"context"
+	"fmt"
 	"strconv"
 	"strings"
 	"sync"
@@ -24,6 +25,30 @@ import (
 // on 1-in-N hits keeps an approximate-LRU ordering while the common hit path
 // stays entirely on shared locks + atomics.
 const promoteEvery = 16
+
+// maxAllowedCacheEntries caps the cache size to prevent absurd memory use
+// (each entry holds a full DNS message; 1M entries is already gigabytes).
+const maxAllowedCacheEntries = 1000000
+
+// defaultMaxEntries is used when New is called with 0 (unlimited) to prevent
+// unbounded growth: an unbounded cache grows forever on a rotating scanner.
+// Callers that explicitly want unlimited should still pass 0 and get the
+// bounded default; true unlimited is available via SetMaxEntries(0) explicitly
+// after construction (documented as dangerous).
+const defaultMaxEntries = 100000
+
+// maxInflightUpstream bounds concurrent upstream fetches (singleflight
+// misses) so a cache-bypass flood cannot park thousands of goroutines/FDs on
+// stalled upstreams. DoHit fails fast with an overload error when full.
+const maxInflightUpstream = 256
+
+// upstreamInflight is the global semaphore bounding concurrent upstream
+// fetches across all Cache instances in the process.
+var upstreamInflight = make(chan struct{}, maxInflightUpstream)
+
+// janitorInterval is how often expired entries are swept. Expired entries are
+// otherwise removed lazily on Get; without a sweep a cold cache grows forever.
+const janitorInterval = time.Minute
 
 type entry struct {
 	key    Key
@@ -44,26 +69,84 @@ type Cache struct {
 	maxEntries int
 	group      singleflight.Group
 	now        func() time.Time
+	stopCh     chan struct{}
+	stopOnce   sync.Once
 }
 
 // New creates a Cache. ttlCap is the maximum time a response may be cached
 // regardless of its record TTL. maxEntries bounds the number of cached
-// responses in memory; 0 disables the limit (entries are then dropped only
-// on expiry).
+// responses in memory; 0 selects a sane bounded default (defaultMaxEntries)
+// instead of unlimited growth. Use SetMaxEntries(0) explicitly after
+// construction only if truly unbounded growth is acceptable.
 func New(ttlCap time.Duration, maxEntries int) *Cache {
 	if ttlCap <= 0 {
 		ttlCap = time.Hour
+	}
+	if maxEntries == 0 {
+		maxEntries = defaultMaxEntries
+	}
+	if maxEntries < 0 {
+		maxEntries = 0
+	}
+	if maxEntries > maxAllowedCacheEntries {
+		maxEntries = maxAllowedCacheEntries
 	}
 	hint := maxEntries
 	if hint < 0 {
 		hint = 0
 	}
-	return &Cache{
+	if hint > 1024 {
+		hint = 1024
+	}
+	c := &Cache{
 		items:      make(map[Key]*entry, hint),
 		lru:        list.New(),
 		ttlCap:     ttlCap,
 		maxEntries: maxEntries,
 		now:        time.Now,
+		stopCh:     make(chan struct{}),
+	}
+	go c.janitor()
+	return c
+}
+
+// Stop terminates the janitor goroutine. Long-lived servers never need it,
+// but tests creating many caches should call it to avoid goroutine leaks.
+func (c *Cache) Stop() {
+	if c == nil {
+		return
+	}
+	c.stopOnce.Do(func() { close(c.stopCh) })
+}
+
+// janitor periodically purges expired entries so a cold cache does not grow
+// forever on entries that are never re-queried (and thus never lazily
+// expired on Get).
+func (c *Cache) janitor() {
+	t := time.NewTicker(janitorInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-c.stopCh:
+			return
+		case <-t.C:
+			c.purgeExpired()
+		}
+	}
+}
+
+// purgeExpired removes entries past their expiry under the exclusive lock.
+func (c *Cache) purgeExpired() {
+	now := c.now()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for k, e := range c.items {
+		if now.After(e.expire) {
+			delete(c.items, k)
+			if e.elem != nil {
+				c.lru.Remove(e.elem)
+			}
+		}
 	}
 }
 
@@ -143,6 +226,9 @@ func minTTL(m *dns.Msg) time.Duration {
 	min := uint32(0)
 	seen := false
 	for _, rr := range m.Answer {
+		if rr == nil || rr.Header() == nil {
+			continue
+		}
 		t := rr.Header().Ttl
 		// RFC 2308 §3: negative answers cache for min(SOA TTL, SOA minimum).
 		// A positive answer never carries an SOA, so this only affects the
@@ -156,6 +242,9 @@ func minTTL(m *dns.Msg) time.Duration {
 		}
 	}
 	for _, rr := range m.Ns {
+		if rr == nil || rr.Header() == nil {
+			continue
+		}
 		t := rr.Header().Ttl
 		if soa, ok := rr.(*dns.SOA); ok && soa.Minttl < t {
 			t = soa.Minttl
@@ -179,11 +268,9 @@ func minTTL(m *dns.Msg) time.Duration {
 // (every promoteEvery-th hit) marks it most-recently-used so it survives LRU
 // eviction.
 //
-// The entire hit path runs on the shared lock: the lookup and expiry check
-// take c.mu.RLock, the popularity bump is an atomic add, and LRU promotion is
-// skipped for all but every promoteEvery-th hit. Only expiry cleanup and the
-// occasional promotion take the exclusive lock. The message Copy happens
-// outside the lock so a slow Copy can't block other readers or writers.
+// The message fields (msg/expire) are snapshotted under the shared lock and
+// copied after unlock: reading them after RUnlock would race with Set (which
+// replaces them under the exclusive lock).
 func (c *Cache) Get(k Key) (*dns.Msg, bool) {
 	if k.Name == "" {
 		return nil, false
@@ -194,9 +281,14 @@ func (c *Cache) Get(k Key) (*dns.Msg, bool) {
 		c.mu.RUnlock()
 		return nil, false
 	}
+	// Snapshot under RLock before any unlock: e.msg/e.expire are mutated by
+	// Set under the write lock, so reading them after RUnlock races.
 	now := c.now()
-	if now.After(e.expire) {
-		c.mu.RUnlock()
+	expire := e.expire
+	msg := e.msg
+	shouldPromote := e.hits.Add(1)%promoteEvery == 0
+	c.mu.RUnlock()
+	if now.After(expire) {
 		// Expired: take the exclusive lock to delete it (or use a value a
 		// concurrent Set refreshed in the meantime). Single clock read, single
 		// re-lookup under the write lock.
@@ -204,42 +296,44 @@ func (c *Cache) Get(k Key) (*dns.Msg, bool) {
 		now2 := c.now()
 		if e2, ok2 := c.items[k]; ok2 {
 			if !now2.After(e2.expire) {
-				e = e2
+				expire = e2.expire
+				msg = e2.msg
 				now = now2
 				c.mu.Unlock()
-				goto copy
+				goto copySnap
 			}
 			delete(c.items, k)
-			c.lru.Remove(e2.elem)
+			if e2.elem != nil {
+				c.lru.Remove(e2.elem)
+			}
 		}
 		c.mu.Unlock()
 		return nil, false
 	}
-	// Approximate LRU: promote only every promoteEvery-th hit. The counter is
-	// per-entry, so promotion is probabilistic under concurrency — good
-	// enough to keep hot entries at the front without exclusive locking.
-	// Add returns the new count, so one atomic covers both the bump and the
-	// cadence check.
-	if e.hits.Add(1)%promoteEvery == 0 {
-		c.mu.RUnlock()
+	// Approximate LRU: promote only every promoteEvery-th hit.
+	if shouldPromote {
 		c.mu.Lock()
 		// Re-check: the entry may have been evicted or replaced meanwhile.
-		if e2, ok2 := c.items[k]; ok2 && e2 == e {
+		if e2, ok2 := c.items[k]; ok2 && e2 == e && e.elem != nil {
 			c.lru.MoveToFront(e.elem)
 		}
 		c.mu.Unlock()
-	} else {
-		c.mu.RUnlock()
 	}
 
-copy:
-	remaining := e.expire.Sub(now)
+copySnap:
+	remaining := expire.Sub(now)
 	ttl := uint32(remaining / time.Second)
 	if ttl < 1 {
 		ttl = 1
 	}
-	out := e.msg.Copy()
+	if msg == nil {
+		return nil, false
+	}
+	out := msg.Copy()
 	for _, rr := range out.Answer {
+		if rr == nil || rr.Header() == nil {
+			continue
+		}
 		rr.Header().Ttl = ttl
 	}
 	// Authority and additional sections expire with the entry too: serving
@@ -248,10 +342,16 @@ copy:
 	// encodes extended RCODE/version/flags such as DO) and must be left
 	// alone.
 	for _, rr := range out.Ns {
+		if rr == nil || rr.Header() == nil {
+			continue
+		}
 		rr.Header().Ttl = ttl
 	}
 	for _, rr := range out.Extra {
 		if _, ok := rr.(*dns.OPT); ok {
+			continue
+		}
+		if rr == nil || rr.Header() == nil {
 			continue
 		}
 		rr.Header().Ttl = ttl
@@ -312,15 +412,23 @@ func (c *Cache) evictLocked() {
 // SetMaxEntries adjusts the in-memory size limit at runtime (0 = unlimited).
 // The cache is trimmed immediately if the new limit is below the current size.
 // This lets the controller tune the cache without a blipd restart.
+// Absurd values (>maxAllowedCacheEntries) are capped to maxAllowedCacheEntries
+// to prevent a misconfigured push from exhausting memory.
 func (c *Cache) SetMaxEntries(n int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if n < 0 {
 		n = 0
 	}
+	if n > maxAllowedCacheEntries {
+		n = maxAllowedCacheEntries
+	}
 	c.maxEntries = n
 	c.evictLocked()
 }
+
+// MaxAllowedEntries returns the upper bound enforced on cache sizes.
+func MaxAllowedEntries() int { return maxAllowedCacheEntries }
 
 // DoHit returns a cached response if present, otherwise runs fn (coalescing
 // concurrent identical fetches onto one upstream call). The bool reports
@@ -328,13 +436,29 @@ func (c *Cache) SetMaxEntries(n int) {
 // behind an in-flight fetch report false — they waited out the full upstream
 // latency, so counting them as hits would bill upstream time to the cache
 // averages on the dashboard.
+//
+// The request context is propagated: if ctx is cancelled while coalesced
+// behind an in-flight fetch, DoHit returns ctx.Err() instead of blocking on
+// the upstream. A global inflight semaphore bounds concurrent upstream
+// fetches (held by the singleflight leader only, so a burst of identical
+// queries coalesces onto one slot); when saturated DoHit fails fast
+// (overload) instead of parking the DNS path.
 func (c *Cache) DoHit(ctx context.Context, k Key, fn func() (*dns.Msg, error)) (*dns.Msg, bool, error) {
 	if m, ok := c.Get(k); ok {
 		return m, true, nil
 	}
 	// singleflight is string-keyed; the String() build runs on the miss path
-	// only, never on a cache hit.
-	v, err, shared := c.group.Do(k.String(), func() (interface{}, error) {
+	// only, never on a cache hit. DoChan lets a cancelled caller stop waiting
+	// without cancelling the shared fetch for other waiters. The inflight
+	// semaphore is acquired inside the singleflight func so only the leader
+	// holds a slot — coalesced waiters share it.
+	ch := c.group.DoChan(k.String(), func() (interface{}, error) {
+		select {
+		case upstreamInflight <- struct{}{}:
+			defer func() { <-upstreamInflight }()
+		default:
+			return nil, fmt.Errorf("upstream overloaded: too many concurrent fetches")
+		}
 		m, ferr := fn()
 		if ferr != nil {
 			return nil, ferr
@@ -342,20 +466,28 @@ func (c *Cache) DoHit(ctx context.Context, k Key, fn func() (*dns.Msg, error)) (
 		c.Set(k, m)
 		return m, nil
 	})
-	if err != nil {
-		return nil, false, err
+	select {
+	case <-ctx.Done():
+		return nil, false, ctx.Err()
+	case r := <-ch:
+		if r.Err != nil {
+			return nil, false, r.Err
+		}
+		m, ok := r.Val.(*dns.Msg)
+		if !ok || m == nil {
+			return nil, false, fmt.Errorf("upstream returned nil response")
+		}
+		if r.Shared {
+			// Coalesced callers share one result pointer; serve() mutates the
+			// returned message (Id, Question), so give each sharer its own copy
+			// instead of racing on a shared one. The cache stored its own copy
+			// in Set, so this does not touch cached state.
+			m = m.Copy()
+		}
+		// ponytail: coalesced waiters report a miss (they waited out the fetch);
+		// per-waiter latency truthfulness wins over counting deduplicated trips.
+		return m, false, nil
 	}
-	m := v.(*dns.Msg)
-	if shared {
-		// Coalesced callers share one result pointer; serve() mutates the
-		// returned message (Id, Question), so give each sharer its own copy
-		// instead of racing on a shared one. The cache stored its own copy
-		// in Set, so this does not touch cached state.
-		m = m.Copy()
-	}
-	// ponytail: coalesced waiters report a miss (they waited out the fetch);
-	// per-waiter latency truthfulness wins over counting deduplicated trips.
-	return m, false, nil
 }
 
 // Purge drops every cached response. It is used when the blocklist changes so
@@ -375,7 +507,9 @@ func (c *Cache) Delete(k Key) {
 	defer c.mu.Unlock()
 	if e, ok := c.items[k]; ok {
 		delete(c.items, k)
-		c.lru.Remove(e.elem)
+		if e.elem != nil {
+			c.lru.Remove(e.elem)
+		}
 	}
 }
 

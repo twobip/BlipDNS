@@ -815,7 +815,7 @@ async function renderUpstreamErrors() {
 let savedRecords = [];     // fleet-wide local DNS records
 let rEditIndex = -1;       // -1 = adding, >=0 = editing an existing record
 
-function recordTypeLabel(t) { return t || "A"; }
+function recordTypeLabel(t) { return esc(t || "A"); }
 function recordValuePlaceholder(t) {
   return t === "A" ? "192.168.1.100" :
          t === "AAAA" ? "2001:db8::1" :
@@ -835,7 +835,7 @@ function renderRecords() {
       <td><span class="mono">${esc(r.domain)}</span></td>
       <td>${t}</td>
       <td><span class="mono">${esc(r.value)}</span></td>
-      <td class="num mono">${r.ttl > 0 ? r.ttl : "—"}</td>
+      <td class="num mono">${r.ttl > 0 ? esc(r.ttl) : "—"}</td>
       <td>
         <div class="row-actions">
           <button class="icon-btn" data-r-act="edit" data-r-i="${i}" title="Edit">${IC.edit}</button>
@@ -1451,8 +1451,8 @@ function serverRow(u) {
   row.innerHTML = `
     <input class="input up-name" placeholder="name (e.g. quad9)" style="width:120px" value="${esc(u.name || "")}"/>
     <input class="input grow up-addr" placeholder="tls://1.1.1.1 (DoT:853), 9.9.9.9 (udp:53) or https://1.1.1.1/dns-query" value="${esc(u.address || "")}"/>
-    <input class="input up-prio" type="number" min="0" title="Priority — lower = higher priority; 0 = route-only" style="width:72px" value="${u.priority ?? ""}"/>
-    <input class="input up-timeout" type="number" min="1" title="Seconds to wait before failing over to the next server (default 5)" style="width:72px" placeholder="5" value="${u.timeout_sec ?? ""}"/>
+    <input class="input up-prio" type="number" min="0" title="Priority — lower = higher priority; 0 = route-only" style="width:72px" value="${esc(u.priority ?? "")}"/>
+    <input class="input up-timeout" type="number" min="1" title="Seconds to wait before failing over to the next server (default 5)" style="width:72px" placeholder="5" value="${esc(u.timeout_sec ?? "")}"/>
     <button class="icon-btn up-del" title="Remove">${IC.trash}</button>`;
   row.querySelector(".up-del").onclick = () => { row.remove(); refreshRouteServerOptions(); };
   return row;
@@ -2328,8 +2328,8 @@ $("s-test-upstream").onclick = async () => {
       const addr = esc(t.address);
       if (t.ok) {
         const ans = (t.answers || []).slice(0, 3).map(esc).join(", ") || "no answer section";
-        const more = (t.answers || []).length > 3 ? ` (+${t.answers.length - 3} more)` : "";
-        return `<li><span class="badge on">ok · ${t.latency_ms}ms · ${esc(t.rcode || "")}</span><span class="mono">${label}</span> <span class="faint mono">${addr}</span><div class="cell-sub mono">${ans}${more}</div></li>`;
+        const more = (t.answers || []).length > 3 ? ` (+${esc(t.answers.length - 3)} more)` : "";
+        return `<li><span class="badge on">ok · ${esc(t.latency_ms)}ms · ${esc(t.rcode || "")}</span><span class="mono">${label}</span> <span class="faint mono">${addr}</span><div class="cell-sub mono">${ans}${more}</div></li>`;
       }
       return `<li><span class="badge err">fail</span><span class="mono">${label}</span> <span class="faint mono">${addr}</span><div class="cell-sub">${esc(t.error || "unknown error")}</div></li>`;
     }).join("");
