@@ -103,7 +103,8 @@ Both scripts accept an optional argument: `master` (default), `stable`, or a ver
 It listens on:
 - `dns_addr`    classic DNS over UDP + TCP
 - `doh_addr`    DNS-over-HTTPS at `GET/POST /dns-query` (RFC 8484)
-- `admin_addr`  management API (token-protected)
+- `admin_addr`  management API (token-protected, HTTPS by default using the
+  DoH certificate; `-admin-tls-cert`/`-admin-tls-key` override with own files)
 
 The `upstream` field accepts space/comma-separated specs with failover:
 - `udp://host:port` (or a bare `ip`/`host:port`; missing port defaults to 53)

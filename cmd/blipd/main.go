@@ -287,6 +287,16 @@ func main() {
 				}
 				return
 			}
+			// No explicit admin TLS flags: reuse the DoH certificate so the
+			// management API is HTTPS by default. Explicit flags above win.
+			if cfg.DoHTLS && tlsCert != nil {
+				admin.TLSConfig = srv.ManagementTLSConfig()
+				log.Printf("blipd: management API on https://%s (DoH certificate)", cfg.AdminAddr)
+				if err := admin.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
+					log.Printf("blipd: admin server: %v", err)
+				}
+				return
+			}
 			log.Printf("blipd: management API on http://%s", cfg.AdminAddr)
 			if err := admin.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 				log.Printf("blipd: admin server: %v", err)

@@ -884,6 +884,42 @@ func (f *Fleet) Add(ctx context.Context, cfg InstanceConfig) error {
 	return nil
 }
 
+// adminTLSRecheckInterval limits HTTPS re-probes for still-http instances:
+// without it every failed 5s poll would burn a 3s probe.
+const adminTLSRecheckInterval = time.Hour
+
+// maybeMigrateMgmtTLS probes the https equivalent after a failed poll and
+// persistently migrates when the instance gained TLS management (e.g. blipd
+// auto-enabled it on update). Never downgrades.
+func (f *Fleet) maybeMigrateMgmtTLS(inst *Instance, id, rawURL string) {
+	up := httpsCandidate(rawURL)
+	if up == "" {
+		return
+	}
+	inst.mu.RLock()
+	last := inst.lastTLSProbe
+	inst.mu.RUnlock()
+	if f.now().Sub(last) < adminTLSRecheckInterval {
+		return
+	}
+	inst.mu.Lock()
+	inst.lastTLSProbe = f.now()
+	inst.mu.Unlock()
+	if !probeMgmtTLS(&http.Client{Timeout: upgradeProbeTimeout}, up) {
+		return
+	}
+	inst.mu.Lock()
+	inst.Config.URL = up
+	inst.client = control.NewClient(up, inst.Config.Token)
+	inst.mu.Unlock()
+	if f.configPath != "" {
+		if err := f.saveConfig(); err != nil {
+			log.Printf("blipc: warning: failed to persist migrated URL: %v", err)
+		}
+	}
+	log.Printf("blipc: instance %q management API migrated to HTTPS (%s)", id, up)
+}
+
 // Remove stops and forgets an instance.
 func (f *Fleet) Remove(id string) {
 	f.mu.Lock()

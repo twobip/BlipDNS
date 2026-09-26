@@ -190,6 +190,39 @@ func (s *Server) SetTLSCert(c *tls.Certificate) {
 	}
 }
 
+// certTLSConfig returns the hardened TLS config serving the live certificate
+// pair (shared by DoH and, when auto-enabled, the management API).
+func (s *Server) certTLSConfig() *tls.Config {
+	return &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		// GCM/ChaCha only: exclude TLS1.2 CBC-SHA suites (Lucky13/ROBOT
+		// class) while keeping broad client compatibility. TLS1.3
+		// suites are always GCM/ChaCha and unaffected by this list.
+		CipherSuites: []uint16{
+			tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+			tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+			tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+			tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+			tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
+			tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
+		},
+		PreferServerCipherSuites: true,
+		CurvePreferences:         []tls.CurveID{tls.X25519, tls.CurveP256},
+		GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+			if c := s.cert.Load(); c != nil {
+				return c, nil
+			}
+			return nil, fmt.Errorf("blipd: no certificate loaded")
+		},
+	}
+}
+
+// ManagementTLSConfig returns a TLS config serving the live DoH certificate
+// for the management API (used when blipd auto-enables admin TLS).
+func (s *Server) ManagementTLSConfig() *tls.Config {
+	return s.certTLSConfig()
+}
+
 // SetBlockLogger registers a callback invoked for blocked queries when the
 // matching policy has Log enabled.
 func (s *Server) SetBlockLogger(fn func(client, domain string)) { s.logfn = fn }
@@ -1434,30 +1467,9 @@ func (s *Server) Start() error {
 			// Serve TLS through http.Server (not a hand-decorated tls.Listen)
 			// so HTTP/2 is set up and advertised via ALPN: a bare tls.Listen
 			// passes the raw conns to Serve() with no h2 support at all.
-			// GetCertificate reads the current pair, so a certificate re-derived
+			// certTLSConfig reads the current pair, so a certificate re-derived
 			// at runtime (VIP configured after startup) is served immediately.
-			doch.TLSConfig = &tls.Config{
-				MinVersion: tls.VersionTLS12,
-				// GCM/ChaCha only: exclude TLS1.2 CBC-SHA suites (Lucky13/ROBOT
-				// class) while keeping broad client compatibility. TLS1.3
-				// suites are always GCM/ChaCha and unaffected by this list.
-				CipherSuites: []uint16{
-					tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
-					tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
-					tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
-					tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
-					tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
-					tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
-				},
-				PreferServerCipherSuites: true,
-				CurvePreferences:         []tls.CurveID{tls.X25519, tls.CurveP256},
-				GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
-					if c := s.cert.Load(); c != nil {
-						return c, nil
-					}
-					return nil, fmt.Errorf("blipd: no DoH certificate loaded")
-				},
-			}
+			doch.TLSConfig = s.certTLSConfig()
 			ln, err := net.Listen("tcp", s.cfg.DoHAddr)
 			if err != nil {
 				return fmt.Errorf("blipd: doh listen: %w", err)

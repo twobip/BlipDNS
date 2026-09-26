@@ -50,25 +50,26 @@ type Instance struct {
 	fleet     *Fleet
 	claimCode string // optional code the controller was pre-seeded with
 
-	mu          sync.RWMutex
-	online      bool
-	health      *control.HealthResponse
-	stats       *control.StatsResponse
-	last        time.Time
-	err         string
-	cancel      context.CancelFunc
-	wg          sync.WaitGroup
-	pingSamples int
-	pingSumMs   float64
-	pingAvgMs   float64
-	pingLastMs  float64
-	pingHist    []pingSample // timestamped poll latencies for the 24h mean
-	pingAvg24h  float64
-	appliedHash string // hash of the effective config last successfully applied
-	lastUpstr   string // default upstream the instance last reported (for drift detection)
-	blHash      uint64 // checksum of the blocklist last successfully pushed
-	haHash      string // hash of the HA config last successfully applied
-	updatedTo   string // commit a successful update job left running ("" = none yet)
+	mu           sync.RWMutex
+	online       bool
+	health       *control.HealthResponse
+	stats        *control.StatsResponse
+	last         time.Time
+	err          string
+	cancel       context.CancelFunc
+	wg           sync.WaitGroup
+	pingSamples  int
+	pingSumMs    float64
+	pingAvgMs    float64
+	pingLastMs   float64
+	pingHist     []pingSample // timestamped poll latencies for the 24h mean
+	pingAvg24h   float64
+	appliedHash  string    // hash of the effective config last successfully applied
+	lastUpstr    string    // default upstream the instance last reported (for drift detection)
+	blHash       uint64    // checksum of the blocklist last successfully pushed
+	haHash       string    // hash of the HA config last successfully applied
+	updatedTo    string    // commit a successful update job left running ("" = none yet)
+	lastTLSProbe time.Time // last HTTPS upgrade probe (rate-limits re-probes)
 
 	blPushing    bool      // a blocklist push is in flight
 	blRetryAfter time.Time // earliest time a failed blocklist push may be retried
@@ -351,6 +352,9 @@ func (i *Instance) poll(ctx context.Context) {
 
 	if herr != nil && ctx.Err() == nil {
 		log.Printf("blipc: poll instance=%q health error: %q", cfg.ID, herr)
+		// The instance may have enabled TLS management since (blipd serves
+		// HTTPS by default now): probe once and migrate persistently.
+		i.fleet.maybeMigrateMgmtTLS(i, cfg.ID, cfg.URL)
 	}
 	if serr != nil && ctx.Err() == nil {
 		log.Printf("blipc: poll instance=%q stats error: %q", cfg.ID, serr)

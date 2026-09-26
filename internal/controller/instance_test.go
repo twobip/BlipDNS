@@ -1,10 +1,16 @@
 package controller
 
 import (
+	"crypto/tls"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/twobip/BlipDNS/internal/certgen"
 )
 
 func TestPushPingWindow(t *testing.T) {
@@ -90,5 +96,72 @@ func TestMgmtInsecureFlag(t *testing.T) {
 		if got := inst.status().MgmtInsecure; got != tc.want {
 			t.Errorf("MgmtInsecure(%q) = %v, want %v", tc.url, got, tc.want)
 		}
+	}
+}
+
+func TestMaybeMigrateMgmtTLS(t *testing.T) {
+	certPEM, keyPEM, err := certgen.Generate("127.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	caFile := filepath.Join(t.TempDir(), "ca.pem")
+	if err := os.WriteFile(caFile, certPEM, 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SSL_CERT_FILE", caFile)
+	cert, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var hits atomic.Int64
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/adopt/status", func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		_, _ = w.Write([]byte(`{"adopted":true}`))
+	})
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{Certificates: []tls.Certificate{cert}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: mux}
+	go func() { _ = srv.Serve(ln) }()
+	defer srv.Close()
+
+	fleet := NewFleet("")
+	httpURL := "http://" + ln.Addr().String()
+	inst := &Instance{Config: InstanceConfig{ID: "s1", URL: httpURL, Token: "t"}, fleet: fleet}
+	fleet.maybeMigrateMgmtTLS(inst, "s1", httpURL)
+	if got := inst.Config.URL; got != "https://"+ln.Addr().String() {
+		t.Fatalf("URL = %q, want the https equivalent", got)
+	}
+	if hits.Load() != 1 {
+		t.Fatalf("probe hits = %d, want 1", hits.Load())
+	}
+	// Already https: no probe, no change.
+	fleet.maybeMigrateMgmtTLS(inst, "s1", inst.Config.URL)
+	if hits.Load() != 1 {
+		t.Fatalf("re-probed an https URL (hits = %d)", hits.Load())
+	}
+	// Recent probe timestamp suppresses re-probes: still http, no new hit.
+	inst2 := &Instance{Config: InstanceConfig{ID: "s2", URL: httpURL, Token: "t"}, fleet: fleet}
+	inst2.lastTLSProbe = fleet.now()
+	fleet.maybeMigrateMgmtTLS(inst2, "s2", inst2.Config.URL)
+	if got := inst2.Config.URL; got != httpURL {
+		t.Fatalf("URL = %q, want unchanged (probe suppressed)", got)
+	}
+	if hits.Load() != 1 {
+		t.Fatalf("probed despite fresh timestamp (hits = %d)", hits.Load())
+	}
+	// Stale timestamp re-probes and migrates.
+	inst2.lastTLSProbe = time.Time{}
+	fleet.maybeMigrateMgmtTLS(inst2, "s2", inst2.Config.URL)
+	if got := inst2.Config.URL; got != "https://"+ln.Addr().String() {
+		t.Fatalf("URL = %q, want the https equivalent", got)
+	}
+	// No TLS there: closed port stays http.
+	inst3 := &Instance{Config: InstanceConfig{ID: "s3", URL: "http://127.0.0.1:9", Token: "t"}, fleet: fleet}
+	fleet.maybeMigrateMgmtTLS(inst3, "s3", inst3.Config.URL)
+	if got := inst3.Config.URL; got != "http://127.0.0.1:9" {
+		t.Fatalf("URL = %q, want unchanged (no TLS there)", got)
 	}
 }
