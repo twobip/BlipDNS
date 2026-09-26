@@ -37,7 +37,8 @@ type InstanceStatus struct {
 	PingAvgMs       float64                 `json:"ping_avg_ms"`
 	PingLastMs      float64                 `json:"ping_last_ms"`
 	PingSamples     int                     `json:"ping_samples"`
-	PingAvg24h      float64                 `json:"ping_avg_24h"` // rolling 24h mean
+	PingAvg24h      float64                 `json:"ping_avg_24h"`  // rolling 24h mean
+	MgmtInsecure    bool                    `json:"mgmt_insecure"` // management URL is remote cleartext HTTP
 	UpdateAvailable bool                    `json:"update_available"`
 	LatestVersion   string                  `json:"latest_version,omitempty"`
 }
@@ -514,18 +515,19 @@ func driftSuppressed(available bool, reportedVersion, updatedTo string) bool {
 func (i *Instance) status() *InstanceStatus {
 	i.mu.RLock()
 	st := &InstanceStatus{
-		ID:          i.Config.ID,
-		Label:       i.Config.Label,
-		URL:         i.Config.URL,
-		Online:      i.online,
-		Health:      i.health,
-		Stats:       i.stats,
-		LastOK:      i.last,
-		Err:         i.err,
-		PingAvgMs:   i.pingAvgMs,
-		PingLastMs:  i.pingLastMs,
-		PingSamples: i.pingSamples,
-		PingAvg24h:  i.pingAvg24h,
+		ID:           i.Config.ID,
+		Label:        i.Config.Label,
+		URL:          i.Config.URL,
+		Online:       i.online,
+		Health:       i.health,
+		Stats:        i.stats,
+		LastOK:       i.last,
+		Err:          i.err,
+		PingAvgMs:    i.pingAvgMs,
+		PingLastMs:   i.pingLastMs,
+		PingSamples:  i.pingSamples,
+		PingAvg24h:   i.pingAvg24h,
+		MgmtInsecure: isInsecureInstanceURL(i.Config.URL),
 	}
 	// Compare the node's reported build against the release-channel head so
 	// the Instances page can badge it "update available" (and show the target).

@@ -506,7 +506,7 @@ function renderInstances() {
     const ping = fmtPing(i.ping_avg_24h ?? i.ping_avg_ms);
     return `<tr>
       <td>
-        <div class="cell-main"><span class="dot ${i.online ? "on" : "off"}"></span><a href="#" data-act="detail" data-id="${esc(i.id)}" style="color:inherit;cursor:pointer">${esc(i.label || i.id)}</a></div>
+        <div class="cell-main"><span class="dot ${i.online ? "on" : "off"}"></span><a href="#" data-act="detail" data-id="${esc(i.id)}" style="color:inherit;cursor:pointer">${esc(i.label || i.id)}</a>${i.mgmt_insecure ? ' <span class="badge warn" title="Management API uses cleartext HTTP — bearer tokens cross the network unencrypted. Enable TLS on blipd (-admin-tls-cert/-key) or co-locate via Unix socket.">http</span>' : ""}</div>
         <div class="cell-sub mono">${esc(i.id)}</div>
       </td>
       <td>

@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -847,6 +848,13 @@ func (f *Fleet) Add(ctx context.Context, cfg InstanceConfig) error {
 	}
 	if err := validateInstanceURL(cfg.URL); err != nil {
 		return err
+	}
+	// Opportunistic HTTPS upgrade: blipd serves the management API over TLS
+	// when configured with -admin-tls-cert/-key. Probe the https equivalent
+	// (token-free endpoint); never downgrade an https URL on failure.
+	if up := httpsCandidate(cfg.URL); up != "" && probeMgmtTLS(&http.Client{Timeout: upgradeProbeTimeout}, up) {
+		log.Printf("blipc: instance %q management API upgraded to HTTPS (%s)", cfg.ID, up)
+		cfg.URL = up
 	}
 	warnInsecureInstanceURL(cfg.ID, cfg.URL)
 	warnMgmtTLSInstanceURL(cfg.ID, cfg.URL)

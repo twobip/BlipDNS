@@ -2,9 +2,12 @@ package controller
 
 import (
 	"fmt"
+	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
+	"time"
 )
 
 // ProxyTrust gates which immediate peers may supply X-Forwarded-* headers.
@@ -147,4 +150,32 @@ func (t *ProxyTrust) RequestHost(r *http.Request) string {
 		}
 	}
 	return r.Host
+}
+
+// upgradeProbeTimeout bounds the HTTPS upgrade probe per instance add.
+const upgradeProbeTimeout = 3 * time.Second
+
+// httpsCandidate rewrites an http:// management URL to its https://
+// equivalent ("" when already https or unparsable).
+func httpsCandidate(raw string) string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Scheme != "http" || u.Host == "" {
+		return ""
+	}
+	u.Scheme = "https"
+	return u.String()
+}
+
+// probeMgmtTLS reports whether url serves the management API over TLS. Any
+// HTTP response (even 4xx) proves the handshake; only transport failures
+// count as unavailable. The unauthenticated adopt/status endpoint keeps
+// bearer tokens out of the probe.
+func probeMgmtTLS(client *http.Client, url string) bool {
+	resp, err := client.Get(strings.TrimSuffix(url, "/") + "/api/v1/adopt/status")
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+	return true
 }
