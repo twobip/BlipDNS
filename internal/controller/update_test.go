@@ -27,6 +27,8 @@ type fakeUpdaterNode struct {
 	failMsg   string
 	failAfter int
 	gets      int
+	// version is reported as the health version ("" = none).
+	version string
 }
 
 func newFakeUpdaterNode(token string) *fakeUpdaterNode {
@@ -58,7 +60,10 @@ func (n *fakeUpdaterNode) server(t *testing.T) *httptest.Server {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		writeJSONH(w, &control.HealthResponse{OK: true})
+		n.mu.Lock()
+		ver := n.version
+		n.mu.Unlock()
+		writeJSONH(w, &control.HealthResponse{OK: true, Version: ver})
 	})
 	mux.HandleFunc("/api/v1/stats", func(w http.ResponseWriter, r *http.Request) {
 		if !auth(r) {
@@ -146,6 +151,62 @@ func TestSingleInstanceUpdateOnlyTouchesOneNode(t *testing.T) {
 	}
 }
 
+// TestUpdateClearsDriftBadge ensures a successful update records the
+// installed commit (clearing the badge while the node reports it), even
+// when the controller was built from a different commit.
+func TestUpdateClearsDriftBadge(t *testing.T) {
+	for _, tc := range []struct {
+		available, want   bool
+		reported, updated string
+	}{
+		{true, true, "blipd/0.7.0+aaaaaaa", "aaaaaaa"},
+		{true, false, "blipd/0.7.0+bbbbbbb", "aaaaaaa"},
+		{true, false, "blipd/0.7.0+aaaaaaa", ""},
+		{true, false, "blipd/0.7.0", "aaaaaaa"},
+		{false, false, "blipd/0.7.0+aaaaaaa", "aaaaaaa"},
+	} {
+		if got := driftSuppressed(tc.available, tc.reported, tc.updated); got != tc.want {
+			t.Errorf("driftSuppressed(%v, %q, %q) = %v, want %v", tc.available, tc.reported, tc.updated, got, tc.want)
+		}
+	}
+
+	node := newFakeUpdaterNode("tok")
+	node.version = "blipd/0.7.0+aaaaaaa"
+	srv := node.server(t)
+	defer srv.Close()
+
+	fleet := NewFleet("")
+	originalWait := haFailoverWait
+	haFailoverWait = 100 * time.Millisecond
+	defer func() { haFailoverWait = originalWait }()
+	if err := fleet.Add(context.Background(), InstanceConfig{ID: "a", URL: srv.URL, Token: "tok"}); err != nil {
+		t.Fatal(err)
+	}
+	fleet.SetReleaseChannelDefault("dev")
+
+	if _, err := fleet.StartUpdateOne(context.Background(), "a", "dev"); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, 30*time.Second, func() bool {
+		n, _ := node.counts()
+		return n == 1
+	}, "node update was not started")
+	node.finish()
+	waitFor(t, 30*time.Second, func() bool {
+		return !fleet.UpdateJob().Running
+	}, "update job did not complete")
+	inst := fleet.get("a")
+	if inst == nil {
+		t.Fatal("missing instance")
+	}
+	inst.mu.RLock()
+	updatedTo := inst.updatedTo
+	inst.mu.RUnlock()
+	if updatedTo != "aaaaaaa" {
+		t.Fatalf("updatedTo = %q, want the installed commit", updatedTo)
+	}
+}
+
 // TestSerializedUpdateWaitsForEachNode ensures that with two adopted nodes,
 // the second node's update is not started until the first node has returned
 // online (health OK after its updater finished), and that a failing node stops
@@ -223,7 +284,7 @@ func TestUpdateFailAfterRunning(t *testing.T) {
 	if inst == nil {
 		t.Fatal("missing instance")
 	}
-	err := fleet.updateOne(inst, "stable")
+	_, err := fleet.updateOne(inst, "stable")
 	if err == nil {
 		t.Fatal("updateOne = nil, want remote updater error")
 	} else if !strings.Contains(err.Error(), "cannot open lock") {

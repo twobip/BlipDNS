@@ -39,10 +39,10 @@ type Server struct {
 	version   string
 	// logRing retains the process-log tail served by /api/v1/logs
 	// (nil = unavailable, e.g. in tests that never set one).
-	logRing *LogRing
-	mu        sync.RWMutex
-	watchMu   sync.Mutex
-	watchers  map[chan WatchEvent]struct{}
+	logRing  *LogRing
+	mu       sync.RWMutex
+	watchMu  sync.Mutex
+	watchers map[chan WatchEvent]struct{}
 	// watchCount mirrors len(watchers) as an atomic so the DNS hot path can
 	// skip building WatchEvents entirely when no consumer is streaming.
 	watchCount atomic.Int64

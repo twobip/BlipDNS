@@ -125,7 +125,7 @@ func (f *Fleet) runUpdateJob(nodes []updateNode, channel string) {
 		// brief traffic blackhole.
 		time.Sleep(haFailoverWait)
 
-		if err := f.updateOne(node.inst, channel); err != nil {
+		if ver, err := f.updateOne(node.inst, channel); err != nil {
 			f.finishUpdate(node.id, "failed: "+err.Error(), err.Error())
 			// Restore priority even on failure so the peer can hand back the
 			// VIP once this node is back online.
@@ -133,8 +133,14 @@ func (f *Fleet) runUpdateJob(nodes []updateNode, channel string) {
 				log.Printf("blipc: HA priority restore for %s: %v", node.id, err)
 			}
 			return
+		} else {
+			// Remember what this job installed ("" when the build carries no
+			// commit): status() clears the drift badge while the node reports
+			// it, so update-all converges instead of re-badging against the
+			// controller's own build commit.
+			node.inst.noteUpdated(commitOf(ver))
+			f.finishUpdate(node.id, "updated", "")
 		}
-		f.finishUpdate(node.id, "updated", "")
 
 		// Restore the original priority now that the node has restarted and
 		// recovered. We tolerate failure: if keepalived or the peer is
@@ -156,11 +162,11 @@ func (f *Fleet) runUpdateJob(nodes []updateNode, channel string) {
 	f.updateMu.Unlock()
 }
 
-func (f *Fleet) updateOne(inst *Instance, channel string) error {
+func (f *Fleet) updateOne(inst *Instance, channel string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), updateNodeTimeout)
 	defer cancel()
 	if err := inst.ctl().StartUpdate(ctx, channel); err != nil {
-		return err
+		return "", err
 	}
 
 	phase := "start" // start -> updating -> restart -> done
@@ -183,7 +189,7 @@ func (f *Fleet) updateOne(inst *Instance, channel string) error {
 			// already saw it running: otherwise any failure after startup
 			// rides the health gate below (the old process still answers)
 			// to a false "updated".
-			return fmt.Errorf("remote updater: %s", status.LastError)
+			return "", fmt.Errorf("remote updater: %s", status.LastError)
 		} else {
 			// Not running and no error: finished before the first poll
 			// observed it, or completed after running — either way wait
@@ -192,14 +198,16 @@ func (f *Fleet) updateOne(inst *Instance, channel string) error {
 		}
 
 		if phase == "restart" {
-			if _, err := inst.ctl().Health(ctx); err == nil {
-				return nil
+			// Return the post-restart build version so the job can record
+			// what it installed (used to clear the drift badge).
+			if h, err := inst.ctl().Health(ctx); err == nil && h != nil {
+				return h.Version, nil
 			}
 		}
 
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("node did not return online within %s", updateNodeTimeout)
+			return "", fmt.Errorf("node did not return online within %s", updateNodeTimeout)
 		case <-ticker.C:
 		}
 	}

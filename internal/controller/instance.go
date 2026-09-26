@@ -64,6 +64,7 @@ type Instance struct {
 	lastUpstr   string // default upstream the instance last reported (for drift detection)
 	blHash      uint64 // checksum of the blocklist last successfully pushed
 	haHash      string // hash of the HA config last successfully applied
+	updatedTo   string // commit a successful update job left running ("" = none yet)
 
 	blPushing    bool      // a blocklist push is in flight
 	blRetryAfter time.Time // earliest time a failed blocklist push may be retried
@@ -133,6 +134,13 @@ func (i *Instance) hasToken() bool {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
 	return i.Config.Token != ""
+}
+
+// noteUpdated records the commit a successful update job left running.
+func (i *Instance) noteUpdated(commit string) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.updatedTo = commit
 }
 
 // snapshotConfig returns a copy of the instance's config under lock. F-11:
@@ -451,6 +459,13 @@ func (i *Instance) watch(ctx context.Context) {
 	}
 }
 
+// driftSuppressed reports whether an installed commit clears the update
+// badge: the node reports exactly what the last successful update job left
+// running, so there is nothing newer to update to.
+func driftSuppressed(available bool, reportedVersion, updatedTo string) bool {
+	return available && updatedTo != "" && commitOf(reportedVersion) == updatedTo
+}
+
 func (i *Instance) status() *InstanceStatus {
 	i.mu.RLock()
 	st := &InstanceStatus{
@@ -471,6 +486,12 @@ func (i *Instance) status() *InstanceStatus {
 	if i.health != nil {
 		st.UpdateAvailable = i.fleet.UpdateAvailable(i.health.Version)
 		st.LatestVersion = i.fleet.LatestVersion()
+		// A successful update job records the installed commit: while the
+		// node still reports it, there is nothing newer to update to — even
+		// when the controller itself was built from a different commit.
+		if driftSuppressed(st.UpdateAvailable, i.health.Version, i.updatedTo) {
+			st.UpdateAvailable = false
+		}
 	}
 	applied := i.appliedHash
 	reportedUpstream := i.lastUpstr
