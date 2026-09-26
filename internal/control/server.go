@@ -983,6 +983,16 @@ func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
 		return
 	}
+	// SSE must outlive the API server's absolute Read/WriteTimeout (10 minutes
+	// each): the write deadline cuts the stream at 10:00, and the read
+	// deadline fires the connection's background read, whose timeout cancels
+	// this request's context. Either one made every watch stream die at
+	// exactly 10:00 and the controller reconnect on a timer, losing whatever
+	// events fell in the gap. Clearing both lets the stream live until the
+	// client leaves (the 15s keepalives below keep it healthy).
+	rc := http.NewResponseController(w)
+	_ = rc.SetWriteDeadline(time.Time{})
+	_ = rc.SetReadDeadline(time.Time{})
 	ch := make(chan WatchEvent, 4096)
 	s.watchMu.Lock()
 	// Cap concurrent watchers so one client cannot exhaust fds/memory with
