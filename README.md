@@ -1,5 +1,9 @@
 # BlipDNS
 
+![BlipDNS logo](blipdns_logo.png)
+
+> **Beta software:** BlipDNS is currently in beta — expect rough edges and breaking changes between updates.
+
 A fast DNS server in Go with **per-client filtering**, **DNS-over-HTTPS (RFC 8484)**,
 and a **controller** (`blipctl`) that connects to managed instances and pushes
 filter policy to them.
