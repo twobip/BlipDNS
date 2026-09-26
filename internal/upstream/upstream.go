@@ -242,7 +242,12 @@ func (r *TLSResolver) Resolve(ctx context.Context, q *dns.Msg) (*dns.Msg, error)
 			r.putConn(c)
 			return resp, nil
 		}
+		// The pooled connection is dead (typically server-closed idle, e.g.
+		// Quad9 timing out the TLS session); its idle siblings died the same
+		// way, so drop the pool and redial fresh instead of popping another
+		// stale conn for the retry.
 		_ = c.Close()
+		r.dropIdle()
 	}
 	return nil, errUpstream(r.addr, err)
 }

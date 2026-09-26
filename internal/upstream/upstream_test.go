@@ -128,6 +128,42 @@ func TestTLSResolverReusesConnection(t *testing.T) {
 	}
 }
 
+func TestTLSResolverServerClosedPoolRedialsOnce(t *testing.T) {
+	r, accepts := testDoT(t)
+	q := new(dns.Msg)
+	q.SetQuestion("example.com.", dns.TypeA)
+	// Fill the pool with two live connections (direct dials, no timing races).
+	for i := 0; i < 2; i++ {
+		c, err := dialPinnedTLS(context.Background(), r.addr, 5*time.Second, &tls.Config{InsecureSkipVerify: true}, &net.Dialer{Timeout: 5 * time.Second})
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		r.putConn(c)
+	}
+	// Simulate the server closing idle connections (e.g. Quad9's idle
+	// timeout): the sockets die but stay pooled, exactly as on a
+	// server-side close the client never observes until first use.
+	r.mu.Lock()
+	if len(r.conns) != 2 {
+		r.mu.Unlock()
+		t.Fatalf("pool has %d conns, want 2", len(r.conns))
+	}
+	for _, c := range r.conns {
+		_ = c.Close()
+	}
+	r.mu.Unlock()
+	base := atomic.LoadInt64(accepts)
+	// Must succeed: the first dead pop drains the pool and the retry dials
+	// fresh. Without the drain the retry pops the second dead conn and the
+	// query fails with EOF.
+	if _, err := r.Resolve(context.Background(), q); err != nil {
+		t.Fatalf("Resolve over server-closed pool: %v", err)
+	}
+	if n := atomic.LoadInt64(accepts); n != base+1 {
+		t.Fatalf("server accepted %d extra connections, want exactly 1 redial", n-base)
+	}
+}
+
 func TestErrUpstreamStripsEphemeralSocket(t *testing.T) {
 	// Address labeling + stripping combined: the ephemeral local socket is
 	// removed so identical failures share one message.
