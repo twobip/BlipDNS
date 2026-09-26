@@ -37,6 +37,7 @@ type InstanceStatus struct {
 	PingAvgMs       float64                 `json:"ping_avg_ms"`
 	PingLastMs      float64                 `json:"ping_last_ms"`
 	PingSamples     int                     `json:"ping_samples"`
+	PingAvg24h      float64                 `json:"ping_avg_24h"` // rolling 24h mean
 	UpdateAvailable bool                    `json:"update_available"`
 	LatestVersion   string                  `json:"latest_version,omitempty"`
 }
@@ -60,6 +61,8 @@ type Instance struct {
 	pingSumMs   float64
 	pingAvgMs   float64
 	pingLastMs  float64
+	pingHist    []pingSample // timestamped poll latencies for the 24h mean
+	pingAvg24h  float64
 	appliedHash string // hash of the effective config last successfully applied
 	lastUpstr   string // default upstream the instance last reported (for drift detection)
 	blHash      uint64 // checksum of the blocklist last successfully pushed
@@ -280,6 +283,47 @@ func (i *Instance) finishBlocklistPush(err error, hash uint64) {
 	i.blForeign = false
 }
 
+// pingWindow is how far back the instances-page mean looks.
+const pingWindow = 24 * time.Hour
+
+// maxPingSamples caps retained ping samples (24h of 5s polls is ~17k;
+// the cap only binds if polling ever runs hot).
+const maxPingSamples = 20000
+
+type pingSample struct {
+	at time.Time
+	ms float64
+}
+
+// pushPing records a poll latency, drops samples outside the window, and
+// returns the retained history with its mean (0 when empty). Samples arrive
+// in poll order, so a single front-scan prunes.
+func pushPing(hist []pingSample, at time.Time, ms float64) ([]pingSample, float64) {
+	hist = append(hist, pingSample{at: at, ms: ms})
+	cut := at.Add(-pingWindow)
+	k := 0
+	for k < len(hist) && hist[k].at.Before(cut) {
+		k++
+	}
+	if k > 0 {
+		copy(hist, hist[k:])
+		hist = hist[:len(hist)-k]
+	}
+	// ponytail: drop-front copy, capped at 20k entries — a container/ring
+	// would save nanoseconds nobody can measure here.
+	if len(hist) > maxPingSamples {
+		hist = hist[len(hist)-maxPingSamples:]
+	}
+	var sum float64
+	for _, s := range hist {
+		sum += s.ms
+	}
+	if len(hist) == 0 {
+		return hist, 0
+	}
+	return hist, sum / float64(len(hist))
+}
+
 func (i *Instance) poll(ctx context.Context) {
 	c := i.ctl()
 	cfg := i.snapshotConfig()
@@ -302,7 +346,7 @@ func (i *Instance) poll(ctx context.Context) {
 		s, serr = c.Stats(ctx)
 	}()
 	wg.Wait()
-	latencyMs := float64(time.Since(start).Milliseconds())
+	latencyMs := float64(time.Since(start).Microseconds()) / 1000
 
 	if herr != nil && ctx.Err() == nil {
 		log.Printf("blipc: poll instance=%q health error: %q", cfg.ID, herr)
@@ -325,6 +369,7 @@ func (i *Instance) poll(ctx context.Context) {
 		i.pingSumMs += latencyMs
 		i.pingAvgMs = i.pingSumMs / float64(i.pingSamples)
 		i.pingLastMs = latencyMs
+		i.pingHist, i.pingAvg24h = pushPing(i.pingHist, i.fleet.now(), latencyMs)
 	} else {
 		i.online = false
 		i.err = herr.Error()
@@ -480,6 +525,7 @@ func (i *Instance) status() *InstanceStatus {
 		PingAvgMs:   i.pingAvgMs,
 		PingLastMs:  i.pingLastMs,
 		PingSamples: i.pingSamples,
+		PingAvg24h:  i.pingAvg24h,
 	}
 	// Compare the node's reported build against the release-channel head so
 	// the Instances page can badge it "update available" (and show the target).

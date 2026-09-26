@@ -503,7 +503,7 @@ function renderInstances() {
   }
   tb.innerHTML = list.map((i) => {
     const s = i.stats || {};
-    const ping = fmtPing(i.ping_avg_ms);
+    const ping = fmtPing(i.ping_avg_24h ?? i.ping_avg_ms);
     return `<tr>
       <td>
         <div class="cell-main"><span class="dot ${i.online ? "on" : "off"}"></span><a href="#" data-act="detail" data-id="${esc(i.id)}" style="color:inherit;cursor:pointer">${esc(i.label || i.id)}</a></div>
@@ -586,7 +586,7 @@ function renderInstanceDetail() {
   $("di-blocked").textContent = fmt(s.blocked_total ?? 0);
   $("di-status").textContent = i.online ? "online" : "offline";
   $("di-version").textContent = "blipd " + ver;
-  $("di-ping").textContent = fmtPing(i.ping_avg_ms);
+  $("di-ping").textContent = fmtPing(i.ping_avg_24h ?? i.ping_avg_ms);
   const ub = $("di-update"), note = $("di-update-note"), rb = $("di-restart");
   rb.disabled = !i.online;
   if (fleetUpdateJob.running) {
