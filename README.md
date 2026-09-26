@@ -5,21 +5,27 @@
 > **Beta software:** BlipDNS is currently in beta — expect rough edges and breaking changes between updates.
 
 A fast DNS server in Go with **per-client filtering**, **DNS-over-HTTPS (RFC 8484)**,
-and a **controller** (`blipctl`) that connects to managed instances and pushes
-filter policy to them.
+a **controller** (`blipc`) with a web dashboard that manages fleets of instances,
+and a **CLI** (`blipctl`) for driving instances directly.
 
 ## Layout
 
 ```
 cmd/blipd     the resolver daemon (classic DNS + DoH + management API)
+cmd/blipc     the controller: web dashboard + fleet manager
 cmd/blipctl   the controller CLI (connects to managed instances)
 internal/
   filter/     per-client CIDR policy store + suffix/wildcard domain matching
   cache/      TTL-aware DNS response cache with singleflight coalescing
   upstream/   DoH + UDP resolvers with failover
   control/    management API server + controller client (shared types)
+  controller/ fleet manager, web dashboard, setup/auth (used by blipc)
   dnsserver/  unified UDP/TCP/DoH query path: filter -> cache -> upstream
   config/     YAML configuration loader
+  blocklist/  global DNS blocklist feeds (AdBlock Plus / hosts format)
+  certgen/    self-signed TLS certificates for DoH
+  ha/         high-availability virtual-IP failover (keepalived)
+  update/     blipd self-updater (unprivileged download + install helper)
 ```
 
 ## Build
@@ -118,7 +124,8 @@ A `default_policy` applies to clients with no matching network.
 ## Controller: blipctl
 
 ```
-blipctl [--token TOKEN] <instance-url> <command> [args]
+blipctl [--token TOKEN] <instance-url|instance-id> <command> [args]
+blipctl --socket <path> <command> [args]   # local blipd admin socket, no token
 
   health                 show instance health
   stats                  show live stats
@@ -126,8 +133,13 @@ blipctl [--token TOKEN] <instance-url> <command> [args]
   set-policy <file.yml>  push a policy
   block <cidr> <domain>  add a block policy for a client CIDR
   del-policy <id>        remove a policy
+  adopt-status           show adoption state (no token needed)
+  adopt <code>           claim this instance once; prints its admin token
   watch                  stream events (SSE)
 ```
+
+On the controller host an instance id is enough (the token is read from the
+local blipc config); `--token-file` is preferred over `--token`.
 
 Example:
 
