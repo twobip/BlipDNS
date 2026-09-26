@@ -411,6 +411,17 @@ func fakeBlipdWithRec(t *testing.T, token, claimCode string, health *control.Hea
 		}
 		writeJSONH(w, control.PurgeCacheResponse{Purged: purged})
 	})
+	mux.HandleFunc("/api/v1/logs", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+token {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		writeJSONH(w, control.LogsResponse{Lines: []string{"2026/09/26 22:20:45 blipd: listening", "2026/09/26 22:20:46 [block] 1.2.3.4 -> ads.example.com"}})
+	})
 	mux.HandleFunc("/api/v1/records", func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer "+token {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -503,6 +514,27 @@ func TestFleetAddAndPoll(t *testing.T) {
 	}
 	if st.Health == nil || !st.Health.OK {
 		t.Error("expected healthy")
+	}
+}
+
+func TestInstanceLogs(t *testing.T) {
+	tok := "t"
+	srv := fakeBlipd(t, tok, "", &control.HealthResponse{OK: true}, &control.StatsResponse{}, &control.ListResponse{})
+	defer srv.Close()
+	fleet := NewFleet("/tmp/blip-test-config.yaml")
+	ctx := context.Background()
+	if err := fleet.Add(ctx, InstanceConfig{ID: "s1", URL: srv.URL, Token: tok}); err != nil {
+		t.Fatal(err)
+	}
+	logs, err := fleet.InstanceLogs(ctx, "s1", 100)
+	if err != nil {
+		t.Fatalf("InstanceLogs: %v", err)
+	}
+	if len(logs.Lines) != 2 || !strings.Contains(logs.Lines[1], "[block]") {
+		t.Fatalf("unexpected lines: %q", logs.Lines)
+	}
+	if _, err := fleet.InstanceLogs(ctx, "nope", 100); err == nil {
+		t.Fatal("expected error for unknown instance")
 	}
 }
 

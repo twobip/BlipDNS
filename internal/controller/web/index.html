@@ -4,8 +4,8 @@
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>BlipDNS Controller</title>
-<link rel="icon" href="favicon.png"/>
-<link rel="stylesheet" href="style.css"/>
+<link rel="icon" href="/favicon.png"/>
+<link rel="stylesheet" href="/style.css"/>
 </head>
 <body>
 <div class="app">
@@ -13,7 +13,7 @@
   <aside class="sidebar" id="sidebar">
     <div class="sidebar-brand">
       <div class="brand-mark">
-        <img src="favicon.png" alt="BlipDNS" style="width:100%;height:100%;border-radius:9px;display:block"/>
+        <img src="/favicon.png" alt="BlipDNS" style="width:100%;height:100%;border-radius:9px;display:block"/>
       </div>
       <div>
         <div class="brand-text">Blip<b>DNS</b></div>
@@ -288,6 +288,65 @@
         <div class="panel">
           <div class="panel-head"><h3>Live Events</h3><span class="spacer"></span><span class="badge on" id="ev-live">live</span></div>
           <ul class="feed" id="d-events"></ul>
+        </div>
+      </section>
+
+      <!-- ================= INSTANCE DETAIL ================= -->
+      <section id="view-instance" class="view hidden">
+        <div class="row">
+          <button class="btn" id="di-back">
+            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5m7-7-7 7 7 7"/></svg>
+            Instances
+          </button>
+          <span class="muted mono" id="di-url"></span>
+        </div>
+        <div class="grid grid-5">
+          <div class="stat">
+            <div class="stat-icon i-blue">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 20h20M6 16V8m6 8V4m6 12v-6"/></svg>
+            </div>
+            <div class="stat-label">Total Queries</div>
+            <div class="stat-value" id="di-queries">—</div>
+            <div class="stat-sub">processed since blipd started</div>
+          </div>
+          <div class="stat">
+            <div class="stat-icon i-red">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="m9 9 6 6m0-6-6 6"/></svg>
+            </div>
+            <div class="stat-label">Blocked</div>
+            <div class="stat-value" id="di-blocked">—</div>
+            <div class="stat-sub">blocked since blipd started</div>
+          </div>
+          <div class="stat">
+            <div class="stat-icon i-green">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="7" rx="2"/><rect x="3" y="13" width="18" height="7" rx="2"/><path d="M7 7.5h.01M7 16.5h.01"/></svg>
+            </div>
+            <div class="stat-label">Status</div>
+            <div class="stat-value" id="di-status">—</div>
+            <div class="stat-sub" id="di-version">—</div>
+          </div>
+          <div class="stat">
+            <div class="stat-icon i-amber">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>
+            </div>
+            <div class="stat-label">Ping</div>
+            <div class="stat-value" id="di-ping">—</div>
+            <div class="stat-sub">controller → instance</div>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><h3>Process Log</h3><span class="spacer"></span><span class="badge on" id="di-live">live</span></div>
+          <ul class="feed" id="di-feed"></ul>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><h3>Options</h3></div>
+          <div class="panel-body">
+            <div class="row">
+              <button class="btn" id="di-restart">Restart blipd</button>
+              <button class="btn" id="di-update">Update</button>
+            </div>
+            <div class="muted mt" id="di-update-note"></div>
+          </div>
         </div>
       </section>
 
@@ -974,7 +1033,7 @@
 <div class="toasts" id="toasts"></div>
 
 <script src="/vendor/chart.umd.min.js" defer></script>
-<script src="high-availability.js" defer></script>
-<script src="app.js" defer></script>
+<script src="/high-availability.js" defer></script>
+<script src="/app.js" defer></script>
 </body>
 </html>

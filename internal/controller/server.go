@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -709,13 +710,32 @@ func (s *Server) handleInstanceUpdate(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		writeJSON(w, s.fleet.UpdateJob())
 	case http.MethodPost:
+		var req struct {
+			ID      string `json:"id"`
+			Channel string `json:"channel"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
 		channel := s.fleet.ReleaseChannel()
-		if requested := r.URL.Query().Get("channel"); requested != "" {
+		if req.Channel != "" {
+			channel = req.Channel
+		} else if requested := r.URL.Query().Get("channel"); requested != "" {
 			channel = requested
 		}
-		job, err := s.fleet.StartUpdates(r.Context(), channel)
+		var (
+			job UpdateJobStatus
+			err error
+		)
+		if req.ID != "" {
+			job, err = s.fleet.StartUpdateOne(r.Context(), req.ID, channel)
+		} else {
+			job, err = s.fleet.StartUpdates(r.Context(), channel)
+		}
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusConflict)
+			if errors.Is(err, errUpdateBusy) {
+				http.Error(w, err.Error(), http.StatusConflict)
+			} else {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+			}
 			return
 		}
 		writeJSON(w, job)
@@ -889,6 +909,17 @@ func (s *Server) handleInstance(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, map[string]string{"ok": "label updated", "id": id})
+	case "logs":
+		if r.Method != http.MethodGet {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		logs, err := s.fleet.InstanceLogs(ctx, id, boundedLimit(r, 200, 500))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		writeJSON(w, logs)
 	case "query-log":
 		if r.Method != http.MethodGet {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

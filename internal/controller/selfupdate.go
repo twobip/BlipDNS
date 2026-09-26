@@ -18,9 +18,10 @@ import (
 var version = "0.0.0"
 
 // ControllerVersion returns the controller's release version, used by the
-// Settings page to badge the controller's update state.
+// Settings page to badge the controller's update state. The build commit is
+// appended (e.g. "blipc/0.7.0+47cf192") so dev-channel drift detection works.
 func ControllerVersion() string {
-	return "blipc/" + version
+	return "blipc/" + control.WithCommit(version)
 }
 
 // SelfUpdater starts the controller's own update. It is deliberately minimal:

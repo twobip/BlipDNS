@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"maps"
@@ -62,10 +63,33 @@ func (f *Fleet) StartUpdates(ctx context.Context, channel string) (UpdateJobStat
 	f.mu.RUnlock()
 	sort.Slice(nodes, func(i, j int) bool { return nodes[i].id < nodes[j].id })
 
+	return f.startJob(nodes, channel)
+}
+
+// StartUpdateOne updates a single instance through the same serialized job
+// machinery (HA degrade, remote updater, health gate, priority restore).
+func (f *Fleet) StartUpdateOne(ctx context.Context, id, channel string) (UpdateJobStatus, error) {
+	if !control.ValidUpdateChannel(channel) {
+		return UpdateJobStatus{}, fmt.Errorf("release channel must be stable or dev")
+	}
+	inst := f.get(id)
+	if inst == nil {
+		return UpdateJobStatus{}, fmt.Errorf("controller: unknown instance %s", id)
+	}
+	if !inst.hasToken() {
+		return UpdateJobStatus{}, fmt.Errorf("controller: instance %s has no management token", id)
+	}
+	return f.startJob([]updateNode{{id: id, inst: inst}}, channel)
+}
+
+// errUpdateBusy reports an update start while a job is already running.
+var errUpdateBusy = errors.New("an instance update is already running")
+
+func (f *Fleet) startJob(nodes []updateNode, channel string) (UpdateJobStatus, error) {
 	f.updateMu.Lock()
 	defer f.updateMu.Unlock()
 	if f.updateJob.Running {
-		return cloneUpdateJob(f.updateJob), fmt.Errorf("an instance update is already running")
+		return cloneUpdateJob(f.updateJob), errUpdateBusy
 	}
 	f.updateJob = UpdateJobStatus{
 		Running:   true,

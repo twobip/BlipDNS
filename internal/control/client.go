@@ -266,6 +266,18 @@ func (c *Client) PurgeCache(ctx context.Context) (int, error) {
 	return out.Purged, nil
 }
 
+// Logs fetches the instance's process-log tail, oldest first.
+func (c *Client) Logs(ctx context.Context, limit int) (*LogsResponse, error) {
+	if limit <= 0 {
+		limit = 200
+	}
+	var out LogsResponse
+	if err := c.do(ctx, http.MethodGet, fmt.Sprintf("/api/v1/logs?limit=%d", limit), nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // AdoptStatus fetches the instance's adoption state (unauthenticated).
 func (c *Client) AdoptStatus(ctx context.Context) (*AdoptStatus, error) {
 	var st AdoptStatus

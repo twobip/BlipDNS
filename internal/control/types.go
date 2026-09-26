@@ -142,6 +142,11 @@ type Answer struct {
 	TTL  int    `json:"ttl,omitempty"`
 }
 
+// LogsResponse carries the blipd process-log tail, oldest first.
+type LogsResponse struct {
+	Lines []string `json:"lines"`
+}
+
 // WatchEvent is streamed by GET /api/v1/watch as SSE.
 type WatchEvent struct {
 	Type   string         `json:"type"` // "stats" | "block" | "pass" | "error"

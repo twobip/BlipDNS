@@ -2335,6 +2335,15 @@ func (f *Fleet) ListPolicies(ctx context.Context, id string) (*control.ListRespo
 	return inst.ctl().ListPolicies(ctx)
 }
 
+// InstanceLogs returns the instance's process-log tail via its management API.
+func (f *Fleet) InstanceLogs(ctx context.Context, id string, limit int) (*control.LogsResponse, error) {
+	inst := f.get(id)
+	if inst == nil {
+		return nil, fmt.Errorf("controller: unknown instance %s", id)
+	}
+	return inst.ctl().Logs(ctx, limit)
+}
+
 // Health returns aggregated fleet health.
 func (f *Fleet) Health() map[string]*control.HealthResponse {
 	out := make(map[string]*control.HealthResponse)

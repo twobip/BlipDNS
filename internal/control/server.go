@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"sort"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -36,6 +37,9 @@ type Server struct {
 	blocklist *blocklist.Blocklist
 	started   time.Time
 	version   string
+	// logRing retains the process-log tail served by /api/v1/logs
+	// (nil = unavailable, e.g. in tests that never set one).
+	logRing *LogRing
 	mu        sync.RWMutex
 	watchMu   sync.Mutex
 	watchers  map[chan WatchEvent]struct{}
@@ -194,6 +198,9 @@ func NewServerWithBlocklist(token string, store *filter.Store, c *cache.Cache, s
 		watchers:  make(map[chan WatchEvent]struct{}),
 	}
 }
+
+// SetLogRing attaches the process-log tail served by /api/v1/logs.
+func (s *Server) SetLogRing(r *LogRing) { s.logRing = r }
 
 // ConfigureAdoption initialises the claim-code handshake. If a prior adopted
 // state file exists the instance is treated as already adopted (the claim code
@@ -390,6 +397,7 @@ func (s *Server) handler(local bool) http.Handler {
 	mux.HandleFunc("/api/v1/ha/disable", auth(s.handleHADisable))
 	mux.HandleFunc("/api/v1/update", auth(s.handleUpdate))
 	mux.HandleFunc("/api/v1/restart", auth(s.handleRestart))
+	mux.HandleFunc("/api/v1/logs", auth(s.handleLogs))
 	mux.HandleFunc("/api/v1/watch", auth(s.handleWatch))
 	// unauthenticated adoption handshake
 	mux.HandleFunc("/api/v1/adopt/status", s.handleAdoptStatus)
@@ -526,6 +534,26 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		Version:       s.version,
 		DroppedEvents: s.droppedEvents.Load(),
 	})
+}
+
+// handleLogs serves the retained process-log tail, oldest first.
+// ?limit caps the lines (default/max = ring capacity).
+func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.logRing == nil {
+		http.Error(w, "process logs unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	n := defaultLogRingCap
+	if q := r.URL.Query().Get("limit"); q != "" {
+		if v, err := strconv.Atoi(q); err == nil && v > 0 {
+			n = min(v, defaultLogRingCap)
+		}
+	}
+	writeJSON(w, LogsResponse{Lines: s.logRing.Snapshot(n)})
 }
 
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {

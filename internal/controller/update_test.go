@@ -98,6 +98,54 @@ func (n *fakeUpdaterNode) counts() (int, bool) {
 	return n.started, n.running
 }
 
+// TestSingleInstanceUpdateOnlyTouchesOneNode ensures StartUpdateOne runs the
+// job for exactly one node while a second adopted node is never contacted.
+func TestSingleInstanceUpdateOnlyTouchesOneNode(t *testing.T) {
+	nodeA := newFakeUpdaterNode("tok-a")
+	nodeB := newFakeUpdaterNode("tok-b")
+	srvA := nodeA.server(t)
+	srvB := nodeB.server(t)
+	defer srvA.Close()
+	defer srvB.Close()
+
+	fleet := NewFleet("")
+	originalWait := haFailoverWait
+	haFailoverWait = 100 * time.Millisecond
+	defer func() { haFailoverWait = originalWait }()
+	if err := fleet.Add(context.Background(), InstanceConfig{ID: "a", URL: srvA.URL, Token: "tok-a"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := fleet.Add(context.Background(), InstanceConfig{ID: "b", URL: srvB.URL, Token: "tok-b"}); err != nil {
+		t.Fatal(err)
+	}
+	fleet.SetReleaseChannelDefault("stable")
+
+	job, err := fleet.StartUpdateOne(context.Background(), "a", "stable")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !job.Running || job.Total != 1 {
+		t.Fatalf("job = %+v, want running with 1 node", job)
+	}
+
+	waitFor(t, 30*time.Second, func() bool {
+		n, _ := nodeA.counts()
+		return n == 1
+	}, "node a update was not started")
+	nodeA.finish()
+	waitFor(t, 30*time.Second, func() bool {
+		status := fleet.UpdateJob()
+		return !status.Running && status.Completed == 1
+	}, "single update did not complete")
+	if n, _ := nodeB.counts(); n != 0 {
+		t.Fatalf("node b touched by single-instance update: started=%d", n)
+	}
+
+	if _, err := fleet.StartUpdateOne(context.Background(), "nope", "stable"); err == nil {
+		t.Fatal("expected error for unknown instance")
+	}
+}
+
 // TestSerializedUpdateWaitsForEachNode ensures that with two adopted nodes,
 // the second node's update is not started until the first node has returned
 // online (health OK after its updater finished), and that a failing node stops

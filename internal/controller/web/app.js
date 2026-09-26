@@ -121,6 +121,7 @@ const TITLES = {
   "upstream-errors": ["Upstream Errors", "Failed upstream requests and when they happened"],
   clients: ["Clients", "Who is querying this resolver"],
   instances: ["Instances", "Managed blipd resolvers"],
+  instance: ["Instance", "Per-instance stats & actions"],
   blocklist: ["Blocklists", "Global blocked domains and list sources"],
   filters: ["DNS Filters", "Per-instance policies and scope rules"],
   upstream: ["Upstream & Conditional Forwarding", "Named resolvers and per-suffix forwarding routes"],
@@ -129,6 +130,7 @@ const TITLES = {
   ha: ["High Availability", "LAN keepalived / VRRP failover"],
 };
 let current = "dashboard";
+let detailId = null; // instance id shown on the detail page ("instance")
 
 function renderNav() {
   const nav = $("nav");
@@ -162,6 +164,7 @@ function go(page, push = true) {
   if (page !== "blocklist" && blStatusTimer) { clearInterval(blStatusTimer); blStatusTimer = null; }
   refresh();
   if (page === "instances") renderEvents();
+  if (page === "instance") renderInstanceDetail();
   if (page === "settings" || page === "upstream") refreshSettings();
   if (page === "ha") loadHighAvailability();
   if (page === "blocklist" || page === "filters") loadBlocklist();
@@ -197,6 +200,8 @@ let pollTimer = null;
 // be initialized before that call — `let` is in the temporal dead zone until
 // its declaration executes.
 let ctrlUpdateTimer = null;
+let updatePollTimer = null;
+let fleetUpdateJob = { running: false, current: "" };
 
 /* ---------- data refresh ---------- */
 async function refresh() {
@@ -212,6 +217,7 @@ async function refresh() {
     else if (current === "upstream-errors") renderUpstreamErrors();
     else if (current === "clients") renderClients();
     else if (current === "filters") renderPolicies();
+    else if (current === "instance") renderInstanceDetail();
   } catch (e) {
     const c = $("conn");
     if (c) { c.textContent = "offline"; c.className = "badge err"; }
@@ -445,22 +451,23 @@ function pushEvent(e) {
   if (eventsRenderTimer) clearTimeout(eventsRenderTimer);
   eventsRenderTimer = setTimeout(() => { renderEvents(); }, 2000);
 }
+function eventRow(e) {
+  const kind = e.type === "block" ? { b: 'badge err', ic: IC.block } : e.type === "pass" ? { b: 'badge on', ic: IC.query } : { b: "badge accent", ic: IC.shield };
+  const resp = e.type === "pass" ? respSummary(e) : "";
+  return `<li><span class="t">${new Date(e.at).toLocaleTimeString()}</span>
+      <span class="badge ${kind.b}">${esc(e.type)}</span>
+      <div class="grow" style="min-width:0">
+        <div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--mono)">${esc(e.domain || e.msg || e.type)}</div>
+        ${resp ? `<div class="cell-sub">${resp}</div>` : `<div class="cell-sub">${esc(e.instance || e.instance_id || "")}${e.client ? " · " + esc(e.client) : ""}</div>`}
+      </div></li>`;
+}
 function renderEvents() {
   const el = $("d-events");
   if (!eventBuffer.length) {
     el.innerHTML = `<div class="empty"><div class="empty-ic">${IC.dash}</div><h4>Waiting for traffic</h4><p>Block / pass events will stream here live.</p></div>`;
     return;
   }
-  el.innerHTML = eventBuffer.map((e) => {
-    const kind = e.type === "block" ? { b: 'badge err', ic: IC.block } : e.type === "pass" ? { b: 'badge on', ic: IC.query } : { b: "badge accent", ic: IC.shield };
-    const resp = e.type === "pass" ? respSummary(e) : "";
-    return `<li><span class="t">${new Date(e.at).toLocaleTimeString()}</span>
-      <span class="badge ${kind.b}">${esc(e.type)}</span>
-      <div class="grow" style="min-width:0">
-        <div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--mono)">${esc(e.domain || e.msg || e.type)}</div>
-        ${resp ? `<div class="cell-sub">${resp}</div>` : `<div class="cell-sub">${esc(e.instance || e.instance_id || "")}${e.client ? " · " + esc(e.client) : ""}</div>`}
-      </div></li>`;
-  }).join("");
+  el.innerHTML = eventBuffer.map(eventRow).join("");
 }
 
 // respSummary renders a short answer/cache summary for a pass event, reusing the
@@ -496,7 +503,7 @@ function renderInstances() {
     const ping = i.ping_avg_ms ? i.ping_avg_ms.toFixed(0) + "ms" : "—";
     return `<tr>
       <td>
-        <div class="cell-main"><span class="dot ${i.online ? "on" : "off"}"></span>${esc(i.label || i.id)}</div>
+        <div class="cell-main"><span class="dot ${i.online ? "on" : "off"}"></span><a href="#" data-act="detail" data-id="${esc(i.id)}" style="color:inherit;cursor:pointer">${esc(i.label || i.id)}</a></div>
         <div class="cell-sub mono">${esc(i.id)}</div>
       </td>
       <td>
@@ -553,6 +560,67 @@ function confirmRemove(id) {
     try { await API("/api/instances/" + encodeURIComponent(id), { method: "DELETE" }); toast("removed " + id); refresh(); }
     catch (e) { toast("remove failed: " + e.message, "err"); }
   });
+}
+
+/* ---------- instance detail ---------- */
+function openInstanceDetail(id) {
+  detailId = id;
+  go("instance");
+  history.replaceState({ page: "instance", id }, "", "/instance/" + encodeURIComponent(id));
+}
+
+function renderInstanceDetail() {
+  if (!instances.length) return; // first poll hasn't landed; refresh() re-renders
+  const i = instances.find((x) => x.id === detailId);
+  if (!i) { go("instances"); return; }
+  const s = i.stats || {};
+  const name = i.label || i.id;
+  const ver = (i.health && i.health.version) || "unknown";
+  $("page-title").textContent = "Stats: " + name;
+  $("page-sub").textContent = (i.online ? "online" : "offline") + (i.url ? " · " + i.url : "");
+  $("di-url").textContent = i.url || "";
+  $("di-queries").textContent = fmt(s.queries_total ?? 0);
+  $("di-blocked").textContent = fmt(s.blocked_total ?? 0);
+  $("di-status").textContent = i.online ? "online" : "offline";
+  $("di-version").textContent = "blipd " + ver;
+  $("di-ping").textContent = i.ping_avg_ms ? i.ping_avg_ms.toFixed(0) + "ms" : "—";
+  const ub = $("di-update"), note = $("di-update-note"), rb = $("di-restart");
+  rb.disabled = !i.online;
+  if (fleetUpdateJob.running) {
+    ub.disabled = true;
+    ub.textContent = fleetUpdateJob.current ? `Updating ${fleetUpdateJob.current}…` : "Updating…";
+    note.textContent = fleetUpdateJob.total > 1
+      ? "Serialized fleet update in progress — instances update one at a time."
+      : "Updating this instance…";
+  } else if (!i.online) {
+    ub.disabled = true; ub.textContent = "Update";
+    note.textContent = "Instance is offline.";
+  } else {
+    ub.disabled = false;
+    ub.textContent = i.update_available ? "Update available" : "Update";
+    note.textContent = i.update_available
+      ? `Running ${ver} → ${i.latest_version || "newer build"} available. Updates only this instance.`
+      : `Running ${ver} — up to date.`;
+  }
+  renderDetailFeed();
+}
+
+// renderDetailFeed tails the instance's process logs (blipd's own stdout,
+// newest at the bottom like tail -f), refreshed on every detail render.
+async function renderDetailFeed() {
+  const el = $("di-feed"); if (!el || !detailId) return;
+  try {
+    const r = await API("/api/instances/" + encodeURIComponent(detailId) + "/logs?limit=200");
+    const d = await r.json();
+    const lines = d.lines || [];
+    if (!lines.length) {
+      el.innerHTML = `<div class="empty"><div class="empty-ic">${IC.dash}</div><h4>No process logs</h4><p>blipd keeps the last 500 lines since it started.</p></div>`;
+      return;
+    }
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
+    el.innerHTML = lines.map((l) => `<li><div class="grow" style="font-family:var(--mono);font-size:12px;white-space:pre-wrap;word-break:break-word">${esc(l)}</div></li>`).join("");
+    if (nearBottom) el.scrollTop = el.scrollHeight;
+  } catch { /* keep previous content when the instance is unreachable */ }
 }
 
 /* ---------- queries ---------- */
@@ -1915,36 +1983,57 @@ $("logout-btn").onclick = async () => {
 
 /* initial route */
 const validPage = (id) => NAV.some((n) => n.id === id) || id === "upstream-errors";
+const routeFor = (p) => {
+  const m = p.match(/^instance\/(.+)$/);
+  if (m) { try { detailId = decodeURIComponent(m[1]); } catch { detailId = m[1]; } return "instance"; }
+  return validPage(p) ? p : "dashboard";
+};
 const initial = (location.pathname.replace(/\/+$/, "") || "/").replace(/^\//, "");
-go(validPage(initial) ? initial : "dashboard", false);
+go(routeFor(initial), false);
 
 /* popstate */
 window.addEventListener("popstate", () => {
   const p = (location.pathname.replace(/\/+$/, "") || "/").replace(/^\//, "");
-  go(validPage(p) ? p : "dashboard", false);
+  go(routeFor(p), false);
 });
 
 /* add instance */
 $("add-instance-btn").onclick = openInstanceModal;
-$("update-instances-btn").onclick = () => {
+function startFleetUpdate(btn, idleLabel) {
   confirmDialog("Update all instances?", "Instances will update one at a time. Each node must return online before the next node is touched; the job stops on failure.", async () => {
-    const b = $("update-instances-btn");
-    b.disabled = true;
-    b.textContent = "Updating…";
+    btn.disabled = true;
+    btn.textContent = "Updating…";
     try {
       const r = await API("/api/instances/update", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ channel: savedReleaseChannel }) });
       const d = await r.json();
       fleetUpdateJob = d;
       toast(`serialized update started (${d.channel || savedReleaseChannel})`, "ok");
       if (current === "instances") renderInstances();
+      else if (current === "instance") renderInstanceDetail();
       pollUpdateJob();
     } catch (e) { toast("update failed: " + e.message, "err"); }
-    finally { b.disabled = false; b.textContent = "Update all"; }
+    finally { btn.disabled = false; btn.textContent = idleLabel; }
   });
-};
+}
+$("update-instances-btn").onclick = (e) => startFleetUpdate(e.currentTarget, "Update all");
 
-let updatePollTimer = null;
-let fleetUpdateJob = { running: false, current: "" };
+function startSingleUpdate(id, btn) {
+  const i = instances.find((x) => x.id === id); if (!i) return;
+  confirmDialog(`Update ${i.label || i.id}?`, "Only this instance updates. Its blipd restarts; DNS served by it drops for a few seconds. Use HA for zero-downtime.", async () => {
+    btn.disabled = true;
+    btn.textContent = "Updating…";
+    try {
+      const r = await API("/api/instances/update", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id, channel: savedReleaseChannel }) });
+      const d = await r.json();
+      fleetUpdateJob = d;
+      toast(`update started for ${i.label || i.id} (${d.channel || savedReleaseChannel})`, "ok");
+      if (current === "instance") renderInstanceDetail();
+      pollUpdateJob();
+    } catch (e) { toast("update failed: " + e.message, "err"); }
+    finally { btn.disabled = false; btn.textContent = "Update"; if (current === "instance") renderInstanceDetail(); }
+  });
+}
+
 async function pollUpdateJob() {
   if (updatePollTimer) clearTimeout(updatePollTimer);
   try {
@@ -1956,6 +2045,7 @@ async function pollUpdateJob() {
       b.disabled = true;
       b.textContent = d.current ? `Updating ${d.current}…` : "Updating…";
       if (current === "instances") renderInstances();
+      else if (current === "instance") renderInstanceDetail();
       updatePollTimer = setTimeout(pollUpdateJob, 3000);
       return;
     }
@@ -1976,11 +2066,17 @@ $("inst-tbody").addEventListener("click", (e) => {
   const b = e.target.closest("[data-act]"); if (!b) return;
   const id = b.dataset.id;
   const act = b.dataset.act;
-  if (act === "policies") openPolicyModal(id);
+  if (act === "detail") { e.preventDefault(); openInstanceDetail(id); }
+  else if (act === "policies") openPolicyModal(id);
   else if (act === "edit") editLabel(id);
   else if (act === "restart") restartInstance(id);
   else if (act === "remove") confirmRemove(id);
 });
+
+/* instance detail buttons */
+$("di-back").onclick = () => go("instances");
+$("di-restart").onclick = () => { if (detailId) restartInstance(detailId); };
+$("di-update").onclick = (e) => { if (detailId) startSingleUpdate(detailId, e.currentTarget); };
 
 async function restartInstance(id) {
   const i = instances.find((x) => x.id === id); if (!i) return;
@@ -2611,7 +2707,7 @@ connectSSE();
 refresh();
 startClock();
 refreshSettings();
-pollTimer = setInterval(() => { if (current === "dashboard" || current === "instances" || current === "cache-stats" || current === "upstream-errors") refresh(); }, 5000);
+pollTimer = setInterval(() => { if (current === "dashboard" || current === "instances" || current === "instance" || current === "cache-stats" || current === "upstream-errors") refresh(); }, 5000);
 // ponytail: no separate fetchStats timer — the 5s refresh() above already runs
 // fetchStats on the dashboard, so a second timer was pure duplicate requests.
 

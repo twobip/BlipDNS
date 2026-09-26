@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -30,9 +31,10 @@ import (
 // "0.0.0" for local, unstamped builds.
 var version = "0.0.0"
 
-// reportedVersion exposes the release version to the management API.
+// reportedVersion exposes the release version to the management API,
+// with the build commit appended (e.g. "blipd/0.7.0+47cf192").
 func reportedVersion() string {
-	return "blipd/" + version
+	return "blipd/" + control.WithCommit(version)
 }
 
 // blocklistSources merges the legacy single URL with the new plural list.
@@ -60,6 +62,11 @@ func main() {
 	adminTLSCert := flag.String("admin-tls-cert", "", "path to TLS certificate for the management API (enables HTTPS with -admin-tls-key)")
 	adminTLSKey := flag.String("admin-tls-key", "", "path to TLS key for the management API")
 	flag.Parse()
+
+	// Tee process logs into an in-memory tail for GET /api/v1/logs.
+	// stderr still receives everything, so the journal is unaffected.
+	logRing := control.NewLogRing(0)
+	log.SetOutput(io.MultiWriter(os.Stderr, logRing))
 
 	cfg, err := config.Load(*cfgPath)
 	if err != nil {
@@ -213,6 +220,7 @@ func main() {
 		log.Printf("[block] %s -> %s", client, domain)
 	})
 	srv.ControlServer().SetHAController(haMgr)
+	srv.ControlServer().SetLogRing(logRing)
 	// A VIP arriving from the controller must reach the certificate without a
 	// restart: re-derive the pair (all SANs, including the VIP) and swap it in.
 	if cfg.DoHTLS && cfg.CertFile == "" && cfg.KeyFile == "" {
