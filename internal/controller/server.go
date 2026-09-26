@@ -1701,6 +1701,12 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
 		return
 	}
+	// The dashboard's SSE stream must outlive the server's 30s absolute
+	// Read/WriteTimeout, otherwise every browser's event stream is cut and
+	// re-connected on a 30s cycle instead of streaming.
+	rc := http.NewResponseController(w)
+	_ = rc.SetWriteDeadline(time.Time{})
+	_ = rc.SetReadDeadline(time.Time{})
 	ch, backlog, ok := s.fleet.Bus().TrySubscribe()
 	if !ok {
 		http.Error(w, "too many event subscribers", http.StatusTooManyRequests)
@@ -1820,21 +1826,31 @@ func (s *Server) handleBlocklistSources(w http.ResponseWriter, r *http.Request) 
 			URLs            []string `json:"urls"`
 			AutoUpdateHours *int     `json:"auto_update_hours"`
 			ClearManual     bool     `json:"clear_manual"`
+			Clear           bool     `json:"clear"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
+		urls := cleanURLs(req.URLs)
+		// Fail closed: an empty source list is only destructive when the
+		// caller asks for it. A UI whose source list was lost (e.g. an old
+		// startup bug clobbered blocklist_sources in the config) PUTs its
+		// empty view on an unrelated save — auto-update hours — and used to
+		// wipe the merged blocklist on every instance.
+		if len(urls) == 0 && !req.Clear {
+			http.Error(w, "refusing to save an empty source list; send clear:true to remove all sources and domains", http.StatusBadRequest)
+			return
+		}
 		if req.AutoUpdateHours != nil {
 			s.fleet.SetAutoUpdateHours(*req.AutoUpdateHours)
 		}
-		urls := cleanURLs(req.URLs)
 		if len(urls) > maxBlocklistSources {
 			http.Error(w, fmt.Sprintf("too many blocklist sources (max %d)", maxBlocklistSources), http.StatusBadRequest)
 			return
 		}
 		if len(urls) == 0 {
-			// Saving an empty source list clears the blocklist.
+			// clear:true with no URLs: drop the sources and the merged list.
 			s.fleet.SetBlocklistSources(r.Context(), nil)
 			s.fleet.Blocklist().FromDomains(nil)
 			if req.ClearManual {

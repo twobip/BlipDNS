@@ -2134,7 +2134,7 @@ $("bl-export").onclick = () => window.open("/api/blocklist/export", "_blank");
 $("bl-clear").onclick = () => {
   confirmDialog("Clear entire blocklist?", "This removes every blocked domain, drops all sources, and deletes custom domains. This cannot be undone.", async () => {
     try {
-      await API("/api/blocklist/sources", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ urls: [], clear_manual: true }) });
+      await API("/api/blocklist/sources", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ urls: [], clear: true, clear_manual: true }) });
       blSources = [];
       toast("cleared blocklist"); loadBlocklist();
     } catch (e) { toast("clear failed", "err"); }
