@@ -83,6 +83,13 @@ func main() {
 	}
 
 	fleet := controller.NewFleet(*cfgPath)
+	// Seed trusted proxies BEFORE anything that persists: the instance Add
+	// loop below saves the config, and saveConfig writes trusted_proxies
+	// from memory — seeding afterwards wiped a configured list on every
+	// restart (the later live-server call only needed srv to exist).
+	if len(cfg.TrustedProxies) > 0 {
+		fleet.SetTrustedProxiesDefault(cfg.TrustedProxies)
+	}
 	// Restore persisted blocklist settings FIRST: several startup calls below
 	// (SetRecords, Add) persist the config, and saveConfig writes the source
 	// list from memory — restoring afterwards lets every restart clobber
@@ -173,9 +180,6 @@ func main() {
 		// Logged as a single setup URL (not a bare token plus a URL) so the
 		// secret appears once, not twice. Keep it private.
 		log.Printf("blipc: first-run setup (one-time, keep private): open http%s://%s/setup#token=%s to create the administrator account", map[bool]string{true: "s", false: ""}[cfg.DashboardTLS || (cfg.TLSCertFile != "" && cfg.TLSKeyFile != "")], cfg.Listen, setupToken)
-	}
-	if len(cfg.TrustedProxies) > 0 {
-		fleet.SetTrustedProxiesDefault(cfg.TrustedProxies)
 	}
 	srv := controller.NewServerWithConfig(cfg.Username, authPass, fleet, controller.UI(), *cfgPath, setupToken)
 	if len(cfg.TrustedProxies) > 0 {
