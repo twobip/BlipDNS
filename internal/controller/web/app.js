@@ -53,6 +53,9 @@ const fmtLat = (us) => {
   if (us < 1000000) return (us / 1000).toFixed(1) + "ms";
   return (us / 1000000).toFixed(1) + "s";
 };
+// fmtPing formats a millisecond ping via fmtLat so sub-millisecond
+// LAN pings show as µs instead of rounding to "0ms".
+const fmtPing = (ms) => fmtLat((ms ?? 0) * 1000);
 
 /* ---------- relative-time ticking ---------- */
 // Recomputes every live relative-time label (.t[data-t]) on a 1s tick so the
@@ -500,7 +503,7 @@ function renderInstances() {
   }
   tb.innerHTML = list.map((i) => {
     const s = i.stats || {};
-    const ping = i.ping_avg_ms ? i.ping_avg_ms.toFixed(0) + "ms" : "—";
+    const ping = fmtPing(i.ping_avg_ms);
     return `<tr>
       <td>
         <div class="cell-main"><span class="dot ${i.online ? "on" : "off"}"></span><a href="#" data-act="detail" data-id="${esc(i.id)}" style="color:inherit;cursor:pointer">${esc(i.label || i.id)}</a></div>
@@ -583,7 +586,7 @@ function renderInstanceDetail() {
   $("di-blocked").textContent = fmt(s.blocked_total ?? 0);
   $("di-status").textContent = i.online ? "online" : "offline";
   $("di-version").textContent = "blipd " + ver;
-  $("di-ping").textContent = i.ping_avg_ms ? i.ping_avg_ms.toFixed(0) + "ms" : "—";
+  $("di-ping").textContent = fmtPing(i.ping_avg_ms);
   const ub = $("di-update"), note = $("di-update-note"), rb = $("di-restart");
   rb.disabled = !i.online;
   if (fleetUpdateJob.running) {
