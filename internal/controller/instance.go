@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"crypto/x509"
 	"log"
 	"runtime/debug"
 	"strings"
@@ -47,6 +48,7 @@ type InstanceStatus struct {
 type Instance struct {
 	Config    InstanceConfig
 	client    *control.Client
+	mgmtLeaf  *x509.Certificate // pinned self-signed management leaf (in-memory; fingerprint persists as Config.MgmtCertFP)
 	fleet     *Fleet
 	claimCode string // optional code the controller was pre-seeded with
 

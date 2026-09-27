@@ -1,7 +1,11 @@
 package controller
 
 import (
+	"context"
+	"crypto/sha256"
 	"crypto/tls"
+	"crypto/x509"
+	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -163,5 +167,87 @@ func TestMaybeMigrateMgmtTLS(t *testing.T) {
 	fleet.maybeMigrateMgmtTLS(inst3, "s3", inst3.Config.URL)
 	if got := inst3.Config.URL; got != "http://127.0.0.1:9" {
 		t.Fatalf("URL = %q, want unchanged (no TLS there)", got)
+	}
+}
+
+// TestMaybeMigrateMgmtTLSTOFU proves migration works against a self-signed
+// instance with NO system trust: the leaf is pinned on first sight, the
+// pinned client can actually poll through it, and a changed cert afterwards
+// refuses instead of silently re-pinning.
+func TestMaybeMigrateMgmtTLSTOFU(t *testing.T) {
+	certPEM, keyPEM, err := certgen.Generate("127.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/v1/adopt/status", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"adopted":true}`))
+	})
+	mux.HandleFunc("/api/v1/health", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":true,"version":"test"}`))
+	})
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{Certificates: []tls.Certificate{cert}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &http.Server{Handler: mux}
+	go func() { _ = srv.Serve(ln) }()
+	defer srv.Close()
+
+	fleet := NewFleet("")
+	httpURL := "http://" + ln.Addr().String()
+	inst := &Instance{Config: InstanceConfig{ID: "s1", URL: httpURL, Token: "t"}, fleet: fleet}
+	fleet.maybeMigrateMgmtTLS(inst, "s1", httpURL)
+	wantURL := "https://" + ln.Addr().String()
+	if got := inst.Config.URL; got != wantURL {
+		t.Fatalf("URL = %q, want %q (TOFU migrate without system trust)", got, wantURL)
+	}
+	leaf, err := x509.ParseCertificate(cert.Certificate[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(leaf.Raw)
+	if want := hex.EncodeToString(sum[:]); inst.Config.MgmtCertFP != want {
+		t.Fatalf("pinned FP = %q, want %q", inst.Config.MgmtCertFP, want)
+	}
+	// The pinned client really polls through the pin (would fail TLS
+	// verification without it: self-signed, no system trust).
+	if _, err := inst.client.Health(context.Background()); err != nil {
+		t.Fatalf("pinned client health poll failed: %v", err)
+	}
+	// Same cert again: pin matches, migration holds.
+	fleet.maybeMigrateMgmtTLS(inst, "s1", httpURL)
+	if got := inst.Config.URL; got != wantURL {
+		t.Fatalf("URL = %q, want %q (pin re-match)", got, wantURL)
+	}
+	// Rotated cert under the same URL: refuse, never silently re-pin.
+	// (Close the first server so the same port can be rebound.)
+	if err := srv.Close(); err != nil {
+		t.Fatal(err)
+	}
+	rotPEM, rotKey, err := certgen.Generate("127.0.0.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rotCert, err := tls.X509KeyPair(rotPEM, rotKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln2, err := tls.Listen("tcp", ln.Addr().String(), &tls.Config{Certificates: []tls.Certificate{rotCert}})
+	if err != nil {
+		t.Skipf("cannot rebind %s for rotation test: %v", ln.Addr(), err)
+	}
+	srv2 := &http.Server{Handler: mux}
+	go func() { _ = srv2.Serve(ln2) }()
+	defer srv2.Close()
+	inst2 := &Instance{Config: InstanceConfig{ID: "s2", URL: httpURL, Token: "t", MgmtCertFP: inst.Config.MgmtCertFP}, fleet: fleet}
+	inst2.lastTLSProbe = time.Time{}
+	fleet.maybeMigrateMgmtTLS(inst2, "s2", httpURL)
+	if got := inst2.Config.URL; got != httpURL {
+		t.Fatalf("URL = %q, want unchanged %q (rotated cert must refuse)", got, httpURL)
 	}
 }

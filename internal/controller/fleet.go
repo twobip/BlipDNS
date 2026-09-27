@@ -7,11 +7,11 @@ package controller
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net"
-	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -59,11 +59,12 @@ type Event struct {
 
 // InstanceConfig is one managed blipd entry (from controller config).
 type InstanceConfig struct {
-	ID    string `yaml:"id" json:"id"`
-	URL   string `yaml:"url" json:"url"` // http://host:8444
-	Token string `yaml:"token" json:"token"`
-	Label string `yaml:"label" json:"label"`
-	Claim string `yaml:"claim" json:"claim"` // one-time claim code (optional bootstrap)
+	ID         string `yaml:"id" json:"id"`
+	URL        string `yaml:"url" json:"url"` // http://host:8444
+	Token      string `yaml:"token" json:"token"`
+	Label      string `yaml:"label" json:"label"`
+	Claim      string `yaml:"claim" json:"claim"`                                   // one-time claim code (optional bootstrap)
+	MgmtCertFP string `yaml:"mgmt_cert_fp,omitempty" json:"mgmt_cert_fp,omitempty"` // pinned SHA256 of the instance's self-signed management cert (TOFU); "" = system trust
 }
 
 // InstanceOverride is a partial per-instance config: only fields that are set
@@ -858,18 +859,30 @@ func (f *Fleet) Add(ctx context.Context, cfg InstanceConfig) error {
 		return err
 	}
 	// Opportunistic HTTPS upgrade: blipd serves the management API over TLS
-	// when configured with -admin-tls-cert/-key. Probe the https equivalent
-	// (token-free endpoint); never downgrade an https URL on failure.
-	if up := httpsCandidate(cfg.URL); up != "" && probeMgmtTLS(&http.Client{Timeout: upgradeProbeTimeout}, up) {
-		log.Printf("blipc: instance %q management API upgraded to HTTPS (%s)", cfg.ID, up)
-		cfg.URL = up
+	// when configured with -admin-tls-cert/-key (or auto-TLS by default).
+	// System-trusted servers migrate plainly; self-signed ones are pinned
+	// on first sight (TOFU) and matched against MgmtCertFP afterwards.
+	// Never downgrade an https URL on failure.
+	target := cfg.URL
+	if up := httpsCandidate(cfg.URL); up != "" {
+		target = up
+	}
+	client := control.NewClient(cfg.URL, cfg.Token)
+	var leaf *x509.Certificate
+	if strings.HasPrefix(target, "https://") {
+		if c, l, fp, ok := httpsMgmtClient(target, cfg.Token, cfg.MgmtCertFP); ok {
+			if target != cfg.URL {
+				log.Printf("blipc: instance %q management API upgraded to HTTPS (%s)", cfg.ID, target)
+			}
+			cfg.URL, cfg.MgmtCertFP, client, leaf = target, fp, c, l
+		}
 	}
 	warnInsecureInstanceURL(cfg.ID, cfg.URL)
 	warnMgmtTLSInstanceURL(cfg.ID, cfg.URL)
 	if cfg.Label == "" {
 		cfg.Label = cfg.ID
 	}
-	inst := &Instance{Config: cfg, client: control.NewClient(cfg.URL, cfg.Token), fleet: f, last: f.now()}
+	inst := &Instance{Config: cfg, client: client, mgmtLeaf: leaf, fleet: f, last: f.now()}
 	f.mu.Lock()
 	f.instances[cfg.ID] = inst
 	f.mu.Unlock()
@@ -898,7 +911,9 @@ const adminTLSRecheckInterval = time.Hour
 
 // maybeMigrateMgmtTLS probes the https equivalent after a failed poll and
 // persistently migrates when the instance gained TLS management (e.g. blipd
-// auto-enabled it on update). Never downgrades.
+// auto-enabled it on update). System-trusted servers migrate plainly;
+// self-signed ones are pinned (TOFU) and matched against the persisted pin
+// afterwards. Never downgrades.
 func (f *Fleet) maybeMigrateMgmtTLS(inst *Instance, id, rawURL string) {
 	up := httpsCandidate(rawURL)
 	if up == "" {
@@ -906,6 +921,8 @@ func (f *Fleet) maybeMigrateMgmtTLS(inst *Instance, id, rawURL string) {
 	}
 	inst.mu.RLock()
 	last := inst.lastTLSProbe
+	token := inst.Config.Token
+	pinned := inst.Config.MgmtCertFP
 	inst.mu.RUnlock()
 	if f.now().Sub(last) < adminTLSRecheckInterval {
 		return
@@ -913,13 +930,20 @@ func (f *Fleet) maybeMigrateMgmtTLS(inst *Instance, id, rawURL string) {
 	inst.mu.Lock()
 	inst.lastTLSProbe = f.now()
 	inst.mu.Unlock()
-	if !probeMgmtTLS(&http.Client{Timeout: upgradeProbeTimeout}, up) {
+	c, leaf, fp, ok := httpsMgmtClient(up, token, pinned)
+	if !ok {
 		return
 	}
 	inst.mu.Lock()
 	inst.Config.URL = up
-	inst.client = control.NewClient(up, inst.Config.Token)
+	inst.Config.MgmtCertFP = fp
+	old := inst.client
+	inst.client = c
+	inst.mgmtLeaf = leaf
 	inst.mu.Unlock()
+	if old != nil {
+		old.CloseIdleConnections()
+	}
 	if f.configPath != "" {
 		if err := f.saveConfig(); err != nil {
 			log.Printf("blipc: warning: failed to persist migrated URL: %v", err)
@@ -2300,7 +2324,13 @@ func (f *Fleet) Adopt(ctx context.Context, id, code string) error {
 		inst.Config.Token = resp.Token
 		inst.claimCode = ""
 		old := inst.client
-		inst.client = control.NewClient(inst.Config.URL, resp.Token)
+		// Preserve the pinned management leaf across the token rotation:
+		// rebuilding a standard client would drop self-signed trust.
+		if inst.mgmtLeaf != nil && strings.HasPrefix(inst.Config.URL, "https://") {
+			inst.client = pinnedMgmtClient(inst.Config.URL, resp.Token, inst.mgmtLeaf)
+		} else {
+			inst.client = control.NewClient(inst.Config.URL, resp.Token)
+		}
 		inst.mu.Unlock()
 		if old != nil {
 			old.CloseIdleConnections()
