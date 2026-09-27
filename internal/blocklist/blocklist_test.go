@@ -526,6 +526,50 @@ func TestParseHostsAnyIP(t *testing.T) {
 	}
 }
 
+// TestParseSkipsNonDNSFilters pins the fix for a fleet-wide outage class:
+// uBlock Origin's IP-scoped filters ("||com^$doc,ipaddress=...") can't be
+// evaluated at DNS level and carry a bare TLD fragment as their hostname
+// part, while cosmetic filters ("top##body > center") carry an injection
+// scope instead of a domain. After a badware.txt refresh, parsing either
+// class into the block set NXDOMAIN'd every .com lookup (and blocked .top,
+// .cc, .at, .icu, ...) on all resolvers. Both must be skipped entirely.
+func TestParseSkipsNonDNSFilters(t *testing.T) {
+	set := make(map[string]struct{})
+	for _, line := range []string{
+		"||com^$doc,ipaddress=206.82.7.123",
+		"||com^$doc,ipaddress=38.114.120.167",
+		"||top^$doc,ipaddress=15.207.81.128",
+		"||at^$script,xhr,3p,ipaddress=185.215.113.111",
+		"||sbs^$doc,ipaddress=166.117.237.67",
+		`app##center#yangchen > iframe#external-frame[src="https://im136.mom/"]:not([class])`,
+		"top##body > center + .A + .post",
+		`monster###bw-rc-host[style="position: fixed !important; inset: 0px !important;"]`,
+		"example.com#?#div.ad",
+	} {
+		if parseLine(line, set) {
+			t.Errorf("parseLine(%q) = true, want skipped", line)
+		}
+	}
+	if len(set) != 0 {
+		t.Fatalf("set = %v, want empty: none of these lines may block a domain", set)
+	}
+	// Options without ipaddress= must parse as before.
+	if !parseLine("||evil.example.com^$doc,domain=~good.example.com", set) {
+		t.Error("plain $doc filter no longer parses")
+	}
+	if _, ok := set["evil.example.com"]; !ok {
+		t.Errorf("evil.example.com missing from %v", set)
+	}
+	// A "#" after whitespace is a hosts-style trailing comment, not a
+	// cosmetic scope: the domain before it must still be picked up.
+	if !parseLine("0.0.0.0 ads.example.net ## comment", set) {
+		t.Error("hosts line with ##-style trailing comment no longer parses")
+	}
+	if _, ok := set["ads.example.net"]; !ok {
+		t.Errorf("ads.example.net missing from %v", set)
+	}
+}
+
 func TestLoadFromURLsPerSourceCounts(t *testing.T) {
 	listA := "||a.example.com^\n||b.example.com^\n"
 	listB := "||b.example.com^\n||c.example.com^\n||d.example.org^\n"

@@ -669,6 +669,21 @@ func parseLine(line string, merged map[string]struct{}) bool {
 	if line[0] == '!' || line[0] == '#' {
 		return false
 	}
+	// Cosmetic filters ("domain##selector", "domain#?#rule", ...) are not
+	// network filters: the part before the marker is an injection scope, not
+	// a hostname to block. Cutting the line at "#" (the comment strip below)
+	// would leak that scope as a bogus single-label entry — e.g.
+	// "top##body > center" would block the whole .top TLD. A "#" in a
+	// hosts-file inline comment always follows whitespace; a cosmetic marker
+	// never does, so check only the text before the first blank.
+	if h := strings.IndexByte(line, '#'); h != -1 {
+		if ws := strings.IndexAny(line, " 	"); ws == -1 || h < ws {
+			if rest := line[h:]; len(rest) >= 2 && rest[0] == '#' &&
+				(rest[1] == '#' || (len(rest) >= 3 && rest[2] == '#' && strings.IndexByte("?$%@^_", rest[1]) != -1)) {
+				return false
+			}
+		}
+	}
 	// hosts-format: "0.0.0.0 <domain>  # comment".
 	if isHostsIP(line) {
 		fields := strings.Fields(line)
@@ -689,8 +704,16 @@ func parseLine(line string, merged map[string]struct{}) bool {
 			return false
 		}
 	}
-	// Strip $options.
+	// Strip $options. Filters scoped by connection IP ($ipaddress=) cannot be
+	// evaluated by a DNS resolver, and their hostname part is a fragment:
+	// uBlock Origin ships "||com^$doc,ipaddress=206.82.7.123" to catch scam
+	// servers by IP across rotating .com domains. Blocking that hostname
+	// part unconditionally takes out an entire TLD (real incident: entry
+	// "com" NXDOMAIN'd every .com lookup fleet-wide), so skip the whole line.
 	if idx := strings.IndexByte(line, '$'); idx != -1 {
+		if strings.Contains(","+line[idx+1:]+",", ",ipaddress=") {
+			return false
+		}
 		line = strings.TrimRight(line[:idx], " 	")
 		if line == "" {
 			return false
