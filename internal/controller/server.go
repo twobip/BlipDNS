@@ -274,10 +274,12 @@ func (s *Server) requireAuth(h http.HandlerFunc) http.HandlerFunc {
 				http.Error(w, "read-only API key cannot access query history", http.StatusForbidden)
 				return
 			}
-			// Per-instance query-log lives under /api/instances/<id>/query-log
-			// (same prefix as other instance reads), so it is enforced inside
-			// handleInstance rather than by path prefix here.
-			if scope == APIKeyScopeRead && strings.HasPrefix(r.URL.Path, "/api/instances/") && strings.HasSuffix(r.URL.Path, "/query-log") {
+			// Per-instance query-log and process-log tails live under
+			// /api/instances/<id>/query-log|/logs (same prefix as other
+			// instance reads), so they are filtered here by suffix rather
+			// than by the top-level path switch above.
+			if scope == APIKeyScopeRead && strings.HasPrefix(r.URL.Path, "/api/instances/") &&
+				(strings.HasSuffix(r.URL.Path, "/query-log") || strings.HasSuffix(r.URL.Path, "/logs")) {
 				http.Error(w, "read-only API key cannot access query history", http.StatusForbidden)
 				return
 			}
@@ -699,6 +701,7 @@ func (s *Server) handleSelfUpdate(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusConflict)
 			return
 		}
+		log.Printf("blipc: audit: self-update started channel=%q from %s", channel, s.clientIP(r))
 		writeJSON(w, map[string]interface{}{"ok": true, "status": s.selfUpdate.UpdateStatus()})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -738,6 +741,7 @@ func (s *Server) handleInstanceUpdate(w http.ResponseWriter, r *http.Request) {
 			}
 			return
 		}
+		log.Printf("blipc: audit: instance update started id=%q channel=%q from %s", req.ID, channel, s.clientIP(r))
 		writeJSON(w, job)
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -798,6 +802,7 @@ func (s *Server) handleInstanceRestart(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	log.Printf("blipc: audit: instance restart id=%q from %s", req.ID, s.clientIP(r))
 	writeJSON(w, map[string]any{"ok": true, "msg": "restarting " + req.ID})
 }
 
@@ -1781,14 +1786,20 @@ func (s *Server) handleBlocklist(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		domains := s.fleet.ManualDomains()
+		allowed := s.fleet.AllowedDomains()
 		if lim := r.URL.Query().Get("limit"); lim != "" {
-			if n, err := strconv.Atoi(lim); err == nil && n > 0 && len(domains) > n {
-				domains = domains[:n]
+			if n, err := strconv.Atoi(lim); err == nil && n > 0 {
+				if len(domains) > n {
+					domains = domains[:n]
+				}
+				if len(allowed) > n {
+					allowed = allowed[:n]
+				}
 			}
 		}
 		writeJSON(w, map[string]interface{}{
 			"domains": domains,
-			"allowed": s.fleet.AllowedDomains(),
+			"allowed": allowed,
 			"total":   s.fleet.Blocklist().Count(),
 			"sources": s.fleet.BlocklistSources(),
 			"status":  s.fleet.BlocklistStatus(),

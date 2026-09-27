@@ -202,6 +202,9 @@ func (a *Auth) verify(user, pass string) bool {
 	hash := append([]byte(nil), a.passHash...)
 	a.mu.Unlock()
 	if !constantTimeEq(user, username) {
+		// Burn the same bcrypt cost as a wrong password so unknown-user
+		// and wrong-password are indistinguishable by response timing.
+		_ = bcrypt.CompareHashAndPassword(hash, []byte(pass))
 		return false
 	}
 	return bcrypt.CompareHashAndPassword(hash, []byte(pass)) == nil

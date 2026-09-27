@@ -211,6 +211,7 @@ func main() {
 		Blocklist:         bl,
 		BlockAction:       blockAction,
 		TrustedProxies:    cfg.TrustedProxies,
+		AllowedNetworks:   cfg.AllowedNetworks,
 	})
 	if err != nil {
 		log.Fatalf("blipd: %v", err)

@@ -487,7 +487,14 @@ func dohMaxAge(resp *dns.Msg) uint32 {
 			if rr == nil || rr.Header() == nil {
 				continue
 			}
-			if t := rr.Header().Ttl; !seen || t < min {
+			t := rr.Header().Ttl
+			// RFC 2308 §3: negative answers cache for min(SOA TTL, SOA
+			// minimum) — mirror cache.minTTL so the advertised HTTP
+			// freshness never exceeds the actual negative-cache TTL.
+			if soa, ok := rr.(*dns.SOA); ok && soa.Minttl < t {
+				t = soa.Minttl
+			}
+			if !seen || t < min {
 				min, seen = t, true
 			}
 		}

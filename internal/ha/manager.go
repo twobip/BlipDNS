@@ -280,11 +280,11 @@ func (m *Manager) ApplyHA() error {
 	//      has no reload handler. Requires a sudoers rule for pkill too.
 	//
 	// Both the systemctl and pkill sudoers rules are installed by
-	// install-blipd.sh. Absolute paths are tried first (PATH may be
-	// restricted under systemd), then bare names.
+	// install-blipd.sh. Absolute paths only: bare names would resolve via
+	// PATH (restricted but attacker-influenced under systemd), and the old
+	// unsudoed last-resort pkill is dead code as the unprivileged blip user.
 	reloadCmds := [][]string{
 		{"/usr/bin/sudo", "-n", "/usr/bin/systemctl", "reload", "keepalived"},
-		{"sudo", "-n", "systemctl", "reload", "keepalived"},
 	}
 	for _, args := range reloadCmds {
 		if commandSucceeds(args[0], args[1:]...) {
@@ -297,7 +297,6 @@ func (m *Manager) ApplyHA() error {
 	// NOPASSWD sudoers rule for pkill.
 	hupCmds := [][]string{
 		{"/usr/bin/sudo", "-n", "/usr/bin/pkill", "-HUP", "keepalived"},
-		{"sudo", "-n", "pkill", "-HUP", "keepalived"},
 	}
 	for _, args := range hupCmds {
 		if commandSucceeds(args[0], args[1:]...) {
@@ -305,13 +304,9 @@ func (m *Manager) ApplyHA() error {
 			return nil
 		}
 	}
-	// Last resort without sudo: works only if blipd is already root.
-	if err := runCommand("pkill", "-HUP", "keepalived"); err != nil {
-		m.recordError(err)
-		return err
-	}
-	m.clearError()
-	return nil
+	err = fmt.Errorf("keepalived reload unavailable: no sudo rule matched (need systemctl reload or pkill -HUP)")
+	m.recordError(err)
+	return err
 }
 
 func (m *Manager) DisableHA() error {

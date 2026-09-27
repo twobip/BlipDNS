@@ -41,7 +41,7 @@ Runtime config of the per-client DNS QPS limit flows **controller → blipd**:
 1. Operator: `PUT /api/settings {"rate_limit_qps": N}` (or per-instance override) in the blipc web UI. blipc persists it to `controller.yaml` and pushes.
 2. `control.Client.SetRateLimit` → `PUT /api/v1/ratelimit {qps,burst}`.
 3. `blipd` management server (`control.Server`) routes to `control.RateLimitController.SetRateLimit` → `dnsserver.Server.SetRateLimit` → `rateLimiter.set`, resetting buckets.
-4. Each query: `dnsserver.Server.serve` calls `rateLimiter.allow(client)` (key = DoH client-id else source IP); REFUSED on excess.
+4. Each query: `dnsserver.Server.serve` calls `rateLimiter.allow(client)` (key = source IP post trusted-proxy resolution); REFUSED on excess.
 5. `blipd` reports current `rate_limit_qps` in `/api/v1/stats`; the controller reconciles a restarted instance back to its effective value via `maybePushRateLimit`.
 When adding runtime-toggled state, always wire it the same way: a control API method on the server, mirrored by `control.Client`, plus controller push + reconcile.
 

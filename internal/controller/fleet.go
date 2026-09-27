@@ -738,6 +738,14 @@ func validateInstanceURL(raw string) error {
 	if u.Host == "" || u.Hostname() == "" {
 		return fmt.Errorf("invalid instance url: host required")
 	}
+	// Literal link-local hosts (incl. cloud metadata 169.254.169.254) are
+	// never legitimate management targets: an admin pointing the controller
+	// at one would send the instance bearer token there on every poll/push.
+	// ponytail: literals only — a hostname resolving to link-local later
+	// (DNS rebinding) is out of scope for operator-typed URLs.
+	if ip := net.ParseIP(u.Hostname()); ip != nil && ip.IsLinkLocalUnicast() {
+		return fmt.Errorf("invalid instance url: link-local hosts (incl. cloud metadata) not allowed")
+	}
 	return nil
 }
 

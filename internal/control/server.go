@@ -973,6 +973,7 @@ func (s *Server) handleUpdate(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "channel must be stable or dev", http.StatusBadRequest)
 			return
 		}
+		log.Printf("blipd: audit: update started channel=%q from %s", channel, adoptIP(r))
 		if err := ctrl.StartUpdate(channel); err != nil {
 			http.Error(w, err.Error(), http.StatusConflict)
 			return
@@ -999,6 +1000,7 @@ func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.lastRestart.Store(time.Now().UnixNano())
+	log.Printf("blipd: audit: restart requested from %s", adoptIP(r))
 	writeJSON(w, AckResponse{OK: true, Msg: "restarting blipd"})
 	go func() {
 		_ = exec.Command("sudo", "-n", "/usr/bin/systemctl", "restart", "blipd.service").Run()

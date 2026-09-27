@@ -3,6 +3,8 @@ package dnsserver
 import (
 	"net/http"
 	"testing"
+
+	"github.com/miekg/dns"
 )
 
 func TestClientIPFromReqIgnoresUntrustedForwardedHeader(t *testing.T) {
@@ -52,4 +54,17 @@ func httptestRequest(remote, forwarded string) *http.Request {
 	r.RemoteAddr = remote
 	r.Header.Set("X-Forwarded-For", forwarded)
 	return r
+}
+
+// TestDohMaxAgeNegativeUsesSOAMinimum proves dohMaxAge mirrors cache.minTTL
+// (RFC 2308 §3): an NXDOMAIN SOA with TTL 3600 / minimum 60 advertises 60,
+// never 3600.
+func TestDohMaxAgeNegativeUsesSOAMinimum(t *testing.T) {
+	m := new(dns.Msg)
+	m.SetRcode(new(dns.Msg).SetQuestion("nx.test.", dns.TypeA), dns.RcodeNameError)
+	soa := &dns.SOA{Hdr: dns.RR_Header{Name: "test.", Rrtype: dns.TypeSOA, Class: dns.ClassINET, Ttl: 3600}, Minttl: 60}
+	m.Ns = []dns.RR{soa}
+	if got := dohMaxAge(m); got != 60 {
+		t.Fatalf("dohMaxAge(NXDOMAIN) = %d, want 60", got)
+	}
 }

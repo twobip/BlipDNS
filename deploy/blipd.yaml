@@ -1,4 +1,10 @@
 dns_addr: "0.0.0.0:53"
+# Recursion ACL: CIDRs/IPs allowed to recurse. Empty = open recursion
+# (answered for any client, with a startup warning) — restrict on any
+# WAN-reachable install, e.g:
+# allowed_networks:
+#   - "127.0.0.0/8"
+#   - "192.168.30.0/24"
 # H4: loopback-first defaults. dns_addr stays wildcard (DNS must serve the
 # LAN), but DoH + management API bind to loopback. Change to 0.0.0.0 only
 # behind an isolated mgmt VLAN + set insecure_lan ack.

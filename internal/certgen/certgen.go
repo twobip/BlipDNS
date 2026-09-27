@@ -35,9 +35,10 @@ const validity = 398 * 24 * time.Hour
 // before the hard expiry instead of all at once on expiry day.
 const renewAfter = validity * 2 / 3
 
-// Generate creates a self-signed ECDSA (P-256) server certificate. The
-// certificate names localhost plus every non-loopback address on the host, so
-// DoH clients can connect via any hostname/IP the machine actually has.
+// Generate creates a self-signed ECDSA (P-256) server certificate covering
+// the expected identities (localhost, hostname, loopback, stable local IPs
+// plus extras) — deliberately not every interface address, so a handshake
+// doesn't disclose full host topology (see expectedSANs).
 // extraHosts may add explicit DNS names or IP addresses.
 func Generate(extraHosts ...string) (certPEM, keyPEM []byte, err error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)

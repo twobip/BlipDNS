@@ -133,6 +133,9 @@ func TestValidateInstanceURLRemoteHTTP(t *testing.T) {
 		"file:///etc/passwd",
 		"http://user:pass@192.168.1.5:8444",
 		"http:///no-host",
+		"http://169.254.169.254/",
+		"http://169.254.169.254:80/latest/meta-data/",
+		"http://[fe80::1]/",
 	} {
 		if err := validateInstanceURL(badURL); err == nil {
 			t.Errorf("validate %q: expected error, got nil", badURL)
