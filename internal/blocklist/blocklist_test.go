@@ -547,6 +547,8 @@ func TestParseSkipsNonDNSFilters(t *testing.T) {
 		"top##body > center + .A + .post",
 		`monster###bw-rc-host[style="position: fixed !important; inset: 0px !important;"]`,
 		"example.com#?#div.ad",
+		"example#@#rule",
+		"example#$#rule",
 	} {
 		if parseLine(line, set, allowed) {
 			t.Errorf("parseLine(%q) = true, want skipped", line)

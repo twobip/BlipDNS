@@ -21,7 +21,7 @@ admin_token: "REPLACE-ME-generate-with-openssl-rand-hex-32"
 # Examples:
 #   upstream: "udp://1.1.1.1:53 udp://8.8.8.8:53"
 #   upstream: "https://1.1.1.1/dns-query https://8.8.8.8/dns-query"
-#   upstream: "https://1.1.1.1/dns-query udp://1.1.1.1:53"  # UDP primary, DoH failover
+#   upstream: "https://1.1.1.1/dns-query udp://1.1.1.1:53"  # DoH primary, UDP failover
 #   upstream: "udp://8.8.8.8:53|2 https://1.1.1.1/dns-query|1"  # DoH is primary
 upstream: "https://1.1.1.1/dns-query udp://1.1.1.1:53"
 # Named upstream pool with conditional routing (optional). Each server gets a

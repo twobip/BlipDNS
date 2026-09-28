@@ -694,19 +694,18 @@ func parseLine(line string, merged, allowed map[string]struct{}) bool {
 	if line[0] == '!' || line[0] == '#' {
 		return false
 	}
-	// Cosmetic filters ("domain##selector", "domain#?#rule", ...) are not
-	// network filters: the part before the marker is an injection scope, not
-	// a hostname to block. Cutting the line at "#" (the comment strip below)
-	// would leak that scope as a bogus single-label entry — e.g.
-	// "top##body > center" would block the whole .top TLD. A "#" in a
-	// hosts-file inline comment always follows whitespace; a cosmetic marker
-	// never does, so check only the text before the first blank.
+	// Cosmetic/special filters ("domain##selector", "domain#?#rule",
+	// "domain#@#exception", ...) are not network filters: the part before
+	// the marker is an injection scope, not a hostname to block. Cutting
+	// the line at "#" (the comment strip below) would leak that scope as a
+	// bogus single-label entry — e.g. "top##body > center" would block the
+	// whole .top TLD. A "#" never appears in a domain, and a "#" in a
+	// hosts-file inline comment always follows whitespace, so any "#" before
+	// the first blank marks the whole line cosmetic (no marker allowlist to
+	// keep in sync with new ABP syntax).
 	if h := strings.IndexByte(line, '#'); h != -1 {
 		if ws := strings.IndexAny(line, " 	"); ws == -1 || h < ws {
-			if rest := line[h:]; len(rest) >= 2 && rest[0] == '#' &&
-				(rest[1] == '#' || (len(rest) >= 3 && rest[2] == '#' && strings.IndexByte("?$%@^_", rest[1]) != -1)) {
-				return false
-			}
+			return false
 		}
 	}
 	// hosts-format: "0.0.0.0 <domain>  # comment".

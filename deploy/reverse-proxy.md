@@ -71,7 +71,7 @@ dns-admin.example.com {
 Caddy sets `X-Forwarded-For/Proto/Host` automatically; keep blipc's
 `trusted_proxies: ["127.0.0.1/32", "::1/128"]`.
 
-## 5. Proxy on a different host (backend over LAN)
+## 4. Proxy on a different host (backend over LAN)
 
 Plain `http://blipc:8500` across the LAN leaks session cookies + fleet tokens
 to passive sniffing. Serve the backend over HTTPS with the same self-signed
@@ -110,7 +110,7 @@ tls_key_file: "/etc/blipd/tls.key"
 Note: `blipc` (user `blipc`) must be able to read those paths — separate
 dashboard certs under `/var/lib/blipc` avoid cross-user key access.
 
-## 4. Checks
+## 5. Checks
 
 - `curl -Ik https://dns-admin.example.com/login` → `Secure` on
   `Set-Cookie: blip_session` after POST `/api/login`.
