@@ -25,6 +25,9 @@ Config (`/etc/blipc/blipc.yaml`):
 
 ```yaml
 listen: "127.0.0.1:8500"
+# trusted_proxies: ["127.0.0.1/32", "::1/128"]  # required behind a
+#   TLS-terminating proxy: without it client IPs show the proxy, session
+#   cookies mint without Secure, and CSRF origin checks use the internal host.
 # Auth is username/password session auth (HttpOnly + SameSite=Strict cookie,
 # Secure when served over TLS directly or behind a trusted proxy sending
 # X-Forwarded-Proto: https). First boot uses the one-time setup flow to create

@@ -107,17 +107,22 @@ func lastForwardedToken(s string) string {
 	return ""
 }
 
-// ClientIP returns the real client IP: the last X-Forwarded-For /
-// CF-Connecting-IP token when the peer is trusted, else the direct peer.
+// ClientIP returns the real client IP: the last X-Forwarded-For token when
+// the peer is trusted, else the direct peer. X-Forwarded-For wins over
+// CF-Connecting-IP: a generic trusted proxy forwards client headers
+// verbatim, letting the client dictate CF-Connecting-IP directly. Either
+// way the proxy must strip/spoof-proof these headers (e.g. only
+// $proxy_add_x_forwarded_for); trusting them also makes rate-limit keys
+// spoofable by anyone behind the proxy.
 func (t *ProxyTrust) ClientIP(r *http.Request) string {
 	if t != nil && t.IsTrustedPeer(r) {
-		if cf := strings.TrimSpace(r.Header.Get("CF-Connecting-IP")); cf != "" {
-			if ip := net.ParseIP(firstForwardedToken(cf)); ip != nil {
+		if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
+			if ip := net.ParseIP(firstForwardedToken(fwd)); ip != nil {
 				return ip.String()
 			}
 		}
-		if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
-			if ip := net.ParseIP(firstForwardedToken(fwd)); ip != nil {
+		if cf := strings.TrimSpace(r.Header.Get("CF-Connecting-IP")); cf != "" {
+			if ip := net.ParseIP(firstForwardedToken(cf)); ip != nil {
 				return ip.String()
 			}
 		}

@@ -108,7 +108,10 @@ func NewSetupToken() (string, error) {
 
 // SetTrustedProxies configures which immediate peers may supply
 // X-Forwarded-For/Proto/Host (reverse proxy / Cloudflare Tunnel).
-// Empty clears the trust (forwarded headers ignored).
+// Empty clears the trust (forwarded headers ignored). Behind a
+// TLS-terminating proxy this list is required for more than client-IP
+// accuracy: without it session cookies mint without Secure and CSRF Origin
+// checks compare against the internal scheme/host.
 func (s *Server) SetTrustedProxies(values []string) error {
 	pt, err := ParseTrustedProxies(values)
 	if err != nil {
