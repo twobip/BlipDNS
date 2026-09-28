@@ -403,6 +403,21 @@ func (s *Server) handler(local bool) http.Handler {
 	mux.HandleFunc("/api/v1/adopt/status", s.handleAdoptStatus)
 	mux.HandleFunc("/api/v1/adopt", s.handleAdopt)
 	mux.HandleFunc("/api/v1/adopt/reset", auth(s.handleAdoptReset))
+	if !local {
+		// No route enumeration oracle: unauthenticated hits on unknown
+		// paths get the same 401 as known routes instead of 404.
+		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+			if s.currentToken() == "" {
+				http.Error(w, "management API disabled", http.StatusServiceUnavailable)
+				return
+			}
+			if !s.authenticated(r) {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			http.NotFound(w, r)
+		})
+	}
 	return s.withSecurityHeaders(mux)
 }
 

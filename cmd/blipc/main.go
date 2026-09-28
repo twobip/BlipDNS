@@ -9,6 +9,7 @@ import (
 	"crypto/tls"
 	"flag"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -28,6 +29,8 @@ type config struct {
 	Listen            string                                  `yaml:"listen"`
 	TrustedProxies    []string                                `yaml:"trusted_proxies"`
 	DashboardTLS      bool                                    `yaml:"dashboard_tls"`
+	AllowPlainRemote  bool                                    `yaml:"allow_plain_remote"`
+	StrictCSRF        *bool                                   `yaml:"strict_csrf"`
 	TLSDir            string                                  `yaml:"tls_dir"`
 	TLSCertFile       string                                  `yaml:"tls_cert_file"`
 	TLSKeyFile        string                                  `yaml:"tls_key_file"`
@@ -182,6 +185,14 @@ func main() {
 		log.Printf("blipc: first-run setup (one-time, keep private): open http%s://%s/setup#token=%s to create the administrator account", map[bool]string{true: "s", false: ""}[cfg.DashboardTLS || (cfg.TLSCertFile != "" && cfg.TLSKeyFile != "")], cfg.Listen, setupToken)
 	}
 	srv := controller.NewServerWithConfig(cfg.Username, authPass, fleet, controller.UI(), *cfgPath, setupToken)
+	// StrictCSRF defaults true for new deploys (fail closed on header-stripped
+	// cross-site posts). Explicit `strict_csrf: false` restores the legacy
+	// compat mode for API clients that omit Origin/Sec-Fetch-Site.
+	strictCSRF := true
+	if cfg.StrictCSRF != nil {
+		strictCSRF = *cfg.StrictCSRF
+	}
+	srv.StrictCSRF = strictCSRF
 	if len(cfg.TrustedProxies) > 0 {
 		if err := srv.SetTrustedProxies(cfg.TrustedProxies); err != nil {
 			log.Fatalf("blipc: trusted_proxies: %v", err)
@@ -192,6 +203,9 @@ func main() {
 	// dashboard_tls is set (or explicit cert/key files are given), serve
 	// HTTPS; otherwise plain HTTP (loopback or behind a TLS proxy).
 	dashboardTLS := cfg.DashboardTLS || (cfg.TLSCertFile != "" && cfg.TLSKeyFile != "")
+	if !dashboardTLS && !cfg.AllowPlainRemote && !isLoopbackListen(cfg.Listen) {
+		log.Fatalf("blipc: refusing plain HTTP on non-loopback %s (session cookies would be sniffable); set dashboard_tls: true, bind listen to 127.0.0.1:8500 behind a TLS proxy (see deploy/reverse-proxy.md), or set allow_plain_remote: true to acknowledge the risk", cfg.Listen)
+	}
 	if !dashboardTLS {
 		blipconfig.WarnPlainHTTP("blipc", "dashboard", cfg.Listen, "session cookies")
 	}
@@ -280,6 +294,20 @@ func main() {
 // (when due) or an explicit operator action. The no-save setters run first
 // and SetAutoUpdateHours (which persists) last, so a save can never observe
 // a half-restored fleet.
+func isLoopbackListen(addr string) bool {
+	h, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	if h == "" || h == "localhost" || h == "127.0.0.1" || h == "::1" {
+		return true
+	}
+	if ip := net.ParseIP(h); ip != nil && ip.IsLoopback() {
+		return true
+	}
+	return false
+}
+
 func restoreBlocklistSettings(fleet *controller.Fleet, sources, disabled []string, updateHours int) {
 	if len(sources) > 0 {
 		fleet.SetBlocklistDisabled(disabled)

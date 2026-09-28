@@ -16,6 +16,14 @@ listen: "127.0.0.1:8500"
 # tls_san lists extra names/IPs the cert must cover (proxy-facing hostname or
 # the LAN IP the proxy dials); changing it regenerates the pair.
 # dashboard_tls: true
+# Headless servers: keep listen on 127.0.0.1:8500 and put a TLS-terminating
+# proxy in front (see deploy/reverse-proxy.md), use dashboard_tls: true, or
+# use `ssh -L 8500:127.0.0.1:8500 user@host`. Plain HTTP on 0.0.0.0 is refused
+# at startup unless you set allow_plain_remote: true to acknowledge sniffing.
+# allow_plain_remote: false
+# CSRF: strict_csrf defaults true (fail closed on header-stripped cross-site
+# posts). Set explicitly false only for legacy API clients that omit Origin.
+# strict_csrf: true
 # tls_dir: "/var/lib/blipc"
 # tls_cert_file: ""
 # tls_key_file: ""

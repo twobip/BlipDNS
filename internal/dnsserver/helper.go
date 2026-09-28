@@ -113,6 +113,9 @@ func parseTrustedProxies(values []string) ([]*net.IPNet, error) {
 		if err != nil {
 			return nil, fmt.Errorf("invalid trusted proxy %q: %w", value, err)
 		}
+		if ones, _ := n.Mask.Size(); ones == 0 {
+			return nil, fmt.Errorf("invalid trusted proxy %q: catch-all CIDR would trust the whole internet; leave trusted_proxies empty instead", value)
+		}
 		out = append(out, n)
 	}
 	return out, nil
