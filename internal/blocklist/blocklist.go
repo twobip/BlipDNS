@@ -509,8 +509,9 @@ func (b *Blocklist) LoadFromURLs(ctx context.Context, urls []string, opts *LoadO
 	}
 
 	type srcResult struct {
-		set map[string]struct{}
-		err error
+		set     map[string]struct{}
+		allowed map[string]struct{}
+		err     error
 	}
 	sem := make(chan struct{}, maxSourceFetchers)
 	results := make([]srcResult, len(urls))
@@ -532,12 +533,14 @@ func (b *Blocklist) LoadFromURLs(ctx context.Context, urls []string, opts *LoadO
 				results[idx].err = err
 			} else if !fr.NotModified {
 				results[idx].set = fr.Domains
+				results[idx].allowed = fr.Allowed
 			}
 		}(i, u)
 	}
 	wg.Wait()
 
 	merged := make(map[string]struct{})
+	mergedAllowed := make(map[string]struct{})
 	res := &LoadResult{Sources: len(urls)}
 	for i, u := range urls {
 		per := SourceResult{URL: u}
@@ -549,6 +552,9 @@ func (b *Blocklist) LoadFromURLs(ctx context.Context, urls []string, opts *LoadO
 		} else {
 			for d := range set {
 				merged[d] = struct{}{}
+			}
+			for d := range results[i].allowed {
+				mergedAllowed[d] = struct{}{}
 			}
 			per.Domains = len(set)
 			res.Errors = append(res.Errors, "")
@@ -566,6 +572,13 @@ func (b *Blocklist) LoadFromURLs(ctx context.Context, urls []string, opts *LoadO
 		return res, errors.New("no domains fetched from any source")
 	}
 	b.FromDomainsMap(merged)
+	// This call owns the whole list: replace the allow set with the sources'
+	// own $denyallow= exceptions (empty clears), matching FromDomainsMap.
+	allowed := make([]string, 0, len(mergedAllowed))
+	for d := range mergedAllowed {
+		allowed = append(allowed, d)
+	}
+	b.SetAllowed(allowed)
 	res.Domains = len(merged)
 	return res, nil
 }
@@ -585,8 +598,16 @@ type Validators struct {
 // FetchResult is one fetched source: the parsed domains plus the validators
 // the server sent back (echo them on the next refresh). NotModified reports
 // a 304: Domains is nil and the persisted snapshot is still current.
+//
+// Allowed carries the domains the source exempts from its own broad filters
+// via "$denyallow=" options (hagezi spam-tlds ships "||*.lol^$denyallow=
+// adsb.lol|..." to block the whole .lol TLD except its named sites). A DNS
+// resolver cannot scope a block to "everything but these", so the exceptions
+// belong in the allow set; dropping them NXDOMAINs legitimate sites
+// fleet-wide (adsb.lol, dozens of wikis, omg.lol, ...).
 type FetchResult struct {
 	Domains     map[string]struct{}
+	Allowed     map[string]struct{}
 	Validators  Validators
 	NotModified bool
 }
@@ -635,13 +656,14 @@ func FetchSource(ctx context.Context, rawURL string, v Validators) (*FetchResult
 	}
 
 	set := make(map[string]struct{})
+	allowed := make(map[string]struct{})
 	sc := bufio.NewScanner(io.LimitReader(resp.Body, maxSourceBytes))
 	sc.Buffer(make([]byte, 8*1024), maxLineLen)
 	for sc.Scan() {
-		parseLine(sc.Text(), set)
+		parseLine(sc.Text(), set, allowed)
 		// F-16: abort an exploding source early instead of growing the map
 		// (plus its SQLite snapshot) without bound.
-		if len(set) > maxSourceDomains {
+		if len(set) > maxSourceDomains || len(allowed) > maxSourceDomains {
 			return nil, fmt.Errorf("source too large: exceeds %d domain cap", maxSourceDomains)
 		}
 		if ctx.Err() != nil {
@@ -655,12 +677,15 @@ func FetchSource(ctx context.Context, rawURL string, v Validators) (*FetchResult
 		return nil, ctx.Err()
 	}
 	out.Domains = set
+	out.Allowed = allowed
 	return out, nil
 }
 
 // parseLine extracts a domain (or wildcard root) from a single list line and
-// adds it to merged. Returns true if the line yielded a new entry.
-func parseLine(line string, merged map[string]struct{}) bool {
+// adds it to merged, plus any "$denyallow=" exceptions the line carries to
+// allowed (see collectDenyallow). Returns true if the line yielded a new
+// block entry.
+func parseLine(line string, merged, allowed map[string]struct{}) bool {
 	line = strings.TrimSpace(line)
 	if line == "" {
 		return false
@@ -710,10 +735,14 @@ func parseLine(line string, merged map[string]struct{}) bool {
 	// servers by IP across rotating .com domains. Blocking that hostname
 	// part unconditionally takes out an entire TLD (real incident: entry
 	// "com" NXDOMAIN'd every .com lookup fleet-wide), so skip the whole line.
+	// $denyallow= is the opposite shape: the hostname part is a legitimate
+	// broad block whose exceptions must survive — keep the block, take the
+	// exceptions into the allow set.
 	if idx := strings.IndexByte(line, '$'); idx != -1 {
 		if strings.Contains(","+line[idx+1:]+",", ",ipaddress=") {
 			return false
 		}
+		collectDenyallow(line[idx+1:], allowed)
 		line = strings.TrimRight(line[:idx], " 	")
 		if line == "" {
 			return false
@@ -763,6 +792,26 @@ func parseLine(line string, merged map[string]struct{}) bool {
 		return true
 	}
 	return false
+}
+
+// collectDenyallow records the domains a filter's "$denyallow=" option
+// exempts into allowed, so a broad block ("||*.lol^") keeps its upstream
+// exceptions resolving. Values are '|'-separated inside the ','-separated
+// option list; entries normalizeDomain rejects are skipped. The exceptions
+// are plain domains (not wildcards) and cover subdomains downstream via the
+// allow set's ancestor walk.
+func collectDenyallow(opts string, allowed map[string]struct{}) {
+	for _, opt := range strings.Split(opts, ",") {
+		v, ok := strings.CutPrefix(strings.TrimSpace(opt), "denyallow=")
+		if !ok {
+			continue
+		}
+		for _, d := range strings.Split(v, "|") {
+			if h := normalizeDomain(d); h != "" {
+				allowed[h] = struct{}{}
+			}
+		}
+	}
 }
 
 // isHostsIP reports whether a line starts with an IP literal (hosts-file form).

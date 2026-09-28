@@ -86,7 +86,12 @@ CREATE TABLE IF NOT EXISTS blocklist_source_domains (
 	domain     TEXT NOT NULL,
 	PRIMARY KEY (source_url, domain)
 );
-CREATE INDEX IF NOT EXISTS idx_blocklist_source_domains_domain ON blocklist_source_domains(domain);`); err != nil {
+CREATE INDEX IF NOT EXISTS idx_blocklist_source_domains_domain ON blocklist_source_domains(domain);
+CREATE TABLE IF NOT EXISTS blocklist_source_allowed (
+	source_url TEXT NOT NULL,
+	domain     TEXT NOT NULL,
+	PRIMARY KEY (source_url, domain)
+);`); err != nil {
 		return nil, fmt.Errorf("create blocklist source schema: %w", err)
 	}
 	s := &BlocklistStore{db: db}
@@ -259,13 +264,27 @@ type SourceMeta struct {
 // any previously stored snapshot for that URL. The snapshot is the fallback
 // used when a later refresh of the source fails.
 func (s *BlocklistStore) ReplaceSourceDomains(ctx context.Context, url string, domains []string) error {
+	return s.replaceSourceSet(ctx, "blocklist_source_domains", url, domains)
+}
+
+// ReplaceSourceAllowed stores the per-source domains the source itself
+// exempts from its broad blocks ($denyallow= exceptions). Same lifecycle as
+// blocklist_source_domains: refreshed on every full fetch, and the fallback
+// for a later 304 or failed refresh.
+func (s *BlocklistStore) ReplaceSourceAllowed(ctx context.Context, url string, domains []string) error {
+	return s.replaceSourceSet(ctx, "blocklist_source_allowed", url, domains)
+}
+
+// replaceSourceSet replaces one source's rows in a (source_url, domain)
+// snapshot table. table must be a literal table name.
+func (s *BlocklistStore) replaceSourceSet(ctx context.Context, table, url string, domains []string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 
-	if _, err := tx.ExecContext(ctx, `DELETE FROM blocklist_source_domains WHERE source_url = ?`, url); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM `+table+` WHERE source_url = ?`, url); err != nil {
 		return err
 	}
 
@@ -274,7 +293,7 @@ func (s *BlocklistStore) ReplaceSourceDomains(ctx context.Context, url string, d
 	// tables created without the primary key.
 	err = insertChunked(ctx, tx, len(domains),
 		func(n int) string {
-			return `INSERT OR IGNORE INTO blocklist_source_domains (source_url, domain) VALUES ` + placeholders(n, 2)
+			return `INSERT OR IGNORE INTO ` + table + ` (source_url, domain) VALUES ` + placeholders(n, 2)
 		},
 		func(start, end int) []interface{} {
 			args := make([]interface{}, 0, (end-start)*2)
@@ -292,9 +311,41 @@ func (s *BlocklistStore) ReplaceSourceDomains(ctx context.Context, url string, d
 // LoadSourceDomains returns the last successfully downloaded domain set for a
 // source. An empty (or absent) snapshot yields an empty set, never an error.
 func (s *BlocklistStore) LoadSourceDomains(ctx context.Context, url string) (map[string]struct{}, error) {
+	return s.loadSourceSet(ctx, "blocklist_source_domains", url)
+}
+
+// LoadSourceAllowed returns one source's stored $denyallow= exceptions.
+// An empty (or absent) snapshot yields an empty set, never an error.
+func (s *BlocklistStore) LoadSourceAllowed(ctx context.Context, url string) (map[string]struct{}, error) {
+	return s.loadSourceSet(ctx, "blocklist_source_allowed", url)
+}
+
+// LoadSourceAllowedSet returns every stored source exception as one set — the
+// union a restart needs so it serves the same allow set it distributed before
+// the next import runs.
+func (s *BlocklistStore) LoadSourceAllowedSet(ctx context.Context) (map[string]struct{}, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT domain FROM blocklist_source_allowed`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string]struct{})
+	for rows.Next() {
+		var d string
+		if err := rows.Scan(&d); err != nil {
+			return nil, err
+		}
+		out[d] = struct{}{}
+	}
+	return out, rows.Err()
+}
+
+// loadSourceSet returns the last stored snapshot for url from a
+// (source_url, domain) table. table must be a literal table name.
+func (s *BlocklistStore) loadSourceSet(ctx context.Context, table, url string) (map[string]struct{}, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT domain
-		FROM blocklist_source_domains
+		FROM `+table+`
 		WHERE source_url = ?`, url)
 	if err != nil {
 		return nil, err
@@ -368,22 +419,24 @@ func (s *BlocklistStore) PruneSources(ctx context.Context, keep []string) error 
 		return nil
 	}
 	if len(keep) == 0 {
-		if _, err := s.db.ExecContext(ctx, `DELETE FROM blocklist_source_domains`); err != nil {
-			return err
+		for _, table := range []string{"blocklist_source_domains", "blocklist_source_allowed", "blocklist_source_meta"} {
+			if _, err := s.db.ExecContext(ctx, `DELETE FROM `+table); err != nil {
+				return err
+			}
 		}
-		_, err := s.db.ExecContext(ctx, `DELETE FROM blocklist_source_meta`)
-		return err
+		return nil
 	}
 	args := make([]interface{}, 0, len(keep))
 	for _, u := range keep {
 		args = append(args, u)
 	}
 	ph := strings.TrimSuffix(strings.Repeat("?,", len(keep)), ",")
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM blocklist_source_domains WHERE source_url NOT IN (`+ph+`)`, args...); err != nil {
-		return err
+	for _, table := range []string{"blocklist_source_domains", "blocklist_source_allowed", "blocklist_source_meta"} {
+		if _, err := s.db.ExecContext(ctx, `DELETE FROM `+table+` WHERE source_url NOT IN (`+ph+`)`, args...); err != nil {
+			return err
+		}
 	}
-	_, err := s.db.ExecContext(ctx, `DELETE FROM blocklist_source_meta WHERE source_url NOT IN (`+ph+`)`, args...)
-	return err
+	return nil
 }
 
 // BlockSourceLabel returns a display label for the list(s) that contain

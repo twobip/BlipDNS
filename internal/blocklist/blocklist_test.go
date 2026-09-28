@@ -497,6 +497,7 @@ func TestHashStringVectors(t *testing.T) {
 
 func TestParseHostsAnyIP(t *testing.T) {
 	set := make(map[string]struct{})
+	allowed := make(map[string]struct{})
 	for _, line := range []string{
 		"127.0.0.2 evil.example.com",
 		"8.8.8.8 ads.example.net",
@@ -504,7 +505,7 @@ func TestParseHostsAnyIP(t *testing.T) {
 		"0.0.0.0 dup.example.com",
 		"0.0.0.0 dup.example.com",
 	} {
-		if !parseLine(line, set) && line != "0.0.0.0 dup.example.com" {
+		if !parseLine(line, set, allowed) && line != "0.0.0.0 dup.example.com" {
 			t.Errorf("parseLine(%q) = false, want true", line)
 		}
 	}
@@ -518,7 +519,7 @@ func TestParseHostsAnyIP(t *testing.T) {
 	}
 	// Digit-leading domains must still parse as domains, not hosts lines.
 	set2 := make(map[string]struct{})
-	if !parseLine("123movies.example.com", set2) {
+	if !parseLine("123movies.example.com", set2, allowed) {
 		t.Error("parseLine(123movies.example.com) = false, want true")
 	}
 	if _, ok := set2["123movies.example.com"]; !ok {
@@ -535,6 +536,7 @@ func TestParseHostsAnyIP(t *testing.T) {
 // .cc, .at, .icu, ...) on all resolvers. Both must be skipped entirely.
 func TestParseSkipsNonDNSFilters(t *testing.T) {
 	set := make(map[string]struct{})
+	allowed := make(map[string]struct{})
 	for _, line := range []string{
 		"||com^$doc,ipaddress=206.82.7.123",
 		"||com^$doc,ipaddress=38.114.120.167",
@@ -546,27 +548,104 @@ func TestParseSkipsNonDNSFilters(t *testing.T) {
 		`monster###bw-rc-host[style="position: fixed !important; inset: 0px !important;"]`,
 		"example.com#?#div.ad",
 	} {
-		if parseLine(line, set) {
+		if parseLine(line, set, allowed) {
 			t.Errorf("parseLine(%q) = true, want skipped", line)
 		}
 	}
 	if len(set) != 0 {
 		t.Fatalf("set = %v, want empty: none of these lines may block a domain", set)
 	}
+	if len(allowed) != 0 {
+		t.Fatalf("allowed = %v, want empty: skipped lines must not contribute exceptions", allowed)
+	}
 	// Options without ipaddress= must parse as before.
-	if !parseLine("||evil.example.com^$doc,domain=~good.example.com", set) {
+	if !parseLine("||evil.example.com^$doc,domain=~good.example.com", set, allowed) {
 		t.Error("plain $doc filter no longer parses")
 	}
 	if _, ok := set["evil.example.com"]; !ok {
 		t.Errorf("evil.example.com missing from %v", set)
 	}
+	if len(allowed) != 0 {
+		t.Errorf("allowed = %v, want empty: $doc/$domain= carry no exceptions", allowed)
+	}
 	// A "#" after whitespace is a hosts-style trailing comment, not a
 	// cosmetic scope: the domain before it must still be picked up.
-	if !parseLine("0.0.0.0 ads.example.net ## comment", set) {
+	if !parseLine("0.0.0.0 ads.example.net ## comment", set, allowed) {
 		t.Error("hosts line with ##-style trailing comment no longer parses")
 	}
 	if _, ok := set["ads.example.net"]; !ok {
 		t.Errorf("ads.example.net missing from %v", set)
+	}
+}
+
+// TestDenyallowExceptionsAllowlisted pins the handling of "$denyallow=" — the
+// gesture hagezi's spam-tlds uses to block a whole TLD except its named sites
+// ("||*.lol^$denyallow=adsb.lol|ags.lol", "||*.wiki^$denyallow=...", 164 of
+// its 460 entries carry the option). The block entry must survive and the
+// exceptions must land in the allow set; before this, the option was dropped
+// and every listed site (adsb.lol's re-api included) NXDOMAIN'd fleet-wide.
+func TestDenyallowExceptionsAllowlisted(t *testing.T) {
+	body := `! Title: hagezi spam-tlds (abridged)
+||*.lol^$denyallow=adsb.lol|ags.lol
+||*.wiki^$doc,denyallow=minecraft.wiki|osrs.wiki
+||*.rest^$doc,domain=~good.rest
+||*.bad^$denyallow=also..broken|
+`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, body)
+	}))
+	defer srv.Close()
+
+	fr, err := FetchSource(context.Background(), srv.URL, Validators{})
+	if err != nil {
+		t.Fatalf("FetchSource: %v", err)
+	}
+	for _, d := range []string{"*.lol", "*.wiki", "*.rest", "*.bad"} {
+		if _, ok := fr.Domains[d]; !ok {
+			t.Errorf("block entry %q missing from %v", d, fr.Domains)
+		}
+	}
+	for _, d := range []string{"adsb.lol", "ags.lol", "minecraft.wiki", "osrs.wiki"} {
+		if _, ok := fr.Allowed[d]; !ok {
+			t.Errorf("denyallow exception %q missing from %v", d, fr.Allowed)
+		}
+		if _, ok := fr.Domains[d]; ok {
+			t.Errorf("exception %q leaked into the block set", d)
+		}
+	}
+	if len(fr.Allowed) != 4 {
+		t.Errorf("Allowed = %v, want exactly the 4 valid exceptions", fr.Allowed)
+	}
+
+	// End to end: an exception beats the whole-TLD block (subdomains too),
+	// while everything else under the TLD stays blocked.
+	bl := New()
+	bl.FromDomainsMap(fr.Domains)
+	allowed := make([]string, 0, len(fr.Allowed))
+	for d := range fr.Allowed {
+		allowed = append(allowed, d)
+	}
+	bl.SetAllowed(allowed)
+	if bl.IsBlocked("re-api.adsb.lol") || bl.IsBlocked("adsb.lol") {
+		t.Error("adsb.lol blocked: denyallow must exempt the listed domain and its subdomains")
+	}
+	if !bl.IsBlocked("evil.lol") {
+		t.Error("evil.lol not blocked: the *.lol entry must stay effective")
+	}
+	if bl.IsBlocked("minecraft.wiki") || !bl.IsBlocked("random.wiki") {
+		t.Error("*.wiki handling wrong: exception must pass, other subdomains stay blocked")
+	}
+
+	// LoadFromURLs (standalone blipd) applies the source's exceptions too.
+	b2 := New()
+	if _, err := b2.LoadFromURLs(context.Background(), []string{srv.URL}, nil); err != nil {
+		t.Fatalf("LoadFromURLs: %v", err)
+	}
+	if b2.IsBlocked("re-api.adsb.lol") {
+		t.Error("LoadFromURLs did not apply denyallow exceptions")
+	}
+	if !b2.IsBlocked("spam.lol") {
+		t.Error("LoadFromURLs lost the *.lol block")
 	}
 }
 

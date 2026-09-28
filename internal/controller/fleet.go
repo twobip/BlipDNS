@@ -129,6 +129,7 @@ type Fleet struct {
 	importLog         []string                     // recent import output lines (capped ring buffer)
 	manualDomains     map[string]struct{}          // hand-added domains, kept apart from sources
 	manualAllowed     map[string]struct{}          // hand-added whitelist domains
+	sourceAllowed     map[string]struct{}          // source-declared $denyallow= exceptions (adsb.lol, ...)
 	autoUpdateHours   int                          // hours between automatic refreshes; 0 = manual only
 	configPath        string                       // path to controller config YAML (for persisting tokens)
 	defaultPolicy     *control.Policy              // fleet-wide default policy (source of truth)
@@ -705,6 +706,7 @@ func NewFleet(configPath string) *Fleet {
 		overrides:         make(map[string]*InstanceOverride),
 		manualDomains:     make(map[string]struct{}),
 		manualAllowed:     make(map[string]struct{}),
+		sourceAllowed:     make(map[string]struct{}),
 		blocklistDisabled: make(map[string]bool),
 		release:           newReleaseCheck(),
 	}
@@ -2799,8 +2801,10 @@ func (f *Fleet) persistManual() {
 	}()
 }
 
-// LoadAllowedDomains restores the hand-added whitelist at startup so allowed
-// domains survive both restarts and the fresh source import that follows one.
+// LoadAllowedDomains restores the effective whitelist at startup — hand-added
+// entries plus the per-source $denyallow= exceptions — so allowed domains
+// survive both restarts and the fresh source import that follows one, and the
+// first reconcile pushes the same allow set the instances already hold.
 func (f *Fleet) LoadAllowedDomains(ctx context.Context) {
 	if f.blocklistDB == nil {
 		return
@@ -2810,9 +2814,21 @@ func (f *Fleet) LoadAllowedDomains(ctx context.Context) {
 		log.Printf("blipc: warning: load allowed blocklist: %v", err)
 		return
 	}
+	src, err := f.blocklistDB.LoadSourceAllowedSet(ctx)
+	if err != nil {
+		log.Printf("blipc: warning: load source $denyallow= exceptions: %v", err)
+	}
+	if src == nil {
+		src = make(map[string]struct{})
+	}
 	f.blMu.Lock()
 	f.manualAllowed = m
+	f.sourceAllowed = src
 	f.blMu.Unlock()
+	// The generation counter starts already "synced", so a plain syncAllowed()
+	// would no-op; bump it or the first reconcile pushes an empty allow set
+	// and un-allows every loaded entry fleet-wide until an allow edit.
+	f.allowGen.Add(1)
 	f.syncAllowed()
 }
 
@@ -2850,22 +2866,49 @@ func (f *Fleet) RemoveAllowedDomain(domain string) {
 	f.persistAllowed()
 }
 
-// AllowedDomains returns the sorted list of hand-added whitelist domains.
+// setSourceAllowed replaces the per-source $denyallow= exception union and
+// mirrors it into the merged list, bumping the allow generation so
+// syncAllowed applies it even though no manual allow edit happened.
+func (f *Fleet) setSourceAllowed(m map[string]struct{}) {
+	if m == nil {
+		m = make(map[string]struct{})
+	}
+	f.blMu.Lock()
+	f.sourceAllowed = m
+	f.blMu.Unlock()
+	f.allowGen.Add(1)
+	f.syncAllowed()
+}
+
+// AllowedDomains returns the sorted effective whitelist: hand-added entries
+// plus the exceptions the configured sources declare for their own broad
+// blocks ($denyallow= — e.g. hagezi spam-tlds exempts adsb.lol from its
+// whole-.lol block). Both kinds are distributed to instances. A source
+// exception can't be removed here; it returns on the next import until the
+// source drops it.
 func (f *Fleet) AllowedDomains() []string {
 	f.blMu.Lock()
 	defer f.blMu.Unlock()
-	out := make([]string, 0, len(f.manualAllowed))
+	union := make(map[string]struct{}, len(f.manualAllowed)+len(f.sourceAllowed))
 	for d := range f.manualAllowed {
+		union[d] = struct{}{}
+	}
+	for d := range f.sourceAllowed {
+		union[d] = struct{}{}
+	}
+	out := make([]string, 0, len(union))
+	for d := range union {
 		out = append(out, d)
 	}
 	sort.Strings(out)
 	return out
 }
 
-// syncAllowed mirrors the manual whitelist into the merged in-memory list so
-// the checksum (and therefore the hash distributed to instances) covers both
-// blocked and allowed domains. Gated on allowGen: the old code rebuilt + sorted
-// the allow set on every poll per instance (N rebuilds per 5s).
+// syncAllowed mirrors the effective whitelist (manual + source-declared
+// $denyallow= exceptions) into the merged in-memory list so the checksum (and
+// therefore the hash distributed to instances) covers both blocked and
+// allowed domains. Gated on allowGen: the old code rebuilt + sorted the allow
+// set on every poll per instance (N rebuilds per 5s).
 func (f *Fleet) syncAllowed() {
 	gen := f.allowGen.Load()
 	if f.allowSyncedGen.Load() == gen {
@@ -2875,14 +2918,15 @@ func (f *Fleet) syncAllowed() {
 	f.allowSyncedGen.Store(gen)
 }
 
-// ClearAllowedDomains removes every hand-added whitelist entry.
+// ClearAllowedDomains removes every hand-added whitelist entry. Exceptions
+// the sources themselves declare ($denyallow=) stay: they reflect upstream
+// intent, not operator state.
 func (f *Fleet) ClearAllowedDomains() {
 	f.blMu.Lock()
 	f.manualAllowed = make(map[string]struct{})
 	f.blMu.Unlock()
 	f.allowGen.Add(1)
-	f.blocklist.SetAllowed(nil)
-	f.allowSyncedGen.Store(f.allowGen.Load())
+	f.syncAllowed()
 	f.persistAllowed()
 }
 
@@ -3051,6 +3095,7 @@ func (f *Fleet) runBlocklistImport(ctx context.Context, gen int) {
 		if f.blocklistDB != nil {
 			_ = f.blocklistDB.PruneSources(context.Background(), nil)
 		}
+		f.setSourceAllowed(nil)
 		f.pushBlocklist(context.Background())
 		f.persistBlocklist()
 		return
@@ -3065,6 +3110,7 @@ func (f *Fleet) runBlocklistImport(ctx context.Context, gen int) {
 		f.logImport("all %d configured source(s) are disabled — keeping only manual domains", len(allURLs))
 		merged := f.manualDomainSet()
 		f.blocklist.FromDomainsMap(merged)
+		f.setSourceAllowed(nil)
 		f.persistBlocklist()
 		f.pushBlocklist(context.Background())
 		return
@@ -3093,12 +3139,30 @@ func (f *Fleet) runBlocklistImport(ctx context.Context, gen int) {
 	if len(merged) > 0 {
 		f.logImport("seeding %d manually added domain(s)", len(merged))
 	}
+	// mergedAllowed collects the sources' own $denyallow= exceptions; they
+	// join the allow set below (the block entries stay, the exceptions beat
+	// them), so an upstream "block *.lol except adsb.lol" really exempts the
+	// listed sites instead of NXDOMAINing them with the TLD.
+	mergedAllowed := make(map[string]struct{})
+	// mergeAllowedFallback folds a source's stored exceptions into the union
+	// (failed fetch or 304: the persisted snapshot is still current).
+	mergeAllowedFallback := func(u string) {
+		if f.blocklistDB == nil {
+			return
+		}
+		if dbSet, derr := f.blocklistDB.LoadSourceAllowed(ctx, u); derr == nil {
+			for d := range dbSet {
+				mergedAllowed[d] = struct{}{}
+			}
+		}
+	}
 
 	// Fetch all sources concurrently (bounded) so a long list of feeds doesn't
 	// serialize into an 8-minute download; results are merged in configured
 	// order so progress and per-source stats stay deterministic.
 	type blSourceResult struct {
 		set         map[string]struct{}
+		allowed     map[string]struct{}
 		err         error
 		dur         time.Duration
 		notModified bool
@@ -3139,7 +3203,7 @@ func (f *Fleet) runBlocklistImport(ctx context.Context, gen int) {
 				results[idx] = blSourceResult{notModified: true, dur: time.Since(t0), validators: nv}
 				return
 			}
-			results[idx] = blSourceResult{set: fr.Domains, dur: time.Since(t0), validators: nv}
+			results[idx] = blSourceResult{set: fr.Domains, allowed: fr.Allowed, dur: time.Since(t0), validators: nv}
 		}(i, u)
 	}
 	wg.Wait()
@@ -3176,6 +3240,7 @@ func (f *Fleet) runBlocklistImport(ctx context.Context, gen int) {
 			} else {
 				f.logImport("[%d/%d] no fallback snapshot available", i+1, len(urls))
 			}
+			mergeAllowedFallback(u)
 		} else if r.notModified {
 			// 304: the server confirms our snapshot is still current. Merge
 			// it without re-downloading or re-parsing anything.
@@ -3193,11 +3258,15 @@ func (f *Fleet) runBlocklistImport(ctx context.Context, gen int) {
 					st.Domains = prev.Domains
 				}
 			}
+			mergeAllowedFallback(u)
 			st.LastUpdate = f.now()
 		} else {
 			f.logImport("[%d/%d] ok: %d domains in %s", i+1, len(urls), len(r.set), r.dur.Round(time.Millisecond))
 			for d := range r.set {
 				merged[d] = struct{}{}
+			}
+			for d := range r.allowed {
+				mergedAllowed[d] = struct{}{}
 			}
 			st.Domains = len(r.set)
 			st.LastUpdate = f.now()
@@ -3208,6 +3277,13 @@ func (f *Fleet) runBlocklistImport(ctx context.Context, gen int) {
 				}
 				if err := f.blocklistDB.ReplaceSourceDomains(ctx, u, domains); err != nil {
 					log.Printf("blipc: warning: persist blocklist source snapshot: %v", err)
+				}
+				allowed := make([]string, 0, len(r.allowed))
+				for d := range r.allowed {
+					allowed = append(allowed, d)
+				}
+				if err := f.blocklistDB.ReplaceSourceAllowed(ctx, u, allowed); err != nil {
+					log.Printf("blipc: warning: persist blocklist source allowlist: %v", err)
 				}
 			}
 		}
@@ -3274,6 +3350,11 @@ func (f *Fleet) runBlocklistImport(ctx context.Context, gen int) {
 	}
 
 	prevHash := f.blocklist.Checksum()
+	// Exceptions the sources exempt ($denyallow=) join the allow set; the
+	// generation bump inside setSourceAllowed makes syncAllowed mirror them,
+	// so the checksum covers them and an exceptions-only change still
+	// persists and reaches the instances.
+	f.setSourceAllowed(mergedAllowed)
 	f.blocklist.FromDomainsMap(merged)
 	blocklistChanged := f.blocklist.Checksum() != prevHash
 	applied = true

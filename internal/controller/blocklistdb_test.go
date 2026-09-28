@@ -15,6 +15,96 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+func TestBlocklistStoreSourceAllowedSnapshots(t *testing.T) {
+	store, err := NewBlocklistStore(filepath.Join(t.TempDir(), "blocklist.db"))
+	if err != nil {
+		t.Fatalf("NewBlocklistStore: %v", err)
+	}
+	defer store.db.Close()
+	ctx := context.Background()
+
+	if err := store.ReplaceSourceDomains(ctx, "https://a.invalid/list", []string{"blocked.example.com"}); err != nil {
+		t.Fatalf("ReplaceSourceDomains: %v", err)
+	}
+	if err := store.ReplaceSourceAllowed(ctx, "https://a.invalid/list", []string{"allowed.example.com"}); err != nil {
+		t.Fatalf("ReplaceSourceAllowed: %v", err)
+	}
+	got, err := store.LoadSourceAllowed(ctx, "https://a.invalid/list")
+	if err != nil {
+		t.Fatalf("LoadSourceAllowed: %v", err)
+	}
+	if !reflect.DeepEqual(got, map[string]struct{}{"allowed.example.com": {}}) {
+		t.Errorf("LoadSourceAllowed = %v", got)
+	}
+	union, err := store.LoadSourceAllowedSet(ctx)
+	if err != nil {
+		t.Fatalf("LoadSourceAllowedSet: %v", err)
+	}
+	if !reflect.DeepEqual(union, map[string]struct{}{"allowed.example.com": {}}) {
+		t.Errorf("LoadSourceAllowedSet = %v", union)
+	}
+	// Pruning a source that is gone drops its exceptions too.
+	if err := store.PruneSources(ctx, []string{"https://b.invalid/other"}); err != nil {
+		t.Fatalf("PruneSources: %v", err)
+	}
+	if union, err = store.LoadSourceAllowedSet(ctx); err != nil || len(union) != 0 {
+		t.Errorf("LoadSourceAllowedSet after prune = %v, %v; want empty", union, err)
+	}
+	if got, err = store.LoadSourceAllowed(ctx, "https://a.invalid/list"); err != nil || len(got) != 0 {
+		t.Errorf("LoadSourceAllowed after prune = %v, %v; want empty", got, err)
+	}
+
+	// Replacing must drop the previous set...
+	if err := store.ReplaceSourceAllowed(ctx, "https://a.invalid/list", []string{"other.example.com"}); err != nil {
+		t.Fatalf("ReplaceSourceAllowed 2: %v", err)
+	}
+	if got, err = store.LoadSourceAllowed(ctx, "https://a.invalid/list"); err != nil || !reflect.DeepEqual(got, map[string]struct{}{"other.example.com": {}}) {
+		t.Errorf("LoadSourceAllowed 2 = %v, %v", got, err)
+	}
+	// ...and an empty set clears.
+	if err := store.ReplaceSourceAllowed(ctx, "https://a.invalid/list", nil); err != nil {
+		t.Fatalf("ReplaceSourceAllowed empty: %v", err)
+	}
+	if got, err = store.LoadSourceAllowed(ctx, "https://a.invalid/list"); err != nil || len(got) != 0 {
+		t.Errorf("LoadSourceAllowed after clear = %v, %v; want empty", got, err)
+	}
+}
+
+func TestFleetLoadAllowedDomainsUnionsSourceExceptions(t *testing.T) {
+	store, err := NewBlocklistStore(filepath.Join(t.TempDir(), "blocklist.db"))
+	if err != nil {
+		t.Fatalf("NewBlocklistStore: %v", err)
+	}
+	defer store.db.Close()
+	ctx := context.Background()
+	if err := store.replaceDomainSet(ctx, "blocklist_manual_allow", []string{"time.nist.gov"}); err != nil {
+		t.Fatalf("seed manual allow: %v", err)
+	}
+	if err := store.ReplaceSourceAllowed(ctx, "https://src.invalid/list", []string{"adsb.lol", "time.nist.gov"}); err != nil {
+		t.Fatalf("seed source exceptions: %v", err)
+	}
+
+	fleet := NewFleet(filepath.Join(t.TempDir(), "blipc.yaml"))
+	fleet.blocklistDB = store
+	fleet.LoadAllowedDomains(ctx)
+
+	got := fleet.AllowedDomains()
+	want := []string{"adsb.lol", "time.nist.gov"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("AllowedDomains() = %v, want %v (union, dedup, sorted)", got, want)
+	}
+	// The load must reach the merged list even though no allow edit bumped
+	// the generation counter: otherwise the first reconcile pushes an empty
+	// allow set and un-allows everything fleet-wide.
+	synced := make(map[string]bool)
+	for _, d := range fleet.Blocklist().Allowed() {
+		synced[d] = true
+	}
+	if !reflect.DeepEqual(synced, map[string]bool{"adsb.lol": true, "time.nist.gov": true}) {
+		t.Errorf("merged list allow set = %v, want the loaded union", synced)
+	}
+}
+
 func TestBlocklistStoreRoundtrip(t *testing.T) {
 	store, err := NewBlocklistStore(filepath.Join(t.TempDir(), "blocklist.db"))
 	if err != nil {
