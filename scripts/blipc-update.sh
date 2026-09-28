@@ -84,6 +84,8 @@ trap 'rm -rf "$DL"' EXIT
 curl -fL --proto '=https' --tlsv1.2 "$BASE/$TAG/blipc-linux-amd64" -o "$DL/blipc-linux-amd64"
 curl -fL --proto '=https' --tlsv1.2 "$BASE/$TAG/blipctl-linux-amd64" -o "$DL/blipctl-linux-amd64"
 curl -fsSL --proto '=https' --tlsv1.2 "$BASE/$TAG/SHA256SUMS" -o "$DL/SHA256SUMS"
+curl -fsSL --proto '=https' --tlsv1.2 "$BASE/$TAG/SHA256SUMS.sig" -o "$DL/SHA256SUMS.sig" \
+  || { echo "error: release $TAG has no SHA256SUMS.sig (unsigned release) — refusing to update" >&2; exit 1; }
 
 echo "phase: verifying"
 expected="$(awk '$2=="blipc-linux-amd64" {print $1; exit}' "$DL/SHA256SUMS")"
@@ -97,12 +99,14 @@ actual_ctl="$(sha256sum "$DL/blipctl-linux-amd64" | awk '{print $1}')"
 
 install -m 0755 "$DL/blipc-linux-amd64" "$WORK/blipc.new"
 install -m 0755 "$DL/blipctl-linux-amd64" "$WORK/blipctl.new"
+# Stage the sums + signature for the root helper: it re-verifies the signature
+# (embedded key) and then each staged inode against the SIGNED sums entry.
+install -m 0644 "$DL/SHA256SUMS" "$WORK/SHA256SUMS"
+install -m 0644 "$DL/SHA256SUMS.sig" "$WORK/SHA256SUMS.sig"
 
 # Hand the verified (unprivileged) binaries to the root install helper.
-# Pass the verified checksums so the root side re-verifies the SAME inode (H2).
-# The helper fails closed when the env is stripped (no downgrade to ELF-only):
-# that means the sudoers rule lacks env_keep — re-run install-blipc.sh to
-# refresh it. Never retry without the checksum.
+# Pass the verified checksums too: the root side cross-checks them against the
+# SIGNED SHA256SUMS — never retry without the checksum.
 install_one() {
   local staged="$1" expected_sum="$2" out rc=0
   out="$(sudo -n EXPECTED_SHA256="$expected_sum" /usr/local/sbin/blipc-install "$staged" 2>&1)" || rc=$?

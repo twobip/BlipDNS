@@ -60,6 +60,20 @@ jobs:
           echo "--- built artifacts ---"
           ls -la blipd-linux-amd64 blipc-linux-amd64 blipctl-linux-amd64 SHA256SUMS
 
+      - name: Sign SHA256SUMS
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          [ -n "$RELEASE_SIGNING_KEY" ] || { echo "::error::RELEASE_SIGNING_KEY repo secret is not set"; exit 1; }
+          umask 077
+          printf '%s\n' "$RELEASE_SIGNING_KEY" > "$RUNNER_TEMP/signing.key"
+          chmod 600 "$RUNNER_TEMP/signing.key"
+          ssh-keygen -Y sign -f "$RUNNER_TEMP/signing.key" -n blipdns-release SHA256SUMS
+          rm -f "$RUNNER_TEMP/signing.key"
+          echo "--- signature ---"
+          cat SHA256SUMS.sig
+
       - name: Publish rolling dev prerelease
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -67,7 +81,7 @@ jobs:
           # Move the "dev" tag to this commit and (re)create the prerelease.
           gh release delete dev --cleanup-tag --yes --repo "$GITHUB_REPOSITORY" 2>/dev/null || true
           gh release create dev \
-            blipd-linux-amd64 blipc-linux-amd64 blipctl-linux-amd64 blipd-update.sh blipd-install.sh blipc-update.sh blipc-install.sh SHA256SUMS \
+            blipd-linux-amd64 blipc-linux-amd64 blipctl-linux-amd64 blipd-update.sh blipd-install.sh blipc-update.sh blipc-install.sh SHA256SUMS SHA256SUMS.sig \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
             --prerelease \
