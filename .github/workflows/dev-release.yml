@@ -52,7 +52,11 @@ jobs:
           go build -trimpath -ldflags "-s -w -X main.version=${STAMP}" -o blipd-linux-amd64 ./cmd/blipd
           go build -trimpath -ldflags "-s -w -X github.com/twobip/BlipDNS/internal/controller.version=${STAMP}" -o blipc-linux-amd64 ./cmd/blipc
           go build -trimpath -ldflags "-s -w" -o blipctl-linux-amd64 ./cmd/blipctl
-          sha256sum blipd-linux-amd64 blipc-linux-amd64 blipctl-linux-amd64 > SHA256SUMS
+          cp scripts/blipd-update.sh blipd-update.sh
+          cp scripts/blipd-install.sh blipd-install.sh
+          cp scripts/blipc-update.sh blipc-update.sh
+          cp scripts/blipc-install.sh blipc-install.sh
+          sha256sum blipd-linux-amd64 blipc-linux-amd64 blipctl-linux-amd64 blipd-update.sh blipd-install.sh blipc-update.sh blipc-install.sh > SHA256SUMS
           echo "--- built artifacts ---"
           ls -la blipd-linux-amd64 blipc-linux-amd64 blipctl-linux-amd64 SHA256SUMS
 
@@ -63,7 +67,7 @@ jobs:
           # Move the "dev" tag to this commit and (re)create the prerelease.
           gh release delete dev --cleanup-tag --yes --repo "$GITHUB_REPOSITORY" 2>/dev/null || true
           gh release create dev \
-            blipd-linux-amd64 blipc-linux-amd64 blipctl-linux-amd64 SHA256SUMS \
+            blipd-linux-amd64 blipc-linux-amd64 blipctl-linux-amd64 blipd-update.sh blipd-install.sh blipc-update.sh blipc-install.sh SHA256SUMS \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
             --prerelease \

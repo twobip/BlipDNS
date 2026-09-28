@@ -312,6 +312,19 @@ esac
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
 
+# fetch_verified <tag> <asset> <destfile> — download and SHA256-verify one asset.
+fetch_verified() {
+  local tag="$1" asset="$2" dest="$3" expected actual
+  curl -fL --proto '=https' --tlsv1.2 "$BASE_URL/$tag/$asset" -o "$TMPDIR/$asset" || err "download failed: $BASE_URL/$tag/$asset"
+  curl -fsSL --proto '=https' --tlsv1.2 "$BASE_URL/$tag/SHA256SUMS" -o "$TMPDIR/SHA256SUMS" || err "download failed: SHA256SUMS"
+  expected="$(awk -v a="$asset" '$2==a {print $1; exit}' "$TMPDIR/SHA256SUMS")"
+  [ -n "$expected" ] || err "no checksum entry for $asset in SHA256SUMS"
+  actual="$(sha256sum "$TMPDIR/$asset" | awk '{print $1}')"
+  [ "$expected" = "$actual" ] || err "checksum verification FAILED for $asset — refusing to install"
+  mv "$TMPDIR/$asset" "$dest"
+  rm -f "$TMPDIR/SHA256SUMS"
+}
+
 if [ "$BUILD_FROM_SOURCE" -eq 1 ]; then
   # /root may be read-only (containers/LXC); keep Go caches somewhere writable.
   CACHE_DIR="/var/cache/blipd-update"
@@ -367,10 +380,10 @@ if [ "$BUILD_FROM_SOURCE" -eq 1 ]; then
   install -m 0755 "$TMPDIR/src/scripts/blipd-update.sh" /usr/local/sbin/blipd-update
   install -m 0755 "$TMPDIR/src/scripts/blipd-install.sh" /usr/local/sbin/blipd-install
 else
-  curl -fsSL --proto '=https' --tlsv1.2 "$RAW_BASE/$REF/scripts/blipd-update.sh" -o /usr/local/sbin/blipd-update \
-    || err "failed to fetch blipd-update.sh"
-  curl -fsSL --proto '=https' --tlsv1.2 "$RAW_BASE/$REF/scripts/blipd-install.sh" -o /usr/local/sbin/blipd-install \
-    || err "failed to fetch blipd-install.sh"
+  # Same as blipc: the install helper runs as root, so fetch it through
+  # SHA256SUMS verification like the binary (see release.yml assets).
+  fetch_verified "$TAG" blipd-update.sh /usr/local/sbin/blipd-update
+  fetch_verified "$TAG" blipd-install.sh /usr/local/sbin/blipd-install
   chmod 0755 /usr/local/sbin/blipd-update /usr/local/sbin/blipd-install
 fi
 # Only the install helper is allowed to run as root; the download (blipd-update)

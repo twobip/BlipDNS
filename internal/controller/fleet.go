@@ -603,7 +603,15 @@ func (f *Fleet) DisableHA(ctx context.Context, cluster control.HACluster) error 
 			ictx, cancel := context.WithTimeout(ctx, 15*time.Second)
 			defer cancel()
 			if err := inst.ctl().DisableHA(ictx); err != nil {
-				errs[k] = fmt.Errorf("%s: %w", nodeID, err)
+				// blipd intentionally refuses remote keepalived disable over
+				// its API (fail-safe: the VIP keeps being announced). Surface
+				// that as an actionable error instead of a raw backend
+				// message so the operator doesn't believe HA is stopped.
+				if strings.Contains(strings.ToLower(err.Error()), "not performed through the api") {
+					errs[k] = fmt.Errorf("%s: blipd refuses remote HA disable by design; stop keepalived box-locally (sudo systemctl stop keepalived), then save the cluster with enabled:false", nodeID)
+				} else {
+					errs[k] = fmt.Errorf("%s: %w", nodeID, err)
+				}
 				return
 			}
 			inst.markHAApplied("")
@@ -943,6 +951,9 @@ func (f *Fleet) Remove(id string) {
 	f.mu.Lock()
 	inst := f.instances[id]
 	delete(f.instances, id)
+	// Drop its per-instance override too so a removed instance can't leave a
+	// stale diff that surprise-applies to a future instance with the same id.
+	delete(f.overrides, id)
 	f.mu.Unlock()
 	if inst != nil {
 		inst.stop()
@@ -1132,6 +1143,12 @@ func (f *Fleet) SetOverride(id string, o *InstanceOverride) {
 // differ from the fleet default), persists it, and pushes it to the instance.
 // If the override is empty the override is removed entirely.
 func (f *Fleet) SetInstanceOverride(ctx context.Context, id string, o *InstanceOverride) map[string]string {
+	// Unknown instances must not accumulate persisted overrides: a typo'd id
+	// would otherwise linger in controller.yaml and surprise-apply if an
+	// instance with that id is ever added.
+	if f.get(id) == nil {
+		return map[string]string{id: "unknown instance"}
+	}
 	f.mu.Lock()
 	if o.IsEmpty() {
 		delete(f.overrides, id)
@@ -2308,6 +2325,10 @@ func (f *Fleet) Adopt(ctx context.Context, id, code string) error {
 		inst.mu.Lock()
 		inst.Config.Token = resp.Token
 		inst.claimCode = ""
+		// One-time semantics: drop the pre-seeded claim from the persisted
+		// config so it doesn't live forever next to the adopted token.
+		// saveConfig below snapshots inst.Config, so clear before it.
+		inst.Config.Claim = ""
 		old := inst.client
 		// Preserve the pinned management leaf across the token rotation:
 		// rebuilding a standard client would drop self-signed trust.

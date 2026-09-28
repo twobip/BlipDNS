@@ -25,6 +25,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 	"gopkg.in/yaml.v3"
 
+	"github.com/twobip/BlipDNS/internal/blocklist"
 	"github.com/twobip/BlipDNS/internal/control"
 	"github.com/twobip/BlipDNS/internal/upstream"
 )
@@ -451,7 +452,11 @@ func readScopeDenied(path string) bool {
 		"/api/upstream-errors",
 		"/api/top-domains",
 		"/api/cache-stats",
-		"/api/stats":
+		"/api/stats",
+		// HA topology (VIP, interfaces, peer IPs) is infrastructure detail,
+		// not query history, but it has no business on a least-privilege
+		// read credential either.
+		"/api/high-availability":
 		return true
 	}
 	return false
@@ -1649,6 +1654,14 @@ func (s *Server) handleUpstreamTest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	// Session-only: bearer API keys are for scripts, and probing arbitrary
+	// host:ports from blipc's network vantage is a LAN port-scan oracle.
+	// The interactive Test button rides the session cookie; scripts can save
+	// the pool and watch stats/upstream-errors instead.
+	if bearerToken(r) != "" {
+		http.Error(w, "session required", http.StatusForbidden)
+		return
+	}
 	var req struct {
 		Servers []upstream.UpstreamServer `json:"servers"`
 		Domain  string                    `json:"domain"`
@@ -1662,13 +1675,13 @@ func (s *Server) handleUpstreamTest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "no servers to test", http.StatusBadRequest)
 		return
 	}
-	if len(req.Servers) > 32 {
-		http.Error(w, "too many servers (max 32)", http.StatusBadRequest)
+	if len(req.Servers) > 8 {
+		http.Error(w, "too many servers (max 8)", http.StatusBadRequest)
 		return
 	}
 	// Rate-limit probes per client IP (10/min): each request fans out to up to
-	// 32 upstreams from blipc's network vantage, so an unthrottled endpoint
-	// is a LAN port-scan oracle for anyone holding a session/key.
+	// 8 upstreams from blipc's network vantage, so an unthrottled endpoint
+	// is a LAN port-scan oracle for anyone holding a session.
 	if !s.probeAllowed(s.clientIP(r)) {
 		http.Error(w, "probe rate limit exceeded; try again later", http.StatusTooManyRequests)
 		return
@@ -1910,6 +1923,15 @@ func (s *Server) handleBlocklistSources(w http.ResponseWriter, r *http.Request) 
 		if len(urls) > maxBlocklistSources {
 			http.Error(w, fmt.Sprintf("too many blocklist sources (max %d)", maxBlocklistSources), http.StatusBadRequest)
 			return
+		}
+		// Reject bad URLs here, not at import: an invalid/internal URL would
+		// otherwise persist and fail on every refresh. The fetch layer still
+		// re-validates (redirect/rebind-safe), so this is UX, not the guard.
+		for i, u := range urls {
+			if err := blocklist.ValidateSourceURL(u); err != nil {
+				http.Error(w, fmt.Sprintf("source %d: %v", i, err), http.StatusBadRequest)
+				return
+			}
 		}
 		if len(urls) == 0 {
 			// clear:true with no URLs: drop the sources and the merged list.

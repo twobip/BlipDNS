@@ -387,10 +387,12 @@ if [ "$BUILD_FROM_SOURCE" -eq 1 ] || [ "$LOCAL" -eq 1 ]; then
   install -m 0755 "$SRC_DIR/scripts/blipc-update.sh" /usr/local/sbin/blipc-update
   install -m 0755 "$SRC_DIR/scripts/blipc-install.sh" /usr/local/sbin/blipc-install
 else
-  curl -fsSL --proto '=https' --tlsv1.2 "$RAW_BASE/$REF/scripts/blipc-update.sh" -o /usr/local/sbin/blipc-update \
-    || err "failed to fetch blipc-update.sh"
-  curl -fsSL --proto '=https' --tlsv1.2 "$RAW_BASE/$REF/scripts/blipc-install.sh" -o /usr/local/sbin/blipc-install \
-    || err "failed to fetch blipc-install.sh"
+  # Helpers run privileged (blipc-install via sudo), so they go through the
+  # same SHA256SUMS verification as the binaries — a bare curl here would
+  # let a compromised mirror land root-executed code. The release publishes
+  # both helpers as assets for exactly this check.
+  fetch_verified "$TAG" blipc-update.sh /usr/local/sbin/blipc-update
+  fetch_verified "$TAG" blipc-install.sh /usr/local/sbin/blipc-install
   chmod 0755 /usr/local/sbin/blipc-update /usr/local/sbin/blipc-install
 fi
 # Only the install helper runs as root; the download (blipc-update) runs as blipc.

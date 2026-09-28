@@ -109,10 +109,11 @@ func isPrivateIP(ip net.IP) bool {
 // httptest (127.0.0.1) servers disable it via TestMain.
 var ssrfEnabled = true
 
-// validateSourceURL rejects non-http(s) schemes and obviously internal hosts
+// ValidateSourceURL rejects non-http(s) schemes and obviously internal hosts
 // before we even dial. The transport-level check is the real guard against DNS
-// rebinding; this is a fast early reject for literal IPs.
-func validateSourceURL(rawURL string) error {
+// rebinding; this is a fast early reject for literal IPs. Exported so the
+// controller can reject bad URLs at save time instead of persisting them.
+func ValidateSourceURL(rawURL string) error {
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return err
@@ -149,7 +150,7 @@ func checkBlocklistRedirect(req *http.Request, via []*http.Request) error {
 	}
 	// Validate every hop, not just the initial URL: refuse non-http(s) and
 	// https->http downgrades (feed content sniffable / injectable).
-	if err := validateSourceURL(req.URL.String()); err != nil {
+	if err := ValidateSourceURL(req.URL.String()); err != nil {
 		return err
 	}
 	if len(via) > 0 && via[0].URL.Scheme == "https" && req.URL.Scheme == "http" {
@@ -617,7 +618,7 @@ type FetchResult struct {
 // one small 304 instead of a full download. An error is returned only when
 // the source could not be fetched or parsed at all.
 func FetchSource(ctx context.Context, rawURL string, v Validators) (*FetchResult, error) {
-	if err := validateSourceURL(rawURL); err != nil {
+	if err := ValidateSourceURL(rawURL); err != nil {
 		return nil, err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
