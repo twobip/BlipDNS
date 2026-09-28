@@ -549,6 +549,10 @@ func (s *Server) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
 	_ = w.WriteMsg(resp)
 }
 
+// unverifiedIDLogLast bounds the "unverified client-id" warning below: a
+// misconfigured chatty device would otherwise log on every query.
+var unverifiedIDLogLast atomic.Int64
+
 // serve is the unified query path: filter -> cache -> upstream. clientID is
 // the optional DoH client identity from /dns-query/{client-id}; it is
 // attributed in logs and query-log events when it actually selected its
@@ -848,7 +852,12 @@ func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, prot
 				client = verifiedID
 			} else if clientID != "" {
 				if s.cfg.Store != nil && s.cfg.Store.KnowsClientID(clientID) {
-					log.Printf("blipd: unverified client-id %q from %s", clientID, clientIP.String())
+					// Sampled: a misconfigured device asserting a known-but-
+					// unscoped ID on every query must not spam stderr.
+					if now, last := time.Now().Unix(), unverifiedIDLogLast.Load(); now-last >= 10 &&
+						unverifiedIDLogLast.CompareAndSwap(last, now) {
+						log.Printf("blipd: unverified client-id %q from %s", clientID, clientIP.String())
+					}
 					client = "unverified-id"
 				} else {
 					// No policy claims this ID, so there is no identity to

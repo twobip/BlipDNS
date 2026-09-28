@@ -409,10 +409,12 @@ func (i *Instance) poll(ctx context.Context) {
 		_ = i.fleet.queryLog.AddStatsSample(ctx, *sample)
 	}
 	if herr == nil {
-		// The bus event carries the polled stats to the browser via SSE.
+		// Liveness tick for SSE browsers (payloads ride the REST poll, not
+		// the stream: Bus.Publish strips Stats/Health so no publisher can
+		// bloat it).
 		i.fleet.bus.Publish(Event{
 			InstanceID: instanceID, Instance: instanceLabel,
-			Type: "health", At: i.fleet.now(), Health: h, Stats: s,
+			Type: "health", At: i.fleet.now(),
 		})
 		// Converge reconcilers concurrently per tick (was 8 sequential RTTs).
 		// Blocklist/HA stay on their own cadence inside maybePush*.

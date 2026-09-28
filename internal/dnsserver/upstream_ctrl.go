@@ -16,18 +16,6 @@ func (s *Server) safePool() *upstream.ResolverPool {
 	return s.pool
 }
 
-// upstreamAuto returns the automatic failover resolver: the priority>0 servers
-// (or, if none, the configured upstream string). It is the default destination
-// for queries that match no conditional-forwarding route and no per-policy
-// upstream override.
-func (s *Server) upstreamAuto() upstream.Resolver {
-	p := s.safePool()
-	if p == nil {
-		return nil
-	}
-	return p.Auto()
-}
-
 // SetUpstream atomically replaces the upstream pool, conditional-forwarding
 // routes, and bootstrap DNS servers. Passing nil/empty for all reverts to the
 // blipd config-file upstream. This implements control.LocalResolverController
