@@ -15,8 +15,9 @@ import (
 // default defensively for any out-of-range value that reaches it.
 const defaultRecordTTL = 60
 
-// maxRecordTTL caps how long a local record may live (one week, in seconds).
-const maxRecordTTL = 7 * 24 * 3600
+// maxRecordTTL is control.MaxRecordTTL: the wire type's TTL cap lives with
+// the wire type so blipc can enforce it at input.
+const maxRecordTTL = control.MaxRecordTTL
 
 // maxLocalRecords caps the number of static records accepted in one push so a
 // misconfigured controller cannot exhaust blipd memory.
@@ -166,97 +167,11 @@ func (rs *RecordStore) SetRecords(records []control.RecordEntry) error {
 	return nil
 }
 
+// validateRecordEntry is control.ValidateRecordEntry: the wire type's
+// validity rule lives with the wire type so blipc can reject bad records at
+// input instead of pushing a batch blipd refuses as a whole.
 func validateRecordEntry(r control.RecordEntry) error {
-	domain := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(r.Domain), "."))
-	domain = strings.TrimLeft(domain, ".")
-	if domain == "" {
-		return fmt.Errorf("empty domain")
-	}
-	if len(domain) > 253 {
-		return fmt.Errorf("domain %q too long", r.Domain)
-	}
-	if strings.HasPrefix(domain, "*.") {
-		parent := domain[2:]
-		if parent == "" {
-			return fmt.Errorf("wildcard %q missing parent", r.Domain)
-		}
-		if !validHostname(parent) {
-			return fmt.Errorf("invalid wildcard parent %q", r.Domain)
-		}
-	} else {
-		if strings.Contains(domain, "*") {
-			return fmt.Errorf("wildcard only allowed as \"*.\" prefix: %q", r.Domain)
-		}
-		if !validHostname(domain) {
-			return fmt.Errorf("invalid domain %q", r.Domain)
-		}
-	}
-	t := strings.ToUpper(strings.TrimSpace(r.Type))
-	if t != "A" && t != "AAAA" && t != "CNAME" {
-		return fmt.Errorf("invalid type %q (want A/AAAA/CNAME)", r.Type)
-	}
-	if len(r.Value) == 0 || len(strings.TrimSuffix(r.Value, ".")) > 253 {
-		return fmt.Errorf("value too long or empty")
-	}
-	switch t {
-	case "A":
-		ip := net.ParseIP(strings.TrimSpace(r.Value))
-		if ip == nil || ip.To4() == nil {
-			return fmt.Errorf("invalid A value %q (want IPv4)", r.Value)
-		}
-	case "AAAA":
-		ip := net.ParseIP(strings.TrimSpace(r.Value))
-		if ip == nil || ip.To16() == nil || ip.To4() != nil {
-			return fmt.Errorf("invalid AAAA value %q (want IPv6, not IPv4)", r.Value)
-		}
-	case "CNAME":
-		target := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(r.Value), "."))
-		target = strings.TrimLeft(target, ".")
-		if target == "" || strings.Contains(target, "*") || !validHostname(target) {
-			return fmt.Errorf("invalid CNAME target %q", r.Value)
-		}
-	}
-	// Compare as int before any uint32 cast: a large int64 TTL truncated to
-	// uint32 would otherwise wrap to a small value and dodge the cap.
-	if r.TTL != 0 && (r.TTL < 1 || r.TTL > maxRecordTTL) {
-		return fmt.Errorf("invalid TTL %d (want 0 or 1..%d)", r.TTL, maxRecordTTL)
-	}
-	return nil
-}
-
-func validLabel(label string) bool {
-	if len(label) == 0 || len(label) > 63 {
-		return false
-	}
-	for i := 0; i < len(label); i++ {
-		c := label[i]
-		if c >= 'a' && c <= 'z' {
-			continue
-		}
-		if c >= '0' && c <= '9' {
-			continue
-		}
-		if c == '-' {
-			continue
-		}
-		return false
-	}
-	if label[0] == '-' || label[len(label)-1] == '-' {
-		return false
-	}
-	return true
-}
-
-func validHostname(host string) bool {
-	if host == "" || len(host) > 253 {
-		return false
-	}
-	for _, l := range strings.Split(host, ".") {
-		if !validLabel(l) {
-			return false
-		}
-	}
-	return true
+	return control.ValidateRecordEntry(r)
 }
 
 // GetRecords returns all records as a flat slice (exact and wildcard).

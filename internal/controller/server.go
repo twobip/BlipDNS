@@ -984,6 +984,15 @@ func (s *Server) handleRecords(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		// Reject bad records here, not on the instances: blipd refuses the
+		// whole push on one bad entry, so one typo would brick the
+		// fleet-wide records until fixed.
+		for i, rec := range req.Records {
+			if err := control.ValidateRecordEntry(rec); err != nil {
+				http.Error(w, fmt.Sprintf("record %d: %v", i, err), http.StatusBadRequest)
+				return
+			}
+		}
 		applied := s.fleet.SetRecords(r.Context(), req.Records)
 		writeJSON(w, map[string]interface{}{"ok": true, "applied": applied})
 	case http.MethodDelete:
@@ -1229,6 +1238,14 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 		if req.Scope == "instance" && req.Instance != "" {
 			existing := s.fleet.InstanceOverrideOf(req.Instance)
 			merged := mergeOverride(existing, req.Override)
+			if merged.Records != nil {
+				for i, rec := range *merged.Records {
+					if err := control.ValidateRecordEntry(rec); err != nil {
+						http.Error(w, fmt.Sprintf("record %d: %v", i, err), http.StatusBadRequest)
+						return
+					}
+				}
+			}
 			applied := s.fleet.SetInstanceOverride(r.Context(), req.Instance, merged)
 			writeJSON(w, map[string]interface{}{"ok": true, "applied": applied})
 			return
