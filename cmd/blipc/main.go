@@ -26,9 +26,13 @@ import (
 )
 
 type config struct {
-	Listen            string                                  `yaml:"listen"`
-	TrustedProxies    []string                                `yaml:"trusted_proxies"`
-	DashboardTLS      bool                                    `yaml:"dashboard_tls"`
+	Listen         string   `yaml:"listen"`
+	TrustedProxies []string `yaml:"trusted_proxies"`
+	// DashboardTLS nil (omitted) means true: the dashboard serves HTTPS by
+	// default. Explicit `dashboard_tls: false` restores plaintext (loopback
+	// or behind a TLS-terminating proxy only; non-loopback plaintext is
+	// refused unless allow_plain_remote is set).
+	DashboardTLS      *bool                                   `yaml:"dashboard_tls"`
 	AllowPlainRemote  bool                                    `yaml:"allow_plain_remote"`
 	StrictCSRF        *bool                                   `yaml:"strict_csrf"`
 	TLSDir            string                                  `yaml:"tls_dir"`
@@ -170,6 +174,8 @@ func main() {
 	if authPass == "" {
 		authPass = cfg.Password
 	}
+	// Effective dashboard scheme is needed for the first-run setup URL.
+	dashboardTLS := effectiveDashboardTLS(cfg)
 	setupToken := ""
 	if cfg.Username == "" || authPass == "" || !controller.NewAuth(cfg.Username, authPass).Configured() {
 		var tokenErr error
@@ -182,7 +188,7 @@ func main() {
 		// It is single-use and the /api/setup endpoint rate-limits guesses.
 		// Logged as a single setup URL (not a bare token plus a URL) so the
 		// secret appears once, not twice. Keep it private.
-		log.Printf("blipc: first-run setup (one-time, keep private): open http%s://%s/setup#token=%s to create the administrator account", map[bool]string{true: "s", false: ""}[cfg.DashboardTLS || (cfg.TLSCertFile != "" && cfg.TLSKeyFile != "")], cfg.Listen, setupToken)
+		log.Printf("blipc: first-run setup (one-time, keep private): open http%s://%s/setup#token=%s to create the administrator account", map[bool]string{true: "s", false: ""}[dashboardTLS], cfg.Listen, setupToken)
 	}
 	srv := controller.NewServerWithConfig(cfg.Username, authPass, fleet, controller.UI(), *cfgPath, setupToken)
 	// StrictCSRF defaults true for new deploys (fail closed on header-stripped
@@ -199,10 +205,12 @@ func main() {
 		}
 		log.Printf("blipc: trusting proxy headers from %v", cfg.TrustedProxies)
 	}
-	// Dashboard TLS: same self-signed mechanism as blipd DoH (certgen). When
-	// dashboard_tls is set (or explicit cert/key files are given), serve
-	// HTTPS; otherwise plain HTTP (loopback or behind a TLS proxy).
-	dashboardTLS := cfg.DashboardTLS || (cfg.TLSCertFile != "" && cfg.TLSKeyFile != "")
+	// Dashboard TLS: HTTPS by default (same self-signed mechanism as blipd
+	// DoH via certgen). Explicit cert/key files always win; otherwise a
+	// co-located blipd DoH pair is reused when readable so a single cert
+	// covers DNS + dashboard; else a dedicated dashboard pair is generated
+	// under tls_dir. Explicit `dashboard_tls: false` opts back into plain
+	// HTTP (loopback or behind a TLS proxy; non-loopback refused below).
 	if !dashboardTLS && !cfg.AllowPlainRemote && !isLoopbackListen(cfg.Listen) {
 		log.Fatalf("blipc: refusing plain HTTP on non-loopback %s (session cookies would be sniffable); set dashboard_tls: true, bind listen to 127.0.0.1:8500 behind a TLS proxy (see deploy/reverse-proxy.md), or set allow_plain_remote: true to acknowledge the risk", cfg.Listen)
 	}
@@ -221,6 +229,17 @@ func main() {
 				log.Fatalf("blipc: load tls cert/key: %v", err)
 			}
 			tlsCert = &pair
+		} else if sharedCertPEM, sharedKeyPEM, ok := coLocatedDoHPair(); ok {
+			// Single-cert default: the co-located blipd DoH pair covers the
+			// dashboard too, so LAN clients pin one fingerprint. Falls
+			// through to a dedicated pair when blipd is absent, remote,
+			// or unreadable (e.g. blip:blip 0600 key).
+			pair, err := tls.X509KeyPair(sharedCertPEM, sharedKeyPEM)
+			if err != nil {
+				log.Fatalf("blipc: build shared DoH cert: %v", err)
+			}
+			tlsCert = &pair
+			log.Printf("blipc: dashboard reusing co-located blipd DoH pair %s", sharedDoHCertFile)
 		} else {
 			certPath := filepath.Join(tlsDir, "dashboard-cert.pem")
 			keyPath := filepath.Join(tlsDir, "dashboard-key.pem")
@@ -294,6 +313,46 @@ func main() {
 // (when due) or an explicit operator action. The no-save setters run first
 // and SetAutoUpdateHours (which persists) last, so a save can never observe
 // a half-restored fleet.
+// sharedDoH paths are blipd's default self-signed pair (see cmd/blipd
+// TLSDir/doh-cert.pem). When blipc is co-located and can read both files,
+// the dashboard reuses them so one fingerprint covers DoH + dashboard.
+const (
+	sharedDoHCertFile = "/var/lib/blipd/doh-cert.pem"
+	sharedDoHKeyFile  = "/var/lib/blipd/doh-key.pem"
+)
+
+// effectiveDashboardTLS reports whether the dashboard serves HTTPS.
+// Explicit cert/key files always enable TLS; otherwise an omitted
+// dashboard_tls defaults to true (secure by default). Explicit
+// `dashboard_tls: false` opts back into plaintext.
+func effectiveDashboardTLS(cfg *config) bool {
+	if cfg.TLSCertFile != "" && cfg.TLSKeyFile != "" {
+		return true
+	}
+	if cfg.DashboardTLS == nil {
+		return true
+	}
+	return *cfg.DashboardTLS
+}
+
+// coLocatedDoHPair returns the blipd DoH pair when both files are readable
+// by this process (co-located install, permissive key). Callers fall back
+// to a dedicated dashboard pair otherwise.
+func coLocatedDoHPair() (certPEM, keyPEM []byte, ok bool) {
+	certPEM, err := os.ReadFile(sharedDoHCertFile)
+	if err != nil {
+		return nil, nil, false
+	}
+	keyPEM, err = os.ReadFile(sharedDoHKeyFile)
+	if err != nil {
+		return nil, nil, false
+	}
+	if len(certPEM) == 0 || len(keyPEM) == 0 {
+		return nil, nil, false
+	}
+	return certPEM, keyPEM, true
+}
+
 func isLoopbackListen(addr string) bool {
 	h, _, err := net.SplitHostPort(addr)
 	if err != nil {

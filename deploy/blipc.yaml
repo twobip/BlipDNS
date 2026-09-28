@@ -9,13 +9,19 @@ listen: "127.0.0.1:8500"
 # CSRF Origin checks. Empty (default) = forwarded headers are ignored.
 # Example for local proxy: ["127.0.0.1/32", "::1/128"]
 # trusted_proxies: ["127.0.0.1/32"]
-# Dashboard HTTPS: same self-signed mechanism as blipd DoH (certgen, ECDSA
-# P-256, 398d). Set dashboard_tls: true to serve https:// with an
-# auto-generated cert persisted under tls_dir (or point tls_cert_file /
-# tls_key_file at your own cert, e.g. the blipd DoH pair when co-located).
-# tls_san lists extra names/IPs the cert must cover (proxy-facing hostname or
-# the LAN IP the proxy dials); changing it regenerates the pair.
+# Dashboard HTTPS: ON by default (omit dashboard_tls for https://). Same
+# self-signed mechanism as blipd DoH (certgen, ECDSA P-256, 398d). With no
+# explicit cert files, a co-located blipd DoH pair
+# (/var/lib/blipd/doh-cert.pem + doh-key.pem) is reused when readable so one
+# fingerprint covers DNS + dashboard; otherwise a dedicated pair is generated
+# under tls_dir. Point tls_cert_file / tls_key_file at your own cert to
+# override (e.g. a copy of the blipd DoH pair, or a CA-signed cert).
+# tls_san lists extra names/IPs the generated cert must cover (proxy-facing
+# hostname or the LAN IP the proxy dials); changing it regenerates the pair.
 # dashboard_tls: true
+# To opt back into plaintext (loopback or behind a TLS-terminating proxy
+# only): dashboard_tls: false. Plain HTTP on 0.0.0.0 is refused at startup
+# unless you set allow_plain_remote: true to acknowledge sniffing.
 # Headless servers: keep listen on 127.0.0.1:8500 and put a TLS-terminating
 # proxy in front (see deploy/reverse-proxy.md), use dashboard_tls: true, or
 # use `ssh -L 8500:127.0.0.1:8500 user@host`. Plain HTTP on 0.0.0.0 is refused
