@@ -549,46 +549,30 @@ func (f *Fleet) ApplyHA(ctx context.Context, cluster control.HACluster) error {
 		return err
 	}
 	ids := []string{cluster.PrimaryInstance, cluster.SecondaryInstance}
-	type res struct {
-		id  string
-		cfg control.HAConfig
-		err error
-	}
-	out := make([]res, len(ids))
-	var wg sync.WaitGroup
-	for idx, id := range ids {
-		wg.Add(1)
-		go func(k int, nodeID string) {
-			defer wg.Done()
-			inst, err := f.haNode(nodeID)
-			if err != nil {
-				out[k] = res{id: nodeID, err: err}
-				return
-			}
-			var nodeCfg control.HAConfig
-			if nodeID == cluster.PrimaryInstance {
-				nodeCfg = cluster.Primary
-			} else {
-				nodeCfg = cluster.Secondary
-			}
-			ictx, cancel := context.WithTimeout(ctx, 15*time.Second)
-			defer cancel()
-			if err := inst.ctl().ApplyHA(ictx); err != nil {
-				out[k] = res{id: nodeID, cfg: nodeCfg, err: fmt.Errorf("%s apply failed after earlier node(s) may have applied: %w", nodeID, err)}
-				return
-			}
-			out[k] = res{id: nodeID, cfg: nodeCfg}
-		}(idx, id)
-	}
-	wg.Wait()
-	for _, r := range out {
-		if r.err != nil {
-			return r.err
+	// Serial, primary first: keepalived/VRRP apply is order-sensitive and
+	// concurrent apply risks dual-active VIP flap. Two nodes only, so
+	// parallelism buys nothing.
+	for _, id := range ids {
+		inst, err := f.haNode(id)
+		if err != nil {
+			return err
+		}
+		ictx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		err = inst.ctl().ApplyHA(ictx)
+		cancel()
+		if err != nil {
+			return fmt.Errorf("%s apply failed after earlier node(s) may have applied: %w", id, err)
 		}
 	}
-	for _, r := range out {
-		if inst := f.get(r.id); inst != nil {
-			inst.markHAApplied(haConfigHash(&r.cfg))
+	for _, id := range ids {
+		if inst := f.get(id); inst != nil {
+			var cfg control.HAConfig
+			if id == cluster.PrimaryInstance {
+				cfg = cluster.Primary
+			} else {
+				cfg = cluster.Secondary
+			}
+			inst.markHAApplied(haConfigHash(&cfg))
 		}
 	}
 	return nil
@@ -1896,7 +1880,7 @@ func (f *Fleet) SetTrustedProxies(proxies []string) error {
 	}
 	clean := make([]string, 0, len(proxies))
 	for _, v := range proxies {
-		if v = trimSpace(v); v != "" {
+		if v = strings.TrimSpace(v); v != "" {
 			clean = append(clean, v)
 		}
 	}
@@ -1909,11 +1893,6 @@ func (f *Fleet) SetTrustedProxies(proxies []string) error {
 		}
 	}
 	return nil
-}
-
-func trimSpace(s string) string {
-	// local helper to avoid importing strings here (already imported).
-	return strings.TrimSpace(s)
 }
 
 // SetQueryLogRetention persists the query log retention and applies it to the
@@ -2179,7 +2158,11 @@ func (f *Fleet) pushInstance(ctx context.Context, id string) map[string]string {
 	}
 	// Collect per-step errors instead of last-wins overwriting, so a partial
 	// failure is surfaced honestly (e.g. "doh: …; upstream: …"). Scopes push
-	// concurrently (was 6 serial RTTs).
+	// concurrently (was 6 serial RTTs). The join is bounded: the scopes share
+	// the caller's ctx, so one hung instance would otherwise hang this
+	// handler forever. One budget covers all six (they run concurrently).
+	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	var errs []string
@@ -2384,19 +2367,24 @@ func (f *Fleet) ResetAdoption(ctx context.Context, id string) error {
 }
 
 // SetLabel updates the label of a managed instance. Labels are capped at
-// maxInstanceLabelLen chars to bound config/UI/event payloads.
+// maxInstanceLabelLen runes to bound config/UI/event payloads.
 func (f *Fleet) SetLabel(ctx context.Context, id, label string) error {
 	inst := f.get(id)
 	if inst == nil {
 		return fmt.Errorf("controller: unknown instance %s", id)
 	}
 	label = strings.TrimSpace(label)
-	if len(label) > maxInstanceLabelLen {
-		label = label[:maxInstanceLabelLen]
+	if r := []rune(label); len(r) > maxInstanceLabelLen {
+		label = string(r[:maxInstanceLabelLen])
 	}
 	inst.mu.Lock()
 	inst.setLabelLocked(label)
 	inst.mu.Unlock()
+	if f.configPath != "" {
+		if err := f.saveConfig(); err != nil {
+			log.Printf("blipc: warning: failed to persist label: %v", err)
+		}
+	}
 	f.bus.Publish(Event{InstanceID: id, Instance: label, Type: "status", At: f.now(), Msg: "label updated"})
 	return nil
 }
