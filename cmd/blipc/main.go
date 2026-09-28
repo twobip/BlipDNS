@@ -210,9 +210,10 @@ func main() {
 	// co-located blipd DoH pair is reused when readable so a single cert
 	// covers DNS + dashboard; else a dedicated dashboard pair is generated
 	// under tls_dir. Explicit `dashboard_tls: false` opts back into plain
-	// HTTP (loopback or behind a TLS proxy; non-loopback refused below).
-	if !dashboardTLS && !cfg.AllowPlainRemote && !isLoopbackListen(cfg.Listen) {
-		log.Fatalf("blipc: refusing plain HTTP on non-loopback %s (session cookies would be sniffable); set dashboard_tls: true, bind listen to 127.0.0.1:8500 behind a TLS proxy (see deploy/reverse-proxy.md), or set allow_plain_remote: true to acknowledge the risk", cfg.Listen)
+	// HTTP: loopback or behind a TLS-terminating proxy (trusted_proxies set)
+	// warn; directly-exposed plaintext without a proxy is refused below.
+	if refusePlainRemote(cfg.Listen, dashboardTLS, cfg.AllowPlainRemote, cfg.TrustedProxies) {
+		log.Fatalf("blipc: refusing plain HTTP on non-loopback %s with no trusted proxy (session cookies would be sniffable); serve dashboard_tls: true, bind listen to 127.0.0.1:8500 behind a TLS proxy and set trusted_proxies (see deploy/reverse-proxy.md), or set allow_plain_remote: true to acknowledge the risk", cfg.Listen)
 	}
 	if !dashboardTLS {
 		blipconfig.WarnPlainHTTP("blipc", "dashboard", cfg.Listen, "session cookies")
@@ -313,6 +314,7 @@ func main() {
 // (when due) or an explicit operator action. The no-save setters run first
 // and SetAutoUpdateHours (which persists) last, so a save can never observe
 // a half-restored fleet.
+
 // sharedDoH paths are blipd's default self-signed pair (see cmd/blipd
 // TLSDir/doh-cert.pem). When blipc is co-located and can read both files,
 // the dashboard reuses them so one fingerprint covers DoH + dashboard.
@@ -351,6 +353,14 @@ func coLocatedDoHPair() (certPEM, keyPEM []byte, ok bool) {
 		return nil, nil, false
 	}
 	return certPEM, keyPEM, true
+}
+
+// refusePlainRemote reports whether plaintext must be fatal: non-loopback,
+// no TLS, no explicit ack, and no trusted proxy. A configured proxy means
+// client-facing TLS terminates there (Secure cookies + HSTS follow
+// X-Forwarded-Proto); backend plaintext over the mgmt LAN only warns.
+func refusePlainRemote(listen string, dashboardTLS, allowPlainRemote bool, trustedProxies []string) bool {
+	return !dashboardTLS && !allowPlainRemote && !isLoopbackListen(listen) && len(trustedProxies) == 0
 }
 
 func isLoopbackListen(addr string) bool {

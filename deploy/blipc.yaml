@@ -23,9 +23,12 @@ listen: "127.0.0.1:8500"
 # only): dashboard_tls: false. Plain HTTP on 0.0.0.0 is refused at startup
 # unless you set allow_plain_remote: true to acknowledge sniffing.
 # Headless servers: keep listen on 127.0.0.1:8500 and put a TLS-terminating
-# proxy in front (see deploy/reverse-proxy.md), use dashboard_tls: true, or
-# use `ssh -L 8500:127.0.0.1:8500 user@host`. Plain HTTP on 0.0.0.0 is refused
-# at startup unless you set allow_plain_remote: true to acknowledge sniffing.
+# proxy in front (see deploy/reverse-proxy.md), use dashboard_tls (default
+# on), or use `ssh -L 8500:127.0.0.1:8500 user@host`. Directly-exposed plain
+# HTTP on 0.0.0.0 with no trusted proxy is refused at startup; behind a
+# TLS-terminating proxy (trusted_proxies set) it starts with a warning.
+# allow_plain_remote: true acknowledges sniffable session cookies for a
+# directly-exposed plaintext listener.
 # allow_plain_remote: false
 # CSRF: strict_csrf defaults true (fail closed on header-stripped cross-site
 # posts). Set explicitly false only for legacy API clients that omit Origin.
