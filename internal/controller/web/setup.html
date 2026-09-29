@@ -39,6 +39,10 @@
   .setup-nav .btn { min-width: 110px; justify-content: center; }
   .setup-note { margin-top: 18px; text-align: center; font-size: 11.5px; color: var(--faint); }
   .bind-row { display: grid; grid-template-columns: 1fr 110px; gap: 10px; }
+  .setup-adv { border: 1px solid var(--border-2); border-radius: 8px; padding: 10px 12px; }
+  .setup-adv summary { cursor: pointer; font-size: 12.5px; color: var(--muted); }
+  .setup-adv .bind-row { margin-top: 10px; }
+  .setup-adv .hint { display: block; margin-top: 8px; }
   .done-mark { font-size: 40px; text-align: center; }
 </style>
 </head>
@@ -81,16 +85,21 @@
     </div>
 
     <div class="setup-step hidden" id="step-3">
-      <div class="field"><label for="adopt-id">Instance ID</label>
+      <div class="field"><label for="adopt-id">Name (optional when pasting a bundle)</label>
         <input class="input" id="adopt-id" autocomplete="off" maxlength="64" placeholder="office-dns" /></div>
-      <div class="field"><label for="adopt-label">Label (optional)</label>
-        <input class="input" id="adopt-label" autocomplete="off" maxlength="64" placeholder="Office" /></div>
-      <div class="field"><label for="adopt-url">Management URL</label>
-        <input class="input" id="adopt-url" autocomplete="off" maxlength="253" placeholder="http://10.0.0.5:8444" /></div>
-      <div class="field"><label for="adopt-token">Token (existing installs — skip if using a claim code)</label>
-        <input class="input" id="adopt-token" autocomplete="off" maxlength="253" /></div>
-      <div class="field"><label for="adopt-claim">Claim code (fresh blipd only, one-time)</label>
-        <input class="input" id="adopt-claim" autocomplete="off" maxlength="128" /></div>
+      <div class="field"><label for="adopt-claim">Adopt code</label>
+        <input class="input" id="adopt-claim" autocomplete="off" maxlength="512" placeholder="paste the adopt bundle from the blipd host" /></div>
+      <span class="hint">On the blipd host: sudo cat /var/lib/blipd/adopt-code, then paste the line here. A bare claim code works too — fill host and port under Advanced.</span>
+      <details class="setup-adv">
+        <summary>Advanced</summary>
+        <div class="bind-row">
+          <div class="field"><label for="adopt-host">Host / IP override</label>
+            <input class="input" id="adopt-host" autocomplete="off" maxlength="253" placeholder="10.0.0.5" /></div>
+          <div class="field"><label for="adopt-port">Port</label>
+            <input class="input" id="adopt-port" autocomplete="off" inputmode="numeric" maxlength="5" placeholder="8444" /></div>
+        </div>
+        <span class="hint">Only needed when the bundle's address is wrong (or for a bare code). Inherits the bundle's http/https scheme.</span>
+      </details>
       <button class="btn btn-primary setup-btn" id="adopt-btn" type="button"><span id="adopt-btn-label">Adopt instance</span></button>
     </div>
 

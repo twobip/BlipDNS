@@ -55,10 +55,12 @@ type HAController interface {
 	DisableHA() error
 }
 
-// DefaultAdoptCodeFile is where the one-time claim code is exposed box-locally
-// (M9). The file holds only the code, mode 0600, so journal exposure is not
-// needed to claim an instance. Operators read it with sudo; the code is
-// single-use and invalidated immediately on successful adoption.
+// DefaultAdoptCodeFile is where the one-time adoption secret is exposed
+// box-locally (M9). The file holds an adopt bundle (id + management URL +
+// code, one opaque line) when the embedder set a bundle URL, else the bare
+// code as before. Mode 0600, so journal exposure is not needed to claim an
+// instance. Operators read it with sudo; the code is single-use and
+// invalidated immediately on successful adoption.
 const DefaultAdoptCodeFile = "/var/lib/blipd/adopt-code"
 
 // CurrentClaimCode returns the active one-time claim code ("", when adopted
@@ -78,6 +80,38 @@ func (s *Server) IsAdopted() bool {
 	return s.adopted
 }
 
+// InstanceID returns the adoption identity (hostname fallback applied in
+// ConfigureAdoption).
+func (s *Server) InstanceID() string {
+	s.adoptMu.Lock()
+	defer s.adoptMu.Unlock()
+	return s.instanceID
+}
+
+// SetAdoptBundleURL records the management URL baked into adopt bundles.
+// Called once by the embedder (which owns listen-address knowledge) before
+// serving; empty leaves the legacy bare-code file.
+func (s *Server) SetAdoptBundleURL(mgmtURL string) {
+	s.adoptMu.Lock()
+	defer s.adoptMu.Unlock()
+	s.bundleURL = mgmtURL
+}
+
+// AdoptBundleString builds the one-opaque-line bundle for the active code
+// ("", when adopted or unset). Same secret-handling as CurrentClaimCode.
+func (s *Server) AdoptBundleString() string {
+	s.adoptMu.Lock()
+	defer s.adoptMu.Unlock()
+	if s.adopted || s.claimCode == "" || s.bundleURL == "" {
+		return ""
+	}
+	b, err := MakeAdoptBundle(s.instanceID, s.bundleURL, s.claimCode)
+	if err != nil {
+		return ""
+	}
+	return b
+}
+
 // WriteAdoptCodeFile persists the active claim code to path with mode 0600
 // for box-local retrieval (M9: file + one-time stdout instead of
 // journal-only). When already adopted (no active code) it removes any stale
@@ -89,17 +123,25 @@ func (s *Server) WriteAdoptCodeFile(path string) error {
 	s.adoptMu.Lock()
 	code := s.claimCode
 	adopted := s.adopted
+	instanceID := s.instanceID
+	bundleURL := s.bundleURL
 	s.adoptMu.Unlock()
 	if adopted || code == "" {
 		_ = os.Remove(path)
 		return nil
+	}
+	secret := code
+	if bundleURL != "" {
+		if b, err := MakeAdoptBundle(instanceID, bundleURL, code); err == nil {
+			secret = b
+		}
 	}
 	if dir := filepath.Dir(path); dir != "" {
 		if err := os.MkdirAll(dir, 0700); err != nil {
 			return err
 		}
 	}
-	if err := os.WriteFile(path, []byte(code+"\n"), 0600); err != nil {
+	if err := os.WriteFile(path, []byte(secret+"\n"), 0600); err != nil {
 		return err
 	}
 	// WriteFile does not chmod existing files; enforce 0600.

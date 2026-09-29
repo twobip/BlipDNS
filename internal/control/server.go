@@ -61,6 +61,10 @@ type Server struct {
 	claimCode  string
 	stateFile  string
 	instanceID string
+	// bundleURL is the management URL baked into the adopt bundle (set by
+	// the embedder, which owns listen-address knowledge). Empty = the
+	// adopt-code file holds a bare code, as before.
+	bundleURL string
 	// adoptFails tracks bad claim-code guesses per source IP, so one
 	// attacker burning guesses can't lock out the real operator (and a
 	// distributed guesser is still capped by the same small budget each).

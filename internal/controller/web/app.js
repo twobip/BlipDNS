@@ -537,7 +537,7 @@ function openInstanceModal() { $("inst-modal-title").textContent = "Add Instance
 
 async function saveInstance() {
   const body = { id: $("i-id").value.trim(), label: $("i-label").value.trim(), url: $("i-url").value.trim(), token: $("i-token").value, claim: $("i-claim").value.trim() };
-  if (!body.id || !body.url) return toast("id and url are required", "err");
+  if ((!body.id || !body.url) && !body.claim) return toast("id and url, or a pasted adopt code, are required", "err");
   try {
     // Single call: the server adopts server-side when a claim is present and
     // reports the outcome, so no second adopt POST is needed.

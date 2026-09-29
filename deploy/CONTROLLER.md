@@ -60,22 +60,24 @@ There is no `?token=` query model — do not put secrets in URLs (they leak via
 history, logs and Referer). Programmatic access uses short-lived API keys
 (`POST /api/keys` with a session, then `Authorization: Bearer <key>`).
 
-## Adding an instance (one-time claim-code adoption)
+## Adding an instance (one-time adopt bundle)
 
-A newly installed `blipd` writes a **one-time claim code** to a `0600` file
-(e.g. `/var/lib/blipd/adopt-code`). When started interactively (stdout is a
-TTY) it also prints the code once to stdout; under systemd stdout is the
-journal (`StandardOutput=journal`), so the code is never printed there — the
-journal only records that a code was generated, not the code itself. Read the
-file box-locally:
+A newly installed `blipd` writes a one-time **adopt bundle** to a `0600` file
+(e.g. `/var/lib/blipd/adopt-code`): a single opaque line packing the instance
+id, its management URL, and the one-time code. When started interactively
+(stdout is a TTY) it also prints the bundle once to stdout; under systemd
+stdout is the journal (`StandardOutput=journal`), so the bundle is never
+printed there — the journal only records that one was generated, not its
+value. Read the file box-locally:
 
 ```
 sudo cat /var/lib/blipd/adopt-code
-sudo journalctl -u blipd | grep -i adopt   # shows generation/adopt audit, not the code
+sudo journalctl -u blipd | grep -i adopt   # shows generation/adopt audit, not the secret
 ```
 
-In the controller web UI, click **+**, enter the instance URL + label, paste
-the claim code, and the controller will:
+In the controller web UI, click **+** and paste the bundle (a bare legacy
+code works too, with the URL typed separately). The controller unpacks
+id + URL + code server-side and will:
 
 1. call `blipd`'s unauthenticated `POST /api/v1/adopt` with the code,
 2. receive the instance's real **admin token** back (never typed by a human),

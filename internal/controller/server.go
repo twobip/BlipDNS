@@ -739,6 +739,20 @@ func (s *Server) handleInstanceUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// bundleURLScheme returns the http/https scheme of an adopt-bundle URL (""
+// when unparseable; the bundle codec already validated it, this is just
+// extraction).
+func bundleURLScheme(bundleURL string) string {
+	u, err := url.Parse(bundleURL)
+	if err != nil {
+		return ""
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return ""
+	}
+	return u.Scheme
+}
+
 func (s *Server) handleInstances(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -758,8 +772,25 @@ func (s *Server) handleInstances(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		cfg = ResolveTokenFileAllow(cfg, false)
+		// Adopt bundle: one opaque paste carrying id + management URL +
+		// one-time code. Fills whatever the caller left empty (the setup
+		// wizard sends only name + bundle + optional Advanced host:port);
+		// a legacy bare code passes through untouched.
+		if b, ok := control.ParseAdoptBundle(cfg.Claim); ok {
+			if cfg.URL == "" {
+				cfg.URL = b.URL
+			} else if bundleScheme := bundleURLScheme(b.URL); bundleScheme != "" && !strings.Contains(cfg.URL, "://") {
+				// Scheme-less Advanced override (host:port) inherits the
+				// bundle scheme so http/https stays correct.
+				cfg.URL = bundleScheme + "://" + cfg.URL
+			}
+			if cfg.ID == "" {
+				cfg.ID = b.ID
+			}
+			cfg.Claim = b.Code
+		}
 		if err := validateInstanceURL(cfg.URL); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			http.Error(w, err.Error()+": paste an adopt bundle or provide host and port", http.StatusBadRequest)
 			return
 		}
 		if err := s.fleet.Add(r.Context(), cfg); err != nil {

@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -251,13 +252,38 @@ func main() {
 		// the "not in journal" guarantee. The control server never logs the
 		// code value; operators read the file box-locally.
 		if code := srv.ControlServer().CurrentClaimCode(); code != "" {
+			// Bake the bundle URL once: scheme mirrors the management
+			// listener below, host prefers the configured admin host when
+			// remotely reachable, else the first LAN address (a wrong guess
+			// is corrected in the controller's Advanced section).
+			mgmtScheme := "http"
+			if adminTLS || (cfg.DoHTLS && tlsCert != nil) {
+				mgmtScheme = "https"
+			}
+			if host, port, err := net.SplitHostPort(cfg.AdminAddr); err == nil {
+				var addrs []net.Addr
+				if ifs, ierr := net.Interfaces(); ierr == nil {
+					for _, iface := range ifs {
+						if a, aerr := iface.Addrs(); aerr == nil {
+							addrs = append(addrs, a...)
+						}
+					}
+				}
+				srv.ControlServer().SetAdoptBundleURL(mgmtScheme + "://" + net.JoinHostPort(pickBundleHost(host, addrs), port))
+			}
 			if err := srv.ControlServer().WriteAdoptCodeFile(control.DefaultAdoptCodeFile); err != nil {
 				log.Printf("blipd: adopt-code file: %v", err)
 			} else {
 				log.Printf("blipd: adoption code generated (written to %s 0600)", control.DefaultAdoptCodeFile)
 			}
 			if isTerminal() {
-				fmt.Printf("blipd: ADOPTION CODE (one-time, keep private): %s\n", code)
+				// One pasteable line beats three fields: print the bundle
+				// (id + URL + code), falling back to the bare code.
+				if b := srv.ControlServer().AdoptBundleString(); b != "" {
+					fmt.Printf("blipd: ADOPT BUNDLE (one-time, keep private): %s\n", b)
+				} else {
+					fmt.Printf("blipd: ADOPTION CODE (one-time, keep private): %s\n", code)
+				}
 			}
 		}
 		if cfg.BlocklistCacheFile != "" {
@@ -427,6 +453,36 @@ func dohScheme(cfg *config.Config) string {
 		return "https"
 	}
 	return "http"
+}
+
+// pickBundleHost chooses the management host baked into the adopt bundle:
+// the configured admin host when it is remotely reachable, else the first
+// non-loopback, non-link-local IPv4 interface address. Pure (addrs injected)
+// so the selection is unit-testable; a wrong guess is corrected in the
+// controller's Advanced section.
+func pickBundleHost(adminHost string, addrs []net.Addr) string {
+	if h := strings.TrimSpace(adminHost); h != "" && h != "localhost" {
+		if ip := net.ParseIP(h); ip == nil || (!ip.IsLoopback() && !ip.IsLinkLocalUnicast()) {
+			return h
+		}
+	}
+	for _, a := range addrs {
+		var ip net.IP
+		switch v := a.(type) {
+		case *net.IPNet:
+			ip = v.IP
+		case *net.IPAddr:
+			ip = v.IP
+		}
+		if ip == nil || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.To4() == nil {
+			continue
+		}
+		return ip.String()
+	}
+	if h := strings.TrimSpace(adminHost); h != "" {
+		return h
+	}
+	return "127.0.0.1"
 }
 
 // isTerminal reports whether stdout is an interactive terminal. Under systemd

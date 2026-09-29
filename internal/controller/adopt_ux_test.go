@@ -78,3 +78,57 @@ func TestInstancesAddWrongClaimReportsPending(t *testing.T) {
 		t.Fatal("wrong-claim instance reports adopted")
 	}
 }
+
+// An opaque bundle pastes id + URL + code in one line: empty id/url fill
+// from the bundle, and a scheme-less Advanced host:port inherits its scheme.
+func TestInstancesAddAdoptBundle(t *testing.T) {
+	fake := fakeBlipd(t, "tok-9", "CODE-9",
+		&control.HealthResponse{OK: true, Version: "blipd/0.1.0"},
+		&control.StatsResponse{},
+		&control.ListResponse{},
+	)
+	defer fake.Close()
+	cfg := filepath.Join(t.TempDir(), "blipc.yaml")
+	if err := os.WriteFile(cfg, []byte("listen: \"127.0.0.1:8500\"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	srv := NewServerWithConfig("admin", "test-password-123", NewFleet(cfg), nil, cfg, "")
+	bundle, err := control.MakeAdoptBundle("n3", fake.URL, "CODE-9")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	code, res := postInstances(t, srv, `{"claim":"`+bundle+`"}`)
+	if code != http.StatusOK {
+		t.Fatalf("bundle add status = %d (%v)", code, res)
+	}
+	if res["adopted"] != true || res["id"] != "n3" {
+		t.Fatalf("bundle add = %v", res)
+	}
+
+	// A fresh fake: the first bundle's one-time code is consumed.
+	fake2 := fakeBlipd(t, "tok-4", "CODE-4",
+		&control.HealthResponse{OK: true, Version: "blipd/0.1.0"},
+		&control.StatsResponse{},
+		&control.ListResponse{},
+	)
+	defer fake2.Close()
+	bundle2, err := control.MakeAdoptBundle("n4", fake2.URL, "CODE-4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hostport2 := strings.TrimPrefix(fake2.URL, "http://")
+	code, res = postInstances(t, srv, `{"id":"n4","url":"`+hostport2+`","claim":"`+bundle2+`"}`)
+	if code != http.StatusOK {
+		t.Fatalf("override add status = %d (%v)", code, res)
+	}
+	if res["adopted"] != true {
+		t.Fatalf("override add = %v", res)
+	}
+
+	// Bare legacy code without a URL still fails with an actionable error.
+	code, res = postInstances(t, srv, `{"id":"n5","claim":"CODE-9"}`)
+	if code != http.StatusBadRequest {
+		t.Fatalf("bare-code-no-url status = %d (%v)", code, res)
+	}
+}

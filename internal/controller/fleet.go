@@ -2311,6 +2311,11 @@ func (f *Fleet) Adopt(ctx context.Context, id, code string) error {
 	if inst == nil {
 		return fmt.Errorf("controller: unknown instance %s", id)
 	}
+	// Accept an adopt bundle anywhere a code goes (row Adopt action,
+	// blipctl): only the inner one-time code crosses the wire.
+	if b, ok := control.ParseAdoptBundle(code); ok {
+		code = b.Code
+	}
 	resp, err := inst.ctl().Adopt(ctx, code)
 	if err != nil {
 		return err
