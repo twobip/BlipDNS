@@ -1142,7 +1142,7 @@ func TestServerFirstRunUI(t *testing.T) {
 	unconfigured := NewServerWithConfig("", "", fleet, UI(), "", "ui-setup-token")
 	rec := httptest.NewRecorder()
 	unconfigured.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
-	if rec.Code != http.StatusOK || !bytes.Contains(rec.Body.Bytes(), []byte("Set up your BlipDNS console")) {
+	if rec.Code != http.StatusOK || !bytes.Contains(rec.Body.Bytes(), []byte("Set up your BlipDNS controller")) {
 		t.Fatalf("unconfigured root: status=%d body=%s", rec.Code, rec.Body.String())
 	}
 	asset := httptest.NewRecorder()

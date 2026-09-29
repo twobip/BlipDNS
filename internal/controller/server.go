@@ -187,8 +187,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/events", api(s.handleEvents))
 	mux.HandleFunc("/api/health", api(s.handleHealth))
 	mux.HandleFunc("/api/records", api(s.handleRecords))
-	mux.HandleFunc("/api/settings", api(s.handleSettings)) // fleet-wide default config
-	mux.HandleFunc("/api/update", api(s.handleSelfUpdate)) // controller self-update
+	mux.HandleFunc("/api/settings", api(s.handleSettings))        // fleet-wide default config
+	mux.HandleFunc("/api/setup/listen", api(s.handleSetupListen)) // dashboard bind address (setup wizard)
+	mux.HandleFunc("/api/update", api(s.handleSelfUpdate))        // controller self-update
 	mux.HandleFunc("/api/high-availability", api(s.handleHighAvailability))
 	mux.HandleFunc("/api/cache/purge", api(s.handleCachePurge))
 
@@ -2061,46 +2062,46 @@ func contentType(name string) string {
 	return "application/octet-stream"
 }
 
-// persistCredentials updates only the auth keys in the existing YAML document,
-// preserving fleet settings and comments written by the operator.
-func persistCredentials(path, username, passwordHash string) error {
+// loadYAMLDoc reads a YAML mapping document, returning an empty document when
+// the file is missing or empty so first-boot callers can create config keys.
+func loadYAMLDoc(path string) (*yaml.Node, error) {
 	b, err := os.ReadFile(path)
 	if err != nil && !os.IsNotExist(err) {
-		return err
+		return nil, err
 	}
 	var doc yaml.Node
 	if len(b) == 0 {
 		doc = yaml.Node{Kind: yaml.DocumentNode, Content: []*yaml.Node{{Kind: yaml.MappingNode}}}
 	} else if err := yaml.Unmarshal(b, &doc); err != nil {
-		return err
+		return nil, err
 	}
 	if len(doc.Content) == 0 || doc.Content[0].Kind != yaml.MappingNode {
-		return fmt.Errorf("config root must be a YAML mapping")
+		return nil, fmt.Errorf("config root must be a YAML mapping")
 	}
-	root := doc.Content[0]
-	set := func(key, value string) {
-		for i := 0; i+1 < len(root.Content); i += 2 {
-			if root.Content[i].Value == key {
-				root.Content[i+1].Kind = yaml.ScalarNode
-				root.Content[i+1].Tag = "!!str"
-				root.Content[i+1].Value = value
-				return
-			}
-		}
-		root.Content = append(root.Content,
-			&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key},
-			&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: value},
-		)
-	}
-	set("username", username)
-	set("password_hash", passwordHash)
+	return &doc, nil
+}
+
+// setYAMLKey sets one top-level scalar key in place, preserving the rest of
+// the document (fleet settings, comments).
+func setYAMLKey(root *yaml.Node, key, value string) {
 	for i := 0; i+1 < len(root.Content); i += 2 {
-		if root.Content[i].Value == "password" {
-			root.Content = append(root.Content[:i], root.Content[i+2:]...)
-			break
+		if root.Content[i].Value == key {
+			root.Content[i+1].Kind = yaml.ScalarNode
+			root.Content[i+1].Tag = "!!str"
+			root.Content[i+1].Value = value
+			return
 		}
 	}
-	out, err := yaml.Marshal(&doc)
+	root.Content = append(root.Content,
+		&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key},
+		&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: value},
+	)
+}
+
+// writeYAMLAtomic marshals the document and swaps it into place (tmp+rename,
+// 0600) so a concurrent reader never sees a truncation.
+func writeYAMLAtomic(path string, doc *yaml.Node) error {
+	out, err := yaml.Marshal(doc)
 	if err != nil {
 		return err
 	}
@@ -2125,4 +2126,78 @@ func persistCredentials(path, username, passwordHash string) error {
 		return err
 	}
 	return os.Chmod(path, 0600)
+}
+
+// persistCredentials updates only the auth keys in the existing YAML document,
+// preserving fleet settings and comments written by the operator.
+func persistCredentials(path, username, passwordHash string) error {
+	doc, err := loadYAMLDoc(path)
+	if err != nil {
+		return err
+	}
+	root := doc.Content[0]
+	setYAMLKey(root, "username", username)
+	setYAMLKey(root, "password_hash", passwordHash)
+	for i := 0; i+1 < len(root.Content); i += 2 {
+		if root.Content[i].Value == "password" {
+			root.Content = append(root.Content[:i], root.Content[i+2:]...)
+			break
+		}
+	}
+	return writeYAMLAtomic(path, doc)
+}
+
+// persistListenKey updates only the `listen` key in the existing YAML
+// document, preserving everything else.
+func persistListenKey(path, listen string) error {
+	doc, err := loadYAMLDoc(path)
+	if err != nil {
+		return err
+	}
+	setYAMLKey(doc.Content[0], "listen", listen)
+	return writeYAMLAtomic(path, doc)
+}
+
+// handleSetupListen persists the dashboard listen address chosen in the setup
+// wizard. Session-gated (the wizard holds a session from /api/setup by now).
+// Shape is validated here; startup policy (plain-remote refusal) still applies
+// on the next boot, and the new address takes effect after a controller
+// restart — there is no in-process rebind.
+func (s *Server) handleSetupListen(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		Listen string `json:"listen"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	host, portStr, err := net.SplitHostPort(strings.TrimSpace(req.Listen))
+	if err != nil {
+		http.Error(w, "listen must be host:port", http.StatusBadRequest)
+		return
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil || port < 1 || port > 65535 {
+		http.Error(w, "port must be 1-65535", http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(host) == "" {
+		http.Error(w, "interface/host is required", http.StatusBadRequest)
+		return
+	}
+	listen := net.JoinHostPort(host, strconv.Itoa(port))
+	if s.configPath == "" {
+		http.Error(w, "setup persistence is unavailable", http.StatusInternalServerError)
+		return
+	}
+	if err := persistListenKey(s.configPath, listen); err != nil {
+		http.Error(w, "could not save listen address", http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]interface{}{"ok": true, "listen": listen, "restart_required": true})
 }

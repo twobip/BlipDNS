@@ -3,28 +3,43 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
-<title>Set up — BlipDNS Controller</title>
+<title>Set up your BlipDNS controller</title>
 <link rel="icon" href="/favicon.png"/>
 <link rel="stylesheet" href="/style.css"/>
 <style>
   body { min-height: 100vh; display: grid; place-items: center; background:
     radial-gradient(900px 500px at 20% 0%, rgba(79,140,255,.08), transparent 55%),
     radial-gradient(800px 500px at 85% 100%, rgba(56,182,255,.06), transparent 55%), var(--bg); }
-  .setup-card { width: 100%; max-width: 440px; background: var(--surface-2);
+  .setup-card { width: 100%; max-width: 460px; background: var(--surface-2);
     border: 1px solid var(--border-2); border-radius: 16px; box-shadow: var(--shadow-2);
-    padding: 36px 32px 30px; animation: pop .25s cubic-bezier(.2,.9,.3,1.1); }
-  .setup-brand { display: flex; flex-direction: column; align-items: center; gap: 10px; margin-bottom: 24px; text-align: center; }
+    padding: 36px 32px 26px; animation: pop .25s cubic-bezier(.2,.9,.3,1.1); }
+  .setup-brand { display: flex; flex-direction: column; align-items: center; gap: 10px; margin-bottom: 20px; text-align: center; }
   .setup-brand .mark { width: 44px; height: 44px; border-radius: 13px; background: var(--accent-grad);
     display: grid; place-items: center; box-shadow: 0 6px 20px rgba(79,140,255,.4); }
-  .setup-brand .mark svg { width: 24px; height: 24px; }
   .setup-brand h1 { margin: 0; font-size: 19px; font-weight: 650; letter-spacing: -.01em; }
-  .setup-brand p { margin: 0; color: var(--muted); font-size: 12.5px; max-width: 330px; }
-  .setup-form { display: flex; flex-direction: column; gap: 14px; }
+  .setup-brand p { margin: 0; color: var(--muted); font-size: 12.5px; max-width: 340px; }
+  .setup-steps { display: flex; gap: 6px; justify-content: center; margin-bottom: 22px; }
+  .setup-steps .st { display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--faint); }
+  .setup-steps .st .n { width: 20px; height: 20px; border-radius: 50%; border: 1px solid var(--border-2);
+    display: grid; place-items: center; font-size: 11px; }
+  .setup-steps .st.on { color: var(--fg); }
+  .setup-steps .st.on .n { background: var(--accent-grad); border-color: transparent; color: #fff; }
+  .setup-steps .st.done { color: var(--muted); }
+  .setup-steps .st.done .n { border-color: var(--accent); color: var(--accent); }
+  .setup-step { display: flex; flex-direction: column; gap: 14px; }
+  .setup-step.hidden { display: none; }
   .setup-err { display: none; font-size: 12.5px; color: #ff9a9a; background: rgba(247,107,107,.09);
     border: 1px solid rgba(247,107,107,.25); border-radius: 8px; padding: 9px 12px; }
   .setup-err.show { display: block; }
+  .setup-ok { display: none; font-size: 12.5px; color: #8fd6a0; background: rgba(80,200,120,.09);
+    border: 1px solid rgba(80,200,120,.25); border-radius: 8px; padding: 9px 12px; }
+  .setup-ok.show { display: block; }
   .setup-btn { width: 100%; justify-content: center; padding: 11px; font-size: 13.5px; margin-top: 4px; }
+  .setup-nav { display: flex; justify-content: space-between; gap: 10px; margin-top: 20px; }
+  .setup-nav .btn { min-width: 110px; justify-content: center; }
   .setup-note { margin-top: 18px; text-align: center; font-size: 11.5px; color: var(--faint); }
+  .bind-row { display: grid; grid-template-columns: 1fr 110px; gap: 10px; }
+  .done-mark { font-size: 40px; text-align: center; }
 </style>
 </head>
 <body>
@@ -33,11 +48,18 @@
       <div class="mark">
         <img src="/favicon.png" alt="BlipDNS" style="width:100%;height:100%;border-radius:13px;display:block"/>
       </div>
-      <h1>Set up your BlipDNS console</h1>
-      <p>Create the administrator account for this controller. Your password is stored as a one-way bcrypt hash.</p>
+      <h1>Set up your BlipDNS controller</h1>
+      <p>Three quick steps to bring this controller online.</p>
+    </div>
+    <div class="setup-steps" id="setup-steps">
+      <span class="st" data-step="1"><span class="n">1</span>Account</span>
+      <span class="st" data-step="2"><span class="n">2</span>Bind address</span>
+      <span class="st" data-step="3"><span class="n">3</span>Adopt instance</span>
     </div>
     <div class="setup-err" id="setup-err"></div>
-    <form class="setup-form" id="setup-form" autocomplete="off">
+    <div class="setup-ok" id="setup-ok"></div>
+
+    <form class="setup-step" id="step-1" autocomplete="off">
       <div class="field"><label for="setup-user">Username</label>
         <input class="input" id="setup-user" autocomplete="username" minlength="1" maxlength="64" required autofocus /></div>
       <div class="field"><label for="setup-pass">Password</label>
@@ -45,8 +67,44 @@
         <span class="hint">Use at least 8 characters.</span></div>
       <div class="field"><label for="setup-confirm">Confirm password</label>
         <input class="input" id="setup-confirm" type="password" autocomplete="new-password" minlength="8" maxlength="72" required /></div>
-      <button class="btn btn-primary setup-btn" id="setup-btn" type="submit"><span id="setup-label">Create account</span></button>
+      <button class="btn btn-primary setup-btn" id="setup-btn" type="submit"><span id="setup-label">Create account &amp; continue</span></button>
     </form>
+
+    <div class="setup-step hidden" id="step-2">
+      <div class="bind-row">
+        <div class="field"><label for="bind-host">Interface / hostname</label>
+          <input class="input" id="bind-host" autocomplete="off" maxlength="253" placeholder="127.0.0.1" /></div>
+        <div class="field"><label for="bind-port">Port</label>
+          <input class="input" id="bind-port" autocomplete="off" inputmode="numeric" maxlength="5" placeholder="8500" /></div>
+      </div>
+      <span class="hint">Where this dashboard listens. Use 127.0.0.1 to keep it local, or 0.0.0.0 to expose it (behind HTTPS/a proxy). Takes effect after you restart the controller.</span>
+    </div>
+
+    <div class="setup-step hidden" id="step-3">
+      <div class="field"><label for="adopt-id">Instance ID</label>
+        <input class="input" id="adopt-id" autocomplete="off" maxlength="64" placeholder="office-dns" /></div>
+      <div class="field"><label for="adopt-label">Label (optional)</label>
+        <input class="input" id="adopt-label" autocomplete="off" maxlength="64" placeholder="Office" /></div>
+      <div class="field"><label for="adopt-url">Management URL</label>
+        <input class="input" id="adopt-url" autocomplete="off" maxlength="253" placeholder="http://10.0.0.5:8444" /></div>
+      <div class="field"><label for="adopt-token">Token (optional if using a claim code)</label>
+        <input class="input" id="adopt-token" autocomplete="off" maxlength="253" /></div>
+      <div class="field"><label for="adopt-claim">Claim code (optional)</label>
+        <input class="input" id="adopt-claim" autocomplete="off" maxlength="128" /></div>
+      <button class="btn btn-primary setup-btn" id="adopt-btn" type="button"><span id="adopt-label">Adopt instance</span></button>
+    </div>
+
+    <div class="setup-step hidden" id="step-4">
+      <div class="done-mark">✓</div>
+      <p style="text-align:center;color:var(--muted);font-size:13px;margin:0">Setup complete. This controller is ready to use.</p>
+      <a class="btn btn-primary setup-btn" href="/">Open dashboard</a>
+    </div>
+
+    <div class="setup-nav" id="setup-nav">
+      <button class="btn" id="setup-prev" type="button">← Previous</button>
+      <button class="btn" id="setup-skip" type="button" style="display:none">Skip for now</button>
+      <button class="btn btn-primary" id="setup-next" type="button" style="display:none">Next →</button>
+    </div>
     <div class="setup-note">This setup page is available only until the first account is created. Use it on a trusted network or behind HTTPS.</div>
   </div>
 <script src="/setup.js"></script>
