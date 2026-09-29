@@ -2311,9 +2311,6 @@ func (f *Fleet) Adopt(ctx context.Context, id, code string) error {
 	if inst == nil {
 		return fmt.Errorf("controller: unknown instance %s", id)
 	}
-	if code == "" && inst.claimCode != "" {
-		code = inst.claimCode // controller was pre-seeded with the code
-	}
 	resp, err := inst.ctl().Adopt(ctx, code)
 	if err != nil {
 		return err
@@ -2324,7 +2321,6 @@ func (f *Fleet) Adopt(ctx context.Context, id, code string) error {
 	if resp.Token != "" {
 		inst.mu.Lock()
 		inst.Config.Token = resp.Token
-		inst.claimCode = ""
 		// One-time semantics: drop the pre-seeded claim from the persisted
 		// config so it doesn't live forever next to the adopted token.
 		// saveConfig below snapshots inst.Config, so clear before it.
@@ -2354,15 +2350,14 @@ func (f *Fleet) Adopt(ctx context.Context, id, code string) error {
 	return nil
 }
 
-// SetClaimCode records a claim code for an instance.
-func (f *Fleet) SetClaimCode(id, code string) {
+// Adopted reports whether the instance completed claim-code adoption,
+// i.e. the controller holds an admin token for it.
+func (f *Fleet) Adopted(id string) bool {
 	inst := f.get(id)
 	if inst == nil {
-		return
+		return false
 	}
-	inst.mu.Lock()
-	inst.claimCode = code
-	inst.mu.Unlock()
+	return inst.hasToken()
 }
 
 // GetAdoptStatus returns the instance's adoption state from blipd (unauthenticated).

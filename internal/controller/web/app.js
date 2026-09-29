@@ -91,6 +91,7 @@ const IC = {
   edit: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.8 2.8 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>',
   trash: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/></svg>',
   shield: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>',
+  key: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6M15.5 7.5l3 3L22 7l-3-3"/></svg>',
   check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>',
   warn: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.8 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.8a2 2 0 0 0-3.4 0z"/><path d="M12 9v4m0 4h.01"/></svg>',
   info: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4m0-4h.01"/></svg>',
@@ -517,10 +518,11 @@ function renderInstances() {
       <td class="num"><span style="color:${s.blocked_total ? "var(--red)" : "inherit"}">${fmt(s.blocked_total ?? 0)}</span></td>
       <td class="num">${fmt(s.cached ?? 0)}</td>
       <td class="num mono">${ping}</td>
-      <td><span class="badge ${i.adopted ? "on" : "off"}">${i.adopted ? "adopted" : "pending"}</span></td>
+      <td><span class="badge ${i.adopted ? "on" : "off"}" title="${i.adopted ? "Claimed: the controller holds this instance's admin token" : esc(i.error || "Not yet adopted — click Adopt and enter the claim code from the blipd host")}">${i.adopted ? "adopted" : "pending"}</span></td>
       <td>${i.config_synced ? '<span class="badge on">synced</span>' : (i.online ? '<span class="badge warn">pending</span>' : '<span class="badge off">—</span>')}</td>
       <td>
         <div class="row-actions">
+          ${i.adopted ? "" : `<button class="icon-btn" data-act="adopt" data-id="${esc(i.id)}" title="Adopt with claim code">${IC.key}</button>`}
           <button class="icon-btn" data-act="restart" data-id="${esc(i.id)}" title="Restart blipd">${IC.refresh}</button>
           <button class="icon-btn" data-act="policies" data-id="${esc(i.id)}" title="Policies">${IC.shield}</button>
           <button class="icon-btn" data-act="edit" data-id="${esc(i.id)}" title="Edit label">${IC.edit}</button>
@@ -537,15 +539,27 @@ async function saveInstance() {
   const body = { id: $("i-id").value.trim(), label: $("i-label").value.trim(), url: $("i-url").value.trim(), token: $("i-token").value, claim: $("i-claim").value.trim() };
   if (!body.id || !body.url) return toast("id and url are required", "err");
   try {
-    await API("/api/instances", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    // Single call: the server adopts server-side when a claim is present and
+    // reports the outcome, so no second adopt POST is needed.
+    const res = await API("/api/instances", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).then((r) => r.json().catch(() => ({})));
     hide("modal-instance");
-    toast("instance added");
-    if (body.claim) {
-      try { await API("/api/instances/" + encodeURIComponent(body.id) + "/adopt", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ code: body.claim }) }); toast("adopted " + body.id); }
-      catch (e) { toast("adoption failed: " + e.message, "err"); }
-    }
+    if (body.claim && !res.adopted) toast("added " + body.id + ", but adoption failed — click Adopt on its row and retry the code", "err");
+    else toast(body.claim ? "added and adopted " + body.id : "instance added");
     refresh();
   } catch (e) { toast("add failed: " + e.message, "err"); }
+}
+
+async function adoptInstance(id) {
+  const code = prompt("Claim code for " + id + " (on the blipd host: sudo cat /var/lib/blipd/adopt-code):");
+  if (code == null || !code.trim()) return;
+  try {
+    await API("/api/instances/" + encodeURIComponent(id) + "/adopt", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ code: code.trim() }) });
+    toast("adopted " + id); refresh();
+  } catch (e) {
+    let m = e.message || "adoption failed";
+    if (/too many|429/i.test(m)) m += " — blipd rate-limits code guesses, wait ~5 min";
+    toast("adoption failed: " + m, "err");
+  }
 }
 
 async function editLabel(id) {
@@ -2072,6 +2086,7 @@ $("inst-tbody").addEventListener("click", (e) => {
   if (act === "detail") { e.preventDefault(); openInstanceDetail(id); }
   else if (act === "policies") openPolicyModal(id);
   else if (act === "edit") editLabel(id);
+  else if (act === "adopt") adoptInstance(id);
   else if (act === "restart") restartInstance(id);
   else if (act === "remove") confirmRemove(id);
 });

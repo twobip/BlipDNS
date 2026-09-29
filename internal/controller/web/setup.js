@@ -101,7 +101,8 @@
   });
   skipBtn.addEventListener("click", function () { go(4); });
 
-  // Step 3: adopt one instance (same calls as the dashboard Instances page).
+  // Step 3: adopt one instance. Single call: the server adopts server-side
+  // when a claim is present and reports the outcome.
   $("adopt-btn").addEventListener("click", function () {
     clear();
     var id = $("adopt-id").value.trim();
@@ -110,28 +111,23 @@
     if (!id || !url) { fail("Instance ID and management URL are required."); return; }
     var btn = $("adopt-btn");
     btn.disabled = true;
-    $("adopt-label").textContent = "Adopting…";
+    $("adopt-btn-label").textContent = "Adopting…";
     api("/api/instances", {
       id: id,
       label: $("adopt-label").value.trim(),
       url: url,
       token: $("adopt-token").value,
       claim: claim,
-    }).then(function () {
-      if (!claim) return null;
-      return api("/api/instances/" + encodeURIComponent(id) + "/adopt", { code: claim }).then(
-        function () { return "adopted"; },
-        function (e) { throw new Error("added, but adoption failed: " + (e.message || "unknown error")); }
-      );
     }).then(function (res) {
+      if (claim && !res.adopted) throw new Error("Added, but adoption failed — retry the code or Skip for now.");
       adopted = true;
       btn.disabled = false;
-      $("adopt-label").textContent = "Adopt instance";
-      note(res === "adopted" ? ("Adopted " + id + ".") : ("Added " + id + "."));
+      $("adopt-btn-label").textContent = "Adopt instance";
+      note(claim ? ("Adopted " + id + ".") : ("Added " + id + "."));
       go(4);
     }).catch(function (e) {
       btn.disabled = false;
-      $("adopt-label").textContent = "Adopt instance";
+      $("adopt-btn-label").textContent = "Adopt instance";
       fail(e.message || "Adopt failed.");
     });
   });

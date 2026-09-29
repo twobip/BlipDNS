@@ -46,11 +46,10 @@ type InstanceStatus struct {
 
 // Instance is a managed blipd with background poll + watch loops.
 type Instance struct {
-	Config    InstanceConfig
-	client    *control.Client
-	mgmtLeaf  *x509.Certificate // pinned self-signed management leaf (in-memory; fingerprint persists as Config.MgmtCertFP)
-	fleet     *Fleet
-	claimCode string // optional code the controller was pre-seeded with
+	Config   InstanceConfig
+	client   *control.Client
+	mgmtLeaf *x509.Certificate // pinned self-signed management leaf (in-memory; fingerprint persists as Config.MgmtCertFP)
+	fleet    *Fleet
 
 	mu           sync.RWMutex
 	online       bool

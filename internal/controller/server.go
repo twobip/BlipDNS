@@ -766,7 +766,7 @@ func (s *Server) handleInstances(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		writeJSON(w, map[string]string{"ok": "added", "id": cfg.ID})
+		writeJSON(w, map[string]interface{}{"ok": "added", "id": cfg.ID, "adopted": s.fleet.Adopted(cfg.ID)})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
