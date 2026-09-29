@@ -77,7 +77,7 @@ Installs:
 - Default config → `/etc/blipc/blipc.yaml` (chmod 600)
 - systemd unit → `/etc/systemd/system/blipc.service`
 
-On the first start, blipc prints a one-time setup URL in the service log. Create the administrator account through the web UI:
+On the first start, blipc prints a first-run setup URL in the service log. Create the administrator account through the web UI:
 
 ```bash
 sudo systemctl enable --now blipc
@@ -90,7 +90,7 @@ If systemd is not available, run blipc manually and keep it running:
 sudo /usr/local/bin/blipc -config /etc/blipc/blipc.yaml
 ```
 
-Copy the setup URL printed by blipc. Open it in a browser. On the setup page, enter a username, an **8–72 character** password, and confirm the password, then click **Create account**. You will be signed in automatically. After the account is created, setup is disabled and you can add blipd instances from the dashboard. Keep the setup URL/token private and use the page on a trusted network or over HTTPS.
+Copy the setup URL printed by blipc. Open it in a browser. The setup wizard walks through three steps: administrator account (an **8–72 character** password, you are signed in automatically), dashboard bind address (applies after a controller restart), and adopting a blipd instance (skippable). After the account is created, setup is disabled and you can manage instances from the dashboard. No token is needed: whoever opens the setup page first claims the controller, so use it on a trusted network or over HTTPS.
 
 Both scripts accept an optional argument: `master` (default), `stable`, or a version tag (e.g. `v1.2.3`), plus the `--install-deps` option. They clone the repo, build from source, and install under `/usr/local/bin` with secure config directories.
 
