@@ -3547,11 +3547,15 @@ func (f *Fleet) saveConfig() error {
 	}
 
 	type fullConfig struct {
-		Listen            string                       `yaml:"listen"`
-		Username          string                       `yaml:"username"`
-		Password          string                       `yaml:"password"`
-		PasswordHash      string                       `yaml:"password_hash"`
-		DashboardTLS      bool                         `yaml:"dashboard_tls"`
+		Listen       string `yaml:"listen"`
+		Username     string `yaml:"username"`
+		Password     string `yaml:"password"`
+		PasswordHash string `yaml:"password_hash"`
+		// Pointer + omitempty (like cache_size below): an absent key must stay
+		// absent so the HTTPS-by-default startup applies. A plain bool
+		// materialized `dashboard_tls: false` on the first fleet save and
+		// flipped default-HTTPS controllers to plaintext on next restart.
+		DashboardTLS      *bool                        `yaml:"dashboard_tls,omitempty"`
 		TLSDir            string                       `yaml:"tls_dir"`
 		TLSCertFile       string                       `yaml:"tls_cert_file"`
 		TLSKeyFile        string                       `yaml:"tls_key_file"`

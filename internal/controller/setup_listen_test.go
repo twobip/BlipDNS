@@ -69,3 +69,61 @@ func TestSetupListenRejectsBadInput(t *testing.T) {
 		t.Errorf("GET: expected 405, got %d", rec.Code)
 	}
 }
+
+// Fleet saves must not materialize an absent dashboard_tls key: the code
+// default is HTTPS, and writing `dashboard_tls: false` flipped fresh
+// controllers to plaintext on their next restart. An explicit value must
+// still round-trip untouched.
+func TestSaveConfigPreservesDashboardTLSAbsence(t *testing.T) {
+	dir := t.TempDir()
+	cfg := filepath.Join(dir, "blipc.yaml")
+	if err := os.WriteFile(cfg, []byte("listen: \"127.0.0.1:8500\"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	f := NewFleet(cfg)
+	if err := f.saveConfig(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "dashboard_tls") {
+		t.Fatalf("absent dashboard_tls was materialized: %s", raw)
+	}
+	if err := persistListenKey(cfg, "127.0.0.1:8501"); err != nil {
+		t.Fatal(err)
+	}
+	raw, err = os.ReadFile(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "dashboard_tls") {
+		t.Fatalf("persistListenKey materialized dashboard_tls: %s", raw)
+	}
+	if err := f.saveConfig(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err = os.ReadFile(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "dashboard_tls") {
+		t.Fatalf("second save materialized dashboard_tls: %s", raw)
+	}
+
+	explicit := []byte("listen: \"127.0.0.1:8500\"\ndashboard_tls: true\n")
+	if err := os.WriteFile(cfg, explicit, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.saveConfig(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err = os.ReadFile(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "dashboard_tls: true") {
+		t.Fatalf("explicit dashboard_tls lost: %s", raw)
+	}
+}
