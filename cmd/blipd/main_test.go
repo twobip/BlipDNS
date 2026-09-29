@@ -30,8 +30,8 @@ func TestPickBundleHost(t *testing.T) {
 		{"", "10.0.0.5", lan},                // empty: LAN guess
 		{"", "127.0.0.1", nil},               // empty + no ifaces: loopback
 		{"169.254.169.254", "10.0.0.5", lan}, // link-local never baked in
-		{"0.0.0.0", "10.0.0.5", lan},           // unspecified -> LAN guess
-		{"::", "10.0.0.5", lan},                // v6 unspecified -> LAN guess
+		{"0.0.0.0", "10.0.0.5", lan},         // unspecified -> LAN guess
+		{"::", "10.0.0.5", lan},              // v6 unspecified -> LAN guess
 	} {
 		if got := pickBundleHost(tc.admin, tc.addrs); got != tc.want {
 			t.Errorf("pickBundleHost(%q) = %q, want %q", tc.admin, got, tc.want)

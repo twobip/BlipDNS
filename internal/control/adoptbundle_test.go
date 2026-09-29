@@ -1,6 +1,7 @@
 package control
 
 import (
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -50,5 +51,18 @@ func TestAdoptBundleLegacyAndGarbage(t *testing.T) {
 	}
 	if _, err := MakeAdoptBundle("x", "http://", "C"); err == nil {
 		t.Fatal("hostless url accepted")
+	}
+}
+
+func TestAdoptCodePathFollowsStateDir(t *testing.T) {
+	dir := t.TempDir()
+	s := &Server{}
+	s.ConfigureAdoption(filepath.Join(dir, "adopted.json"), "n1")
+	if got := s.AdoptCodePath(); got != filepath.Join(dir, "adopt-code") {
+		t.Fatalf("state-dir path = %q", got)
+	}
+	plain := &Server{}
+	if got := plain.AdoptCodePath(); got != DefaultAdoptCodeFile {
+		t.Fatalf("default path = %q", got)
 	}
 }

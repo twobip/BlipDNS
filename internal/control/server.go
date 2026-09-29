@@ -1185,7 +1185,7 @@ func (s *Server) handleAdopt(w http.ResponseWriter, r *http.Request) {
 	s.claimCode = ""  // one-time: invalidate immediately
 	s.adoptedBy = src // pin the management API to the adopting controller
 	s.persistAdopted(true)
-	ClearAdoptCodeFile("")
+	ClearAdoptCodeFile(s.AdoptCodePath())
 	log.Printf("blipd: instance adopted via claim code")
 	writeJSON(w, AdoptResponse{Adopted: true, Token: s.currentToken()})
 }

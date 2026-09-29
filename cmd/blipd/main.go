@@ -271,10 +271,10 @@ func main() {
 				}
 				srv.ControlServer().SetAdoptBundleURL(mgmtScheme + "://" + net.JoinHostPort(pickBundleHost(host, addrs), port))
 			}
-			if err := srv.ControlServer().WriteAdoptCodeFile(control.DefaultAdoptCodeFile); err != nil {
+			if err := srv.ControlServer().WriteAdoptCodeFile(srv.ControlServer().AdoptCodePath()); err != nil {
 				log.Printf("blipd: adopt-code file: %v", err)
 			} else {
-				log.Printf("blipd: adoption code generated (written to %s 0600)", control.DefaultAdoptCodeFile)
+				log.Printf("blipd: adoption code generated (written to %s 0600)", srv.ControlServer().AdoptCodePath())
 			}
 			if isTerminal() {
 				// One pasteable line beats three fields: print the bundle
@@ -423,7 +423,7 @@ func adoptAudit(cs *control.Server, next http.Handler) http.Handler {
 			case rec.status == http.StatusTooManyRequests:
 				log.Printf("blipd: adopt rejected (rate-limited) from %s status=%d", peer, rec.status)
 			case !wasAdopted && cs.IsAdopted():
-				control.ClearAdoptCodeFile(control.DefaultAdoptCodeFile)
+				control.ClearAdoptCodeFile(cs.AdoptCodePath())
 				log.Printf("blipd: adopt succeeded from %s (claim code consumed, file removed)", peer)
 			case wasAdopted:
 				log.Printf("blipd: adopt probe from %s (already adopted) status=%d", peer, rec.status)
@@ -433,10 +433,10 @@ func adoptAudit(cs *control.Server, next http.Handler) http.Handler {
 		case "/api/v1/adopt/reset":
 			if rec.status < 400 {
 				if code := cs.CurrentClaimCode(); code != "" {
-					if err := cs.WriteAdoptCodeFile(control.DefaultAdoptCodeFile); err != nil {
+					if err := cs.WriteAdoptCodeFile(cs.AdoptCodePath()); err != nil {
 						log.Printf("blipd: adopt reset from %s: cannot rewrite code file: %v", peer, err)
 					} else {
-						log.Printf("blipd: adopt reset from %s: new code generated (file %s 0600)", peer, control.DefaultAdoptCodeFile)
+						log.Printf("blipd: adopt reset from %s: new code generated (file %s 0600)", peer, cs.AdoptCodePath())
 					}
 				} else {
 					log.Printf("blipd: adopt reset from %s status=%d", peer, rec.status)

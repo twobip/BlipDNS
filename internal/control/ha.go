@@ -118,7 +118,7 @@ func (s *Server) AdoptBundleString() string {
 // file and returns nil. Parent dirs are created 0700.
 func (s *Server) WriteAdoptCodeFile(path string) error {
 	if path == "" {
-		path = DefaultAdoptCodeFile
+		path = s.AdoptCodePath()
 	}
 	s.adoptMu.Lock()
 	code := s.claimCode
@@ -149,6 +149,25 @@ func (s *Server) WriteAdoptCodeFile(path string) error {
 		return err
 	}
 	return nil
+}
+
+// AdoptCodePath is the 0600 adopt-code file: next to the adoption state file
+// when one is configured, else the default. Parallel instances with separate
+// state dirs therefore get separate code files instead of sharing (and
+// failing to write) the default.
+func (s *Server) AdoptCodePath() string {
+	s.adoptMu.Lock()
+	defer s.adoptMu.Unlock()
+	return s.adoptCodePathLocked()
+}
+
+func (s *Server) adoptCodePathLocked() string {
+	if s.stateFile != "" {
+		if dir := filepath.Dir(s.stateFile); dir != "" && dir != "." {
+			return filepath.Join(dir, "adopt-code")
+		}
+	}
+	return DefaultAdoptCodeFile
 }
 
 // ClearAdoptCodeFile removes the claim-code file best-effort (called after a
