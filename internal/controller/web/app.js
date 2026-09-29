@@ -533,9 +533,38 @@ function renderInstances() {
   }).join("");
 }
 
-function openInstanceModal() { $("inst-modal-title").textContent = "Add Instance"; $("i-save").textContent = "Add Instance"; $("i-save").dataset.mode = "add"; ["i-id","i-label","i-url","i-token","i-claim"].forEach((x) => $(x).value = ""); show("modal-instance"); }
+function openInstanceModal() { $("inst-modal-title").textContent = "Add Instance"; $("i-save").textContent = "Add Instance"; $("i-save").dataset.mode = "add"; ["i-id","i-label","i-url","i-token","i-claim","i-name","i-code","i-host","i-port"].forEach((x) => $(x).value = ""); setInstanceMode(false); show("modal-instance"); }
+
+function setInstanceMode(manual) {
+  $("inst-auto").classList.toggle("hidden", manual);
+  $("inst-manual").classList.toggle("hidden", !manual);
+  $("i-mode").textContent = manual ? "Bundle" : "Manual";
+}
 
 async function saveInstance() {
+  // Bundle view (default): name + pasted code + optional Advanced host:port.
+  // The server unpacks the bundle, so this page never decodes anything.
+  if ($("inst-manual").classList.contains("hidden")) {
+    const id = $("i-name").value.trim();
+    const claim = $("i-code").value.trim();
+    const host = $("i-host").value.trim();
+    const port = $("i-port").value.trim();
+    if (!claim) return toast("paste the adopt code from the blipd host", "err");
+    if (!id) return toast("give the instance a name", "err");
+    let url = "";
+    if (host || port) {
+      if (!host || !/^\d+$/.test(port) || +port < 1 || +port > 65535) return toast("Advanced override needs a host and a port 1-65535", "err");
+      url = host + ":" + port; // scheme-less: inherits the bundle scheme server-side
+    }
+    try {
+      const res = await API("/api/instances", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id, url, claim }) }).then((r) => r.json().catch(() => ({})));
+      hide("modal-instance");
+      if (!res.adopted) toast("added " + id + ", but adoption failed — click Adopt on its row and retry the code", "err");
+      else toast("added and adopted " + (res.id || id));
+      refresh();
+    } catch (e) { toast("add failed: " + e.message, "err"); }
+    return;
+  }
   const body = { id: $("i-id").value.trim(), label: $("i-label").value.trim(), url: $("i-url").value.trim(), token: $("i-token").value, claim: $("i-claim").value.trim() };
   if ((!body.id || !body.url) && !body.claim) return toast("id and url, or a pasted adopt code, are required", "err");
   try {
@@ -2076,6 +2105,7 @@ async function pollUpdateJob() {
   }
 }
 $("i-save").onclick = saveInstance;
+$("i-mode").onclick = () => setInstanceMode($("inst-manual").classList.contains("hidden"));
 $("inst-filter").addEventListener("input", debounce(renderInstances, 150));
 
 /* instance row actions (event delegation) */

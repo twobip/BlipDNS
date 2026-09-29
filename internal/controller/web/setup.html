@@ -39,10 +39,6 @@
   .setup-nav .btn { min-width: 110px; justify-content: center; }
   .setup-note { margin-top: 18px; text-align: center; font-size: 11.5px; color: var(--faint); }
   .bind-row { display: grid; grid-template-columns: 1fr 110px; gap: 10px; }
-  .setup-adv { border: 1px solid var(--border-2); border-radius: 8px; padding: 10px 12px; }
-  .setup-adv summary { cursor: pointer; font-size: 12.5px; color: var(--muted); }
-  .setup-adv .bind-row { margin-top: 10px; }
-  .setup-adv .hint { display: block; margin-top: 8px; }
   .done-mark { font-size: 40px; text-align: center; }
 </style>
 </head>
@@ -90,7 +86,7 @@
       <div class="field"><label for="adopt-claim">Adopt code</label>
         <input class="input" id="adopt-claim" autocomplete="off" maxlength="512" placeholder="paste the adopt bundle from the blipd host" /></div>
       <span class="hint">Paste the adopt bundle: sudo cat /var/lib/blipd/adopt-code on the blipd host.</span>
-      <details class="setup-adv">
+      <details class="adv">
         <summary>Advanced</summary>
         <div class="bind-row">
           <div class="field"><label for="adopt-host">Host / IP override</label>

@@ -919,6 +919,20 @@
     <div class="modal-head"><h3 id="inst-modal-title">Add Instance</h3><button class="icon-btn x" data-close="modal-instance">
       <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button></div>
     <form class="modal-body" onsubmit="return false">
+      <div id="inst-auto">
+        <div class="field"><label>Name</label><input class="input" id="i-name" placeholder="office-dns"/></div>
+        <div class="field"><label>Adopt code</label><input class="input" id="i-code" autocomplete="off" maxlength="512" placeholder="paste the adopt bundle from the blipd host"/></div>
+        <span class="hint">Paste the adopt bundle: sudo cat /var/lib/blipd/adopt-code on the blipd host.</span>
+        <details class="adv">
+          <summary>Advanced</summary>
+          <div class="form-grid">
+            <div class="field"><label>Host / IP override</label><input class="input" id="i-host" placeholder="10.0.0.5"/></div>
+            <div class="field"><label>Port</label><input class="input" id="i-port" inputmode="numeric" placeholder="8444"/></div>
+          </div>
+          <span class="hint">Only needed when the bundle's address is wrong. Inherits the bundle's http/https scheme.</span>
+        </details>
+      </div>
+      <div id="inst-manual" class="hidden">
       <div class="form-grid">
         <div class="field"><label>ID</label><input class="input" id="i-id" placeholder="office-dns"/></div>
         <div class="field"><label>Label</label><input class="input" id="i-label" placeholder="Office"/></div>
@@ -928,8 +942,10 @@
         <div class="field"><label>Token <span class="faint">(existing installs — skip if using a claim code)</span></label><input class="input" id="i-token" type="password" placeholder="admin token" autocomplete="new-password"/></div>
         <div class="field"><label>Claim code <span class="faint">(fresh blipd only, one-time)</span></label><input class="input" id="i-claim" placeholder="ABCD-1234"/></div>
       </div>
+      </div>
     </form>
     <div class="modal-foot">
+      <button class="btn" id="i-mode">Manual</button>
       <button class="btn" data-close="modal-instance">Cancel</button>
       <button class="btn btn-primary" id="i-save">Add Instance</button>
     </div>
