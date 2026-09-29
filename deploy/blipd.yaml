@@ -15,8 +15,8 @@ admin_token: "__BLIP_ADMIN_TOKEN__"
 # (Pi-hole model) — `sudo blipctl --socket /var/lib/blipd/blipd.sock health`.
 # The socket file is 0600 owned by the blipd user; "" disables it.
 admin_socket: "/var/lib/blipd/blipd.sock"
-# Persists "adopted" so the one-time claim code isn't regenerated on restart.
-# The controller uses the claim code (printed to the journal) to bootstrap trust.
+# Persists "adopted" so the one-time adopt bundle isn't regenerated on restart.
+# The controller uses the bundle (printed box-locally) to bootstrap trust.
 state_file: "/var/lib/blipd/adopted.json"
 # Production upstreams with failover (override in /etc/blipd/blipd.yaml).
 upstream: "https://1.1.1.1/dns-query https://8.8.8.8/dns-query"

@@ -462,7 +462,7 @@ func dohScheme(cfg *config.Config) string {
 // controller's Advanced section.
 func pickBundleHost(adminHost string, addrs []net.Addr) string {
 	if h := strings.TrimSpace(adminHost); h != "" && h != "localhost" {
-		if ip := net.ParseIP(h); ip == nil || (!ip.IsLoopback() && !ip.IsLinkLocalUnicast()) {
+		if ip := net.ParseIP(h); ip == nil || (!ip.IsLoopback() && !ip.IsLinkLocalUnicast() && !ip.IsUnspecified()) {
 			return h
 		}
 	}
