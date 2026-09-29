@@ -85,8 +85,8 @@
     </div>
 
     <div class="setup-step hidden" id="step-3">
-      <div class="field"><label for="adopt-id">Name (optional when pasting a bundle)</label>
-        <input class="input" id="adopt-id" autocomplete="off" maxlength="64" placeholder="office-dns" /></div>
+      <div class="field"><label for="adopt-id">Name</label>
+        <input class="input" id="adopt-id" autocomplete="off" maxlength="64" required placeholder="office-dns" /></div>
       <div class="field"><label for="adopt-claim">Adopt code</label>
         <input class="input" id="adopt-claim" autocomplete="off" maxlength="512" placeholder="paste the adopt bundle from the blipd host" /></div>
       <span class="hint">On the blipd host: sudo cat /var/lib/blipd/adopt-code, then paste the line here. A bare claim code works too — fill host and port under Advanced.</span>

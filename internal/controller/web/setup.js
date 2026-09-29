@@ -111,6 +111,7 @@
     var host = $("adopt-host").value.trim();
     var port = $("adopt-port").value.trim();
     if (!claim) { fail("Paste the adopt code from the blipd host."); return; }
+    if (!id) { fail("Give the instance a name to continue."); return; }
     var url = "";
     if (host || port) {
       if (!host || !/^\d+$/.test(port) || +port < 1 || +port > 65535) { fail("Advanced override needs a host and a port 1-65535."); return; }
