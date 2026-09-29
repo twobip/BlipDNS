@@ -176,21 +176,13 @@ func main() {
 	}
 	// Effective dashboard scheme is needed for the first-run setup URL.
 	dashboardTLS := effectiveDashboardTLS(cfg)
-	setupToken := ""
+	// First-run bootstrap: no admin exists yet. AdGuard-style, no token —
+	// whoever opens this one-time setup page first claims the controller,
+	// so only boot unconfigured on a trusted network.
 	if cfg.Username == "" || authPass == "" || !controller.NewAuth(cfg.Username, authPass).Configured() {
-		var tokenErr error
-		setupToken, tokenErr = controller.NewSetupToken()
-		if tokenErr != nil {
-			log.Fatalf("blipc: generate setup token: %v", tokenErr)
-		}
-		// First-run bootstrap: no admin exists yet, so the one-time token is
-		// printed once to the local log only (journal, blipc/root-readable).
-		// It is single-use and the /api/setup endpoint rate-limits guesses.
-		// Logged as a single setup URL (not a bare token plus a URL) so the
-		// secret appears once, not twice. Keep it private.
-		log.Printf("blipc: first-run setup (one-time, keep private): open http%s://%s/setup#token=%s to create the administrator account", map[bool]string{true: "s", false: ""}[dashboardTLS], cfg.Listen, setupToken)
+		log.Printf("blipc: first-run setup (one-time): open http%s://%s/setup to create the administrator account", map[bool]string{true: "s", false: ""}[dashboardTLS], cfg.Listen)
 	}
-	srv := controller.NewServerWithConfig(cfg.Username, authPass, fleet, controller.UI(), *cfgPath, setupToken)
+	srv := controller.NewServerWithConfig(cfg.Username, authPass, fleet, controller.UI(), *cfgPath, "")
 	// StrictCSRF defaults true for new deploys (fail closed on header-stripped
 	// cross-site posts). Explicit `strict_csrf: false` restores the legacy
 	// compat mode for API clients that omit Origin/Sec-Fetch-Site.

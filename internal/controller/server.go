@@ -2,9 +2,6 @@ package controller
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/subtle"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -96,15 +93,6 @@ func NewServer(username, password string, fleet *Fleet, ui fs.FS) *Server {
 // token used by first-run setup.
 func NewServerWithConfig(username, password string, fleet *Fleet, ui fs.FS, configPath, setupToken string) *Server {
 	return &Server{auth: NewAuth(username, password), fleet: fleet, ui: ui, configPath: configPath, setupToken: setupToken, selfUpdate: NewSelfUpdater()}
-}
-
-// NewSetupToken returns a cryptographically random token for first-run setup.
-func NewSetupToken() (string, error) {
-	b := make([]byte, 24)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(b), nil
 }
 
 // SetTrustedProxies configures which immediate peers may supply
@@ -507,14 +495,14 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 // handleSetup creates the first controller credentials and immediately signs
 // the operator in. It is deliberately unavailable after the first success.
+// AdGuard-style: no setup token — whoever reaches this first-boot page first
+// claims the controller, so only boot unconfigured on a trusted network. The
+// per-IP brute-force limiter still applies.
 func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	// Rate-limit setup attempts with the same per-IP brute-force limiter as
-	// login: the setup token is a high-value secret and must not be guessable
-	// at line rate.
 	ip := s.clientIP(r)
 	if !s.auth.allowLogin(ip) {
 		http.Error(w, "too many attempts", http.StatusTooManyRequests)
@@ -527,7 +515,6 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Token    string `json:"token"`
 		Username string `json:"username"`
 		Password string `json:"password"`
 		Confirm  string `json:"confirm"`
@@ -535,11 +522,6 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
-		return
-	}
-	if s.setupToken == "" || len(req.Token) != len(s.setupToken) || subtle.ConstantTimeCompare([]byte(req.Token), []byte(s.setupToken)) != 1 {
-		s.auth.recordFail(ip)
-		http.Error(w, "invalid setup token", http.StatusForbidden)
 		return
 	}
 	req.Username = strings.TrimSpace(req.Username)

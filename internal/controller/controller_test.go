@@ -1165,10 +1165,9 @@ func TestServerFirstRunSetup(t *testing.T) {
 		t.Fatal(err)
 	}
 	fleet := NewFleet(cfgPath)
-	setupToken := "test-setup-token"
-	srv := NewServerWithConfig("", "", fleet, nil, cfgPath, setupToken)
+	// No token: first-run setup is AdGuard-style, whoever gets here first.
+	srv := NewServerWithConfig("", "", fleet, nil, cfgPath, "")
 	body, _ := json.Marshal(map[string]string{
-		"token":    setupToken,
 		"username": "admin",
 		"password": "correct horse",
 		"confirm":  "correct horse",
