@@ -35,7 +35,10 @@ SystemCallArchitectures=native
 # even via sudo) and self-update dies with "cannot open lock".
 # /usr/local/bin: the helper stages (mktemp) and installs there. Both stay
 # root-owned, so the service user gains no write access; only root passes.
-ReadWritePaths=/etc/blipd /var/lib/blipd /var/cache/blipd-update /run/lock /usr/local/bin
+# /etc/blipd is deliberately NOT writable here (finding 11): the config is
+# root-owned 0640 so a compromised daemon cannot persist via admin_token,
+# upstream or allowed_networks. ProtectSystem=strict still allows reads.
+ReadWritePaths=/var/lib/blipd /var/cache/blipd-update /run/lock /usr/local/bin
 LimitNOFILE=65536
 StandardOutput=journal
 StandardError=journal
