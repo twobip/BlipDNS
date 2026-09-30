@@ -507,6 +507,21 @@ func dohMaxAge(resp *dns.Msg) uint32 {
 
 // ServeDNS implements dns.Handler for classic DNS.
 func (s *Server) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
+	// A classic-DNS panic must not kill blipd (DNS+DoH+API+HA share the
+	// process); net/http recovers per-request but miekg/dns does not.
+	defer func() {
+		if r := recover(); r != nil {
+			resp := new(dns.Msg)
+			if req != nil {
+				resp.SetReply(req)
+			}
+			resp.RecursionAvailable = true
+			resp.Rcode = dns.RcodeServerFailure
+			if w != nil {
+				_ = w.WriteMsg(resp)
+			}
+		}
+	}()
 	// Zero-alloc client IP: type-assert the packet address instead of
 	// String()+SplitHostPort+ParseIP (3 allocs per query on the old path).
 	var clientIP net.IP
@@ -525,9 +540,8 @@ func (s *Server) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
 		}
 	}
 	isUDP := false
-	// The mux serves both UDP and TCP on the same handler; only UDP needs
-	// truncation to 1232 (DNS flag day) to avoid IP fragmentation. TCP can
-	// carry the full response.
+	// The mux serves both UDP and TCP on the same handler; the flag only
+	// selects the response cap (see responseCap).
 	if w != nil {
 		if la := w.LocalAddr(); la != nil && la.Network() == "udp" {
 			isUDP = true
@@ -539,9 +553,19 @@ func (s *Server) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
 	defer cancel()
 	resp := s.serveInner(ctx, clientIP, "", control.ProtoDNS, isUDP, req)
 	// Safety net for every early-return path (blocked/local/refused): a large
-	// local answer over UDP must still fit the path MTU.
-	if isUDP && resp != nil && resp.Len() > 1232 {
-		resp.Truncate(1232)
+	// answer must still fit the path (UDP: DNS flag-day 1232; TCP: the
+	// client's advertised EDNS0 bufsize capped at 1232, 512 + TC when the
+	// client sent no OPT). serveInner never returns nil, but guard anyway —
+	// WriteMsg(nil) would panic.
+	if resp == nil {
+		resp = new(dns.Msg)
+		if req != nil {
+			resp.SetReply(req)
+		}
+		resp.RecursionAvailable = true
+		resp.Rcode = dns.RcodeServerFailure
+	} else if cap := responseCap(req, isUDP); resp.Len() > cap {
+		resp.Truncate(cap)
 	}
 	if w == nil {
 		return
@@ -587,15 +611,76 @@ type chainBlockedError struct {
 
 func (e *chainBlockedError) Error() string { return "blipd: cname target blocked: " + e.target }
 
+// responseCap is the largest response that may be sent back on this transport
+// (RFC 8659 §6.1): UDP truncates to the DNS flag-day 1232; TCP honors the
+// client's advertised EDNS0 buffer size capped at 1232, defaulting to 512
+// (Truncate sets TC so the client retries with OPT or over TCP) when the
+// client sent no OPT.
+func responseCap(req *dns.Msg, isUDP bool) int {
+	if isUDP {
+		return 1232
+	}
+	if req != nil {
+		if opt := req.IsEdns0(); opt != nil {
+			if sz := int(opt.UDPSize()); sz > 0 {
+				return min(max(sz, 512), 1232)
+			}
+		}
+	}
+	return 512
+}
+
+// rrTarget returns the domain name carried by rr for blocklist inspection:
+// the rdata target for name-bearing types, the owner name for address
+// records. The second result is false for types that carry no domain name
+// (or an empty one — NAPTR "." included, which normalizes away).
+func rrTarget(rr dns.RR) (string, bool) {
+	switch v := rr.(type) {
+	case *dns.CNAME:
+		return v.Target, v.Target != ""
+	case *dns.DNAME:
+		return v.Target, v.Target != ""
+	case *dns.A, *dns.AAAA:
+		name := rr.Header().Name
+		return name, name != ""
+	case *dns.MX:
+		return v.Mx, v.Mx != ""
+	case *dns.SRV:
+		return v.Target, v.Target != ""
+	case *dns.NS:
+		return v.Ns, v.Ns != ""
+	case *dns.SOA:
+		return v.Ns, v.Ns != ""
+	case *dns.SVCB:
+		return v.Target, v.Target != ""
+	case *dns.HTTPS:
+		return v.Target, v.Target != ""
+	case *dns.NAPTR:
+		// "." is the NAPTR "no replacement" marker, not a name.
+		return v.Replacement, v.Replacement != "" && v.Replacement != "."
+	case *dns.CAA:
+		// Value is "issuer-domain [params]" (e.g. "letsencrypt.org; validationmethods=dns-01").
+		if f, _, _ := strings.Cut(v.Value, ";"); strings.TrimSpace(f) != "" {
+			return strings.TrimSpace(f), true
+		}
+		return "", false
+	case *dns.RP:
+		return v.Mbox, v.Mbox != ""
+	default:
+		return "", false
+	}
+}
+
 // maxChainInspect bounds CNAME/DNAME chain inspection. Chains longer than
 // this are treated as blocked (fail-closed) rather than silently allowed:
 // an unbounded upstream-constructed chain must never evade filtering, and an
 // unbounded walk is itself a CPU concern on attacker-controlled responses.
 const maxChainInspect = 64
 
-// chainBlocked inspects every CNAME/DNAME target in all sections (Answer, Ns,
-// Extra) and every A/AAAA owner name, reporting whether any of them is blocked
-// per classify (the same policy/blocklist function used for the qname).
+// chainBlocked inspects every name carried in all sections (Answer, Ns,
+// Extra) — rdata targets of name-bearing types plus A/AAAA owner names —
+// reporting whether any of them is blocked per classify (the same
+// policy/blocklist function used for the qname).
 // F-08: the old code stopped after 8 targets, so a blocked domain placed 9th
 // (or later) evaded filtering and poisoned the cache. Over-long chains
 // (>maxChainInspect) fail closed.
@@ -604,47 +689,23 @@ func chainBlocked(m *dns.Msg, classify func(string) bool) bool {
 		return false
 	}
 	checked := 0
-	// Check CNAME/DNAME targets in all sections plus A/AAAA owner names.
+	// Check rdata targets plus A/AAAA owner names in all sections.
 	sections := [][]dns.RR{m.Answer, m.Ns, m.Extra}
 	for _, sec := range sections {
 		for _, rr := range sec {
-			switch v := rr.(type) {
-			case *dns.CNAME:
-				if v.Target == "" {
-					continue
-				}
-				if classify(v.Target) {
-					return true
-				}
-				checked++
-				if checked > maxChainInspect {
-					return true
-				}
-			case *dns.DNAME:
-				if v.Target == "" {
-					continue
-				}
-				if classify(v.Target) {
-					return true
-				}
-				checked++
-				if checked > maxChainInspect {
-					return true
-				}
-			case *dns.A, *dns.AAAA:
-				owner := rr.Header().Name
-				if owner == "" {
-					continue
-				}
-				if classify(owner) {
-					return true
-				}
-				checked++
-				if checked > maxChainInspect {
-					return true
-				}
-			default:
+			if rr == nil || rr.Header() == nil {
 				continue
+			}
+			target, ok := rrTarget(rr)
+			if !ok {
+				continue
+			}
+			if classify(target) {
+				return true
+			}
+			checked++
+			if checked > maxChainInspect {
+				return true
 			}
 		}
 	}
@@ -1003,18 +1064,8 @@ func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, prot
 						if rr == nil || rr.Header() == nil {
 							continue
 						}
-						var target string
-						switch v := rr.(type) {
-						case *dns.CNAME:
-							target = v.Target
-						case *dns.DNAME:
-							target = v.Target
-						case *dns.A, *dns.AAAA:
-							target = rr.Header().Name
-						default:
-							continue
-						}
-						if target == "" {
+						target, ok := rrTarget(rr)
+						if !ok {
 							continue
 						}
 						if ok, a, _, _ := s.classifyName(clientIP, clientID, target); ok {
@@ -1049,6 +1100,12 @@ func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, prot
 				out.Id = req.Id
 				out.Question = req.Question
 				out.AuthenticatedData = false
+			} else {
+				// Lookup claimed a hit but handed back nil: SERVFAIL rather
+				// than a nil Msg (ServeDNS would panic on WriteMsg(nil)).
+				resp.Rcode = dns.RcodeServerFailure
+				resp.AuthenticatedData = false
+				return resp
 			}
 			return out
 		}
@@ -1104,52 +1161,32 @@ func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, prot
 		key.Label = upstreamLabel
 	}
 	// classifyTarget applies the same policy/blocklist decision used for the
-	// qname to a CNAME/DNAME target or A/AAAA owner. Single Check evaluation
-	// on the normalized target (one lookup + one allow/block walk) instead of
-	// the Allowed+Classify+BlockSource triple.
+	// qname to an rdata target or A/AAAA owner: one shared evaluation
+	// (see classifyName) instead of a second near-duplicate closure.
 	classifyTarget := func(target string) (bool, filter.BlockAction, string, bool) {
-		bare := filter.NormalizeName(target)
-		var allowed, blocked bool
-		var action filter.BlockAction
-		var doLog bool
-		var source string
-		if s.cfg.Store != nil {
-			allowed, blocked, action, _, doLog, source = s.cfg.Store.Check(clientIP, clientID, bare)
-		} else {
-			action = filter.DefaultAction
-		}
-		if s.cfg.Blocklist != nil && s.cfg.Blocklist.IsBlocked(bare) && !allowed {
-			return true, s.cfg.BlockAction, "global", true
-		}
-		if blocked {
-			return true, action, source, doLog
-		}
-		return false, "", "", false
+		return s.classifyName(clientIP, clientID, target)
 	}
-	// findBlockedTarget returns the first blocked CNAME/DNAME target or
-	// blocked A/AAAA owner across all sections for attribution.
+	// findBlockedTarget returns the first blocked rdata target or blocked
+	// A/AAAA owner across all sections for attribution. Bounded like
+	// chainBlocked: over-long chains fail closed via chainBlocked first, so
+	// stopping here just caps attribution work.
 	findBlockedTarget := func(m *dns.Msg) (bool, filter.BlockAction, string, bool, string) {
 		if m == nil {
 			return false, "", "", false, ""
 		}
+		checked := 0
 		for _, sec := range [][]dns.RR{m.Answer, m.Ns, m.Extra} {
 			for _, rr := range sec {
 				if rr == nil || rr.Header() == nil {
 					continue
 				}
-				var target string
-				switch v := rr.(type) {
-				case *dns.CNAME:
-					target = v.Target
-				case *dns.DNAME:
-					target = v.Target
-				case *dns.A, *dns.AAAA:
-					target = rr.Header().Name
-				default:
+				target, ok := rrTarget(rr)
+				if !ok {
 					continue
 				}
-				if target == "" {
-					continue
+				checked++
+				if checked > maxChainInspect {
+					return false, "", "", false, ""
 				}
 				if ok, act, src, lg := classifyTarget(target); ok {
 					return true, act, src, lg, strings.TrimSuffix(target, ".")
@@ -1280,10 +1317,11 @@ func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, prot
 	// (never serve cached AD=1 as validated). CD/DO forwarding is preserved
 	// via the query and cache key.
 	out.AuthenticatedData = false
-	// UDP path-MTU safety (DNS flag day 1232): truncate large responses so
-	// they fit without IP fragmentation; the client retries over TCP (TC bit).
-	if isUDP && out.Len() > 1232 {
-		out.Truncate(1232)
+	// Path-MTU safety: truncate large responses so they fit without IP
+	// fragmentation (see responseCap); the client retries over TCP (TC bit)
+	// or with a larger OPT buffer.
+	if cap := responseCap(req, isUDP); out.Len() > cap {
+		out.Truncate(cap)
 	}
 
 	// Notify pass event for query log (with full answer records + qtype so
@@ -1445,6 +1483,16 @@ func newHTTPServer(addr string, h http.Handler) *http.Server {
 	return &http.Server{Addr: addr, Handler: h, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 10 * time.Second, WriteTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 1 << 20}
 }
 
+// newClassicServers builds the UDP and TCP listeners for one address. The
+// UDP read buffer is the DNS flag-day 1232: the vendored default (512) would
+// FORMERR every query larger than 512 bytes (EDNS padding, large option
+// sets, long QNAMEs).
+func newClassicServers(addr string, h dns.Handler) (udp, tcp *dns.Server) {
+	udp = &dns.Server{Addr: addr, Net: "udp", Handler: h, UDPSize: 1232, ReadTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second, IdleTimeout: func() time.Duration { return 30 * time.Second }}
+	tcp = &dns.Server{Addr: addr, Net: "tcp", Handler: h, ReadTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second, IdleTimeout: func() time.Duration { return 30 * time.Second }}
+	return udp, tcp
+}
+
 // Start launches UDP, TCP and DoH listeners (DoH blocks).
 func (s *Server) Start() error {
 	dh := s.Handler()
@@ -1452,8 +1500,7 @@ func (s *Server) Start() error {
 
 	udpH := dns.NewServeMux()
 	udpH.Handle(".", s)
-	udp := &dns.Server{Addr: s.cfg.DNSAddr, Net: "udp", Handler: udpH, ReadTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second, IdleTimeout: func() time.Duration { return 30 * time.Second }}
-	tcp := &dns.Server{Addr: s.cfg.DNSAddr, Net: "tcp", Handler: udpH, ReadTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second, IdleTimeout: func() time.Duration { return 30 * time.Second }}
+	udp, tcp := newClassicServers(s.cfg.DNSAddr, udpH)
 
 	s.lifeMu.Lock()
 	s.doch = doch

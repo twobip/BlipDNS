@@ -385,9 +385,12 @@ func (s *Store) rebuildLocked() {
 			// Accept the documented "/dns-query/<id>" form as well as the bare
 			// id: clientIDFromPath yields the bare path segment, so a policy
 			// written with the prefix would otherwise never match.
+			// Client IDs match case-insensitively (see foldClientID): a case
+			// difference must not silently drop a device into the default,
+			// more permissive policy.
 			c = strings.TrimPrefix(strings.TrimSpace(c), "/dns-query/")
 			if c != "" {
-				byClient[c] = cp
+				byClient[foldClientID(c)] = cp
 			}
 		}
 	}
@@ -438,6 +441,14 @@ func (s *Store) All() (def *Policy, list []*Policy) {
 	return
 }
 
+// foldClientID normalizes a DoH client ID for policy matching. IDs are
+// matched case-insensitively: the ID travels in a URL path segment and in
+// operator-written config, so "Phone" and "phone" must select the same
+// policy rather than dropping the device into the default policy.
+func foldClientID(id string) string {
+	return strings.ToLower(id)
+}
+
 // lookup returns the policy for a DoH client ID if one matches, otherwise the
 // most specific policy for ip, else the default. Nets are sorted longest-prefix
 // first so the first match wins (early exit, no Mask.Size recompute).
@@ -454,7 +465,7 @@ func (s *Store) lookupLocked(ip net.IP, clientID string) *compiledPolicy {
 		nip = ip4
 	}
 	if clientID != "" {
-		if p, ok := s.byClient[clientID]; ok {
+		if p, ok := s.byClient[foldClientID(clientID)]; ok {
 			// A DoH client-ID is self-asserted (no auth), so it only selects
 			// its policy when the source IP also falls inside that policy's
 			// networks. A policy with no networks never matches by ID alone:
@@ -485,7 +496,7 @@ func (s *Store) KnowsClientID(clientID string) bool {
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	_, ok := s.byClient[clientID]
+	_, ok := s.byClient[foldClientID(clientID)]
 	return ok
 }
 
@@ -501,7 +512,7 @@ func (s *Store) ClientIDSelected(ip net.IP, clientID string) bool {
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	p, ok := s.byClient[clientID]
+	p, ok := s.byClient[foldClientID(clientID)]
 	if !ok || len(p.nets) == 0 {
 		return false
 	}

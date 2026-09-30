@@ -42,9 +42,31 @@ const defaultMaxEntries = 100000
 // stalled upstreams. DoHit fails fast with an overload error when full.
 const maxInflightUpstream = 256
 
-// upstreamInflight is the global semaphore bounding concurrent upstream
-// fetches across all Cache instances in the process.
-var upstreamInflight = make(chan struct{}, maxInflightUpstream)
+// upstreamPartitions splits the inflight semaphore by upstream label so one
+// blackholed upstream cannot starve every other resolver: each partition
+// holds maxInflightUpstream/upstreamPartitions slots (16×16 = 256 total, same
+// ceiling as the old global). The label is only hashed, never parsed.
+const upstreamPartitions = 16
+
+// upstreamInflight bounds concurrent upstream fetches across all Cache
+// instances in the process, partitioned for per-upstream fairness.
+var upstreamInflight [upstreamPartitions]chan struct{}
+
+func init() {
+	for i := range upstreamInflight {
+		upstreamInflight[i] = make(chan struct{}, maxInflightUpstream/upstreamPartitions)
+	}
+}
+
+// inflightFor returns the semaphore partition for an upstream label.
+func inflightFor(label string) chan struct{} {
+	h := uint32(2166136261)
+	for i := 0; i < len(label); i++ {
+		h ^= uint32(label[i])
+		h *= 16777619
+	}
+	return upstreamInflight[h%upstreamPartitions]
+}
 
 // janitorInterval is how often expired entries are swept. Expired entries are
 // otherwise removed lazily on Get; without a sweep a cold cache grows forever.
@@ -453,9 +475,10 @@ func (c *Cache) DoHit(ctx context.Context, k Key, fn func() (*dns.Msg, error)) (
 	// semaphore is acquired inside the singleflight func so only the leader
 	// holds a slot — coalesced waiters share it.
 	ch := c.group.DoChan(k.String(), func() (interface{}, error) {
+		sem := inflightFor(k.Label)
 		select {
-		case upstreamInflight <- struct{}{}:
-			defer func() { <-upstreamInflight }()
+		case sem <- struct{}{}:
+			defer func() { <-sem }()
 		default:
 			return nil, fmt.Errorf("upstream overloaded: too many concurrent fetches")
 		}
