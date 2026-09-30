@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -130,5 +131,27 @@ func TestInstancesAddAdoptBundle(t *testing.T) {
 	code, res = postInstances(t, srv, `{"id":"n5","claim":"CODE-9"}`)
 	if code != http.StatusBadRequest {
 		t.Fatalf("bare-code-no-url status = %d (%v)", code, res)
+	}
+}
+
+// Adopting an already-adopted instance without holding its token must fail
+// loudly: success-without-token would strand the row as "adopted" yet
+// offline with nothing to poll with.
+func TestAdoptWithoutTokenFails(t *testing.T) {
+	fake := fakeBlipd(t, "tok-held", "",
+		&control.HealthResponse{OK: true, Version: "blipd/0.1.0"},
+		&control.StatsResponse{},
+		&control.ListResponse{},
+	)
+	defer fake.Close()
+	fleet := NewFleet("")
+	ctx := context.Background()
+	if err := fleet.Add(ctx, InstanceConfig{ID: "s9", URL: fake.URL}); err != nil {
+		t.Fatal(err)
+	}
+	if err := fleet.Adopt(ctx, "s9", "anything"); err == nil {
+		t.Fatal("expected error adopting without token issuance")
+	} else if !strings.Contains(err.Error(), "reset adoption") {
+		t.Fatalf("unactionable error: %v", err)
 	}
 }

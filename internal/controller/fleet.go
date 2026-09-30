@@ -2323,6 +2323,13 @@ func (f *Fleet) Adopt(ctx context.Context, id, code string) error {
 	if !resp.Adopted {
 		return fmt.Errorf("controller: adoption rejected: %s", resp.Message)
 	}
+	if resp.Token == "" && !inst.hasToken() {
+		// Success without a token means blipd was already adopted elsewhere
+		// (e.g. an earlier attempt that never delivered its token): there is
+		// nothing to poll with, so this must fail loudly rather than strand
+		// the instance as "adopted" yet offline.
+		return fmt.Errorf("controller: already adopted elsewhere and no token was issued — reset adoption on the blipd host, then adopt with the fresh code")
+	}
 	if resp.Token != "" {
 		inst.mu.Lock()
 		inst.Config.Token = resp.Token
