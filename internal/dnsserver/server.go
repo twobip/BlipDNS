@@ -815,7 +815,7 @@ func (s *Server) classifyName(clientIP net.IP, clientID, target string) (bool, f
 		action = filter.DefaultAction
 	}
 	if s.cfg.Blocklist != nil && s.cfg.Blocklist.IsBlocked(bare) && !allowed {
-		return true, s.cfg.BlockAction, "global", true
+		return true, s.cfg.BlockAction, "global", doLog
 	}
 	if blocked {
 		return true, action, source, doLog

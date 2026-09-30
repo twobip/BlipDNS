@@ -462,6 +462,14 @@ func (a *Auth) recordSetupFail(ip string) {
 	recordFailFor(a.setupFl, ip)
 }
 
+// clearSetupFails drops setup-guess state for ip after a valid token, so a
+// past guessing flood can never lock out the legitimate operator.
+func (a *Auth) clearSetupFails(ip string) {
+	a.flMu.Lock()
+	delete(a.setupFl, ip)
+	a.flMu.Unlock()
+}
+
 func recordFailFor(m map[string]*loginFails, ip string) {
 	now := time.Now()
 	if len(m) >= maxLoginFailEntries {
