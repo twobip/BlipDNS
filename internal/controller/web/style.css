@@ -506,6 +506,8 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
 .adv summary { cursor: pointer; font-size: 12.5px; color: var(--muted); }
 .adv .form-grid { margin-top: 10px; }
 .adv .bind-row { margin-top: 10px; }
+#inst-auto { display: flex; flex-direction: column; gap: 14px; }
+#inst-auto > .hint { line-height: 1.55; color: var(--muted); font-size: 12px; }
 @media (max-width:640px){ .form-grid{ grid-template-columns: 1fr; } }
 
 /* ============================================================
