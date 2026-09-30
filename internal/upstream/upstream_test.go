@@ -693,6 +693,8 @@ func TestParseSpecRejectsLinkLocal(t *testing.T) {
 		"udp://169.254.169.254",
 		"https://169.254.169.254/dns-query",
 		"tls://[fe80::1]:853",
+		"udp://100.64.0.1:53",
+		"https://100.100.100.200/dns-query",
 	} {
 		if _, err := ParseSpec(spec); err == nil {
 			t.Errorf("ParseSpec(%q) accepted a link-local/metadata address", spec)
@@ -714,7 +716,7 @@ func TestParseSpecRejectsLinkLocal(t *testing.T) {
 // The dial-time guard covers names (metadata service, DNS rebinding) that only
 // resolve into link-local space after the fact.
 func TestBlockedUpstreamIP(t *testing.T) {
-	blocked := []string{"169.254.169.254", "fe80::1", "0.0.0.0", "::"}
+	blocked := []string{"169.254.169.254", "fe80::1", "0.0.0.0", "::", "100.64.0.1", "100.100.100.200"}
 	for _, s := range blocked {
 		if !blockedUpstreamIP(net.ParseIP(s)) {
 			t.Errorf("%s should be blocked as an upstream target", s)
@@ -725,5 +727,28 @@ func TestBlockedUpstreamIP(t *testing.T) {
 		if blockedUpstreamIP(net.ParseIP(s)) {
 			t.Errorf("%s should stay allowed as an upstream target", s)
 		}
+	}
+}
+
+// URL userinfo (user@host) must be rejected at parse time: it defeats the
+// spec-time host check and would be sent as a Basic-auth header.
+func TestParseSpecRejectsUserinfo(t *testing.T) {
+	for _, spec := range []string{
+		"https://x@169.254.169.254/latest/meta-data/",
+		"https://evil.com@127.0.0.1/",
+		"udp://user@9.9.9.9:53",
+		"tls://user@9.9.9.9:853",
+	} {
+		if _, err := ParseSpec(spec); err == nil {
+			t.Errorf("ParseSpec(%q) accepted userinfo in an upstream address", spec)
+		}
+	}
+	// Sanity: the same targets without userinfo keep their old verdicts —
+	// metadata still blocked, public/loopback still allowed.
+	if _, err := ParseSpec("https://169.254.169.254/latest/meta-data/"); err == nil {
+		t.Errorf("ParseSpec metadata URL without userinfo should still be blocked")
+	}
+	if _, err := ParseSpec("https://9.9.9.9/dns-query"); err != nil {
+		t.Errorf("ParseSpec(%q) = %v, want accepted", "https://9.9.9.9/dns-query", err)
 	}
 }

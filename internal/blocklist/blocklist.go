@@ -93,6 +93,11 @@ const maxSourceFetchers = 8
 // ponytail: parsed once here; drop if stdlib IsPrivate ever covers CGNAT.
 var cgnatNet = func() *net.IPNet { _, n, _ := net.ParseCIDR("100.64.0.0/10"); return n }()
 
+// IsCGNAT reports whether ip is in the carrier-grade NAT range (RFC 6598,
+// 100.64.0.0/10) that net.IP.IsPrivate misses. Shared with the upstream dial
+// guard so both packages agree on the same range.
+func IsCGNAT(ip net.IP) bool { return cgnatNet.Contains(ip) }
+
 // isPrivateIP reports whether ip is not publicly routable: loopback,
 // link-local (incl. cloud-metadata 169.254.0.0/16), multicast, unspecified,
 // RFC 1918/4193 private, or carrier-grade NAT. Stricter-or-equal to the old
