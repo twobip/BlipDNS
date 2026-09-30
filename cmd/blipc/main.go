@@ -368,7 +368,12 @@ func isLoopbackListen(addr string) bool {
 	if err != nil {
 		return false
 	}
-	if h == "" || h == "localhost" || h == "127.0.0.1" || h == "::1" {
+	// Empty host (":8500", "8500") binds ALL interfaces via net.Listen —
+	// it must never count as loopback.
+	if h == "" {
+		return false
+	}
+	if h == "localhost" || h == "127.0.0.1" || h == "::1" {
 		return true
 	}
 	if ip := net.ParseIP(h); ip != nil && ip.IsLoopback() {

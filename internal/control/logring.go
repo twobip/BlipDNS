@@ -10,6 +10,11 @@ import (
 // covers hours of operation in well under 100 KiB.
 const defaultLogRingCap = 500
 
+// maxLogLineLen bounds a single retained line: handler errors can echo
+// large operator-supplied input, and a handful of unbounded lines could
+// otherwise retain hundreds of MB.
+const maxLogLineLen = 4 << 10 // 4 KiB
+
 // LogRing is a mutex-guarded in-memory tail of process log lines, oldest
 // first. It implements io.Writer so blipd can tee its standard logger into
 // it; GET /api/v1/logs serves the tail to the controller.
@@ -35,6 +40,9 @@ func (r *LogRing) Write(p []byte) (int, error) {
 	for _, ln := range strings.Split(string(p), "\n") {
 		if ln == "" {
 			continue
+		}
+		if len(ln) > maxLogLineLen {
+			ln = ln[:maxLogLineLen]
 		}
 		r.lines = append(r.lines, ln)
 		if len(r.lines) > r.cap {
