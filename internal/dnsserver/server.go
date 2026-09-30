@@ -1227,6 +1227,14 @@ func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, prot
 			applyBlockAction(blockedResp, q, cbe.action)
 			return blockedResp
 		}
+		// Caller went away (DoH disconnect, coalesced waiter gave up): not
+		// an upstream failure — SERVFAIL the (gone) caller without counting
+		// or reporting it. Mirrors upstream.isCallerCancel at the pool.
+		if errors.Is(err, context.Canceled) || (ctx != nil && errors.Is(ctx.Err(), context.Canceled)) {
+			resp.Rcode = dns.RcodeServerFailure
+			resp.AuthenticatedData = false
+			return resp
+		}
 		s.cnt.AddUpErr()
 		s.notifyUpstreamError(renderClient(), domain, upstreamErrText(upstreamLabel, err))
 		resp.Rcode = dns.RcodeServerFailure

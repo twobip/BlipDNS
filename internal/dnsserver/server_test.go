@@ -631,6 +631,53 @@ func TestUpstreamErrText(t *testing.T) {
 	}
 }
 
+// errUp always fails with a genuine upstream error; cancelUp simulates the
+// caller going away mid-fetch (DoH disconnect).
+type errUp struct{ err error }
+
+func (r errUp) Resolve(context.Context, *dns.Msg) (*dns.Msg, error) { return nil, r.err }
+
+func TestServeCallerCancelNotUpstreamError(t *testing.T) {
+	newCancelSrv := func(resolver upstream.Resolver) *Server {
+		srv, _ := newTestServer(t)
+		srv.cnt = new(control.Counters)
+		srv.pool = upstream.NewPoolWithAuto(resolver)
+		return srv
+	}
+	ask := func(srv *Server, ctx context.Context, name string) *dns.Msg {
+		q := new(dns.Msg)
+		q.SetQuestion(name, dns.TypeA)
+		return srv.serve(ctx, net.ParseIP("192.168.1.5"), "", "dns", q)
+	}
+	// Upstream returning context.Canceled (client disconnected mid-fetch):
+	// SERVFAIL to the (gone) caller, but no upstream-error count.
+	srv := newCancelSrv(errUp{context.Canceled})
+	if resp := ask(srv, context.Background(), "cancel-return.test."); resp.Rcode != dns.RcodeServerFailure {
+		t.Fatalf("cancel-return rc=%d want SERVFAIL", resp.Rcode)
+	}
+	if got := srv.cnt.Stats().UpstreamErr; got != 0 {
+		t.Fatalf("cancel-return upstream_errors=%d want 0", got)
+	}
+	// Already-canceled query context (coalesced waiter gave up): same.
+	srv2 := newCancelSrv(&recUp{answer: map[string]string{"waiter.test.": "9.9.9.9"}})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if resp := ask(srv2, ctx, "waiter.test."); resp.Rcode != dns.RcodeServerFailure {
+		t.Fatalf("waiter-cancel rc=%d want SERVFAIL", resp.Rcode)
+	}
+	if got := srv2.cnt.Stats().UpstreamErr; got != 0 {
+		t.Fatalf("waiter-cancel upstream_errors=%d want 0", got)
+	}
+	// Genuine failure still counts.
+	srv3 := newCancelSrv(errUp{fmt.Errorf("boom")})
+	if resp := ask(srv3, context.Background(), "genuine.test."); resp.Rcode != dns.RcodeServerFailure {
+		t.Fatalf("genuine rc=%d want SERVFAIL", resp.Rcode)
+	}
+	if got := srv3.cnt.Stats().UpstreamErr; got != 1 {
+		t.Fatalf("genuine upstream_errors=%d want 1", got)
+	}
+}
+
 func TestServeRecordsQueryDuration(t *testing.T) {
 	srv, _ := newTestServer(t)
 	srv.cnt = new(control.Counters)
