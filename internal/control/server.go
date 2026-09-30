@@ -268,8 +268,9 @@ func (s *Server) genClaim() {
 	s.claimCode = genClaimCode()
 	s.adopted = false
 	// M9: do NOT log the code value — it is a secret. Box-local retrieval is
-	// via the 0600 adopt-code file + one-time stdout in cmd/blipd.
-	log.Printf("blipd: adoption code generated (see %s 0600, printed once to stdout)", DefaultAdoptCodeFile)
+	// via the 0600 adopt-code file + one-time stdout in cmd/blipd. Both
+	// callers hold adoptMu, so the locked path variant is safe here.
+	log.Printf("blipd: adoption code generated (see %s 0600, printed once to stdout)", s.adoptCodePathLocked())
 }
 
 func (s *Server) persistAdopted(adopted bool) {
@@ -1185,7 +1186,9 @@ func (s *Server) handleAdopt(w http.ResponseWriter, r *http.Request) {
 	s.claimCode = ""  // one-time: invalidate immediately
 	s.adoptedBy = src // pin the management API to the adopting controller
 	s.persistAdopted(true)
-	ClearAdoptCodeFile(s.AdoptCodePath())
+	// Locked variant: this handler already holds adoptMu (AdoptCodePath
+	// would self-deadlock here and hang the adopt call until client timeout).
+	ClearAdoptCodeFile(s.adoptCodePathLocked())
 	log.Printf("blipd: instance adopted via claim code")
 	writeJSON(w, AdoptResponse{Adopted: true, Token: s.currentToken()})
 }
