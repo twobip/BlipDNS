@@ -23,6 +23,8 @@ func TestRefusePlainRemote(t *testing.T) {
 		want    bool
 	}{
 		{"loopback plain", "127.0.0.1:8500", false, false, nil, false},
+		{"empty host binds all interfaces", ":8500", false, false, nil, true},
+		{"ipv6 wildcard binds all interfaces", "[::]:8500", false, false, nil, true},
 		{"direct plain refused", "0.0.0.0:8500", false, false, nil, true},
 		{"direct tls ok", "0.0.0.0:8500", true, false, nil, false},
 		{"direct acked ok", "0.0.0.0:8500", false, true, nil, false},

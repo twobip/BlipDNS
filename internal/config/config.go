@@ -138,7 +138,8 @@ func WarnPlainHTTP(prog, what, addr, secretKind string) {
 	if err != nil {
 		return
 	}
-	if h == "" || h == "127.0.0.1" || h == "::1" || h == "localhost" {
+	// Empty host (":8500") binds all interfaces — never loopback.
+	if h == "127.0.0.1" || h == "::1" || h == "localhost" {
 		return
 	}
 	log.Printf("%s: WARNING: %s on %s is plain HTTP on a non-loopback address; %s are sniffable. Terminate TLS in front of it.", prog, what, addr, secretKind)

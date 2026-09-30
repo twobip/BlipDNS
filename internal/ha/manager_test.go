@@ -1,6 +1,7 @@
 package ha
 
 import (
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -161,8 +162,11 @@ func TestSetHAConfigRefreshesCertAndExposesVIP(t *testing.T) {
 	if err := m.SetHAConfig(cfg); err != nil {
 		t.Fatal(err)
 	}
-	if calls != 1 {
-		t.Errorf("cert refresher called %d times, want 1", calls)
+	// A disabled config must NOT refresh the certificate: otherwise an
+	// authenticated caller could force regeneration (breaking
+	// mgmt_cert_fp pins) without enabling HA.
+	if calls != 0 {
+		t.Errorf("cert refresher called %d times for disabled config, want 0", calls)
 	}
 	if got := m.VirtualIP(); got != "192.0.2.99" {
 		t.Errorf("VirtualIP() = %q, want 192.0.2.99", got)
@@ -172,5 +176,24 @@ func TestSetHAConfigRefreshesCertAndExposesVIP(t *testing.T) {
 	restored := NewManager(filepath.Join(dir, "keepalived.conf"))
 	if got := restored.VirtualIP(); got != "192.0.2.99" {
 		t.Errorf("restored VirtualIP() = %q, want 192.0.2.99", got)
+	}
+}
+
+func TestSetHAConfigRefreshesCertWhenEnabled(t *testing.T) {
+	if err := interfaceHasIP("lo", net.ParseIP("127.0.0.1")); err != nil {
+		t.Skipf("no loopback interface for enabled-config refresher check: %v", err)
+	}
+	m := NewManager(filepath.Join(t.TempDir(), "keepalived.conf"))
+	calls := 0
+	m.SetCertRefresher(func() { calls++ })
+	cfg := control.HAConfig{Enabled: true, Mode: "unicast", NodeRole: "primary",
+		Interface: "lo", SourceIP: "127.0.0.1", PeerIP: "127.0.0.2",
+		VirtualIP: "127.0.0.99/8", VirtualRouterID: 51, Priority: 101,
+		AdvertIntervalSec: 1}
+	if err := m.SetHAConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Errorf("cert refresher called %d times for enabled config, want 1", calls)
 	}
 }

@@ -456,7 +456,17 @@ func readScopeDenied(path string) bool {
 		// HA topology (VIP, interfaces, peer IPs) is infrastructure detail,
 		// not query history, but it has no business on a least-privilege
 		// read credential either.
-		"/api/high-availability":
+		"/api/high-availability",
+		// Fleet configuration and topology: instance management URLs,
+		// upstream servers/routes/bootstrap, trusted proxies, client CIDR
+		// policy, local records, the full blocklist export, and the DoH
+		// mobileconfig all disclose infrastructure a dashboard-read key
+		// has no need for.
+		"/api/settings",
+		"/api/instances",
+		"/api/records",
+		"/api/blocklist/export",
+		"/api/doh-mobileconfig":
 		return true
 	}
 	return false
@@ -489,6 +499,14 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	if !s.auth.Configured() {
 		http.Error(w, "authentication not configured", http.StatusForbidden)
+		return
+	}
+	// Login mints a session cookie, so require the same Origin check as
+	// logout and other mutating routes; otherwise a cross-site auto-POST
+	// can mint an attacker-known session (login CSRF). Headerless
+	// API clients still pass (absent Origin/Referer is allowed).
+	if !s.csrfOriginAllowed(r) {
+		http.Error(w, "cross-site request rejected", http.StatusForbidden)
 		return
 	}
 	id, err := s.auth.Login(req.Username, req.Password, s.clientIP(r))
@@ -1784,7 +1802,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	defer s.fleet.Bus().Unsubscribe(ch)
 
 	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Cache-Control", "no-store")
 
 	for _, e := range backlog {
 		fmt.Fprintf(w, "data: %s\n\n", control.MustJSON(e))
