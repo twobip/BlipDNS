@@ -25,9 +25,9 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: '1.25.x'
 
@@ -62,7 +62,7 @@ jobs:
           STAMP="${VERSION}+$(git rev-parse --short=7 HEAD)"
           go build -trimpath -ldflags "-s -w -X main.version=${STAMP}" -o blipd-linux-amd64 ./cmd/blipd
           go build -trimpath -ldflags "-s -w -X github.com/twobip/BlipDNS/internal/controller.version=${STAMP}" -o blipc-linux-amd64 ./cmd/blipc
-          go build -trimpath -ldflags "-s -w" -o blipctl-linux-amd64 ./cmd/blipctl
+          go build -trimpath -ldflags "-s -w -X main.version=${STAMP}" -o blipctl-linux-amd64 ./cmd/blipctl
           # The root-executed install helpers ship as release assets too so the
           # install scripts can SHA256-verify them like the binaries (a bare
           # curl of raw.githubusercontent would trust the mirror for root code).
@@ -70,7 +70,12 @@ jobs:
           cp scripts/blipd-install.sh blipd-install.sh
           cp scripts/blipc-update.sh blipc-update.sh
           cp scripts/blipc-install.sh blipc-install.sh
-          sha256sum blipd-linux-amd64 blipc-linux-amd64 blipctl-linux-amd64 blipd-update.sh blipd-install.sh blipc-update.sh blipc-install.sh > SHA256SUMS
+          # Finding 21: ship the hardened systemd units as signed release
+          # assets so the installers fetch them verified instead of
+          # re-emitting weaker inline copies.
+          cp deploy/blipd.service blipd.service
+          cp deploy/blipc.service blipc.service
+          sha256sum blipd-linux-amd64 blipc-linux-amd64 blipctl-linux-amd64 blipd-update.sh blipd-install.sh blipc-update.sh blipc-install.sh blipd.service blipc.service > SHA256SUMS
           echo "--- built artifacts ---"
           ls -la blipd-linux-amd64 blipc-linux-amd64 blipctl-linux-amd64 SHA256SUMS
 
@@ -96,7 +101,7 @@ jobs:
           VERSION: ${{ steps.version.outputs.value }}
         run: |
           gh release create "v${VERSION}" \
-            blipd-linux-amd64 blipc-linux-amd64 blipctl-linux-amd64 blipd-update.sh blipd-install.sh blipc-update.sh blipc-install.sh SHA256SUMS SHA256SUMS.sig \
+            blipd-linux-amd64 blipc-linux-amd64 blipctl-linux-amd64 blipd-update.sh blipd-install.sh blipc-update.sh blipc-install.sh blipd.service blipc.service SHA256SUMS SHA256SUMS.sig \
             --repo "$GITHUB_REPOSITORY" \
             --title "v${VERSION}" \
             --generate-notes

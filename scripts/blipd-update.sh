@@ -35,10 +35,11 @@ fi
 WORK="/var/lib/blipd/update"
 mkdir -p "$WORK"
 
-# M14: best-effort downgrade guard. blipd has no --version flag, so probe the
-# local management API, then binary strings, then the last recorded stamp.
-# Unknown current version => warn and continue. Set ALLOW_DOWNGRADE=1 to
-# bypass the check explicitly. The "dev" rolling tag is exempt (no ordering).
+# Downgrade guard (finding 9): ask the installed binary for its version
+# via `blipd --version`, falling back to the install-time stamp. Unknown
+# current version => FAIL CLOSED (refuse the update). Set ALLOW_DOWNGRADE=1
+# to bypass explicitly (documented escape hatch, e.g. for unstamped local
+# builds). The "dev" rolling tag is exempt (no ordering).
 semver_cmp() {
   local a="${1#v}" b="${2#v}"
   a="${a%%+*}"; b="${b%%+*}"
@@ -55,28 +56,24 @@ semver_cmp() {
   done
   echo 0
 }
-current_version_best_effort() {
+current_version() {
   local v=""
-  if command -v curl >/dev/null 2>&1; then
-    v="$(curl -fsSL --max-time 3 http://127.0.0.1:8444/api/v1/stats 2>/dev/null | grep -o '"version"[[:space:]]*:[[:space:]]*"[^"]*"' | grep -o '[0-9][0-9.]*' | head -n1 || true)"
-  fi
-  if [[ -z "$v" && -x /usr/local/bin/blipd ]]; then
-    v="$(strings /usr/local/bin/blipd 2>/dev/null | grep -o 'blipd/[0-9][0-9.]*' | head -n1 | cut -d/ -f2 || true)"
+  if [[ -x /usr/local/bin/blipd ]]; then
+    v="$(/usr/local/bin/blipd --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || true)"
   fi
   if [[ -z "$v" && -f "$WORK/.installed-version" ]]; then
-    v="$(tr -d '[:space:]' < "$WORK/.installed-version" 2>/dev/null || true)"
+    v="$(tr -d '[:space:]' < "$WORK/.installed-version" 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || true)"
   fi
   printf '%s' "$v"
 }
 if [[ "$TAG" != "dev" && "${ALLOW_DOWNGRADE:-0}" != "1" ]]; then
-  CUR="$(current_version_best_effort || true)"
-  if [[ -n "$CUR" ]]; then
-    TARGET="${TAG#v}"
-    if [[ "$(semver_cmp "$TARGET" "$CUR")" == "2" ]]; then
-      echo "error: refusing downgrade $CUR -> $TARGET (set ALLOW_DOWNGRADE=1 to bypass)" >&2; exit 1
-    fi
-  else
-    echo "warning: installed version unknown — downgrade check skipped (no --version flag; probed API/strings/stamp)" >&2
+  CUR="$(current_version || true)"
+  if [[ -z "$CUR" ]]; then
+    echo "error: installed version unknown (blipd --version failed and no $WORK/.installed-version stamp) — refusing to update; re-run the installer once, or set ALLOW_DOWNGRADE=1 to bypass" >&2; exit 1
+  fi
+  TARGET="${TAG#v}"
+  if [[ "$(semver_cmp "$TARGET" "$CUR")" == "2" ]]; then
+    echo "error: refusing downgrade $CUR -> $TARGET (set ALLOW_DOWNGRADE=1 to bypass)" >&2; exit 1
   fi
 fi
 
@@ -111,7 +108,7 @@ if [[ "$install_rc" -ne 0 ]]; then
   fi
   exit "$install_rc"
 fi
-# Record the installed version stamp for future downgrade checks (M14).
+# Refresh the installed-version stamp for future downgrade checks.
 if [[ "$TAG" != "dev" ]]; then
   printf '%s\n' "${TAG#v}" > "$WORK/.installed-version" 2>/dev/null || true
 fi

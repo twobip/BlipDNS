@@ -50,6 +50,7 @@ func blocklistSources(cfg *config.Config) []string {
 
 func main() {
 	cfgPath := flag.String("config", "", "path to YAML config")
+	showVersion := flag.Bool("version", false, "print the release version and exit")
 	// H1: management-API TLS. The config struct has no admin_tls fields, so
 	// flags are the surface: when both are set the management API serves
 	// HTTPS (bearer tokens protected); otherwise plain HTTP with the existing
@@ -62,6 +63,13 @@ func main() {
 	adminTLSCert := flag.String("admin-tls-cert", "", "path to TLS certificate for the management API (enables HTTPS with -admin-tls-key)")
 	adminTLSKey := flag.String("admin-tls-key", "", "path to TLS key for the management API")
 	flag.Parse()
+
+	// Finding 9: downgrade guards need a trustworthy local version, so
+	// --version prints the bare stamped release (e.g. "0.7.0").
+	if *showVersion {
+		fmt.Println(version)
+		return
+	}
 
 	// Tee process logs into an in-memory tail for GET /api/v1/logs.
 	// stderr still receives everything, so the journal is unaffected.

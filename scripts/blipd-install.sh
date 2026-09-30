@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 077
 
 # Root half of the blipd self-updater. Installs a binary that was already
 # built (unprivileged) and restarts the service. No network, no compiler — the

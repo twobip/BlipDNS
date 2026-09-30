@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/tls"
 	"flag"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -64,7 +65,15 @@ type config struct {
 
 func main() {
 	cfgPath := flag.String("config", "/etc/blipc/blipc.yaml", "path to YAML config")
+	showVersion := flag.Bool("version", false, "print the release version and exit")
 	flag.Parse()
+
+	// Finding 9: downgrade guards need a trustworthy local version, so
+	// --version prints the bare stamped release (e.g. "0.7.0+47cf192").
+	if *showVersion {
+		fmt.Println(controller.ControllerVersion())
+		return
+	}
 
 	cfg, err := load(*cfgPath)
 	if err != nil {

@@ -18,6 +18,7 @@
 #   sudo bash /tmp/install-blipc.sh --install-deps
 #
 set -euo pipefail
+umask 077
 
 REPO="github.com/twobip/BlipDNS"
 BIN_DIR="${BIN_DIR:-/usr/local/bin}"
@@ -32,6 +33,28 @@ RAW_BASE="https://raw.githubusercontent.com/twobip/BlipDNS"
 # --- helpers -----------------------------------------------------------------
 log()  { echo "[install-blipc] $*"; }
 err()  { echo "[install-blipc] ERROR: $*" >&2; exit 1; }
+
+# Release signing (finding 4): SHA256SUMS is signed with an ed25519 key
+# (ssh-keygen -Y sign, namespace below). The public half is embedded here,
+# copied from scripts/blipc-install.sh, so every asset — including the
+# root-executed helpers — verifies against the SIGNED sums before install.
+SIGN_IDENTITY="release@blipdns"
+SIGN_NAMESPACE="blipdns-release"
+SIGNING_ALLOWED='release@blipdns ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAllzM9gHKiNT3JLmP4nj0VgS68IBkFVsP6OIirPEm2V BlipDNS release signing (GitHub Actions)'
+
+command -v ssh-keygen >/dev/null 2>&1 || err "ssh-keygen (openssh-client) is required to verify release signatures"
+
+# verify_sums_sig <dir> — verify dir/SHA256SUMS against dir/SHA256SUMS.sig.
+# Fail closed: a missing or bad signature refuses the install.
+verify_sums_sig() {
+  [ -f "$1/SHA256SUMS" ] || err "SHA256SUMS missing — refusing to install"
+  [ -f "$1/SHA256SUMS.sig" ] || err "SHA256SUMS.sig missing — release is not signed — refusing to install"
+  _signers="$(mktemp)" || err "cannot create signers scratch file"
+  printf '%s\n' "$SIGNING_ALLOWED" > "$_signers"
+  ssh-keygen -Y verify -f "$_signers" -I "$SIGN_IDENTITY" -n "$SIGN_NAMESPACE" -s "$1/SHA256SUMS.sig" < "$1/SHA256SUMS" \
+    || { rm -f "$_signers"; err "SHA256SUMS signature verification FAILED — refusing to install"; }
+  rm -f "$_signers"
+}
 
 usage() {
   cat <<'EOF'
@@ -296,10 +319,16 @@ fi
 
 case "$CHANNEL" in
   stable|master)
-    REF="master"
-    TAG="v$(curl -fsSL --proto '=https' --tlsv1.2 "$RAW_BASE/master/VERSION" || err "could not read the current stable version from GitHub")" ;;
+    # Finding 10: validate the VERSION payload before turning it into a
+    # download URL or clone ref (same regex as blipc-update.sh).
+    STABLE_VER="$(curl -fsSL --proto '=https' --tlsv1.2 "$RAW_BASE/master/VERSION" || err "could not read the current stable version from GitHub")"
+    [[ "$STABLE_VER" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || err "invalid VERSION from GitHub: $STABLE_VER"
+    TAG="v$STABLE_VER"
+    # Clone the immutable tag, not the moving master branch: an unreviewed
+    # push to master must not change what "install stable" puts on root boxes.
+    REF="$TAG" ;;
   dev)
-    REF="dev"
+    REF="master"
     TAG="dev" ;;
   v*)
     REF="$CHANNEL"
@@ -316,17 +345,21 @@ export GOMODCACHE="$CACHE_DIR/gomod"
 export GOCACHE="$CACHE_DIR/gocache"
 export GOPATH="$CACHE_DIR/gopath"
 
-# fetch_verified <tag> <asset> <destfile> — download and SHA256-verify one asset.
+# fetch_verified <tag> <asset> <destfile> — download one asset, verify the
+# release signature over SHA256SUMS (embedded key, fail closed), then bind
+# the asset to its hash from the SIGNED sums before installing.
 fetch_verified() {
   local tag="$1" asset="$2" dest="$3" expected actual
   curl -fL --proto '=https' --tlsv1.2 "$BASE_URL/$tag/$asset" -o "$TMPDIR/$asset" || err "download failed: $BASE_URL/$tag/$asset"
   curl -fsSL --proto '=https' --tlsv1.2 "$BASE_URL/$tag/SHA256SUMS" -o "$TMPDIR/SHA256SUMS" || err "download failed: SHA256SUMS"
+  curl -fsSL --proto '=https' --tlsv1.2 "$BASE_URL/$tag/SHA256SUMS.sig" -o "$TMPDIR/SHA256SUMS.sig" || err "download failed: SHA256SUMS.sig — unsigned release, refusing to install"
+  verify_sums_sig "$TMPDIR"
   expected="$(awk -v a="$asset" '$2==a {print $1; exit}' "$TMPDIR/SHA256SUMS")"
   [ -n "$expected" ] || err "no checksum entry for $asset in SHA256SUMS"
   actual="$(sha256sum "$TMPDIR/$asset" | awk '{print $1}')"
   [ "$expected" = "$actual" ] || err "checksum verification FAILED for $asset — refusing to install"
-  mv "$TMPDIR/$asset" "$dest"
-  rm -f "$TMPDIR/SHA256SUMS"
+  install -m 0755 "$TMPDIR/$asset" "$dest"
+  rm -f "$TMPDIR/SHA256SUMS" "$TMPDIR/SHA256SUMS.sig"
 }
 
 TMPDIR="$(mktemp -d)"
@@ -339,11 +372,11 @@ if [ "$LOCAL" -eq 1 ]; then
   cd "$SRC_DIR"
   log "building blipc and blipctl (first build can take a few minutes — package list below shows progress)"
   go build -v -ldflags "-X github.com/twobip/BlipDNS/internal/controller.version=$(cat VERSION)" -o "$TMPDIR/blipc" ./cmd/blipc
-  go build -v -o "$TMPDIR/blipctl" ./cmd/blipctl
+  go build -v -ldflags "-X main.version=$(cat VERSION)" -o "$TMPDIR/blipctl" ./cmd/blipctl
 elif [ "$BUILD_FROM_SOURCE" -eq 1 ]; then
   SRC_DIR="$TMPDIR/src"
   # M13: pin the clone. REF is allow-listed by the channel case above
-  # (stable|master|dev|vX.Y.Z); refuse an empty REF so we never clone a
+  # (immutable vX.Y.Z tag for stable/pins; master only for dev); refuse an
   # default branch implicitly. Fail hard when the pinned ref cannot be
   # fetched — never fall back to an unpinned default branch (H2: the fallback
   # would silently install unaudited code when the pin is unavailable).
@@ -364,7 +397,7 @@ elif [ "$BUILD_FROM_SOURCE" -eq 1 ]; then
   cd "$SRC_DIR"
   log "building blipc and blipctl (first build can take a few minutes — package list below shows progress)"
   go build -v -ldflags "-X github.com/twobip/BlipDNS/internal/controller.version=$(cat VERSION)" -o "$TMPDIR/blipc" ./cmd/blipc
-  go build -v -o "$TMPDIR/blipctl" ./cmd/blipctl
+  go build -v -ldflags "-X main.version=$(cat VERSION)" -o "$TMPDIR/blipctl" ./cmd/blipctl
 else
   log "downloading blipc and blipctl from release $TAG"
   fetch_verified "$TAG" blipc-linux-amd64 "$TMPDIR/blipc"
@@ -441,53 +474,41 @@ else
   chmod 600 "$CONFIG_DIR/blipc.yaml"
 fi
 
+# Finding 9: record the installed version at INSTALL time (not only on
+# self-update) so the updater's downgrade guard has a trustworthy stamp.
+# The dev rolling tag is exempt (no ordering).
+if [ "$TAG" != "dev" ]; then
+  mkdir -p "$STATE_DIR/update"
+  printf '%s\n' "${TAG#v}" > "$STATE_DIR/update/.installed-version"
+  chown -R blipc:blipc "$STATE_DIR/update"
+  chmod 644 "$STATE_DIR/update/.installed-version"
+fi
+
 # --- systemd service (if systemd is available) --------------------------------
 if [ -d "$SYSTEMD_DIR" ] && command -v systemctl >/dev/null 2>&1; then
   SYSTEMD_AVAILABLE=1
   log "installing systemd unit: $SYSTEMD_DIR/$SERVICE_NAME.service"
-  cat > "$SYSTEMD_DIR/$SERVICE_NAME.service" <<EOF
-[Unit]
-Description=BlipDNS Controller - Unifi-style fleet management console
-Documentation=https://github.com/twobip/BlipDNS
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=blipc
-Group=blipc
-ExecStart=$BIN_DIR/blipc -config $CONFIG_DIR/blipc.yaml
-ExecReload=/bin/kill -HUP \$MAINPID
-Restart=on-failure
-RestartSec=3
-
-AmbientCapabilities=CAP_NET_BIND_SERVICE
-# No CapabilityBoundingSet restriction: blipc elevates to the pinned
-# /usr/local/sbin/blipc-install helper via sudo (narrow sudoers rule), which
-# needs CAP_SETGID/CAP_SETUID available.
-# NoNewPrivileges must stay OFF for the same reason.
-UMask=0077
-ProtectSystem=strict
-ProtectHome=true
-PrivateTmp=true
-# /run/lock: the root install helper takes its lock there. Without this the
-# lock open fails with EROFS (children inherit the unit's mount namespace,
-# even via sudo) and every self-update dies with "cannot open lock".
-# DAC is unchanged (/run/lock stays root-owned), so the F-03 lock-placement
-# property holds; the helper still refuses pre-existing symlinks.
-# /usr/local/bin: the helper stages (mktemp) and installs there. Same
-# reasoning: the dir stays root-owned, so the service user gains nothing,
-# but root can write through its own mount namespace.
-ReadWritePaths=$STATE_DIR $CONFIG_DIR /run/lock /usr/local/bin
-LimitNOFILE=65536
-StandardOutput=journal
-StandardError=journal
-SyslogIdentifier=blipc
-
-[Install]
-WantedBy=multi-user.target
-EOF
-  chmod 644 "$SYSTEMD_DIR/$SERVICE_NAME.service"
+  # Finding 21: install the hardened unit shipped in deploy/ instead of
+  # re-emitting an inline copy (which had drifted weaker). Source/local
+  # builds copy it from the checkout; release installs fetch it as a signed
+  # release asset (fail closed when absent).
+  if [ "$BUILD_FROM_SOURCE" -eq 1 ]; then
+    UNIT_SRC="$SRC_DIR/deploy/blipc.service"
+    [ -f "$UNIT_SRC" ] || err "deploy/blipc.service missing from source checkout"
+  elif [ "$LOCAL" -eq 1 ]; then
+    UNIT_SRC="$SRC_DIR/deploy/blipc.service"
+    [ -f "$UNIT_SRC" ] || err "deploy/blipc.service missing from local checkout"
+  else
+    UNIT_SRC="$TMPDIR/blipc.service"
+    fetch_verified "$TAG" blipc.service "$UNIT_SRC"
+  fi
+  # Honor BIN_DIR/CONFIG_DIR/STATE_DIR overrides; deploy/ carries defaults.
+  sed -e "s#/usr/local/bin/blipc#$BIN_DIR/blipc#" \
+      -e "s#/etc/blipc/blipc.yaml#$CONFIG_DIR/blipc.yaml#" \
+      -e "s#/var/lib/blipc#$STATE_DIR#g" \
+      "$UNIT_SRC" > "$TMPDIR/blipc.service.inst" \
+    || err "failed to stage systemd unit"
+  install -m 0644 "$TMPDIR/blipc.service.inst" "$SYSTEMD_DIR/$SERVICE_NAME.service"
   log "reloading systemd daemon"
   systemctl daemon-reload || true
   if systemctl is-active --quiet "$SERVICE_NAME"; then

@@ -40,7 +40,13 @@ import (
 // when blipctl runs on the controller host.
 const defaultControllerPath = "/etc/blipc/blipc.yaml"
 
+// version is the blipctl release version, stamped at build time from the
+// repo's VERSION file: -ldflags "-X main.version=$(cat VERSION)". It
+// defaults to "0.0.0" for local, unstamped builds.
+var version = "0.0.0"
+
 func main() {
+	showVersion := flag.Bool("version", false, "print the release version and exit")
 	token := flag.String("token", os.Getenv("BLIP_TOKEN"), "management API bearer token (visible via ps; prefer --token-file)")
 	tokenFile := flag.String("token-file", "", "read management API bearer token from file (0600 recommended; used only when --token/BLIP_TOKEN is empty)")
 	outTokenFile := flag.String("out-token-file", "", "write the adopted admin token to this file (0600) instead of printing it to stdout")
@@ -48,6 +54,12 @@ func main() {
 	controllerPath := flag.String("controller", controllerPathDefault(), "local blipc config used to resolve instance ids/urls to tokens (\"\" disables)")
 	flag.Usage = func() { usage() }
 	flag.Parse()
+
+	// Finding 9: --version prints the bare stamped release for inventory use.
+	if *showVersion {
+		fmt.Println(version)
+		return
+	}
 
 	// Warn when the secret travels via argv/env: it is visible in `ps`,
 	// /proc/<pid>/cmdline (or environ), shell history, and audit logs.
