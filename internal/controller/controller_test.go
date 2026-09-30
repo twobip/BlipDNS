@@ -1107,13 +1107,15 @@ func TestServerBruteForce(t *testing.T) {
 	if rec.Code != http.StatusTooManyRequests {
 		t.Errorf("expected 429 after %d fails, got %d", maxLoginFails, rec.Code)
 	}
-	// even a correct password is rejected while locked out
+	// A correct password still succeeds while the IP has failures recorded:
+	// valid credentials are checked before the failure table, so a guessing
+	// flood can never lock out the legitimate operator (finding #2).
 	good, _ := json.Marshal(map[string]string{"username": "admin", "password": "secret"})
 	req = httptest.NewRequest("POST", "/api/login", bytes.NewReader(good))
 	rec = httptest.NewRecorder()
 	srv.Handler().ServeHTTP(rec, req)
-	if rec.Code != http.StatusTooManyRequests {
-		t.Errorf("expected 429 for correct creds while locked, got %d", rec.Code)
+	if rec.Code != http.StatusOK {
+		t.Errorf("expected 200 for correct creds despite prior fails, got %d", rec.Code)
 	}
 }
 

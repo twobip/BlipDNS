@@ -241,6 +241,11 @@ func TestServeStoreZeroActionSynthesizesZero(t *testing.T) {
 // must show the bare domain.
 func TestServeStripsRootDotFromLoggedDomain(t *testing.T) {
 	srv, _ := newTestServer(t)
+	if err := srv.cfg.Store.SetPolicy(&filter.Policy{
+		ID: "p", Networks: []string{"10.0.0.0/8"}, Block: []string{"blocked.test"}, Log: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
 	srv.cfg.Blocklist = blocklist.New()
 	srv.cfg.Blocklist.FromDomains([]string{"blocked.test"})
 	var got string

@@ -58,6 +58,10 @@ type Server struct {
 	StrictCSRF bool
 }
 
+// maxProbeEntries bounds the probe-limiter table: rotating IPs must not
+// grow it forever.
+const maxProbeEntries = 10000
+
 // probeAllowed reports whether ip may probe upstreams now (10 requests per
 // rolling minute) and records the attempt.
 func (s *Server) probeAllowed(ip string) bool {
@@ -81,8 +85,53 @@ func (s *Server) probeAllowed(ip string) bool {
 		s.probeHits[ip] = hits
 		return false
 	}
+	if _, ok := s.probeHits[ip]; !ok && len(s.probeHits) >= maxProbeEntries {
+		sweepProbeHitsLocked(s.probeHits, now)
+		if len(s.probeHits) >= maxProbeEntries {
+			evictOldestProbeLocked(s.probeHits)
+		}
+	}
 	s.probeHits[ip] = append(hits, now)
 	return true
+}
+
+// sweepProbeHitsLocked drops keys with no in-window hits. Caller holds probeMu.
+func sweepProbeHitsLocked(m map[string][]time.Time, now time.Time) {
+	cutoff := now.Add(-time.Minute)
+	for k, hits := range m {
+		keep := false
+		for _, t := range hits {
+			if t.After(cutoff) {
+				keep = true
+				break
+			}
+		}
+		if !keep {
+			delete(m, k)
+		}
+	}
+}
+
+// evictOldestProbeLocked removes the key with the stalest latest hit.
+// Caller holds probeMu.
+func evictOldestProbeLocked(m map[string][]time.Time) {
+	victim := ""
+	var oldest time.Time
+	first := true
+	for k, hits := range m {
+		var latest time.Time
+		for _, t := range hits {
+			if t.After(latest) {
+				latest = t
+			}
+		}
+		if first || latest.Before(oldest) {
+			victim, oldest, first = k, latest, false
+		}
+	}
+	if victim != "" {
+		delete(m, victim)
+	}
 }
 
 // NewServer builds the controller HTTP server. ui may be nil (API-only).
@@ -511,11 +560,11 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	// Rate-limit setup attempts with the same per-IP brute-force limiter as
-	// login: the setup token is a high-value secret and must not be guessable
-	// at line rate.
+	// Rate-limit setup attempts with a dedicated per-IP brute-force bucket:
+	// the setup token is a high-value secret and must not be guessable
+	// at line rate — but setup guesses must never lock out login.
 	ip := s.clientIP(r)
-	if !s.auth.allowLogin(ip) {
+	if !s.auth.allowSetup(ip) {
 		http.Error(w, "too many attempts", http.StatusTooManyRequests)
 		return
 	}
@@ -537,7 +586,7 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.setupToken == "" || len(req.Token) != len(s.setupToken) || subtle.ConstantTimeCompare([]byte(req.Token), []byte(s.setupToken)) != 1 {
-		s.auth.recordFail(ip)
+		s.auth.recordSetupFail(ip)
 		http.Error(w, "invalid setup token", http.StatusForbidden)
 		return
 	}
