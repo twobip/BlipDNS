@@ -93,6 +93,7 @@ type Server struct {
 type Controllers struct {
 	DoH       DoHController
 	RateLimit RateLimitController
+	ACL       ACLController
 	Cache     CacheController
 	Records   RecordController
 	Upstream  LocalResolverController
@@ -137,6 +138,22 @@ type RateLimitController interface {
 func (s *Server) SetRateLimitController(c RateLimitController) {
 	s.mu.Lock()
 	s.ctrls.RateLimit = c
+	s.mu.Unlock()
+}
+
+// ACLController is the piece of the DNS server the management API can
+// reconfigure at runtime: the recursion ACL (CIDRs/IPs allowed to recurse).
+// The controller reports it back via stats so its poll loop can converge it.
+type ACLController interface {
+	SetAllowedNetworks(networks []string) error
+	AllowedNetworks() []string
+}
+
+// SetACLController wires the DNS server (which owns its recursion ACL) into
+// the management API so Settings changes can restrict open recursion live.
+func (s *Server) SetACLController(c ACLController) {
+	s.mu.Lock()
+	s.ctrls.ACL = c
 	s.mu.Unlock()
 }
 
@@ -400,6 +417,7 @@ func (s *Server) handler(local bool) http.Handler {
 	mux.HandleFunc("/api/v1/blocklist", auth(s.handleBlocklist))
 	mux.HandleFunc("/api/v1/doh", auth(s.handleDoH))             // toggle plain-HTTP DoH
 	mux.HandleFunc("/api/v1/ratelimit", auth(s.handleRateLimit)) // per-client QPS
+	mux.HandleFunc("/api/v1/acl", auth(s.handleACL))             // recursion ACL
 	mux.HandleFunc("/api/v1/upstream", auth(s.handleUpstream))   // conditional forwarding
 	mux.HandleFunc("/api/v1/cache", auth(s.handleCache))         // cache size + auto-refresh
 	mux.HandleFunc("/api/v1/cache/purge", auth(s.handleCachePurge))
@@ -629,6 +647,11 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		if ifc := ctrls.RateLimit; ifc != nil {
 			st.RateLimitQPS = ifc.RateLimitQPS()
 		}
+		// Report the recursion ACL so the controller can converge it
+		// (e.g. after a restart) by re-pushing on drift.
+		if ac := ctrls.ACL; ac != nil {
+			st.AllowedNetworks = ac.AllowedNetworks()
+		}
 		// Report the runtime cache size limit so the controller can converge
 		// it after a restart.
 		if cc := ctrls.Cache; cc != nil {
@@ -722,6 +745,36 @@ func (s *Server) handleRateLimit(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, AckResponse{OK: true, Msg: "rate limit set"})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// handleACL gets/sets the recursion ACL (CIDRs/IPs allowed to recurse). The
+// controller pushes this from the Settings page; an empty list opens
+// recursion. Entries are validated with the shared parser (including the /0
+// catch-all guard) so a push can never silently restore open recursion.
+func (s *Server) handleACL(w http.ResponseWriter, r *http.Request) {
+	ac := s.controllers().ACL
+	if ac == nil {
+		http.Error(w, "acl control not available on this instance", http.StatusServiceUnavailable)
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, map[string]interface{}{"networks": ac.AllowedNetworks()})
+	case http.MethodPut, http.MethodPost:
+		var req SetACLRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			log.Printf("blipd: management: bad request body: %v", err)
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		if err := ac.SetAllowedNetworks(req.Networks); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, AckResponse{OK: true, Msg: "acl set"})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}

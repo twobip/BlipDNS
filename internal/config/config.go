@@ -32,6 +32,7 @@ type Config struct {
 	AdminSocket          string                    `yaml:"admin_socket"`     // local Unix socket for passwordless admin (0600, blipd user; "" = off)
 	TrustedProxies       []string                  `yaml:"trusted_proxies"`  // CIDRs/IPs allowed to supply X-Forwarded-For / CF-Connecting-IP to DoH
 	AllowedNetworks      []string                  `yaml:"allowed_networks"` // recursion ACL: CIDRs/IPs allowed to recurse; empty = allow all (open, with warning)
+	OpenRecursion        bool                      `yaml:"open_recursion"`   // explicit ack for empty allowed_networks on a non-loopback bind (fail closed without it)
 	StateFile            string                    `yaml:"state_file"`       // persists "adopted" so the claim code isn't regenerated
 	InstanceID           string                    `yaml:"instance_id"`      // stable id shown to the controller
 	Upstream             string                    `yaml:"upstream"`

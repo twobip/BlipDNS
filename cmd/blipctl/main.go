@@ -16,6 +16,7 @@
 //	set-policy <file.yml>  push a policy (YAML)
 //	block <cidr> <domain>  convenience: add a block policy for a client CIDR
 //	del-policy <id>        remove a policy
+//	acl [cidr...]          show the recursion ACL, or replace it
 //	watch                  stream events (SSE)
 package main
 
@@ -210,7 +211,7 @@ func socketAlive(path string) bool {
 func isCommand(s string) bool {
 	switch s {
 	case "health", "stats", "policies", "set-policy", "block", "del-policy",
-		"adopt-status", "adopt", "watch":
+		"acl", "adopt-status", "adopt", "watch":
 		return true
 	default:
 		return false
@@ -286,6 +287,25 @@ func run(ctx context.Context, client *control.Client, cmd string, rest []string,
 		}
 		die(client.DeletePolicy(ctx, rest[0]))
 		fmt.Println("deleted policy:", rest[0])
+	case "acl":
+		// No args: show the current recursion ACL. Args replace it
+		// (validated server-side, including the /0 catch-all guard).
+		// There is deliberately no way to clear the ACL here: opening
+		// recursion requires editing blipd.yaml (open_recursion: true).
+		if len(rest) == 0 {
+			s, err := client.Stats(ctx)
+			die(err)
+			if len(s.AllowedNetworks) == 0 {
+				fmt.Println("recursion ACL: open (answering all clients)")
+				return
+			}
+			for _, n := range s.AllowedNetworks {
+				fmt.Println(n)
+			}
+			return
+		}
+		die(client.SetAllowedNetworks(ctx, rest))
+		fmt.Println("recursion ACL set:", strings.Join(rest, ", "))
 	case "adopt-status":
 		st, err := client.AdoptStatus(ctx)
 		die(err)
@@ -531,6 +551,7 @@ commands:
   set-policy <file.yml>  push a policy
   block <cidr> <domain>  add a block policy for a client CIDR
   del-policy <id>        remove a policy
+  acl [cidr...]          show the recursion ACL, or replace it
   adopt-status           show adoption state (no token needed)
   adopt <code>           claim this instance once; prints its admin token
   watch                  stream events (SSE)

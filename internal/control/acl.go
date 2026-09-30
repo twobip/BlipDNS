@@ -1,0 +1,46 @@
+// Shared recursion-ACL parsing: blipd validates pushes here at the trust
+// boundary, and the DNS server builds its runtime ACL from the same parser
+// so the two can never disagree about what a CIDR means.
+package control
+
+import (
+	"fmt"
+	"net"
+	"strings"
+)
+
+// ParseAllowedNetworks parses recursion-ACL CIDRs/IPs. Empty input means
+// allow all (open recursion). Single IPs are treated as /32 (/128 for IPv6).
+// Catch-all /0 CIDRs are rejected, mirroring the trusted-proxy parser: they
+// silently restore open recursion, so they must be explicit (open_recursion).
+func ParseAllowedNetworks(values []string) ([]*net.IPNet, error) {
+	out := make([]*net.IPNet, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if !strings.Contains(value, "/") {
+			ip := net.ParseIP(value)
+			if ip == nil {
+				return nil, fmt.Errorf("invalid allowed network %q", value)
+			}
+			if ip4 := ip.To4(); ip4 != nil {
+				ip = ip4
+				out = append(out, &net.IPNet{IP: ip, Mask: net.CIDRMask(32, 32)})
+			} else {
+				out = append(out, &net.IPNet{IP: ip, Mask: net.CIDRMask(128, 128)})
+			}
+			continue
+		}
+		_, n, err := net.ParseCIDR(value)
+		if err != nil {
+			return nil, fmt.Errorf("invalid allowed network %q: %w", value, err)
+		}
+		if ones, _ := n.Mask.Size(); ones == 0 {
+			return nil, fmt.Errorf("invalid allowed network %q: catch-all CIDR would allow the whole internet; leave allowed_networks empty (with open_recursion: true) for open recursion instead", value)
+		}
+		out = append(out, n)
+	}
+	return out, nil
+}

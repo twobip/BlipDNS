@@ -153,7 +153,7 @@ func TestTokenRequired(t *testing.T) {
 }
 
 func TestIsCommand(t *testing.T) {
-	for _, c := range []string{"health", "stats", "policies", "set-policy", "block", "del-policy", "adopt-status", "adopt", "watch"} {
+	for _, c := range []string{"health", "stats", "policies", "set-policy", "block", "del-policy", "acl", "adopt-status", "adopt", "watch"} {
 		if !isCommand(c) {
 			t.Errorf("isCommand(%q) = false", c)
 		}

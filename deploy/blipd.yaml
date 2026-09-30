@@ -1,10 +1,21 @@
 dns_addr: "0.0.0.0:53"
-# Recursion ACL: CIDRs/IPs allowed to recurse. Empty = open recursion
-# (answered for any client, with a startup warning) — restrict on any
-# WAN-reachable install, e.g:
-# allowed_networks:
-#   - "127.0.0.0/8"
-#   - "192.168.30.0/24"
+# Recursion ACL: only these clients may recurse. dns_addr stays wildcard (DNS
+# must serve the LAN), so this list is the open-resolver guard — loopback +
+# RFC1918 + ULA covers every legitimate local client. To serve recursion to
+# the whole internet instead, empty this list AND set open_recursion: true
+# (blipd refuses to start with an empty list on a non-loopback bind without
+# that explicit ack).
+allowed_networks:
+  - "127.0.0.0/8"
+  - "::1/128"
+  - "10.0.0.0/8"
+  - "172.16.0.0/12"
+  - "192.168.0.0/16"
+  - "fc00::/7"
+open_recursion: false
+# Per-client DNS query rate limit (queries/sec; 0 = unlimited, not
+# recommended on a LAN-reachable resolver).
+rate_limit_qps: 20
 # H4: loopback-first defaults. dns_addr stays wildcard (DNS must serve the
 # LAN), but DoH + management API bind to loopback. Change to 0.0.0.0 only
 # on a trusted mgmt LAN: blipd logs a loud startup warning for non-loopback

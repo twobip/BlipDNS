@@ -419,10 +419,11 @@ func (i *Instance) poll(ctx context.Context) {
 		// Converge reconcilers concurrently per tick (was 8 sequential RTTs).
 		// Blocklist/HA stay on their own cadence inside maybePush*.
 		var wg sync.WaitGroup
-		wg.Add(7)
+		wg.Add(8)
 		go func() { defer wg.Done(); i.fleet.maybePushConfig(ctx, i, s) }()
 		go func() { defer wg.Done(); i.fleet.maybePushDoH(ctx, i, s) }()
 		go func() { defer wg.Done(); i.fleet.maybePushRateLimit(ctx, i, s) }()
+		go func() { defer wg.Done(); i.fleet.maybePushACL(ctx, i, s) }()
 		go func() { defer wg.Done(); i.fleet.maybePushCache(ctx, i, s) }()
 		go func() { defer wg.Done(); i.fleet.maybePushUpstream(ctx, i, s) }()
 		go func() { defer wg.Done(); i.fleet.maybePushBlocklist(ctx, i, s) }()
