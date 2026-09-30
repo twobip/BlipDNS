@@ -948,7 +948,7 @@ func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, prot
 		s.cnt.AddBlocked()
 		c := renderClient()
 		s.notifyBlock(req, resp, c, domain, "global", proto, start)
-		if s.logfn != nil {
+		if doLog && s.logfn != nil {
 			s.logfn(c, domain)
 		}
 		applyBlockAction(resp, q, s.cfg.BlockAction)
@@ -1221,7 +1221,7 @@ func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, prot
 			}
 			c := renderClient()
 			s.notifyBlock(req, blockedResp, c, notifyDomain, cbe.source, proto, start)
-			if s.logfn != nil && (cbe.shouldLog || cbe.source == "global") {
+			if s.logfn != nil && cbe.shouldLog {
 				s.logfn(c, notifyDomain)
 			}
 			applyBlockAction(blockedResp, q, cbe.action)
@@ -1263,7 +1263,7 @@ func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, prot
 			lg = cbe.shouldLog
 		}
 		s.notifyBlock(req, blockedResp, renderClient(), notifyDomain, src, proto, start)
-		if s.logfn != nil && (lg || src == "global") {
+		if s.logfn != nil && lg {
 			s.logfn(renderClient(), notifyDomain)
 		}
 		applyBlockAction(blockedResp, q, act)

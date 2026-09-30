@@ -59,6 +59,9 @@ type Auth struct {
 
 	flMu sync.Mutex
 	fl   map[string]*loginFails // client IP -> failure state
+	// setupFl tracks setup-token guesses separately so burning setup
+	// attempts can never lock out login (and vice versa).
+	setupFl map[string]*loginFails // client IP -> setup failure state
 
 	apiFlMu sync.Mutex
 	apiFl   map[string]*apiKeyFail // client IP -> bearer-key failure state
@@ -85,6 +88,11 @@ func (a *Auth) Sweep() {
 			delete(a.fl, ip)
 		}
 	}
+	for ip, f := range a.setupFl {
+		if f == nil || now.After(f.windowStart.Add(loginLockWindow)) {
+			delete(a.setupFl, ip)
+		}
+	}
 	a.flMu.Unlock()
 	a.apiFlMu.Lock()
 	for ip, f := range a.apiFl {
@@ -105,6 +113,7 @@ func NewAuth(username, password string) *Auth {
 		sessions: make(map[string]time.Time),
 		keys:     make(map[string]apiKey),
 		fl:       make(map[string]*loginFails),
+		setupFl:  make(map[string]*loginFails),
 	}
 	if username == "" || password == "" {
 		return a // configured=false -> all logins rejected
@@ -176,24 +185,29 @@ func (a *Auth) Login(username, password, clientIP string) (string, error) {
 	if !a.Configured() {
 		return "", errNoAuthCfg
 	}
-	if !a.allowLogin(clientIP) {
-		return "", errLocked
+	// Credential first: a correct password always succeeds, so bad guesses
+	// from anywhere can never lock out the legitimate operator. The limiter
+	// below only ever sees failures.
+	if a.verify(username, password) {
+		a.clearFails(clientIP)
+		id, err := newSessionID()
+		if err != nil {
+			return "", err
+		}
+		a.mu.Lock()
+		a.sessions[id] = time.Now().Add(sessionTTL)
+		a.mu.Unlock()
+		return id, nil
 	}
-	// constant-time username + password comparison
-	if !a.verify(username, password) {
+	// Failed credential: loopback callers are never locked out (same-box
+	// access must survive a guessing flood).
+	if !isLoopbackIP(clientIP) {
+		if !a.allowLogin(clientIP) {
+			return "", errLocked
+		}
 		a.recordFail(clientIP)
-		return "", errBadCreds
 	}
-	a.clearFails(clientIP)
-
-	id, err := newSessionID()
-	if err != nil {
-		return "", err
-	}
-	a.mu.Lock()
-	a.sessions[id] = time.Now().Add(sessionTTL)
-	a.mu.Unlock()
-	return id, nil
+	return "", errBadCreds
 }
 
 func (a *Auth) verify(user, pass string) bool {
@@ -406,11 +420,27 @@ func (a *Auth) apiKeyScope(secret string) (scope string, ok bool) {
 
 // ---- brute-force guard (sliding window) ----
 
+// maxLoginFailEntries bounds the login/setup failure tables (mirroring the
+// bearer-key table): expired entries sweep first, then the stalest window.
+const maxLoginFailEntries = 10000
+
 func (a *Auth) allowLogin(ip string) bool {
 	a.flMu.Lock()
 	defer a.flMu.Unlock()
-	f, ok := a.fl[ip]
-	if !ok || time.Now().After(f.windowStart.Add(loginLockWindow)) {
+	return allowLoginFor(a.fl, ip)
+}
+
+// allowSetup reports whether ip may attempt first-run setup now. Setup
+// guesses draw from their own bucket so they never lock out login.
+func (a *Auth) allowSetup(ip string) bool {
+	a.flMu.Lock()
+	defer a.flMu.Unlock()
+	return allowLoginFor(a.setupFl, ip)
+}
+
+func allowLoginFor(m map[string]*loginFails, ip string) bool {
+	f, ok := m[ip]
+	if !ok || f == nil || time.Now().After(f.windowStart.Add(loginLockWindow)) {
 		return true
 	}
 	return f.count < maxLoginFails
@@ -419,10 +449,50 @@ func (a *Auth) allowLogin(ip string) bool {
 func (a *Auth) recordFail(ip string) {
 	a.flMu.Lock()
 	defer a.flMu.Unlock()
-	f, ok := a.fl[ip]
+	recordFailFor(a.fl, ip)
+}
+
+// recordSetupFail records one bad setup token from ip.
+func (a *Auth) recordSetupFail(ip string) {
+	a.flMu.Lock()
+	defer a.flMu.Unlock()
+	if a.setupFl == nil {
+		a.setupFl = make(map[string]*loginFails)
+	}
+	recordFailFor(a.setupFl, ip)
+}
+
+func recordFailFor(m map[string]*loginFails, ip string) {
 	now := time.Now()
-	if !ok || now.After(f.windowStart.Add(loginLockWindow)) {
-		a.fl[ip] = &loginFails{count: 1, windowStart: now}
+	if len(m) >= maxLoginFailEntries {
+		for k, f := range m {
+			if f == nil || now.After(f.windowStart.Add(loginLockWindow)) {
+				delete(m, k)
+			}
+		}
+	}
+	for len(m) >= maxLoginFailEntries {
+		// LRU: evict the stalest window so rotating IPs stay bounded.
+		victim := ""
+		var oldest time.Time
+		first := true
+		for k, f := range m {
+			var t time.Time
+			if f != nil {
+				t = f.windowStart
+			}
+			if first || t.Before(oldest) {
+				victim, oldest, first = k, t, false
+			}
+		}
+		if victim == "" {
+			break
+		}
+		delete(m, victim)
+	}
+	f, ok := m[ip]
+	if !ok || f == nil || now.After(f.windowStart.Add(loginLockWindow)) {
+		m[ip] = &loginFails{count: 1, windowStart: now}
 		return
 	}
 	f.count++
@@ -521,6 +591,13 @@ func (a *Auth) clearAPIKeyFails(ip string) {
 	a.apiFlMu.Lock()
 	delete(a.apiFl, ip)
 	a.apiFlMu.Unlock()
+}
+
+// isLoopbackIP reports whether ip is a loopback address. Unparseable input
+// is not loopback (fail-closed: strangers get the limiter).
+func isLoopbackIP(ip string) bool {
+	parsed := net.ParseIP(strings.TrimSpace(ip))
+	return parsed != nil && parsed.IsLoopback()
 }
 
 // ClientIP returns the immediate peer address. Forwarded headers are NOT

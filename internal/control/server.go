@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"io"
@@ -200,7 +201,8 @@ func NewServerWithBlocklist(token string, store *filter.Store, c *cache.Cache, s
 }
 
 // SetLogRing attaches the process-log tail served by /api/v1/logs.
-func (s *Server) SetLogRing(r *LogRing) { s.logRing = r }
+// Guarded by mu: handleLogs reads it per request.
+func (s *Server) SetLogRing(r *LogRing) { s.mu.Lock(); s.logRing = r; s.mu.Unlock() }
 
 // ConfigureAdoption initialises the claim-code handshake. If a prior adopted
 // state file exists the instance is treated as already adopted (the claim code
@@ -230,7 +232,19 @@ func (s *Server) ConfigureAdoption(stateFile, instanceID string) {
 				s.claimCode = ""
 				s.adoptedBy = st.ControllerIP
 				if st.Token != "" {
-					s.token = st.Token
+					// The operator's config is authoritative: a rotated
+					// admin_token must win over the persisted one, otherwise
+					// a leaked token can never be revoked.
+					s.tokenMu.Lock()
+					cur := s.token
+					if cur == "" {
+						s.token = st.Token
+					}
+					s.tokenMu.Unlock()
+					if cur != "" && cur != st.Token {
+						log.Printf("blipd: WARNING: %s holds a different token than admin_token; the config token wins. Persisting it to complete rotation.", stateFile)
+						s.persistAdopted(true)
+					}
 				}
 				log.Printf("blipd: management already adopted (state %s); claim code not required", stateFile)
 				return
@@ -484,17 +498,38 @@ func (s *Server) auth(h http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 		src := adoptIP(r)
-		// Brute-force guard: 5 bad tokens from one IP => 5min 429.
-		s.authMu.Lock()
-		sweepAuthFailsLocked(s.authFails)
-		if f := s.authFails[src]; f != nil && time.Now().Before(f.until) {
+		// Credential first: a valid bearer token always succeeds, so a flood
+		// of bad guesses can never lock out the legitimate controller.
+		// The failure table is consulted/recorded only for bad credentials.
+		if checkToken(r.Header.Get("Authorization"), tok) {
+			// Success: clear this IP's failure state.
+			s.authMu.Lock()
+			if s.authFails != nil {
+				delete(s.authFails, src)
+			}
 			s.authMu.Unlock()
-			http.Error(w, "too many attempts; try again later", http.StatusTooManyRequests)
+			// Controller pin (set at claim-code adoption): only the adopting
+			// controller — or box-local access — may drive the management API.
+			s.adoptMu.Lock()
+			pinned := s.adoptedBy
+			s.adoptMu.Unlock()
+			if peer := adoptIP(r); pinned != "" && peer != pinned && !isLoopbackAddr(peer) {
+				http.Error(w, "forbidden", http.StatusForbidden)
+				return
+			}
+			h(w, r)
 			return
 		}
-		s.authMu.Unlock()
-		if !checkToken(r.Header.Get("Authorization"), tok) {
+		// Bad credential: loopback peers are never locked out (same-box
+		// operator access must survive), everyone else feeds the limiter.
+		if !isLoopbackAddr(src) {
 			s.authMu.Lock()
+			sweepAuthFailsLocked(s.authFails)
+			if f := s.authFails[src]; f != nil && time.Now().Before(f.until) {
+				s.authMu.Unlock()
+				http.Error(w, "too many attempts; try again later", http.StatusTooManyRequests)
+				return
+			}
 			if s.authFails == nil {
 				s.authFails = make(map[string]*adoptFail)
 			}
@@ -517,22 +552,9 @@ func (s *Server) auth(h http.HandlerFunc) http.HandlerFunc {
 				f.count = 0
 			}
 			s.authMu.Unlock()
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
 		}
-		// Success: clear this IP's failure state.
-		s.authMu.Lock()
-		if s.authFails != nil {
-			delete(s.authFails, src)
-		}
-		s.authMu.Unlock()
-		// Controller pin (set at claim-code adoption): only the adopting
-		// controller — or box-local access — may drive the management API.
-		if peer := adoptIP(r); s.adoptedBy != "" && peer != s.adoptedBy && !net.ParseIP(peer).IsLoopback() {
-			http.Error(w, "forbidden", http.StatusForbidden)
-			return
-		}
-		h(w, r)
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
 	}
 }
 
@@ -558,7 +580,10 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if s.logRing == nil {
+	s.mu.RLock()
+	ring := s.logRing
+	s.mu.RUnlock()
+	if ring == nil {
 		http.Error(w, "process logs unavailable", http.StatusServiceUnavailable)
 		return
 	}
@@ -568,7 +593,7 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 			n = min(v, defaultLogRingCap)
 		}
 	}
-	writeJSON(w, LogsResponse{Lines: s.logRing.Snapshot(n)})
+	writeJSON(w, LogsResponse{Lines: ring.Snapshot(n)})
 }
 
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
@@ -578,10 +603,14 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	}
 	st := s.stats.Stats()
 	if st != nil {
-		st.Cached = s.cache.Len()
+		if s.cache != nil {
+			st.Cached = s.cache.Len()
+		}
 		// Add upstream from default policy
-		if def, _ := s.store.All(); def != nil {
-			st.Upstream = def.Upstream
+		if s.store != nil {
+			if def, _ := s.store.All(); def != nil {
+				st.Upstream = def.Upstream
+			}
 		}
 		// Report the active global blocklist so the controller can detect drift.
 		if s.blocklist != nil {
@@ -763,7 +792,95 @@ func (s *Server) handlePolicy(w http.ResponseWriter, r *http.Request) {
 // SetBlocklistCache enables persisting each received blocklist to path, so a
 // blipd restart can restore it into RAM instantly. Pass "" to disable.
 func (s *Server) SetBlocklistCache(path string) {
+	s.mu.Lock()
 	s.blocklistCachePath = path
+	s.mu.Unlock()
+}
+
+// blocklistPushSem caps concurrent blocklist pushes: each decode transiently
+// holds the full domain set, so unbounded concurrency OOMs the resolver.
+var blocklistPushSem = make(chan struct{}, 2)
+
+// maxPushDomains bounds each pushed list. The controller caps merged lists
+// at 5M; refuse anything clearly beyond that instead of building it.
+const maxPushDomains = 6_000_000
+
+// maxPushEntryLen bounds one pushed domain: real domains fit in 253 bytes,
+// so anything over 1 KiB is abuse, not a list.
+const maxPushEntryLen = 1024
+
+var errBlocklistTooLarge = errors.New("blocklist too large")
+
+// decodeBlocklistPush streams a SetBlocklistRequest body, aborting with
+// errBlocklistTooLarge as soon as either list exceeds maxPushDomains —
+// before the overshoot is ever allocated.
+func decodeBlocklistPush(r io.Reader) (SetBlocklistRequest, error) {
+	var req SetBlocklistRequest
+	dec := json.NewDecoder(r)
+	tok, err := dec.Token()
+	if err != nil || tok != json.Delim('{') {
+		return req, errors.New("bad request")
+	}
+	for dec.More() {
+		key, err := dec.Token()
+		if err != nil {
+			return req, err
+		}
+		switch ks, _ := key.(string); ks {
+		case "domains", "allowed":
+			list, err := decodeBlocklistStrings(dec)
+			if err != nil {
+				return req, err
+			}
+			if ks == "domains" {
+				req.Domains = list
+			} else {
+				req.Allowed = list
+			}
+		default:
+			var raw json.RawMessage
+			if err := dec.Decode(&raw); err != nil {
+				return req, err
+			}
+		}
+	}
+	if _, err := dec.Token(); err != nil {
+		return req, err
+	}
+	return req, nil
+}
+
+func decodeBlocklistStrings(dec *json.Decoder) ([]string, error) {
+	tok, err := dec.Token()
+	if err != nil {
+		return nil, err
+	}
+	if tok == nil {
+		// encoding/json decodes null into a nil slice; accept the same so
+		// a controller clearing a list (nil slice marshals as null) works.
+		return nil, nil
+	}
+	if tok != json.Delim('[') {
+		return nil, errors.New("bad request")
+	}
+	var out []string
+	for dec.More() {
+		var s string
+		if err := dec.Decode(&s); err != nil {
+			return nil, err
+		}
+		if len(s) > maxPushEntryLen {
+			return nil, errors.New("bad request")
+		}
+		out = append(out, s)
+		if len(out) > maxPushDomains {
+			return nil, errBlocklistTooLarge
+		}
+	}
+	if _, err := dec.Token(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // handleBlocklist replaces the instance's global blocklist with the given
@@ -777,20 +894,26 @@ func (s *Server) handleBlocklist(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "blocklist not configured", http.StatusServiceUnavailable)
 		return
 	}
-	dec := json.NewDecoder(io.LimitReader(r.Body, 256<<20)) // 256 MiB cap: the largest real lists are tens of MB
-	dec.UseNumber()
-	var req SetBlocklistRequest
-	if err := dec.Decode(&req); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+	// Only two pushes at once: each decode can transiently hold hundreds of
+	// MB, and the resolver shares the box with DNS. Extra pushes 429 and
+	// the controller retries.
+	// ponytail: fixed 2-slot ceiling, queue instead if pushes ever contend.
+	select {
+	case blocklistPushSem <- struct{}{}:
+		defer func() { <-blocklistPushSem }()
+	default:
+		http.Error(w, "blocklist push already in progress; try again later", http.StatusTooManyRequests)
 		return
 	}
-	// F-16: bound the decoded domain count as well as the byte count: a
-	// crafted payload under 256 MiB can still decode into tens of millions of
-	// strings and OOM the resolver. The controller caps merged lists at 5M;
-	// refuse anything clearly beyond that here instead of building it.
-	const maxPushDomains = 6_000_000
-	if len(req.Domains) > maxPushDomains || len(req.Allowed) > maxPushDomains {
-		http.Error(w, "blocklist too large", http.StatusRequestEntityTooLarge)
+	// Stream the body instead of decoding it whole: abort as soon as either
+	// list exceeds the domain cap, before millions of strings are built.
+	req, err := decodeBlocklistPush(http.MaxBytesReader(w, r.Body, 256<<20))
+	if err != nil {
+		if errors.Is(err, errBlocklistTooLarge) {
+			http.Error(w, "blocklist too large", http.StatusRequestEntityTooLarge)
+			return
+		}
+		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
@@ -805,8 +928,11 @@ func (s *Server) handleBlocklist(w http.ResponseWriter, r *http.Request) {
 	if s.cache != nil {
 		s.cache.Purge()
 	}
-	if s.blocklistCachePath != "" {
-		path := s.blocklistCachePath
+	s.mu.RLock()
+	cachePath := s.blocklistCachePath
+	s.mu.RUnlock()
+	if cachePath != "" {
+		path := cachePath
 		go func() {
 			if err := s.blocklist.SaveCache(path); err != nil {
 				log.Printf("blipd: blocklist cache: %v", err)
@@ -1009,12 +1135,21 @@ func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 30s cooldown: a stolen token or retry loop must not reboot-loop the
-	// node into a DNS outage.
-	if last := s.lastRestart.Load(); last != 0 && time.Since(time.Unix(0, last)) < 30*time.Second {
-		http.Error(w, "restart too soon; try again later", http.StatusTooManyRequests)
-		return
+	// node into a DNS outage. CompareAndSwap so N concurrent requests elect
+	// exactly one winner instead of all observing last == 0.
+	for {
+		last := s.lastRestart.Load()
+		now := time.Now()
+		if last != 0 && now.Sub(time.Unix(0, last)) < 30*time.Second {
+			http.Error(w, "restart too soon; try again later", http.StatusTooManyRequests)
+			return
+		}
+		if s.lastRestart.CompareAndSwap(last, now.UnixNano()) {
+			break
+		}
+		// Lost the race: the winner's timestamp is now visible, so the
+		// re-check above will 429. No unbounded spin (one extra lap).
 	}
-	s.lastRestart.Store(time.Now().UnixNano())
 	log.Printf("blipd: audit: restart requested from %s", adoptIP(r))
 	writeJSON(w, AckResponse{OK: true, Msg: "restarting blipd"})
 	go func() {
@@ -1065,12 +1200,22 @@ func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request) {
 
 	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
+	// Bound the stream lifetime so stalled readers cannot pin goroutines,
+	// channels and fds forever; the controller reconnects (with backoff),
+	// so a clean close is just a reconnect.
+	// ponytail: fixed 30m ceiling, configurable max age if operators need it.
+	streamMax := time.NewTimer(30 * time.Minute)
+	defer streamMax.Stop()
 	for {
 		select {
 		case <-r.Context().Done():
 			return
+		case <-streamMax.C:
+			return
 		case e := <-ch:
-			writeSSEEvent(w, e)
+			if err := writeSSEEvent(w, e); err != nil {
+				return
+			}
 			flusher.Flush()
 		case <-ticker.C:
 			// Keepalive: a lightweight stats ping so the controller can
@@ -1081,7 +1226,9 @@ func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request) {
 				st.UpstreamServers = nil
 				st.UpstreamRoutes = nil
 			}
-			writeSSEEvent(w, WatchEvent{Type: "stats", At: time.Now(), Stats: st})
+			if err := writeSSEEvent(w, WatchEvent{Type: "stats", At: time.Now(), Stats: st}); err != nil {
+				return
+			}
 			flusher.Flush()
 		}
 	}
@@ -1134,13 +1281,10 @@ func (s *Server) handleAdopt(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req AdoptRequest
-	// Bound the body like every other management endpoint so a giant payload
-	// cannot be slurped (the claim code itself is a few dozen bytes).
-	r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
-		return
-	}
+	// Limiter state is checked before the body is read, and the body itself
+	// is a few dozen bytes: reject a lying Content-Length up front and bound
+	// the read in time so trickled bodies cannot pin a goroutine + fd for
+	// the server's 10-minute ReadTimeout.
 	s.adoptMu.Lock()
 	defer s.adoptMu.Unlock()
 	if s.adopted {
@@ -1154,6 +1298,18 @@ func (s *Server) handleAdopt(w http.ResponseWriter, r *http.Request) {
 	src := adoptIP(r)
 	if f := s.adoptFails[src]; f != nil && time.Now().Before(f.until) {
 		http.Error(w, "too many attempts; try again later", http.StatusTooManyRequests)
+		return
+	}
+	if r.ContentLength > 2<<20 {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(15 * time.Second))
+	// Bound the body like every other management endpoint so a giant payload
+	// cannot be slurped (the claim code itself is a few dozen bytes).
+	r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
 	if req.Code == "" || !checkClaimCode(req.Code, s.claimCode) {
@@ -1287,6 +1443,13 @@ func evictOldestAuthFailLocked(m map[string]*adoptFail) {
 	}
 }
 
+// isLoopbackAddr reports whether host is a loopback IP. Unparseable input
+// is not loopback (fail-closed: strangers get the limiter and the pin).
+func isLoopbackAddr(host string) bool {
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
 // adoptIP keys guess tracking on the immediate peer, not X-Forwarded-For
 // (spoofable) — same reason the controller's login limiter ignores it.
 func adoptIP(r *http.Request) string {
@@ -1317,16 +1480,27 @@ func MustJSON(v interface{}) string {
 }
 
 // writeSSEEvent writes one SSE data frame without the MustJSON string copy.
-func writeSSEEvent(w io.Writer, v interface{}) {
+// It reports the first write error so stalled readers close the stream
+// instead of parking in Flush() forever.
+func writeSSEEvent(w io.Writer, v interface{}) error {
 	buf := mustJSONPool.Get().(*bytes.Buffer)
 	buf.Reset()
 	_ = json.NewEncoder(buf).Encode(v)
 	b := buf.Bytes()
-	_, _ = w.Write([]byte("data: "))
-	_, _ = w.Write(b)
-	_, _ = w.Write([]byte("\n"))
+	if _, err := w.Write([]byte("data: ")); err != nil {
+		buf.Reset()
+		mustJSONPool.Put(buf)
+		return err
+	}
+	if _, err := w.Write(b); err != nil {
+		buf.Reset()
+		mustJSONPool.Put(buf)
+		return err
+	}
+	_, err := w.Write([]byte("\n"))
 	buf.Reset()
 	mustJSONPool.Put(buf)
+	return err
 }
 
 func fromFilter(p *filter.Policy) *Policy {
