@@ -48,3 +48,34 @@ func TestHandleAdoptResponds(t *testing.T) {
 		t.Fatal("server not marked adopted")
 	}
 }
+
+// A successful adopt clears the peer's bearer brute-force failures, so
+// pre-adopt tokenless polls don't 429 for minutes after adoption succeeds.
+func TestHandleAdoptClearsPeerFailures(t *testing.T) {
+	store := filter.NewStore(nil)
+	srv := NewServerWithBlocklist("", store, cache.New(0, 0), &Counters{}, "blipd/test", blocklist.New())
+	srv.ConfigureAdoption(filepath.Join(t.TempDir(), "adopted.json"), "test-1")
+	srv.adoptMu.Lock()
+	code := srv.claimCode
+	srv.adoptMu.Unlock()
+	srv.authMu.Lock()
+	srv.authFails = map[string]*adoptFail{"127.0.0.1": {count: 4, until: time.Now().Add(5 * time.Minute)}}
+	srv.authMu.Unlock()
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Post(ts.URL+"/api/v1/adopt", "application/json",
+		strings.NewReader(`{"code":`+strconv.Quote(code)+`}`))
+	if err != nil {
+		t.Fatalf("adopt call failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	srv.authMu.Lock()
+	defer srv.authMu.Unlock()
+	if f, ok := srv.authFails["127.0.0.1"]; ok && time.Now().Before(f.until) {
+		t.Fatal("peer failure state survived a successful adopt")
+	}
+}

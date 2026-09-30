@@ -1186,6 +1186,16 @@ func (s *Server) handleAdopt(w http.ResponseWriter, r *http.Request) {
 	s.claimCode = ""  // one-time: invalidate immediately
 	s.adoptedBy = src // pin the management API to the adopting controller
 	s.persistAdopted(true)
+	// A successful adopt proves the peer is the legitimate controller, so
+	// clear any brute-force failure state for it: pre-adopt tokenless polls
+	// would otherwise 429 for up to 5 minutes after adoption succeeds.
+	// authMu nests inside adoptMu here; no reverse path exists (auth()
+	// touches authMu only).
+	s.authMu.Lock()
+	if s.authFails != nil {
+		delete(s.authFails, src)
+	}
+	s.authMu.Unlock()
 	// Locked variant: this handler already holds adoptMu (AdoptCodePath
 	// would self-deadlock here and hang the adopt call until client timeout).
 	ClearAdoptCodeFile(s.adoptCodePathLocked())
