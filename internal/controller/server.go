@@ -508,14 +508,20 @@ func readScopeDenied(path string) bool {
 		"/api/high-availability",
 		// Fleet configuration and topology: instance management URLs,
 		// upstream servers/routes/bootstrap, trusted proxies, client CIDR
-		// policy, local records, the full blocklist export, and the DoH
-		// mobileconfig all disclose infrastructure a dashboard-read key
-		// has no need for.
+		// policy, local records, the manual block/allow lists and full
+		// blocklist export, and the DoH mobileconfig all disclose
+		// infrastructure a dashboard-read key has no need for.
 		"/api/settings",
 		"/api/instances",
 		"/api/records",
+		"/api/blocklist",
 		"/api/blocklist/export",
 		"/api/doh-mobileconfig":
+		return true
+	}
+	// Per-instance policies carry per-client allow/block domain lists plus
+	// client IDs and networks — the same policy class as /api/blocklist.
+	if strings.HasPrefix(path, "/api/instances/") && strings.HasSuffix(path, "/policies") {
 		return true
 	}
 	return false
@@ -553,7 +559,8 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// Login mints a session cookie, so require the same Origin check as
 	// logout and other mutating routes; otherwise a cross-site auto-POST
 	// can mint an attacker-known session (login CSRF). Headerless
-	// API clients still pass (absent Origin/Referer is allowed).
+	// clients only pass when StrictCSRF is off; under StrictCSRF a
+	// headerless POST is rejected like a forged legacy-browser post.
 	if !s.csrfOriginAllowed(r) {
 		http.Error(w, "cross-site request rejected", http.StatusForbidden)
 		return
@@ -582,10 +589,6 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 	// the setup token is a high-value secret and must not be guessable
 	// at line rate — but setup guesses must never lock out login.
 	ip := s.clientIP(r)
-	if !s.auth.allowSetup(ip) {
-		http.Error(w, "too many attempts", http.StatusTooManyRequests)
-		return
-	}
 	s.setupMu.Lock()
 	defer s.setupMu.Unlock()
 	if s.auth.Configured() {
@@ -603,11 +606,29 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
+	// Setup mints a session cookie, so require the same Origin check as
+	// login; otherwise a cross-site auto-POST mints a session (setup CSRF).
+	if !s.csrfOriginAllowed(r) {
+		http.Error(w, "cross-site request rejected", http.StatusForbidden)
+		return
+	}
+	// Credential first: a valid setup token always succeeds, so bad
+	// guesses from anywhere can never lock out the legitimate operator
+	// (mirrors Login). The limiter below only ever sees failures, and
+	// loopback callers are never locked out (same-box access must
+	// survive a guessing flood).
 	if s.setupToken == "" || len(req.Token) != len(s.setupToken) || subtle.ConstantTimeCompare([]byte(req.Token), []byte(s.setupToken)) != 1 {
-		s.auth.recordSetupFail(ip)
+		if !isLoopbackIP(ip) {
+			if !s.auth.allowSetup(ip) {
+				http.Error(w, "too many attempts", http.StatusTooManyRequests)
+				return
+			}
+			s.auth.recordSetupFail(ip)
+		}
 		http.Error(w, "invalid setup token", http.StatusForbidden)
 		return
 	}
+	s.auth.clearSetupFails(ip)
 	req.Username = strings.TrimSpace(req.Username)
 	if len(req.Username) < 1 || len(req.Username) > 64 {
 		http.Error(w, "username must be between 1 and 64 characters", http.StatusBadRequest)
