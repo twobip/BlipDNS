@@ -80,7 +80,36 @@ func (r *dohRec) snapshot() []string {
 	return out
 }
 
-// upstreamCall is one upstream pool+routes+bootstrap push observed by upstreamRec.
+// aclRec records every recursion-ACL push to a fake blipd and reports the
+// current list back from /api/v1/stats so the controller can converge a
+// restarted instance (mirroring dohRec).
+type aclRec struct {
+	mu    sync.Mutex
+	nets  []string
+	calls [][]string
+}
+
+func (r *aclRec) applied(nets []string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.nets = append([]string(nil), nets...)
+	r.calls = append(r.calls, append([]string(nil), nets...))
+}
+
+func (r *aclRec) snapshot() [][]string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([][]string, len(r.calls))
+	copy(out, r.calls)
+	return out
+}
+
+func (r *aclRec) current() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.nets...)
+}
+
 type upstreamCall struct {
 	servers   []upstream.UpstreamServer
 	routes    []upstream.UpstreamRoute
@@ -213,6 +242,7 @@ func fakeBlipdWithRec(t *testing.T, token, claimCode string, health *control.Hea
 	var up *upstreamRec
 	var cache *cacheRec
 	var recCtrl *recRec
+	var acl *aclRec
 	var gate *policyGate
 	for _, r := range recs {
 		switch rv := r.(type) {
@@ -220,6 +250,8 @@ func fakeBlipdWithRec(t *testing.T, token, claimCode string, health *control.Hea
 			up = rv
 		case *cacheRec:
 			cache = rv
+		case *aclRec:
+			acl = rv
 		case *policyGate:
 			gate = rv
 		case *recRec:
@@ -265,6 +297,9 @@ func fakeBlipdWithRec(t *testing.T, token, claimCode string, health *control.Hea
 		}
 		if recCtrl != nil {
 			st.RecordsHash = control.RecordsHash(recCtrl.snapshot())
+		}
+		if acl != nil {
+			st.AllowedNetworks = acl.current()
 		}
 		writeJSONH(w, &st)
 	})
@@ -447,6 +482,32 @@ func fakeBlipdWithRec(t *testing.T, token, claimCode string, health *control.Hea
 		case http.MethodDelete:
 			if recCtrl != nil {
 				recCtrl.applied(nil)
+			}
+			writeJSONH(w, map[string]bool{"ok": true})
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+	mux.HandleFunc("/api/v1/acl", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+token {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		switch r.Method {
+		case http.MethodGet:
+			var current []string
+			if acl != nil {
+				current = acl.current()
+			}
+			writeJSONH(w, map[string]interface{}{"networks": current})
+		case http.MethodPut, http.MethodPost:
+			var req control.SetACLRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if acl != nil {
+				acl.applied(req.Networks)
 			}
 			writeJSONH(w, map[string]bool{"ok": true})
 		default:
@@ -1378,6 +1439,133 @@ func TestFleetDoHReconcileRestartRevert(t *testing.T) {
 	waitForDoh(2, "no re-push after simulated restart revert")
 	if got := doh.snapshot(); got[len(got)-1] != "0.0.0.0:8445" {
 		t.Errorf("last doh push = %q, want 0.0.0.0:8445", got[len(got)-1])
+	}
+}
+
+// TestFleetACLReconcileRestartRevert simulates a blipd restart that reverts
+// the recursion ACL to open; the controller must re-push the fleet value.
+func TestFleetACLReconcileRestartRevert(t *testing.T) {
+	pollInterval = 100 * time.Millisecond
+	defer func() { pollInterval = 5 * time.Second }()
+	acl := &aclRec{}
+	srv := fakeBlipdWithRec(t, "t", "", &control.HealthResponse{OK: true}, &control.StatsResponse{}, &control.ListResponse{}, nil, nil, acl)
+	defer srv.Close()
+
+	fleet := NewFleet("/tmp/blip-test-config.yaml")
+	fleet.SetAllowedNetworksDefault([]string{"10.0.0.0/8"})
+	if err := fleet.Add(context.Background(), InstanceConfig{ID: "a", URL: srv.URL, Token: "t"}); err != nil {
+		t.Fatal(err)
+	}
+	// initial push from Add (via poll reconcile) lands the fleet value.
+	waitForACL := func(n int, msg string) {
+		deadline := time.After(3 * time.Second)
+		for {
+			if len(acl.snapshot()) >= n {
+				return
+			}
+			select {
+			case <-deadline:
+				t.Fatal(msg)
+			case <-time.After(20 * time.Millisecond):
+			}
+		}
+	}
+	waitForACL(1, "initial acl push never happened")
+
+	// Simulate restart revert: blipd forgot the ACL (open recursion).
+	acl.mu.Lock()
+	acl.nets = nil
+	acl.mu.Unlock()
+
+	waitForACL(2, "no re-push after simulated restart revert")
+	if got := acl.snapshot(); !aclEqual(got[len(got)-1], []string{"10.0.0.0/8"}) {
+		t.Errorf("last acl push = %v, want [10.0.0.0/8]", got[len(got)-1])
+	}
+}
+
+// TestFleetSetACL verifies the fleet-wide recursion ACL is pushed to every
+// instance, persisted to the controller config, and that invalid entries
+// (including /0 catch-alls) are rejected without persisting.
+func TestFleetSetACL(t *testing.T) {
+	aclA, aclB := &aclRec{}, &aclRec{}
+	srvA := fakeBlipdWithRec(t, "t", "", &control.HealthResponse{OK: true}, &control.StatsResponse{}, &control.ListResponse{}, nil, nil, aclA)
+	defer srvA.Close()
+	srvB := fakeBlipdWithRec(t, "t", "", &control.HealthResponse{OK: true}, &control.StatsResponse{}, &control.ListResponse{}, nil, nil, aclB)
+	defer srvB.Close()
+
+	cfgPath := filepath.Join(t.TempDir(), "blipc.yaml")
+	fleet := NewFleet(cfgPath)
+	ctx := context.Background()
+	if err := fleet.Add(ctx, InstanceConfig{ID: "a", URL: srvA.URL, Token: "t"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := fleet.Add(ctx, InstanceConfig{ID: "b", URL: srvB.URL, Token: "t"}); err != nil {
+		t.Fatal(err)
+	}
+
+	want := []string{"10.0.0.0/8", "fc00::/7"}
+	res, err := fleet.SetAllowedNetworks(ctx, want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res["a"] != "ok" || res["b"] != "ok" {
+		t.Fatalf("expected both ok, got %+v", res)
+	}
+	last := func(r *aclRec) []string {
+		sn := r.snapshot()
+		if len(sn) == 0 {
+			return nil
+		}
+		return sn[len(sn)-1]
+	}
+	if got := last(aclA); !aclEqual(got, want) {
+		t.Errorf("instance a last acl push = %v, want %v", got, want)
+	}
+	if got := last(aclB); !aclEqual(got, want) {
+		t.Errorf("instance b last acl push = %v, want %v", got, want)
+	}
+	if got := fleet.AllowedNetworks(); !aclEqual(got, want) {
+		t.Errorf("fleet AllowedNetworks = %v, want %v", got, want)
+	}
+	b, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(b, []byte("allowed_networks:")) || !bytes.Contains(b, []byte("10.0.0.0/8")) {
+		t.Errorf("acl not persisted:\n%s", b)
+	}
+
+	// Invalid entries are rejected and must not clobber the stored ACL.
+	for _, bad := range [][]string{{"0.0.0.0/0"}, {"::/0"}, {"bogus"}} {
+		if _, err := fleet.SetAllowedNetworks(ctx, bad); err == nil {
+			t.Errorf("SetAllowedNetworks(%v) accepted, want rejection", bad)
+		}
+	}
+	if got := fleet.AllowedNetworks(); !aclEqual(got, want) {
+		t.Errorf("fleet ACL changed by rejected push: %v", got)
+	}
+}
+
+// TestFleetACLNoPushWhenUnconfigured verifies an empty fleet ACL is never
+// pushed: it means "no fleet opinion", and pushing it would wipe an
+// instance's local ACL back to open recursion.
+func TestFleetACLNoPushWhenUnconfigured(t *testing.T) {
+	pollInterval = 100 * time.Millisecond
+	defer func() { pollInterval = 5 * time.Second }()
+	acl := &aclRec{}
+	acl.applied([]string{"192.168.0.0/16"}) // instance's local ACL
+	srv := fakeBlipdWithRec(t, "t", "", &control.HealthResponse{OK: true}, &control.StatsResponse{}, &control.ListResponse{}, nil, nil, acl)
+	defer srv.Close()
+
+	fleet := NewFleet("/tmp/blip-test-config.yaml")
+	// No SetAllowedNetworksDefault: the fleet has no opinion.
+	if err := fleet.Add(context.Background(), InstanceConfig{ID: "a", URL: srv.URL, Token: "t"}); err != nil {
+		t.Fatal(err)
+	}
+	nPushes := len(acl.snapshot())
+	time.Sleep(400 * time.Millisecond) // let several poll reconciles run
+	if got := len(acl.snapshot()); got != nPushes {
+		t.Errorf("unconfigured fleet pushed ACL %d time(s), want 0 (history=%v)", got-nPushes, acl.snapshot())
 	}
 }
 

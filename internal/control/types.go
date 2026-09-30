@@ -52,6 +52,10 @@ type StatsResponse struct {
 	// RateLimited counts queries dropped because they exceeded the per-client
 	// rate limit.
 	RateLimited uint64 `json:"rate_limited,omitempty"`
+	// AllowedNetworks is the instance's recursion ACL (CIDRs/IPs allowed to
+	// recurse). Empty/nil means open recursion. Reported so the controller
+	// can reconcile it.
+	AllowedNetworks []string `json:"allowed_networks,omitempty"`
 	// DurationTotalUs is the cumulative answer time of every served query, in
 	// microseconds. The controller deltas it across polls and divides by the
 	// query delta — the dashboard's average response time.
@@ -91,6 +95,12 @@ type SetDoHRequest struct {
 type SetRateLimitRequest struct {
 	QPS   int `json:"qps"`
 	Burst int `json:"burst,omitempty"`
+}
+
+// SetACLRequest replaces the instance's recursion ACL (CIDRs/IPs allowed to
+// recurse). An empty list opens recursion (answered for any client).
+type SetACLRequest struct {
+	Networks []string `json:"networks"`
 }
 
 // SetCacheRequest tunes the instance's response cache size: the max cached

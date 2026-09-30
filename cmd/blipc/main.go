@@ -47,6 +47,7 @@ type config struct {
 	InstanceOverrides map[string]*controller.InstanceOverride `yaml:"instance_overrides"`
 	DoHHTTPAddr       string                                  `yaml:"doh_http_addr"`
 	RateLimitQPS      int                                     `yaml:"rate_limit_qps"`
+	AllowedNetworks   []string                                `yaml:"allowed_networks"`
 	// CacheSize is a pointer so "omitted" (nil = blipd keeps its own default)
 	// stays distinct from an explicit "cache_size: 0" (unlimited, F-18).
 	CacheSize              *int                        `yaml:"cache_size"`
@@ -124,6 +125,9 @@ func main() {
 	}
 	if cfg.RateLimitQPS > 0 {
 		fleet.SetRateLimitQPSDefault(cfg.RateLimitQPS)
+	}
+	if len(cfg.AllowedNetworks) > 0 {
+		fleet.SetAllowedNetworksDefault(cfg.AllowedNetworks)
 	}
 	// F-18: CacheSize is presence-aware (*int). An explicit `cache_size: 0`
 	// means unlimited and must reach the fleet; an omitted field leaves

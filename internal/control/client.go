@@ -243,6 +243,13 @@ func (c *Client) SetRateLimit(ctx context.Context, qps, burst int) error {
 	return c.do(ctx, http.MethodPut, "/api/v1/ratelimit", &SetRateLimitRequest{QPS: qps, Burst: burst}, nil)
 }
 
+// SetAllowedNetworks replaces the instance's recursion ACL (CIDRs/IPs
+// allowed to recurse). An empty list opens recursion. Invalid entries and
+// catch-all /0 CIDRs are rejected server-side.
+func (c *Client) SetAllowedNetworks(ctx context.Context, networks []string) error {
+	return c.do(ctx, http.MethodPut, "/api/v1/acl", &SetACLRequest{Networks: networks}, nil)
+}
+
 // SetCacheConfig tunes the instance's response cache size: the max cached
 // responses (0 = unlimited).
 func (c *Client) SetCacheConfig(ctx context.Context, size int) error {

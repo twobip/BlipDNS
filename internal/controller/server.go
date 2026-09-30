@@ -1092,6 +1092,7 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			"instance_overrides":        s.fleet.InstanceOverrides(),
 			"doh_http_addr":             s.fleet.DoHHTTPAddr(),
 			"rate_limit_qps":            s.fleet.RateLimitQPS(),
+			"allowed_networks":          s.fleet.AllowedNetworks(),
 			"upstream_servers":          upServers,
 			"upstream_routes":           upRoutes,
 			"upstream_bootstrap":        s.fleet.UpstreamBootstrap(),
@@ -1109,6 +1110,7 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			Override               *InstanceOverride          `json:"override"`
 			DoHHTTPAddr            *string                    `json:"doh_http_addr"`
 			RateLimitQPS           *int                       `json:"rate_limit_qps"`
+			AllowedNetworks        *[]string                  `json:"allowed_networks"`
 			CacheSize              *int                       `json:"cache_size"`
 			QueryLogRetentionHours *int                       `json:"query_log_retention_hours"`
 			TrustedProxies         *[]string                  `json:"trusted_proxies"`
@@ -1207,6 +1209,35 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			applied := s.fleet.SetRateLimitQPS(r.Context(), qps)
+			writeJSON(w, map[string]interface{}{"ok": true, "applied": applied})
+			return
+		}
+		// Recursion ACL (fleet-wide or per-instance). Entries are validated
+		// (including the /0 catch-all guard) before persisting. An empty
+		// fleet-wide list means "no fleet opinion" and is never pushed; an
+		// explicitly-empty per-instance list clears back to the fleet
+		// default.
+		if req.AllowedNetworks != nil {
+			nets := *req.AllowedNetworks
+			if _, err := control.ParseAllowedNetworks(nets); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if req.Scope == "instance" && req.Instance != "" {
+				existing := s.fleet.InstanceOverrideOf(req.Instance)
+				merged := mergeOverride(existing, &InstanceOverride{AllowedNetworks: req.AllowedNetworks})
+				if len(nets) == 0 {
+					merged.AllowedNetworks = nil
+				}
+				applied := s.fleet.SetInstanceOverride(r.Context(), req.Instance, merged)
+				writeJSON(w, map[string]interface{}{"ok": true, "applied": applied})
+				return
+			}
+			applied, err := s.fleet.SetAllowedNetworks(r.Context(), nets)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
 			writeJSON(w, map[string]interface{}{"ok": true, "applied": applied})
 			return
 		}

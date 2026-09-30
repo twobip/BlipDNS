@@ -63,6 +63,7 @@ type Config struct {
 	BlockAction       filter.BlockAction   // response for global-blocklist hits ("" = nxdomain)
 	TrustedProxies    []string             // CIDRs/IPs trusted for X-Forwarded-For
 	AllowedNetworks   []string             // recursion ACL: CIDRs/IPs allowed to recurse; empty = allow all (open, with warning)
+	OpenRecursion     bool                 // explicit ack for empty allowed_networks on a non-loopback bind (fail closed without it)
 }
 
 // Server is the DNS + DoH resolver.
@@ -126,11 +127,17 @@ func New(cfg Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	allowed, err := parseAllowedNetworks(cfg.AllowedNetworks)
+	allowed, err := control.ParseAllowedNetworks(cfg.AllowedNetworks)
 	if err != nil {
 		return nil, err
 	}
-	if len(allowed) == 0 && len(cfg.AllowedNetworks) == 0 {
+	// Fail closed: an empty ACL on a non-loopback bind is an open resolver.
+	// Refuse to start unless the operator explicitly acked it. Loopback-only
+	// binds keep the old warning (tests and single-host setups).
+	if len(allowed) == 0 && !cfg.OpenRecursion && !isLoopbackBind(cfg.DNSAddr) {
+		return nil, fmt.Errorf("blipd: refusing to start: empty allowed_networks with non-loopback dns_addr %q is an open resolver; restrict allowed_networks to loopback/private LANs or set open_recursion: true", cfg.DNSAddr)
+	}
+	if len(allowed) == 0 {
 		log.Printf("blipd: WARNING open recursion: no allowed_networks configured, answering all clients (restrict with allowed_networks to loopback/private LANs)")
 	}
 	c := cache.New(cfg.CacheCap, cfg.CacheSize)
@@ -163,6 +170,7 @@ func New(cfg Config) (*Server, error) {
 	// the response cache (size / purge) at runtime.
 	ctrl.SetDoHController(s)
 	ctrl.SetRateLimitController(s)
+	ctrl.SetACLController(s)
 	ctrl.SetLocalResolverController(s)
 	ctrl.SetCacheController(s)
 	ctrl.SetRecordController(s)
@@ -227,43 +235,27 @@ func (s *Server) ManagementTLSConfig() *tls.Config {
 // matching policy has Log enabled.
 func (s *Server) SetBlockLogger(fn func(client, domain string)) { s.logfn = fn }
 
-// parseAllowedNetworks parses recursion-ACL CIDRs/IPs. Empty input means
-// allow all (open recursion, backward-compat). Single IPs are treated as
-// /32 (/128 for IPv6).
-func parseAllowedNetworks(values []string) ([]*net.IPNet, error) {
-	out := make([]*net.IPNet, 0, len(values))
-	for _, value := range values {
-		value = strings.TrimSpace(value)
-		if value == "" {
-			continue
-		}
-		if !strings.Contains(value, "/") {
-			ip := net.ParseIP(value)
-			if ip == nil {
-				return nil, fmt.Errorf("invalid allowed network %q", value)
-			}
-			if ip4 := ip.To4(); ip4 != nil {
-				ip = ip4
-				out = append(out, &net.IPNet{IP: ip, Mask: net.CIDRMask(32, 32)})
-			} else {
-				out = append(out, &net.IPNet{IP: ip, Mask: net.CIDRMask(128, 128)})
-			}
-			continue
-		}
-		_, n, err := net.ParseCIDR(value)
-		if err != nil {
-			return nil, fmt.Errorf("invalid allowed network %q: %w", value, err)
-		}
-		out = append(out, n)
+// isLoopbackBind reports whether addr binds loopback only. An empty host
+// (":53") binds all interfaces — never loopback (finding 8 precedent).
+func isLoopbackBind(addr string) bool {
+	h, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
 	}
-	return out, nil
+	if h == "" || strings.EqualFold(h, "localhost") {
+		return h != ""
+	}
+	if ip := net.ParseIP(strings.Trim(h, "[]")); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
 }
 
 // SetAllowedNetworks replaces the recursion ACL at runtime. Empty/nil allows
-// all (open recursion). Returns an error for invalid CIDRs without changing
-// the current ACL.
+// all (open recursion). Returns an error for invalid CIDRs (including /0
+// catch-alls) without changing the current ACL.
 func (s *Server) SetAllowedNetworks(values []string) error {
-	nets, err := parseAllowedNetworks(values)
+	nets, err := control.ParseAllowedNetworks(values)
 	if err != nil {
 		return err
 	}
@@ -276,6 +268,15 @@ func (s *Server) SetAllowedNetworks(values []string) error {
 		log.Printf("blipd: WARNING open recursion: allowed_networks cleared, answering all clients")
 	}
 	return nil
+}
+
+// AllowedNetworks returns the current recursion ACL (a copy; empty/nil means
+// open recursion). Reported via /api/v1/stats so the controller can
+// reconcile it.
+func (s *Server) AllowedNetworks() []string {
+	s.aclMu.RLock()
+	defer s.aclMu.RUnlock()
+	return append([]string(nil), s.cfg.AllowedNetworks...)
 }
 
 // isRecursionAllowed reports whether clientIP may recurse. Empty ACL allows

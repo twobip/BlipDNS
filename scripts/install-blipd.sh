@@ -496,6 +496,23 @@ admin_token: "__BLIP_ADMIN_TOKEN__"
 admin_socket: "/var/lib/blipd/blipd.sock"
 upstream: "udp://1.1.1.1:53 https://1.1.1.1/dns-query"
 cache_size: 10000
+# Recursion ACL: only these clients may recurse. dns_addr stays wildcard (DNS
+# must serve the LAN), so this list is the open-resolver guard — loopback +
+# RFC1918 + ULA covers every legitimate local client. To serve recursion to
+# the whole internet instead, empty this list AND set open_recursion: true
+# (blipd refuses to start with an empty list on a non-loopback bind without
+# that explicit ack).
+allowed_networks:
+  - "127.0.0.0/8"
+  - "::1/128"
+  - "10.0.0.0/8"
+  - "172.16.0.0/12"
+  - "192.168.0.0/16"
+  - "fc00::/7"
+open_recursion: false
+# Per-client DNS query rate limit (queries/sec; burst autos to the same).
+# 0 = unlimited (not recommended on a LAN-reachable resolver).
+rate_limit_qps: 20
 # Per-server upstream timeout (seconds before failing over to next priority server):
 # upstream_servers:
 #   - name: "cloudflare"

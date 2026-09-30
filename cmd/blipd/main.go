@@ -220,6 +220,7 @@ func main() {
 		BlockAction:       blockAction,
 		TrustedProxies:    cfg.TrustedProxies,
 		AllowedNetworks:   cfg.AllowedNetworks,
+		OpenRecursion:     cfg.OpenRecursion,
 	})
 	if err != nil {
 		log.Fatalf("blipd: %v", err)
