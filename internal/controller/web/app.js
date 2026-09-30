@@ -2380,7 +2380,8 @@ function loadReleaseEditor() {
     "DoH (DNS over HTTPS)": "dns", "Rate Limit": "dns", "Cache": "dns",
     "Recursion ACL": "sec", "Open Resolver": "sec",
     "API Keys": "keys",
-    "Release Channel": "about", "Controller Update": "about", "Reverse Proxy": "about", "About": "about"
+    "Release Channel": "about", "Controller Update": "about", "About": "about",
+    "Reverse Proxy": "sec",
   };
   const tabs = Array.from(document.querySelectorAll("#settings-tabs .settings-tab"));
   const panels = Array.from(document.querySelectorAll("#view-settings .panel"));
