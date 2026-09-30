@@ -48,6 +48,9 @@ type config struct {
 	DoHHTTPAddr       string                                  `yaml:"doh_http_addr"`
 	RateLimitQPS      int                                     `yaml:"rate_limit_qps"`
 	AllowedNetworks   []string                                `yaml:"allowed_networks"`
+	// OpenRecursionAck persists the Security-tab open-resolver ack: pushing
+	// an empty fleet ACL (open recursion) is refused unless this is true.
+	OpenRecursionAck bool `yaml:"open_recursion_ack,omitempty"`
 	// CacheSize is a pointer so "omitted" (nil = blipd keeps its own default)
 	// stays distinct from an explicit "cache_size: 0" (unlimited, F-18).
 	CacheSize              *int                        `yaml:"cache_size"`
@@ -128,6 +131,9 @@ func main() {
 	}
 	if len(cfg.AllowedNetworks) > 0 {
 		fleet.SetAllowedNetworksDefault(cfg.AllowedNetworks)
+	}
+	if cfg.OpenRecursionAck {
+		fleet.SetOpenRecursionAckDefault(true)
 	}
 	// F-18: CacheSize is presence-aware (*int). An explicit `cache_size: 0`
 	// means unlimited and must reach the fleet; an omitted field leaves

@@ -297,6 +297,7 @@ func run(ctx context.Context, client *control.Client, cmd string, rest []string,
 			die(err)
 			if len(s.AllowedNetworks) == 0 {
 				fmt.Println("recursion ACL: open (answering all clients)")
+				fmt.Println("open_recursion:", s.OpenRecursion)
 				return
 			}
 			for _, n := range s.AllowedNetworks {

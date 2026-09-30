@@ -141,6 +141,7 @@ type Fleet struct {
 	dohHTTPAddr       string                       // fleet-wide plain-HTTP DoH address ("", off)
 	rateLimitQPS      int                          // fleet-wide DNS per-client QPS limit (0 = disabled)
 	allowedNetworks   []string                     // fleet-wide recursion ACL (nil/empty = no fleet opinion; never pushed)
+	openRecursionAck  bool                         // explicit operator ack: allow pushing an empty ACL (open resolver)
 	cacheSize         int                          // fleet-wide max cached responses (0 = unlimited)
 	cacheConfigured   bool                         // true once the operator explicitly set a fleet-wide cache value
 	upstreamServers   []upstream.UpstreamServer    // fleet-wide default upstream pool
@@ -1256,7 +1257,7 @@ func (f *Fleet) effectiveRateLimitQPS(id string) int {
 }
 
 // AllowedNetworks returns the fleet-wide recursion ACL (nil/empty = no fleet
-// opinion; the controller never pushes an empty ACL).
+// opinion; an empty ACL is pushed only with the open-recursion ack).
 func (f *Fleet) AllowedNetworks() []string {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
@@ -1275,6 +1276,33 @@ func (f *Fleet) SetAllowedNetworksDefault(networks []string) {
 	f.mu.Lock()
 	f.allowedNetworks = append([]string(nil), networks...)
 	f.mu.Unlock()
+}
+
+// OpenRecursionAck reports whether the operator explicitly allowed pushing
+// an empty recursion ACL (i.e. running instances as open resolvers).
+func (f *Fleet) OpenRecursionAck() bool {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return f.openRecursionAck
+}
+
+// SetOpenRecursionAckDefault records the ack without distributing anything.
+// Used at startup from the controller config.
+func (f *Fleet) SetOpenRecursionAckDefault(v bool) {
+	f.mu.Lock()
+	f.openRecursionAck = v
+	f.mu.Unlock()
+}
+
+// SetOpenRecursionAck records the ack and persists it. There is nothing to
+// push: the ack only gates future (possibly empty) ACL pushes.
+func (f *Fleet) SetOpenRecursionAck(v bool) {
+	f.SetOpenRecursionAckDefault(v)
+	if f.configPath != "" {
+		if err := f.saveConfig(); err != nil {
+			log.Printf("blipc: warning: failed to persist open_recursion_ack: %v", err)
+		}
+	}
 }
 
 // effectiveAllowedNetworks returns the recursion ACL an instance should
@@ -1808,12 +1836,13 @@ func (f *Fleet) SetAllowedNetworks(ctx context.Context, networks []string) (map[
 }
 
 // pushACL distributes the effective recursion ACL to every instance. An
-// empty effective ACL is never pushed: it means "no fleet opinion", and
+// empty effective ACL is never pushed unless the operator gave the
+// open-recursion ack: empty means "no fleet opinion" by default, and
 // pushing it would wipe an instance's local ACL back to open recursion.
 func (f *Fleet) pushACL(ctx context.Context) map[string]string {
 	return f.fanOut(ctx, func(ictx context.Context, i *Instance) string {
 		want := f.effectiveAllowedNetworks(i.id())
-		if len(want) == 0 {
+		if len(want) == 0 && !f.OpenRecursionAck() {
 			return "ok"
 		}
 		if err := i.ctl().SetAllowedNetworks(ictx, want); err != nil {
@@ -1826,10 +1855,14 @@ func (f *Fleet) pushACL(ctx context.Context) map[string]string {
 // maybePushACL converges an instance's recursion ACL to its fleet default
 // (or per-instance override) when the instance reports a divergent value —
 // e.g. after a restart it reverted to its own YAML. An empty fleet ACL never
-// converges: it must not wipe an instance's local list.
+// converges unless the open-recursion ack is set: it must not wipe an
+// instance's local list by accident.
 func (f *Fleet) maybePushACL(ctx context.Context, i *Instance, reported *control.StatsResponse) {
 	want := f.effectiveAllowedNetworks(i.id())
-	if len(want) == 0 || !i.hasToken() {
+	if !i.hasToken() {
+		return
+	}
+	if len(want) == 0 && !f.OpenRecursionAck() {
 		return
 	}
 	var rep []string
@@ -3700,6 +3733,7 @@ func (f *Fleet) saveConfig() error {
 		DoHHTTPAddr       string                       `yaml:"doh_http_addr"`
 		RateLimitQPS      int                          `yaml:"rate_limit_qps"`
 		AllowedNetworks   []string                     `yaml:"allowed_networks,omitempty"`
+		OpenRecursionAck  bool                         `yaml:"open_recursion_ack,omitempty"`
 		UpstreamServers   []upstream.UpstreamServer    `yaml:"upstream_servers"`
 		UpstreamRoutes    []upstream.UpstreamRoute     `yaml:"upstream_routes"`
 		UpstreamBootstrap []upstream.UpstreamServer    `yaml:"upstream_bootstrap"`
@@ -3746,6 +3780,7 @@ func (f *Fleet) saveConfig() error {
 	dohAddr := f.dohHTTPAddr
 	rateQPS := f.rateLimitQPS
 	allowed := append([]string(nil), f.allowedNetworks...)
+	openAck := f.openRecursionAck
 	upServers := append([]upstream.UpstreamServer(nil), f.upstreamServers...)
 	upRoutes := append([]upstream.UpstreamRoute(nil), f.upstreamRoutes...)
 	upBootstrap := append([]upstream.UpstreamServer(nil), f.upstreamBootstrap...)
@@ -3768,6 +3803,7 @@ func (f *Fleet) saveConfig() error {
 	cfg.DoHHTTPAddr = dohAddr
 	cfg.RateLimitQPS = rateQPS
 	cfg.AllowedNetworks = allowed
+	cfg.OpenRecursionAck = openAck
 	upstreamServers, upstreamRoutes := upServers, upRoutes
 	cfg.UpstreamServers = upstreamServers
 	cfg.UpstreamRoutes = upstreamRoutes

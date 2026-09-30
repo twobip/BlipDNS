@@ -279,6 +279,13 @@ func (s *Server) AllowedNetworks() []string {
 	return append([]string(nil), s.cfg.AllowedNetworks...)
 }
 
+// OpenRecursion reports the boot-time open-resolver ack (refuse-to-start
+// is bypassed when true). Reported via /api/v1/stats so the controller UI
+// can show which instances run open.
+func (s *Server) OpenRecursion() bool {
+	return s.cfg.OpenRecursion
+}
+
 // isRecursionAllowed reports whether clientIP may recurse. Empty ACL allows
 // all (backward-compat). A nil Server (tests constructing Server literals
 // without New) also allows all.

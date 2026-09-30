@@ -2693,3 +2693,77 @@ func TestBlocklistAddAcceptsSpaceSeparated(t *testing.T) {
 		t.Errorf("ManualDomains() = %v, want %v", got, want)
 	}
 }
+
+// TestSettingsOpenRecursionAck exercises the Security-tab ack gate: clearing
+// the fleet ACL without the ack is refused (400, nothing pushed); flipping
+// the ack persists it; clearing with the ack pushes an empty ACL (open) to
+// instances; GET reads the ack back.
+func TestSettingsOpenRecursionAck(t *testing.T) {
+	acl := &aclRec{}
+	srv := fakeBlipdWithRec(t, "t", "", &control.HealthResponse{OK: true}, &control.StatsResponse{}, &control.ListResponse{}, nil, nil, acl)
+	defer srv.Close()
+
+	cfgPath := filepath.Join(t.TempDir(), "blipc.yaml")
+	fleet := NewFleet(cfgPath)
+	if err := fleet.Add(context.Background(), InstanceConfig{ID: "a", URL: srv.URL, Token: "t"}); err != nil {
+		t.Fatal(err)
+	}
+	s := NewServer("admin", "secret", fleet, nil)
+	c := newAuthedClient(t, s)
+	put := func(body string) (int, map[string]interface{}) {
+		t.Helper()
+		req, _ := http.NewRequest(http.MethodPut, "/api/settings", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := c.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		var d map[string]interface{}
+		if resp.StatusCode == http.StatusOK {
+			if err := json.NewDecoder(resp.Body).Decode(&d); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return resp.StatusCode, d
+	}
+
+	if code, _ := put(`{"allowed_networks":[]}`); code != http.StatusBadRequest {
+		t.Fatalf("clear without ack: status=%d, want 400", code)
+	}
+	if n := len(acl.snapshot()); n != 0 {
+		t.Fatalf("pushes without ack = %d, want 0", n)
+	}
+	if code, d := put(`{"open_recursion_ack":true}`); code != http.StatusOK || d["open_recursion_ack"] != true {
+		t.Fatalf("ack flip: status=%d body=%v", code, d)
+	}
+	if !fleet.OpenRecursionAck() {
+		t.Fatal("fleet ack not set")
+	}
+	if code, _ := put(`{"allowed_networks":[]}`); code != http.StatusOK {
+		t.Fatalf("clear with ack: status=%d, want 200", code)
+	}
+	hist := acl.snapshot()
+	if len(hist) == 0 || len(hist[len(hist)-1]) != 0 {
+		t.Fatalf("want one empty push, got %v", hist)
+	}
+	resp, err := c.Get("/api/settings")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var d map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&d); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if d["open_recursion_ack"] != true {
+		t.Errorf("GET open_recursion_ack = %v, want true", d["open_recursion_ack"])
+	}
+	b, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), "open_recursion_ack: true") {
+		t.Errorf("controller.yaml lacks persisted ack:\n%s", b)
+	}
+}

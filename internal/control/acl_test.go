@@ -37,6 +37,7 @@ func TestParseAllowedNetworks(t *testing.T) {
 type fakeACLController struct {
 	mu   sync.Mutex
 	nets []string
+	open bool
 }
 
 func (f *fakeACLController) SetAllowedNetworks(networks []string) error {
@@ -53,6 +54,12 @@ func (f *fakeACLController) AllowedNetworks() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.nets...)
+}
+
+func (f *fakeACLController) OpenRecursion() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.open
 }
 
 func TestACLEndpoint(t *testing.T) {
@@ -127,5 +134,33 @@ func TestACLEndpoint(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusServiceUnavailable {
 		t.Errorf("unwired status = %d, want 503", resp.StatusCode)
+	}
+}
+
+func TestStatsReportsOpenRecursion(t *testing.T) {
+	bl := blocklist.New()
+	store := filter.NewStore(nil)
+	ac := &fakeACLController{open: true}
+	srv := NewServerWithBlocklist("tok", store, cache.New(0, 0), &Counters{}, "blipd/test", bl)
+	srv.SetACLController(ac)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/v1/stats", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("stats status = %d, want 200", resp.StatusCode)
+	}
+	var st map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&st); err != nil {
+		t.Fatal(err)
+	}
+	if st["open_recursion"] != true {
+		t.Errorf("stats open_recursion = %v, want true", st["open_recursion"])
 	}
 }

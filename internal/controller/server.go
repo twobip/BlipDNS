@@ -1117,6 +1117,7 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			"doh_http_addr":             s.fleet.DoHHTTPAddr(),
 			"rate_limit_qps":            s.fleet.RateLimitQPS(),
 			"allowed_networks":          s.fleet.AllowedNetworks(),
+			"open_recursion_ack":        s.fleet.OpenRecursionAck(),
 			"upstream_servers":          upServers,
 			"upstream_routes":           upRoutes,
 			"upstream_bootstrap":        s.fleet.UpstreamBootstrap(),
@@ -1135,6 +1136,7 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			DoHHTTPAddr            *string                    `json:"doh_http_addr"`
 			RateLimitQPS           *int                       `json:"rate_limit_qps"`
 			AllowedNetworks        *[]string                  `json:"allowed_networks"`
+			OpenRecursionAck       *bool                      `json:"open_recursion_ack"`
 			CacheSize              *int                       `json:"cache_size"`
 			QueryLogRetentionHours *int                       `json:"query_log_retention_hours"`
 			TrustedProxies         *[]string                  `json:"trusted_proxies"`
@@ -1236,6 +1238,16 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, map[string]interface{}{"ok": true, "applied": applied})
 			return
 		}
+		// Fleet-wide open-resolver ack: explicit opt-in to pushing an empty
+		// ACL. Applied before the ACL below so one request can ack+clear.
+		if req.OpenRecursionAck != nil {
+			s.fleet.SetOpenRecursionAck(*req.OpenRecursionAck)
+			// A lone ack flip (no ACL in the same request) is done here.
+			if req.AllowedNetworks == nil {
+				writeJSON(w, map[string]interface{}{"ok": true, "open_recursion_ack": s.fleet.OpenRecursionAck()})
+				return
+			}
+		}
 		// Recursion ACL (fleet-wide or per-instance). Entries are validated
 		// (including the /0 catch-all guard) before persisting. An empty
 		// fleet-wide list means "no fleet opinion" and is never pushed; an
@@ -1245,6 +1257,10 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			nets := *req.AllowedNetworks
 			if _, err := control.ParseAllowedNetworks(nets); err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if len(nets) == 0 && req.Scope != "instance" && !s.fleet.OpenRecursionAck() {
+				http.Error(w, "clearing the fleet ACL opens recursion to the world; set open_recursion_ack first", http.StatusBadRequest)
 				return
 			}
 			if req.Scope == "instance" && req.Instance != "" {

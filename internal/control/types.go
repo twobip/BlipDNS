@@ -56,6 +56,10 @@ type StatsResponse struct {
 	// recurse). Empty/nil means open recursion. Reported so the controller
 	// can reconcile it.
 	AllowedNetworks []string `json:"allowed_networks,omitempty"`
+	// OpenRecursion is the instance's boot-time open-resolver ack: true
+	// means blipd started with open_recursion set, i.e. an empty ACL on a
+	// non-loopback bind answers the world instead of refusing to boot.
+	OpenRecursion bool `json:"open_recursion,omitempty"`
 	// DurationTotalUs is the cumulative answer time of every served query, in
 	// microseconds. The controller deltas it across polls and divides by the
 	// query delta — the dashboard's average response time.

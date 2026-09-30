@@ -1769,6 +1769,78 @@ function loadRlEditor() {
   }
 }
 
+// Recursion-ACL editor state
+let savedACL = [];               // fleet-wide allowed networks (empty = no fleet opinion)
+let savedOpenAck = false;        // fleet-wide open-resolver ack
+let aclScopeState = "default";   // "default" or an instance id
+function renderAclScopeSelect() {
+  const sel = $("s-acl-scope");
+  sel.innerHTML = "";
+  const opt = (v, label) => {
+    const o = document.createElement("option");
+    o.value = v; o.textContent = label; sel.appendChild(o);
+  };
+  opt("default", "Fleet-wide default");
+  for (const i of instances) {
+    const has = savedOverrides[i.id] && savedOverrides[i.id].allowed_networks != null;
+    opt(i.id, "instance: " + (i.label || i.id) + (has ? " (custom)" : ""));
+  }
+  if (!instances.some((i) => i.id === aclScopeState)) aclScopeState = "default";
+  sel.value = aclScopeState;
+}
+function aclNetsForScope() {
+  if (aclScopeState === "default") return savedACL;
+  const o = savedOverrides[aclScopeState];
+  return (o && o.allowed_networks != null) ? o.allowed_networks : null; // null = inherits
+}
+function loadACLEditor() {
+  renderAclScopeSelect();
+  const ta = $("s-acl-nets");
+  const badge = $("s-acl-badge");
+  const hint = $("s-acl-scope-hint");
+  const nets = aclNetsForScope();
+  if (aclScopeState === "default") {
+    badge.textContent = "fleet-wide";
+    badge.className = "badge accent";
+    ta.value = (nets || []).join("\n");
+    hint.textContent = "Applies to every instance that doesn't have its own override. Empty = open resolver (needs the ack below).";
+  } else {
+    badge.textContent = "instance";
+    badge.className = "badge purple";
+    ta.value = nets == null ? "" : nets.join("\n");
+    ta.placeholder = nets == null ? savedACL.join("\n") : "";
+    hint.textContent = "Blank = inherit the fleet-wide default.";
+  }
+  loadOpenEditor();
+}
+function loadOpenEditor() {
+  const cb = $("s-open-ack");
+  const badge = $("s-open-badge");
+  const tb = $("s-open-tbody");
+  cb.checked = savedOpenAck;
+  const anyOpen = instances.some((i) => {
+    const st = i.stats || {};
+    return (st.allowed_networks || []).length === 0;
+  });
+  badge.textContent = savedOpenAck ? "ack on" : (anyOpen ? "open instances!" : "closed");
+  badge.className = "badge " + (savedOpenAck || anyOpen ? "err" : "on");
+  if (!instances.length) {
+    tb.innerHTML = `<tr class="empty-row"><td colspan="3"><div class="empty"><h4>No instances</h4></div></td></tr>`;
+    return;
+  }
+  tb.innerHTML = instances.map((i) => {
+    const st = i.stats || {};
+    const rep = st.allowed_networks || [];
+    const o = (savedOverrides[i.id] || {}).allowed_networks;
+    const eff = o != null ? o : savedACL;
+    const effTxt = eff.length === 0 ? "<b>OPEN</b>" : esc(eff.join(", "));
+    const repTxt = rep.length === 0 ? "<b>OPEN</b>" : esc(rep.join(", "));
+    const boot = st.open_recursion ? `<span class="badge err">open_recursion</span>` : `<span class="badge on">ACL</span>`;
+    const drift = rep.join("\n") !== eff.join("\n") ? ` <span class="muted">(want: ${effTxt})</span>` : "";
+    return `<tr><td>${esc(i.label || i.id)}</td><td>${repTxt}${drift}</td><td>${boot}</td></tr>`;
+  }).join("");
+}
+
 // Response-cache editor state
 let savedCacheSize = 0;          // fleet-wide max cached responses (0 = unlimited)
 let savedQLRetention = 720;      // how long query log entries are kept (hours)
@@ -1932,6 +2004,8 @@ async function refreshSettings() {
     // fleet-wide plain-HTTP DoH address ("" = off)
     savedFleetDoH = (d.doh_http_addr != null && d.doh_http_addr !== undefined) ? (d.doh_http_addr || "") : "";
     savedRLQPS = (d.rate_limit_qps != null && d.rate_limit_qps !== undefined) ? Number(d.rate_limit_qps || 0) : 0;
+    savedACL = Array.isArray(d.allowed_networks) ? d.allowed_networks : [];
+    savedOpenAck = d.open_recursion_ack === true;
     savedCacheSize = (d.cache_size != null && d.cache_size !== undefined) ? Number(d.cache_size || 0) : 0;
     savedQLRetention = (d.query_log_retention_hours != null && d.query_log_retention_hours !== undefined) ? Number(d.query_log_retention_hours || 720) : 720;
     savedReleaseChannel = d.release_channel === "dev" ? "dev" : "stable";
@@ -1949,6 +2023,7 @@ async function refreshSettings() {
     loadScopeEditor();
     loadDoHEditor();
     loadRlEditor();
+    loadACLEditor();
     loadCacheEditor();
     loadQLEditor();
     loadKeys();
@@ -2303,6 +2378,7 @@ function loadReleaseEditor() {
   const paneOf = {
     "Query Log": "ql", "Reset & destroy": "ql",
     "DoH (DNS over HTTPS)": "dns", "Rate Limit": "dns", "Cache": "dns",
+    "Recursion ACL": "sec", "Open Resolver": "sec",
     "API Keys": "keys",
     "Release Channel": "about", "Controller Update": "about", "Reverse Proxy": "about", "About": "about"
   };
@@ -2550,6 +2626,58 @@ $("s-doh-plain").addEventListener("change", (e) => {
   const addrIn = $("s-doh-addr");
   if (plainCb.checked && !addrIn.value) addrIn.value = "0.0.0.0:8445";
   addrIn.disabled = !plainCb.checked;
+});
+$("s-acl-scope").addEventListener("change", (e) => {
+  aclScopeState = e.target.value;
+  loadACLEditor();
+});
+$("s-save-acl").onclick = async () => {
+  const st = $("s-acl-status");
+  st.textContent = "saving…";
+  const nets = $("s-acl-nets").value.split("\n").map((s) => s.trim()).filter((s) => s !== "");
+  let body, msg;
+  if (aclScopeState === "default") {
+    body = { allowed_networks: nets };
+    msg = nets.length === 0 ? "fleet ACL cleared (open resolver)" : "fleet recursion ACL saved";
+  } else {
+    body = { scope: "instance", instance: aclScopeState, allowed_networks: nets };
+    msg = nets.length === 0 ? "instance ACL override cleared" : "instance ACL override saved";
+  }
+  try {
+    const r = await API("/api/settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const d = await r.json();
+    const applied = d.applied || {};
+    const ids = Object.keys(applied);
+    const ok = ids.filter((k) => applied[k] === "ok").length;
+    const failed = ids.filter((k) => applied[k] !== "ok");
+    st.textContent = ids.length ? "saved on blipc · pushed to " + ok + "/" + ids.length + " instance" + (ids.length > 1 ? "s" : "") + (failed.length ? " · errors: " + failed.map((k) => k + ": " + applied[k]).join(", ") : "") : "saved on blipc · no instance to push to yet";
+    toast(msg + (ids.length ? " (" + ok + "/" + ids.length + ")" : ""));
+    if (aclScopeState === "default") {
+      savedACL = nets;
+    } else {
+      const o = savedOverrides[aclScopeState];
+      if (nets.length === 0) {
+        if (o) delete o.allowed_networks;
+        if (!o || Object.keys(o).length === 0) delete savedOverrides[aclScopeState];
+      } else {
+        if (!o) savedOverrides[aclScopeState] = { allowed_networks: nets };
+        else o.allowed_networks = nets;
+      }
+    }
+    loadACLEditor();
+  } catch (e) { st.textContent = ""; toast("save failed: " + e.message, "err"); }
+};
+$("s-open-ack").addEventListener("change", async (e) => {
+  const st = $("s-open-status");
+  const want = e.target.checked;
+  st.textContent = "saving…";
+  try {
+    await API("/api/settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ open_recursion_ack: want }) });
+    savedOpenAck = want;
+    st.textContent = want ? "ack on — clearing the fleet ACL will now open recursion" : "ack off";
+    toast(want ? "open-resolver ack enabled" : "open-resolver ack disabled");
+    loadACLEditor();
+  } catch (err) { st.textContent = ""; e.target.checked = savedOpenAck; toast("save failed: " + err.message, "err"); }
 });
 $("s-rl-scope").addEventListener("change", (e) => {
   rlScopeState = e.target.value;

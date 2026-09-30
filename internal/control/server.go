@@ -151,6 +151,7 @@ func (s *Server) SetRateLimitController(c RateLimitController) {
 type ACLController interface {
 	SetAllowedNetworks(networks []string) error
 	AllowedNetworks() []string
+	OpenRecursion() bool
 }
 
 // SetACLController wires the DNS server (which owns its recursion ACL) into
@@ -656,6 +657,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		// (e.g. after a restart) by re-pushing on drift.
 		if ac := ctrls.ACL; ac != nil {
 			st.AllowedNetworks = ac.AllowedNetworks()
+			st.OpenRecursion = ac.OpenRecursion()
 		}
 		// Report the runtime cache size limit so the controller can converge
 		// it after a restart.
