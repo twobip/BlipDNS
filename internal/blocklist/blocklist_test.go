@@ -17,6 +17,7 @@ package blocklist
 import (
 	"context"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -42,9 +43,23 @@ func TestSSRFProtection(t *testing.T) {
 	for _, u := range []string{
 		"http://127.0.0.1/x", "http://localhost/x", "http://169.254.169.254/latest/x",
 		"http://10.0.0.1/x", "http://192.168.1.1/x", "ftp://example.com/x",
+		"http://100.64.0.1/x", "http://100.100.100.200/latest/x",
 	} {
 		if _, err := FetchSource(context.Background(), u, Validators{}); err == nil {
 			t.Errorf("FetchSource(%q) should have been blocked", u)
+		}
+	}
+}
+
+func TestIsCGNAT(t *testing.T) {
+	for _, s := range []string{"100.64.0.1", "100.100.100.200", "100.127.255.255"} {
+		if !IsCGNAT(net.ParseIP(s)) {
+			t.Errorf("IsCGNAT(%s) = false, want true", s)
+		}
+	}
+	for _, s := range []string{"8.8.8.8", "10.0.0.1", "169.254.169.254", "101.64.0.1", "99.64.0.1"} {
+		if IsCGNAT(net.ParseIP(s)) {
+			t.Errorf("IsCGNAT(%s) = true, want false", s)
 		}
 	}
 }
