@@ -17,6 +17,7 @@
 #   sudo bash /tmp/install-blipd.sh --install-deps
 #
 set -euo pipefail
+umask 077
 
 REPO="github.com/twobip/BlipDNS"
 BIN_DIR="${BIN_DIR:-/usr/local/bin}"
@@ -30,6 +31,28 @@ RAW_BASE="https://raw.githubusercontent.com/twobip/BlipDNS"
 # --- helpers -----------------------------------------------------------------
 log()  { echo "[install-blipd] $*"; }
 err()  { echo "[install-blipd] ERROR: $*" >&2; exit 1; }
+
+# Release signing (finding 4): SHA256SUMS is signed with an ed25519 key
+# (ssh-keygen -Y sign, namespace below). The public half is embedded here,
+# copied from scripts/blipd-install.sh, so every asset — including the
+# root-executed helpers — verifies against the SIGNED sums before install.
+SIGN_IDENTITY="release@blipdns"
+SIGN_NAMESPACE="blipdns-release"
+SIGNING_ALLOWED='release@blipdns ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAllzM9gHKiNT3JLmP4nj0VgS68IBkFVsP6OIirPEm2V BlipDNS release signing (GitHub Actions)'
+
+command -v ssh-keygen >/dev/null 2>&1 || err "ssh-keygen (openssh-client) is required to verify release signatures"
+
+# verify_sums_sig <dir> — verify dir/SHA256SUMS against dir/SHA256SUMS.sig.
+# Fail closed: a missing or bad signature refuses the install.
+verify_sums_sig() {
+  [ -f "$1/SHA256SUMS" ] || err "SHA256SUMS missing — refusing to install"
+  [ -f "$1/SHA256SUMS.sig" ] || err "SHA256SUMS.sig missing — release is not signed — refusing to install"
+  _signers="$(mktemp)" || err "cannot create signers scratch file"
+  printf '%s\n' "$SIGNING_ALLOWED" > "$_signers"
+  ssh-keygen -Y verify -f "$_signers" -I "$SIGN_IDENTITY" -n "$SIGN_NAMESPACE" -s "$1/SHA256SUMS.sig" < "$1/SHA256SUMS" \
+    || { rm -f "$_signers"; err "SHA256SUMS signature verification FAILED — refusing to install"; }
+  rm -f "$_signers"
+}
 
 usage() {
   cat <<'EOF'
@@ -296,10 +319,16 @@ fi
 
 case "$CHANNEL" in
   stable|master)
-    REF="master"
-    TAG="v$(curl -fsSL --proto '=https' --tlsv1.2 "$RAW_BASE/master/VERSION" || err "could not read the current stable version from GitHub")" ;;
+    # Finding 10: validate the VERSION payload before turning it into a
+    # download URL or clone ref (same regex as blipd-update.sh).
+    STABLE_VER="$(curl -fsSL --proto '=https' --tlsv1.2 "$RAW_BASE/master/VERSION" || err "could not read the current stable version from GitHub")"
+    [[ "$STABLE_VER" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || err "invalid VERSION from GitHub: $STABLE_VER"
+    TAG="v$STABLE_VER"
+    # Clone the immutable tag, not the moving master branch: an unreviewed
+    # push to master must not change what "install stable" puts on root boxes.
+    REF="$TAG" ;;
   dev)
-    REF="dev"
+    REF="master"
     TAG="dev" ;;
   v*)
     REF="$CHANNEL"
@@ -312,17 +341,21 @@ esac
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
 
-# fetch_verified <tag> <asset> <destfile> — download and SHA256-verify one asset.
+# fetch_verified <tag> <asset> <destfile> — download one asset, verify the
+# release signature over SHA256SUMS (embedded key, fail closed), then bind
+# the asset to its hash from the SIGNED sums before installing.
 fetch_verified() {
   local tag="$1" asset="$2" dest="$3" expected actual
   curl -fL --proto '=https' --tlsv1.2 "$BASE_URL/$tag/$asset" -o "$TMPDIR/$asset" || err "download failed: $BASE_URL/$tag/$asset"
   curl -fsSL --proto '=https' --tlsv1.2 "$BASE_URL/$tag/SHA256SUMS" -o "$TMPDIR/SHA256SUMS" || err "download failed: SHA256SUMS"
+  curl -fsSL --proto '=https' --tlsv1.2 "$BASE_URL/$tag/SHA256SUMS.sig" -o "$TMPDIR/SHA256SUMS.sig" || err "download failed: SHA256SUMS.sig — unsigned release, refusing to install"
+  verify_sums_sig "$TMPDIR"
   expected="$(awk -v a="$asset" '$2==a {print $1; exit}' "$TMPDIR/SHA256SUMS")"
   [ -n "$expected" ] || err "no checksum entry for $asset in SHA256SUMS"
   actual="$(sha256sum "$TMPDIR/$asset" | awk '{print $1}')"
   [ "$expected" = "$actual" ] || err "checksum verification FAILED for $asset — refusing to install"
-  mv "$TMPDIR/$asset" "$dest"
-  rm -f "$TMPDIR/SHA256SUMS"
+  install -m 0755 "$TMPDIR/$asset" "$dest"
+  rm -f "$TMPDIR/SHA256SUMS" "$TMPDIR/SHA256SUMS.sig"
 }
 
 if [ "$BUILD_FROM_SOURCE" -eq 1 ]; then
@@ -334,7 +367,7 @@ if [ "$BUILD_FROM_SOURCE" -eq 1 ]; then
   export GOPATH="$CACHE_DIR/gopath"
 
   # M13: pin the clone. REF is allow-listed by the channel case above
-  # (stable|master|dev|vX.Y.Z); refuse an empty REF so we never clone a
+  # (immutable vX.Y.Z tag for stable/pins; master only for dev); refuse an
   # default branch implicitly. Fail hard when the pinned ref cannot be
   # fetched — never fall back to an unpinned default branch (H2: the fallback
   # would silently install unaudited code when the pin is unavailable).
@@ -362,7 +395,10 @@ else
     || err "download failed: $BASE_URL/$TAG/blipd-linux-amd64"
   curl -fsSL --proto '=https' --tlsv1.2 "$BASE_URL/$TAG/SHA256SUMS" -o "$TMPDIR/SHA256SUMS" \
     || err "download failed: SHA256SUMS"
-  log "verifying checksum"
+  curl -fsSL --proto '=https' --tlsv1.2 "$BASE_URL/$TAG/SHA256SUMS.sig" -o "$TMPDIR/SHA256SUMS.sig" \
+    || err "download failed: SHA256SUMS.sig — unsigned release, refusing to install"
+  log "verifying signature and checksum"
+  verify_sums_sig "$TMPDIR"
   expected="$(awk '$2=="blipd-linux-amd64" {print $1; exit}' "$TMPDIR/SHA256SUMS")"
   [ -n "$expected" ] || err "no checksum entry for blipd-linux-amd64 in SHA256SUMS"
   actual="$(sha256sum "$TMPDIR/blipd" | awk '{print $1}')"
@@ -448,7 +484,9 @@ if [ ! -f "$CONFIG_DIR/blipd.yaml" ]; then
 dns_addr: "0.0.0.0:53"
 # H4: loopback-first defaults. dns_addr stays wildcard (DNS must serve the
 # LAN), but the management API and DoH bind to loopback. To expose them,
-# change to 0.0.0.0 only behind an isolated mgmt VLAN + set insecure_lan ack.
+# change to 0.0.0.0 only on a trusted mgmt LAN: blipd logs a loud startup
+# warning for non-loopback listeners (there is no ack flag — the warning
+# is the control), so confirm you see it and restrict the LAN accordingly.
 doh_addr: "127.0.0.1:443"
 doh_tls: true
 admin_addr: "127.0.0.1:8444"
@@ -458,6 +496,23 @@ admin_token: "__BLIP_ADMIN_TOKEN__"
 admin_socket: "/var/lib/blipd/blipd.sock"
 upstream: "udp://1.1.1.1:53 https://1.1.1.1/dns-query"
 cache_size: 10000
+# Recursion ACL: only these clients may recurse. dns_addr stays wildcard (DNS
+# must serve the LAN), so this list is the open-resolver guard — loopback +
+# RFC1918 + ULA covers every legitimate local client. To serve recursion to
+# the whole internet instead, empty this list AND set open_recursion: true
+# (blipd refuses to start with an empty list on a non-loopback bind without
+# that explicit ack).
+allowed_networks:
+  - "127.0.0.0/8"
+  - "::1/128"
+  - "10.0.0.0/8"
+  - "172.16.0.0/12"
+  - "192.168.0.0/16"
+  - "fc00::/7"
+open_recursion: false
+# Per-client DNS query rate limit (queries/sec; burst autos to the same).
+# 0 = unlimited (not recommended on a LAN-reachable resolver).
+rate_limit_qps: 20
 # Per-server upstream timeout (seconds before failing over to next priority server):
 # upstream_servers:
 #   - name: "cloudflare"
@@ -470,70 +525,62 @@ cache_size: 10000
 #     timeout_sec: 5
 EOF
   sed -i "s/__BLIP_ADMIN_TOKEN__/$ADMIN_TOKEN/" "$CONFIG_DIR/blipd.yaml"
-  chmod 600 "$CONFIG_DIR/blipd.yaml"
+  chmod 640 "$CONFIG_DIR/blipd.yaml"
+  chown root:blip "$CONFIG_DIR/blipd.yaml"
   log "admin token saved in $CONFIG_DIR/blipd.yaml (do not share it)"
 elif grep -Eq '^[[:space:]]*admin_token:[[:space:]]*("replace-me-with-a-secret-token"|replace-me-with-a-secret-token|"__BLIP_ADMIN_TOKEN__"|__BLIP_ADMIN_TOKEN__|""|null|)[[:space:]]*$' "$CONFIG_DIR/blipd.yaml"; then
   ADMIN_TOKEN="$(generate_admin_token)"
   sed -i -E "s|^([[:space:]]*admin_token:)[[:space:]].*$|\\1 \\\"$ADMIN_TOKEN\\\"|" "$CONFIG_DIR/blipd.yaml"
-  chmod 600 "$CONFIG_DIR/blipd.yaml"
+  chmod 640 "$CONFIG_DIR/blipd.yaml"
+  chown root:blip "$CONFIG_DIR/blipd.yaml"
   log "replaced the placeholder admin token in $CONFIG_DIR/blipd.yaml (do not share it)"
 fi
-chmod 600 "$CONFIG_DIR/blipd.yaml"
+chmod 640 "$CONFIG_DIR/blipd.yaml"
+chown root:blip "$CONFIG_DIR/blipd.yaml"
 
 # The service runs as the unprivileged 'blip' user; give it write access to its
 # state directory and read access to the config (which holds the admin token).
 log "setting ownership for the blip service user"
 chown -R blip:blip "$STATE_DIR"
 chown -R root:blip "$CONFIG_DIR"
-chown blip:blip "$CONFIG_DIR/blipd.yaml"
+# Finding 11: the config must not be daemon-writable — a compromised blip
+# process could otherwise persist (admin_token, upstream, allowed_networks).
+# root-owned, group-readable: blipd can read, only root can rewrite.
+chown root:blip "$CONFIG_DIR/blipd.yaml"
+chmod 640 "$CONFIG_DIR/blipd.yaml"
 chmod 750 "$CONFIG_DIR"
-# chmod 600 already set above (line 438); 640 would warn in blipd.
+
+# Finding 9: record the installed version at INSTALL time (not only on
+# self-update) so the updater's downgrade guard has a trustworthy stamp.
+# The dev rolling tag is exempt (no ordering).
+if [ "$TAG" != "dev" ]; then
+  mkdir -p "$STATE_DIR/update"
+  printf '%s\n' "${TAG#v}" > "$STATE_DIR/update/.installed-version"
+  chown -R blip:blip "$STATE_DIR/update"
+  chmod 644 "$STATE_DIR/update/.installed-version"
+fi
 
 # --- systemd service (if systemd is available) --------------------------------
 if [ -d "$SYSTEMD_DIR" ] && command -v systemctl >/dev/null 2>&1; then
   log "installing systemd unit: $SYSTEMD_DIR/$SERVICE_NAME.service"
-  cat > "$SYSTEMD_DIR/$SERVICE_NAME.service" <<EOF
-[Unit]
-Description=BlipDNS - fast per-client filtering DNS server with DoH
-Documentation=https://github.com/twobip/BlipDNS
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=blip
-Group=blip
-ExecStart=$BIN_DIR/blipd -config $CONFIG_DIR/blipd.yaml
-ExecReload=/bin/kill -HUP \$MAINPID
-Restart=on-failure
-RestartSec=3
-
-# Allow binding privileged ports (e.g. 53) as the unprivileged 'blip' user.
-AmbientCapabilities=CAP_NET_BIND_SERVICE
-# No CapabilityBoundingSet restriction: blipd elevates to the pinned
-# /usr/local/sbin/blipd-install helper via sudo (narrow sudoers rule), which
-# needs CAP_SETGID/CAP_SETUID available.
-# NoNewPrivileges must stay OFF for the same reason.
-UMask=0077
-ProtectSystem=strict
-ProtectHome=true
-PrivateTmp=true
-# /run/lock: the root install helper takes its lock there; without this the
-# lock open fails with EROFS (children inherit the unit's mount namespace,
-# even via sudo) and self-update dies with "cannot open lock".
-# /usr/local/bin: the helper stages (mktemp) and installs there.
-# Both stay root-owned, so the service user gains no write access (DAC
-# unchanged); only the mount flag changes, letting the root helper through.
-ReadWritePaths=$STATE_DIR $CONFIG_DIR /run/lock /usr/local/bin
-LimitNOFILE=65536
-StandardOutput=journal
-StandardError=journal
-SyslogIdentifier=blipd
-
-[Install]
-WantedBy=multi-user.target
-EOF
-  chmod 644 "$SYSTEMD_DIR/$SERVICE_NAME.service"
+  # Finding 21: install the hardened unit shipped in deploy/ instead of
+  # re-emitting an inline copy (which had drifted weaker — 0 of the 7
+  # sandbox directives). Source builds copy it from the clone; release
+  # installs fetch it as a signed release asset (fail closed when absent).
+  if [ "$BUILD_FROM_SOURCE" -eq 1 ]; then
+    UNIT_SRC="$TMPDIR/src/deploy/blipd.service"
+    [ -f "$UNIT_SRC" ] || err "deploy/blipd.service missing from source checkout"
+  else
+    UNIT_SRC="$TMPDIR/blipd.service"
+    fetch_verified "$TAG" blipd.service "$UNIT_SRC"
+  fi
+  # Honor BIN_DIR/CONFIG_DIR/STATE_DIR overrides; deploy/ carries defaults.
+  sed -e "s#/usr/local/bin/blipd#$BIN_DIR/blipd#" \
+      -e "s#/etc/blipd/blipd.yaml#$CONFIG_DIR/blipd.yaml#" \
+      -e "s#/var/lib/blipd#$STATE_DIR#g" \
+      "$UNIT_SRC" > "$TMPDIR/blipd.service.inst" \
+    || err "failed to stage systemd unit"
+  install -m 0644 "$TMPDIR/blipd.service.inst" "$SYSTEMD_DIR/$SERVICE_NAME.service"
   log "reloading systemd daemon"
   systemctl daemon-reload || true
   if systemctl is-active --quiet "$SERVICE_NAME"; then

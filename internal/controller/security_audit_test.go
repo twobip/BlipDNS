@@ -68,7 +68,9 @@ func TestReadKeyDeniedQueryHistory(t *testing.T) {
 		t.Fatalf("create read key: bad json %s", rec.Body.String())
 	}
 
-	for _, path := range []string{"/api/queries", "/api/clients", "/api/client-names", "/api/events", "/api/upstream-errors"} {
+	for _, path := range []string{"/api/queries", "/api/clients", "/api/client-names", "/api/events", "/api/upstream-errors",
+		"/api/settings", "/api/instances", "/api/records", "/api/blocklist", "/api/blocklist/export", "/api/doh-mobileconfig",
+		"/api/instances/demo/policies"} {
 		req := httptest.NewRequest(http.MethodGet, path, nil)
 		req.Header.Set("Authorization", "Bearer "+out.Key)
 		r := httptest.NewRecorder()
@@ -84,6 +86,41 @@ func TestReadKeyDeniedQueryHistory(t *testing.T) {
 	h.ServeHTTP(r, req)
 	if r.Code != http.StatusOK {
 		t.Errorf("read key GET /api/health: status=%d, want 200", r.Code)
+	}
+}
+
+// TestLoginCSRF proves /api/login enforces the same Origin check as logout:
+// a cross-site POST is rejected even before credentials are examined, while
+// a headerless API-style POST still reaches authentication (401, not 403)
+// when StrictCSRF is off — but is rejected (403) under StrictCSRF, where a
+// headerless POST is indistinguishable from a forged legacy-browser post.
+func TestLoginCSRF(t *testing.T) {
+	srv := NewServerWithConfig("admin", "test-password-123", NewFleet(""), nil, "", "")
+	h := srv.Handler()
+
+	bad, _ := json.Marshal(map[string]interface{}{"username": "admin", "password": "wrong"})
+	req := httptest.NewRequest(http.MethodPost, "/api/login", bytes.NewReader(bad))
+	req.Header.Set("Origin", "https://attacker.example")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("cross-site Origin login: status=%d, want 403", rec.Code)
+	}
+
+	req2 := httptest.NewRequest(http.MethodPost, "/api/login", bytes.NewReader(bad))
+	rec2 := httptest.NewRecorder()
+	h.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusUnauthorized {
+		t.Fatalf("headerless login: status=%d, want 401", rec2.Code)
+	}
+
+	// Under StrictCSRF the same headerless POST must fail closed.
+	srv.StrictCSRF = true
+	req3 := httptest.NewRequest(http.MethodPost, "/api/login", bytes.NewReader(bad))
+	rec3 := httptest.NewRecorder()
+	h.ServeHTTP(rec3, req3)
+	if rec3.Code != http.StatusForbidden {
+		t.Fatalf("strict headerless login: status=%d, want 403", rec3.Code)
 	}
 }
 

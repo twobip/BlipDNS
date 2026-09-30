@@ -80,6 +80,10 @@ type InstanceOverride struct {
 	// RateLimitQPS, when set, overrides the fleet-wide DNS query rate limit
 	// (QPS per client) for this instance. 0 disables rate limiting.
 	RateLimitQPS *int `json:"rate_limit_qps,omitempty" yaml:"rate_limit_qps,omitempty"`
+	// AllowedNetworks, when set, overrides the fleet-wide recursion ACL
+	// (CIDRs/IPs allowed to recurse) for this instance. nil = inherit the
+	// fleet default.
+	AllowedNetworks *[]string `json:"allowed_networks,omitempty" yaml:"allowed_networks,omitempty"`
 	// UpstreamServers, when set, overrides the fleet-wide upstream server pool
 	// for this instance. nil = inherit the fleet default.
 	UpstreamServers *[]upstream.UpstreamServer `json:"upstream_servers,omitempty" yaml:"upstream_servers,omitempty"`
@@ -100,7 +104,7 @@ type InstanceOverride struct {
 
 // IsEmpty reports whether the override changes nothing.
 func (o *InstanceOverride) IsEmpty() bool {
-	return o == nil || (o.Upstream == nil && o.BlockAction == nil && o.Log == nil && o.DoHHTTPAddr == nil && o.RateLimitQPS == nil && o.UpstreamServers == nil && o.UpstreamRoutes == nil && o.UpstreamBootstrap == nil && o.CacheSize == nil && o.Records == nil)
+	return o == nil || (o.Upstream == nil && o.BlockAction == nil && o.Log == nil && o.DoHHTTPAddr == nil && o.RateLimitQPS == nil && o.AllowedNetworks == nil && o.UpstreamServers == nil && o.UpstreamRoutes == nil && o.UpstreamBootstrap == nil && o.CacheSize == nil && o.Records == nil)
 }
 
 // Fleet holds all instances, the event bus, and the global blocklist.
@@ -136,6 +140,7 @@ type Fleet struct {
 	overrides         map[string]*InstanceOverride // per-instance partial configs (diff vs default)
 	dohHTTPAddr       string                       // fleet-wide plain-HTTP DoH address ("", off)
 	rateLimitQPS      int                          // fleet-wide DNS per-client QPS limit (0 = disabled)
+	allowedNetworks   []string                     // fleet-wide recursion ACL (nil/empty = no fleet opinion; never pushed)
 	cacheSize         int                          // fleet-wide max cached responses (0 = unlimited)
 	cacheConfigured   bool                         // true once the operator explicitly set a fleet-wide cache value
 	upstreamServers   []upstream.UpstreamServer    // fleet-wide default upstream pool
@@ -1105,6 +1110,10 @@ func cloneInstanceOverride(o *InstanceOverride) *InstanceOverride {
 		v := *o.RateLimitQPS
 		out.RateLimitQPS = &v
 	}
+	if o.AllowedNetworks != nil {
+		v := append([]string(nil), *o.AllowedNetworks...)
+		out.AllowedNetworks = &v
+	}
 	if o.UpstreamServers != nil {
 		v := append([]upstream.UpstreamServer(nil), *o.UpstreamServers...)
 		out.UpstreamServers = &v
@@ -1244,6 +1253,57 @@ func (f *Fleet) effectiveRateLimitQPS(id string) int {
 		return *o.RateLimitQPS
 	}
 	return f.rateLimitQPS
+}
+
+// AllowedNetworks returns the fleet-wide recursion ACL (nil/empty = no fleet
+// opinion; the controller never pushes an empty ACL).
+func (f *Fleet) AllowedNetworks() []string {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return append([]string(nil), f.allowedNetworks...)
+}
+
+// SetAllowedNetworksDefault records the fleet-wide recursion ACL without
+// distributing it. Used at startup from the controller config. An invalid
+// startup value is dropped (not stored) with a warning so every poll
+// reconcile does not fail pushing it.
+func (f *Fleet) SetAllowedNetworksDefault(networks []string) {
+	if _, err := control.ParseAllowedNetworks(networks); err != nil {
+		log.Printf("blipc: warning: ignoring invalid startup allowed_networks: %q", err)
+		return
+	}
+	f.mu.Lock()
+	f.allowedNetworks = append([]string(nil), networks...)
+	f.mu.Unlock()
+}
+
+// effectiveAllowedNetworks returns the recursion ACL an instance should
+// report: its own override if set, otherwise the fleet-wide default.
+func (f *Fleet) effectiveAllowedNetworks(id string) []string {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	if o := f.overrides[id]; o != nil && o.AllowedNetworks != nil {
+		return append([]string(nil), *o.AllowedNetworks...)
+	}
+	return append([]string(nil), f.allowedNetworks...)
+}
+
+// aclEqual reports whether two ACLs hold the same entries regardless of
+// order (the wire format preserves operator order; reconcile must not fight
+// it).
+func aclEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	sa, sb := append([]string(nil), a...), append([]string(nil), b...)
+	sort.Strings(sa)
+	sort.Strings(sb)
+	for i := range sa {
+		if sa[i] != sb[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // Upstream returns the fleet-wide default upstream pool and routes.
@@ -1628,6 +1688,9 @@ func mergeOverride(existing, partial *InstanceOverride) *InstanceOverride {
 	if partial.RateLimitQPS != nil {
 		merged.RateLimitQPS = partial.RateLimitQPS
 	}
+	if partial.AllowedNetworks != nil {
+		merged.AllowedNetworks = partial.AllowedNetworks
+	}
 	if partial.UpstreamServers != nil {
 		merged.UpstreamServers = partial.UpstreamServers
 	}
@@ -1724,6 +1787,60 @@ func (f *Fleet) maybePushRateLimit(ctx context.Context, i *Instance, reported *c
 	}
 	if err := i.ctl().SetRateLimit(ctx, want, 0); err != nil {
 		log.Printf("blipc: reconcile rate limit for %q: %q", i.id(), err)
+	}
+}
+
+// SetAllowedNetworks records the fleet-wide recursion ACL, persists it, and
+// pushes the effective value (default or per-instance override) to every
+// adopted instance. Invalid entries (including /0 catch-alls) are rejected
+// up front so a bad save can never persist an unpushable value.
+func (f *Fleet) SetAllowedNetworks(ctx context.Context, networks []string) (map[string]string, error) {
+	if _, err := control.ParseAllowedNetworks(networks); err != nil {
+		return nil, err
+	}
+	f.SetAllowedNetworksDefault(networks)
+	if f.configPath != "" {
+		if err := f.saveConfig(); err != nil {
+			log.Printf("blipc: warning: failed to persist allowed networks: %v", err)
+		}
+	}
+	return f.pushACL(ctx), nil
+}
+
+// pushACL distributes the effective recursion ACL to every instance. An
+// empty effective ACL is never pushed: it means "no fleet opinion", and
+// pushing it would wipe an instance's local ACL back to open recursion.
+func (f *Fleet) pushACL(ctx context.Context) map[string]string {
+	return f.fanOut(ctx, func(ictx context.Context, i *Instance) string {
+		want := f.effectiveAllowedNetworks(i.id())
+		if len(want) == 0 {
+			return "ok"
+		}
+		if err := i.ctl().SetAllowedNetworks(ictx, want); err != nil {
+			return err.Error()
+		}
+		return "ok"
+	})
+}
+
+// maybePushACL converges an instance's recursion ACL to its fleet default
+// (or per-instance override) when the instance reports a divergent value —
+// e.g. after a restart it reverted to its own YAML. An empty fleet ACL never
+// converges: it must not wipe an instance's local list.
+func (f *Fleet) maybePushACL(ctx context.Context, i *Instance, reported *control.StatsResponse) {
+	want := f.effectiveAllowedNetworks(i.id())
+	if len(want) == 0 || !i.hasToken() {
+		return
+	}
+	var rep []string
+	if reported != nil {
+		rep = reported.AllowedNetworks
+	}
+	if aclEqual(rep, want) {
+		return
+	}
+	if err := i.ctl().SetAllowedNetworks(ctx, want); err != nil {
+		log.Printf("blipc: reconcile acl for %q: %q", i.id(), err)
 	}
 }
 
@@ -2154,7 +2271,7 @@ func (f *Fleet) pushConfigs(ctx context.Context) map[string]string {
 // per-instance override is saved. Returns a single-entry result map. The DoH
 // address is always pushed (it can override even with no policy set); the
 // policy is pushed only when an effective one exists. Independent scopes push
-// concurrently (was 6 serial RTTs).
+// concurrently (was 7 serial RTTs).
 func (f *Fleet) pushInstance(ctx context.Context, id string) map[string]string {
 	i := f.get(id)
 	if i == nil {
@@ -2165,6 +2282,7 @@ func (f *Fleet) pushInstance(ctx context.Context, id string) map[string]string {
 	wantDoH := f.effectiveDoHHTTPAddr(id)
 	wantSize := f.effectiveCacheConfig(id)
 	wantQPS := f.effectiveRateLimitQPS(id)
+	wantACL := f.effectiveAllowedNetworks(id)
 	wantRecs := f.effectiveRecords(id)
 	wantServers, wantRoutes, wantBootstrap := f.effectiveUpstream(id)
 	f.mu.RUnlock()
@@ -2175,9 +2293,9 @@ func (f *Fleet) pushInstance(ctx context.Context, id string) map[string]string {
 	}
 	// Collect per-step errors instead of last-wins overwriting, so a partial
 	// failure is surfaced honestly (e.g. "doh: …; upstream: …"). Scopes push
-	// concurrently (was 6 serial RTTs). The join is bounded: the scopes share
+	// concurrently (was 7 serial RTTs). The join is bounded: the scopes share
 	// the caller's ctx, so one hung instance would otherwise hang this
-	// handler forever. One budget covers all six (they run concurrently).
+	// handler forever. One budget covers all seven (they run concurrently).
 	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 	var mu sync.Mutex
@@ -2188,7 +2306,7 @@ func (f *Fleet) pushInstance(ctx context.Context, id string) map[string]string {
 		errs = append(errs, msg)
 		mu.Unlock()
 	}
-	wg.Add(6)
+	wg.Add(7)
 	go func() {
 		defer wg.Done()
 		if err := i.ctl().SetDoHHTTPAddr(ctx, wantDoH); err != nil {
@@ -2205,6 +2323,16 @@ func (f *Fleet) pushInstance(ctx context.Context, id string) map[string]string {
 		defer wg.Done()
 		if err := i.ctl().SetRateLimit(ctx, wantQPS, 0); err != nil {
 			addErr("rate_limit: " + err.Error())
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		// An empty effective ACL is never pushed (no fleet opinion; must
+		// not wipe the instance's local list back to open recursion).
+		if len(wantACL) > 0 {
+			if err := i.ctl().SetAllowedNetworks(ctx, wantACL); err != nil {
+				addErr("acl: " + err.Error())
+			}
 		}
 	}()
 	go func() {
@@ -3571,6 +3699,7 @@ func (f *Fleet) saveConfig() error {
 		InstancePolicies  map[string]*InstanceOverride `yaml:"instance_overrides"`
 		DoHHTTPAddr       string                       `yaml:"doh_http_addr"`
 		RateLimitQPS      int                          `yaml:"rate_limit_qps"`
+		AllowedNetworks   []string                     `yaml:"allowed_networks,omitempty"`
 		UpstreamServers   []upstream.UpstreamServer    `yaml:"upstream_servers"`
 		UpstreamRoutes    []upstream.UpstreamRoute     `yaml:"upstream_routes"`
 		UpstreamBootstrap []upstream.UpstreamServer    `yaml:"upstream_bootstrap"`
@@ -3616,6 +3745,7 @@ func (f *Fleet) saveConfig() error {
 	}
 	dohAddr := f.dohHTTPAddr
 	rateQPS := f.rateLimitQPS
+	allowed := append([]string(nil), f.allowedNetworks...)
 	upServers := append([]upstream.UpstreamServer(nil), f.upstreamServers...)
 	upRoutes := append([]upstream.UpstreamRoute(nil), f.upstreamRoutes...)
 	upBootstrap := append([]upstream.UpstreamServer(nil), f.upstreamBootstrap...)
@@ -3637,6 +3767,7 @@ func (f *Fleet) saveConfig() error {
 	cfg.InstancePolicies = overs
 	cfg.DoHHTTPAddr = dohAddr
 	cfg.RateLimitQPS = rateQPS
+	cfg.AllowedNetworks = allowed
 	upstreamServers, upstreamRoutes := upServers, upRoutes
 	cfg.UpstreamServers = upstreamServers
 	cfg.UpstreamRoutes = upstreamRoutes

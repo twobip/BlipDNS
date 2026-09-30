@@ -2106,6 +2106,10 @@ async function pollUpdateJob() {
 }
 $("i-save").onclick = saveInstance;
 $("i-mode").onclick = () => setInstanceMode($("inst-manual").classList.contains("hidden"));
+// The modal form carries the management bearer token: never let the browser
+// natively submit it (would serialize the secret into the URL/history).
+// The inline onsubmit guard is inert under script-src 'self', so guard here.
+document.querySelector("#modal-instance form")?.addEventListener("submit", (e) => e.preventDefault());
 $("inst-filter").addEventListener("input", debounce(renderInstances, 150));
 
 /* instance row actions (event delegation) */

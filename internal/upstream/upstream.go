@@ -14,6 +14,7 @@ import (
 	"math/rand"
 	"net"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -22,6 +23,7 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
+	"github.com/twobip/BlipDNS/internal/blocklist"
 )
 
 // Resolver resolves a DNS query message and returns the response.
@@ -581,7 +583,9 @@ func bootstrapDialContext(bootstrap Resolver, timeout time.Duration) func(ctx co
 
 // blockedUpstreamIP reports whether ip must never be dialled as an upstream:
 // link-local (169.254.0.0/16 and fe80::/10, where cloud metadata services
-// live), any multicast, and the unspecified address. Loopback and RFC1918 stay
+// live), carrier-grade NAT (100.64.0.0/10, RFC 6598 — shared with the
+// blocklist predicate because net.IP.IsPrivate misses it), any multicast,
+// and the unspecified address. Loopback and RFC1918 stay
 // allowed — a resolver legitimately forwards to a LAN or local upstream; the
 // guard exists to stop the control plane, a policy override or a DNS answer
 // from aiming blipd at the metadata service. Callers that dial a loopback or
@@ -592,7 +596,7 @@ func blockedUpstreamIP(ip net.IP) bool {
 	if ip == nil {
 		return true
 	}
-	return ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified()
+	return ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() || blocklist.IsCGNAT(ip)
 }
 
 // warnLocalUpstream logs when an upstream is loopback or private (RFC1918).
@@ -1035,6 +1039,11 @@ func ParseSpec(spec string) ([]Spec, error) {
 				break
 			}
 			return nil, fmt.Errorf("upstream: unrecognized spec %q", tok)
+		}
+		// Reject URL userinfo (user@host): it defeats the spec-time host check
+		// below and would be sent on the wire as a Basic-auth header.
+		if u, uerr := url.Parse("//" + s.Address); uerr == nil && u.User != nil {
+			return nil, fmt.Errorf("upstream: %s: userinfo not allowed in upstream address", tok)
 		}
 		// Reject literal link-local/metadata targets at config time so the
 		// failure names the spec instead of surfacing as a dial error later.

@@ -35,10 +35,11 @@ fi
 WORK="/var/lib/blipd/update"
 mkdir -p "$WORK"
 
-# M14: best-effort downgrade guard. blipd has no --version flag, so probe the
-# local management API, then binary strings, then the last recorded stamp.
-# Unknown current version => warn and continue. Set ALLOW_DOWNGRADE=1 to
-# bypass the check explicitly. The "dev" rolling tag is exempt (no ordering).
+# Downgrade guard (finding 9): ask the installed binary for its version
+# via `blipd --version`, falling back to the install-time stamp. Unknown
+# current version => FAIL CLOSED (refuse the update). Set ALLOW_DOWNGRADE=1
+# to bypass explicitly (documented escape hatch, e.g. for unstamped local
+# builds). The "dev" rolling tag is exempt (no ordering).
 semver_cmp() {
   local a="${1#v}" b="${2#v}"
   a="${a%%+*}"; b="${b%%+*}"
@@ -55,28 +56,24 @@ semver_cmp() {
   done
   echo 0
 }
-current_version_best_effort() {
+current_version() {
   local v=""
-  if command -v curl >/dev/null 2>&1; then
-    v="$(curl -fsSL --max-time 3 http://127.0.0.1:8444/api/v1/stats 2>/dev/null | grep -o '"version"[[:space:]]*:[[:space:]]*"[^"]*"' | grep -o '[0-9][0-9.]*' | head -n1 || true)"
-  fi
-  if [[ -z "$v" && -x /usr/local/bin/blipd ]]; then
-    v="$(strings /usr/local/bin/blipd 2>/dev/null | grep -o 'blipd/[0-9][0-9.]*' | head -n1 | cut -d/ -f2 || true)"
+  if [[ -x /usr/local/bin/blipd ]]; then
+    v="$(/usr/local/bin/blipd --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || true)"
   fi
   if [[ -z "$v" && -f "$WORK/.installed-version" ]]; then
-    v="$(tr -d '[:space:]' < "$WORK/.installed-version" 2>/dev/null || true)"
+    v="$(tr -d '[:space:]' < "$WORK/.installed-version" 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || true)"
   fi
   printf '%s' "$v"
 }
 if [[ "$TAG" != "dev" && "${ALLOW_DOWNGRADE:-0}" != "1" ]]; then
-  CUR="$(current_version_best_effort || true)"
-  if [[ -n "$CUR" ]]; then
-    TARGET="${TAG#v}"
-    if [[ "$(semver_cmp "$TARGET" "$CUR")" == "2" ]]; then
-      echo "error: refusing downgrade $CUR -> $TARGET (set ALLOW_DOWNGRADE=1 to bypass)" >&2; exit 1
-    fi
-  else
-    echo "warning: installed version unknown — downgrade check skipped (no --version flag; probed API/strings/stamp)" >&2
+  CUR="$(current_version || true)"
+  if [[ -z "$CUR" ]]; then
+    echo "error: installed version unknown (blipd --version failed and no $WORK/.installed-version stamp) — refusing to update; re-run the installer once, or set ALLOW_DOWNGRADE=1 to bypass" >&2; exit 1
+  fi
+  TARGET="${TAG#v}"
+  if [[ "$(semver_cmp "$TARGET" "$CUR")" == "2" ]]; then
+    echo "error: refusing downgrade $CUR -> $TARGET (set ALLOW_DOWNGRADE=1 to bypass)" >&2; exit 1
   fi
 fi
 
@@ -85,6 +82,8 @@ DL="$(mktemp -d "$WORK/dl.XXXXXX")"
 trap 'rm -rf "$DL"' EXIT
 curl -fL --proto '=https' --tlsv1.2 "$BASE/$TAG/blipd-linux-amd64" -o "$DL/blipd-linux-amd64"
 curl -fsSL --proto '=https' --tlsv1.2 "$BASE/$TAG/SHA256SUMS" -o "$DL/SHA256SUMS"
+curl -fsSL --proto '=https' --tlsv1.2 "$BASE/$TAG/SHA256SUMS.sig" -o "$DL/SHA256SUMS.sig" \
+  || { echo "error: release $TAG has no SHA256SUMS.sig (unsigned release) — refusing to update" >&2; exit 1; }
 
 echo "phase: verifying"
 expected="$(awk '$2=="blipd-linux-amd64" {print $1; exit}' "$DL/SHA256SUMS")"
@@ -93,12 +92,14 @@ actual="$(sha256sum "$DL/blipd-linux-amd64" | awk '{print $1}')"
 [ "$expected" = "$actual" ] || { echo "error: checksum verification failed — refusing to install" >&2; exit 1; }
 
 install -m 0755 "$DL/blipd-linux-amd64" "$WORK/blipd.new"
+# Stage the sums + signature for the root helper: it re-verifies the signature
+# (embedded key) and then the staged inode against the SIGNED sums entry.
+install -m 0644 "$DL/SHA256SUMS" "$WORK/SHA256SUMS"
+install -m 0644 "$DL/SHA256SUMS.sig" "$WORK/SHA256SUMS.sig"
 
 # Hand the verified (unprivileged) binary to the root install helper.
-# Pass the verified checksum so the root side re-verifies the SAME inode (H2).
-# The helper fails closed when the env is stripped (no downgrade to ELF-only):
-# that means the sudoers rule lacks env_keep — re-run install-blipd.sh to
-# refresh it. Never retry without the checksum.
+# Pass the verified checksum too: the root side cross-checks it against the
+# SIGNED SHA256SUMS — never retry without the checksum.
 install_out="$(sudo -n EXPECTED_SHA256="$expected" /usr/local/sbin/blipd-install "$WORK/blipd.new" 2>&1)" && install_rc=0 || install_rc=$?
 printf '%s\n' "$install_out"
 if [[ "$install_rc" -ne 0 ]]; then
@@ -107,7 +108,7 @@ if [[ "$install_rc" -ne 0 ]]; then
   fi
   exit "$install_rc"
 fi
-# Record the installed version stamp for future downgrade checks (M14).
+# Refresh the installed-version stamp for future downgrade checks.
 if [[ "$TAG" != "dev" ]]; then
   printf '%s\n' "${TAG#v}" > "$WORK/.installed-version" 2>/dev/null || true
 fi

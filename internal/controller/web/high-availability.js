@@ -34,7 +34,11 @@ function renderHAStatus() {
   if (rows) rows.innerHTML = instances.map((i) => {
     const st = statuses[i.id] || {};
     const updating = st.updating ? ' <span class="cell-sub">updating…</span>' : "";
-    return `<div class="ha-status-row"><span class="dot ${st.active ? "on" : st.state === "FAULT" ? "err" : "off"}"></span><strong>${esc(i.label || i.id)}</strong><span class="muted">${esc(st.state || "unknown")}</span><span class="cell-sub">${esc(st.message || st.last_error || "")}${updating}</span></div>`;
+    // Unauthenticated VRRP: any LAN host can forge advertisements and seize
+    // the VIP. Only meaningful while the node runs VRRP (not DISABLED).
+    const unauth = !st.vrrp_auth && st.state && st.state !== "DISABLED" && st.state !== "UNAVAILABLE"
+      ? ' <span class="cell-sub" style="color:var(--warn,orange)">unauthenticated VRRP — set a LAN auth password</span>' : "";
+    return `<div class="ha-status-row"><span class="dot ${st.active ? "on" : st.state === "FAULT" ? "err" : "off"}"></span><strong>${esc(i.label || i.id)}</strong><span class="muted">${esc(st.state || "unknown")}</span><span class="cell-sub">${esc(st.message || st.last_error || "")}${updating}${unauth}</span></div>`;
   }).join("") || `<div class="muted">Add and adopt two blipd instances first.</div>`;
 }
 
@@ -116,6 +120,10 @@ async function haAction(action) {
 }
 
 function initHA() {
+  // The VRRP form holds the LAN auth password: block native submission so
+  // it can never be serialized into the URL/history. (Inline onsubmit is
+  // inert under script-src 'self'.)
+  document.querySelector("#view-ha form")?.addEventListener("submit", (e) => e.preventDefault());
   $("ha-save")?.addEventListener("click", () => saveHA().catch((e) => toast(e.message, "err")));
   ["validate", "apply", "disable"].forEach((action) => $("ha-" + action)?.addEventListener("click", () => haAction(action).catch((e) => toast(e.message, "err"))));
 }

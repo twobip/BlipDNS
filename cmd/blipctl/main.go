@@ -16,6 +16,7 @@
 //	set-policy <file.yml>  push a policy (YAML)
 //	block <cidr> <domain>  convenience: add a block policy for a client CIDR
 //	del-policy <id>        remove a policy
+//	acl [cidr...]          show the recursion ACL, or replace it
 //	watch                  stream events (SSE)
 package main
 
@@ -40,7 +41,13 @@ import (
 // when blipctl runs on the controller host.
 const defaultControllerPath = "/etc/blipc/blipc.yaml"
 
+// version is the blipctl release version, stamped at build time from the
+// repo's VERSION file: -ldflags "-X main.version=$(cat VERSION)". It
+// defaults to "0.0.0" for local, unstamped builds.
+var version = "0.0.0"
+
 func main() {
+	showVersion := flag.Bool("version", false, "print the release version and exit")
 	token := flag.String("token", os.Getenv("BLIP_TOKEN"), "management API bearer token (visible via ps; prefer --token-file)")
 	tokenFile := flag.String("token-file", "", "read management API bearer token from file (0600 recommended; used only when --token/BLIP_TOKEN is empty)")
 	outTokenFile := flag.String("out-token-file", "", "write the adopted admin token to this file (0600) instead of printing it to stdout")
@@ -48,6 +55,12 @@ func main() {
 	controllerPath := flag.String("controller", controllerPathDefault(), "local blipc config used to resolve instance ids/urls to tokens (\"\" disables)")
 	flag.Usage = func() { usage() }
 	flag.Parse()
+
+	// Finding 9: --version prints the bare stamped release for inventory use.
+	if *showVersion {
+		fmt.Println(version)
+		return
+	}
 
 	// Warn when the secret travels via argv/env: it is visible in `ps`,
 	// /proc/<pid>/cmdline (or environ), shell history, and audit logs.
@@ -198,7 +211,7 @@ func socketAlive(path string) bool {
 func isCommand(s string) bool {
 	switch s {
 	case "health", "stats", "policies", "set-policy", "block", "del-policy",
-		"adopt-status", "adopt", "watch":
+		"acl", "adopt-status", "adopt", "watch":
 		return true
 	default:
 		return false
@@ -274,6 +287,25 @@ func run(ctx context.Context, client *control.Client, cmd string, rest []string,
 		}
 		die(client.DeletePolicy(ctx, rest[0]))
 		fmt.Println("deleted policy:", rest[0])
+	case "acl":
+		// No args: show the current recursion ACL. Args replace it
+		// (validated server-side, including the /0 catch-all guard).
+		// There is deliberately no way to clear the ACL here: opening
+		// recursion requires editing blipd.yaml (open_recursion: true).
+		if len(rest) == 0 {
+			s, err := client.Stats(ctx)
+			die(err)
+			if len(s.AllowedNetworks) == 0 {
+				fmt.Println("recursion ACL: open (answering all clients)")
+				return
+			}
+			for _, n := range s.AllowedNetworks {
+				fmt.Println(n)
+			}
+			return
+		}
+		die(client.SetAllowedNetworks(ctx, rest))
+		fmt.Println("recursion ACL set:", strings.Join(rest, ", "))
 	case "adopt-status":
 		st, err := client.AdoptStatus(ctx)
 		die(err)
@@ -519,6 +551,7 @@ commands:
   set-policy <file.yml>  push a policy
   block <cidr> <domain>  add a block policy for a client CIDR
   del-policy <id>        remove a policy
+  acl [cidr...]          show the recursion ACL, or replace it
   adopt-status           show adoption state (no token needed)
   adopt <code>           claim this instance once; prints its admin token
   watch                  stream events (SSE)

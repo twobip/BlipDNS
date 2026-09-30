@@ -55,6 +55,10 @@ type Server struct {
 	StrictCSRF bool
 }
 
+// maxProbeEntries bounds the probe-limiter table: rotating IPs must not
+// grow it forever.
+const maxProbeEntries = 10000
+
 // probeAllowed reports whether ip may probe upstreams now (10 requests per
 // rolling minute) and records the attempt.
 func (s *Server) probeAllowed(ip string) bool {
@@ -78,8 +82,53 @@ func (s *Server) probeAllowed(ip string) bool {
 		s.probeHits[ip] = hits
 		return false
 	}
+	if _, ok := s.probeHits[ip]; !ok && len(s.probeHits) >= maxProbeEntries {
+		sweepProbeHitsLocked(s.probeHits, now)
+		if len(s.probeHits) >= maxProbeEntries {
+			evictOldestProbeLocked(s.probeHits)
+		}
+	}
 	s.probeHits[ip] = append(hits, now)
 	return true
+}
+
+// sweepProbeHitsLocked drops keys with no in-window hits. Caller holds probeMu.
+func sweepProbeHitsLocked(m map[string][]time.Time, now time.Time) {
+	cutoff := now.Add(-time.Minute)
+	for k, hits := range m {
+		keep := false
+		for _, t := range hits {
+			if t.After(cutoff) {
+				keep = true
+				break
+			}
+		}
+		if !keep {
+			delete(m, k)
+		}
+	}
+}
+
+// evictOldestProbeLocked removes the key with the stalest latest hit.
+// Caller holds probeMu.
+func evictOldestProbeLocked(m map[string][]time.Time) {
+	victim := ""
+	var oldest time.Time
+	first := true
+	for k, hits := range m {
+		var latest time.Time
+		for _, t := range hits {
+			if t.After(latest) {
+				latest = t
+			}
+		}
+		if first || latest.Before(oldest) {
+			victim, oldest, first = k, latest, false
+		}
+	}
+	if victim != "" {
+		delete(m, victim)
+	}
 }
 
 // NewServer builds the controller HTTP server. ui may be nil (API-only).
@@ -445,7 +494,23 @@ func readScopeDenied(path string) bool {
 		// HA topology (VIP, interfaces, peer IPs) is infrastructure detail,
 		// not query history, but it has no business on a least-privilege
 		// read credential either.
-		"/api/high-availability":
+		"/api/high-availability",
+		// Fleet configuration and topology: instance management URLs,
+		// upstream servers/routes/bootstrap, trusted proxies, client CIDR
+		// policy, local records, the manual block/allow lists and full
+		// blocklist export, and the DoH mobileconfig all disclose
+		// infrastructure a dashboard-read key has no need for.
+		"/api/settings",
+		"/api/instances",
+		"/api/records",
+		"/api/blocklist",
+		"/api/blocklist/export",
+		"/api/doh-mobileconfig":
+		return true
+	}
+	// Per-instance policies carry per-client allow/block domain lists plus
+	// client IDs and networks — the same policy class as /api/blocklist.
+	if strings.HasPrefix(path, "/api/instances/") && strings.HasSuffix(path, "/policies") {
 		return true
 	}
 	return false
@@ -480,6 +545,15 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "authentication not configured", http.StatusForbidden)
 		return
 	}
+	// Login mints a session cookie, so require the same Origin check as
+	// logout and other mutating routes; otherwise a cross-site auto-POST
+	// can mint an attacker-known session (login CSRF). Headerless
+	// clients only pass when StrictCSRF is off; under StrictCSRF a
+	// headerless POST is rejected like a forged legacy-browser post.
+	if !s.csrfOriginAllowed(r) {
+		http.Error(w, "cross-site request rejected", http.StatusForbidden)
+		return
+	}
 	id, err := s.auth.Login(req.Username, req.Password, s.clientIP(r))
 	if err != nil {
 		if err == errLocked {
@@ -503,11 +577,6 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	ip := s.clientIP(r)
-	if !s.auth.allowLogin(ip) {
-		http.Error(w, "too many attempts", http.StatusTooManyRequests)
-		return
-	}
 	s.setupMu.Lock()
 	defer s.setupMu.Unlock()
 	if s.auth.Configured() {
@@ -522,6 +591,14 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	// Setup mints a session cookie, so require the same Origin check as
+	// login; otherwise a cross-site auto-POST mints a session (setup CSRF).
+	// (Tokenless first-run setup has no secret to guess, so there is no
+	// failure bucket here: the endpoint goes inert after first success.)
+	if !s.csrfOriginAllowed(r) {
+		http.Error(w, "cross-site request rejected", http.StatusForbidden)
 		return
 	}
 	req.Username = strings.TrimSpace(req.Username)
@@ -1039,6 +1116,7 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			"instance_overrides":        s.fleet.InstanceOverrides(),
 			"doh_http_addr":             s.fleet.DoHHTTPAddr(),
 			"rate_limit_qps":            s.fleet.RateLimitQPS(),
+			"allowed_networks":          s.fleet.AllowedNetworks(),
 			"upstream_servers":          upServers,
 			"upstream_routes":           upRoutes,
 			"upstream_bootstrap":        s.fleet.UpstreamBootstrap(),
@@ -1056,6 +1134,7 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			Override               *InstanceOverride          `json:"override"`
 			DoHHTTPAddr            *string                    `json:"doh_http_addr"`
 			RateLimitQPS           *int                       `json:"rate_limit_qps"`
+			AllowedNetworks        *[]string                  `json:"allowed_networks"`
 			CacheSize              *int                       `json:"cache_size"`
 			QueryLogRetentionHours *int                       `json:"query_log_retention_hours"`
 			TrustedProxies         *[]string                  `json:"trusted_proxies"`
@@ -1154,6 +1233,35 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			applied := s.fleet.SetRateLimitQPS(r.Context(), qps)
+			writeJSON(w, map[string]interface{}{"ok": true, "applied": applied})
+			return
+		}
+		// Recursion ACL (fleet-wide or per-instance). Entries are validated
+		// (including the /0 catch-all guard) before persisting. An empty
+		// fleet-wide list means "no fleet opinion" and is never pushed; an
+		// explicitly-empty per-instance list clears back to the fleet
+		// default.
+		if req.AllowedNetworks != nil {
+			nets := *req.AllowedNetworks
+			if _, err := control.ParseAllowedNetworks(nets); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if req.Scope == "instance" && req.Instance != "" {
+				existing := s.fleet.InstanceOverrideOf(req.Instance)
+				merged := mergeOverride(existing, &InstanceOverride{AllowedNetworks: req.AllowedNetworks})
+				if len(nets) == 0 {
+					merged.AllowedNetworks = nil
+				}
+				applied := s.fleet.SetInstanceOverride(r.Context(), req.Instance, merged)
+				writeJSON(w, map[string]interface{}{"ok": true, "applied": applied})
+				return
+			}
+			applied, err := s.fleet.SetAllowedNetworks(r.Context(), nets)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
 			writeJSON(w, map[string]interface{}{"ok": true, "applied": applied})
 			return
 		}
@@ -1798,7 +1906,7 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	defer s.fleet.Bus().Unsubscribe(ch)
 
 	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Cache-Control", "no-store")
 
 	for _, e := range backlog {
 		fmt.Fprintf(w, "data: %s\n\n", control.MustJSON(e))

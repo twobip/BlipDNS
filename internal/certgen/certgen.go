@@ -95,9 +95,9 @@ func EnsurePair(certPath, keyPath string, extraHosts ...string) (*tls.Certificat
 // expectedSANs returns the identities a self-signed DoH certificate must
 // cover: localhost, loopback IPs, the machine hostname, and any
 // operator-configured extra hosts (e.g. an HA VIP). Deliberately NOT every
-// interface address: embedding LAN/link-local/docker IPs discloses topology
-// to anyone completing a handshake and churns the fingerprint on every DHCP
-// change. Operators that serve by LAN IP should list it in doh_san.
+// interface address: embedding LAN/private/link-local/docker IPs discloses
+// topology to anyone completing a handshake and churns the fingerprint on
+// every DHCP change. Operators that serve by LAN IP should list it in doh_san.
 func expectedSANs(extraHosts []string) ([]string, []net.IP) {
 	names := []string{"localhost"}
 	if hn := hostname(); hn != "" {
@@ -248,11 +248,12 @@ func load(certPath, keyPath string, extraHosts []string) ([]byte, []byte, error)
 		return nil, nil, fmt.Errorf("self-signed cert: lifetime %s exceeds policy %s", lifetime.Round(time.Hour), validity)
 	}
 	// F-15: reject unexpected disclosing SANs. Current certs only cover
-	// stable (non-link-local, non-multicast) addresses; a legacy cert with
-	// link-local/docker-bridge/multicast identities discloses topology and
-	// keeps unintended identities valid. Force regeneration.
+	// stable (non-link-local, non-multicast, non-private) addresses; a
+	// legacy cert with link-local/docker-bridge/RFC1918/multicast identities
+	// discloses topology and keeps unintended identities valid. Force
+	// regeneration. Loopback and operator-configured (doh_san) SANs stay.
 	for _, ip := range cert.IPAddresses {
-		if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() {
+		if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() || ip.IsPrivate() {
 			return nil, nil, fmt.Errorf("self-signed cert: contains disallowed SAN IP %s", ip.String())
 		}
 	}
@@ -357,16 +358,18 @@ func hostname() string {
 	return h
 }
 
-// stableLocalIPs returns the machine's LAN addresses for the SAN set,
-// excluding ephemeral/disclosing ones: link-local (fe80::/10, 169.254/16),
-// multicast, and unspecified. Global-unicast and private (RFC1918) addresses
-// stay covered so clients reaching blipd by LAN IP keep verifying; operators
-// with stricter needs should list exact names in doh_san.
+// stableLocalIPs returns the machine's global-unicast, non-private addresses
+// for the SAN set, excluding ephemeral/disclosing ones: link-local
+// (fe80::/10, 169.254/16), multicast, unspecified, and private (RFC1918/ULA,
+// which covers docker bridge ranges). Private LAN IPs are deliberately NOT
+// embedded: they disclose topology to anyone completing a handshake and churn
+// the fingerprint on every DHCP change. Loopback stays covered via the base
+// SAN set and operator-served names/IPs via doh_san extraHosts.
 func stableLocalIPs() []net.IP {
 	out := []net.IP{}
 	for _, ip := range localIPs() {
 		if ip == nil || ip.IsUnspecified() || ip.IsMulticast() ||
-			ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+			ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsPrivate() {
 			continue
 		}
 		out = append(out, ip)

@@ -94,6 +94,24 @@ Copy the setup URL printed by blipc. Open it in a browser. The setup wizard walk
 
 Both scripts accept an optional argument: `master` (default), `stable`, or a version tag (e.g. `v1.2.3`), plus the `--install-deps` option. They clone the repo, build from source, and install under `/usr/local/bin` with secure config directories.
 
+### Update signing
+
+Self-updates (`blipd-update` / `blipc-update`, elevated through the root install
+helpers) verify an ed25519 signature over the release's `SHA256SUMS` before
+installing: the root helper checks `SHA256SUMS.sig` against a public key
+embedded in the helper itself, then binds each staged binary to a hash taken
+from the signed sums. A compromised mirror — or a release publisher without the
+signing key — cannot get an unsigned binary installed. The release workflows
+sign with the `RELEASE_SIGNING_KEY` repository secret (`ssh-keygen -Y sign`,
+namespace `blipdns-release`).
+
+Two honest limits: the one-line installer remains trust-on-first-use (verify it
+against a pinned ref before piping to root), and releases cut before signing
+existed carry no `.sig` — re-run the installer once on each node to refresh the
+helpers, then update onto a signed release. To rotate the key: add the new
+public key line beside the old one in both `scripts/*-install.sh` helpers,
+release, re-run the installers on the nodes, then swap the CI secret.
+
 ## Run blipd
 
 ```

@@ -43,6 +43,10 @@ type HAStatus struct {
 	Message    string `json:"message,omitempty"`
 	LastError  string `json:"last_error,omitempty"`
 	Updating   bool   `json:"updating,omitempty"` // true while blipd is mid-self-update
+	// VRRPAuth reports whether the node-local VRRP config carries
+	// advertisement authentication. False with HA active means any host
+	// on the LAN can forge advertisements and seize the VIP.
+	VRRPAuth bool `json:"vrrp_auth"`
 }
 
 // HAController is implemented by the local blipd host. Operations are

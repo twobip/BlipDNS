@@ -36,9 +36,11 @@ fi
 WORK="/var/lib/blipc/update"
 mkdir -p "$WORK"
 
-# M14: best-effort downgrade guard. blipc has no --version flag, so probe
-# binary strings, then the last recorded stamp. Unknown current version =>
-# warn and continue. Set ALLOW_DOWNGRADE=1 to bypass. "dev" is exempt.
+# Downgrade guard (finding 9): ask the installed binary for its version
+# via `blipc --version`, falling back to the install-time stamp. Unknown
+# current version => FAIL CLOSED (refuse the update). Set ALLOW_DOWNGRADE=1
+# to bypass explicitly (documented escape hatch, e.g. for unstamped local
+# builds). The "dev" rolling tag is exempt (no ordering).
 semver_cmp() {
   local a="${1#v}" b="${2#v}"
   a="${a%%+*}"; b="${b%%+*}"
@@ -55,26 +57,24 @@ semver_cmp() {
   done
   echo 0
 }
-current_version_best_effort() {
+current_version() {
   local v=""
   if [[ -x /usr/local/bin/blipc ]]; then
-    v="$(strings /usr/local/bin/blipc 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+(\+[0-9a-f]{7,})?' | head -n1 || true)"
-    v="${v%%+*}"
+    v="$(/usr/local/bin/blipc --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || true)"
   fi
   if [[ -z "$v" && -f "$WORK/.installed-version" ]]; then
-    v="$(tr -d '[:space:]' < "$WORK/.installed-version" 2>/dev/null || true)"
+    v="$(tr -d '[:space:]' < "$WORK/.installed-version" 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1 || true)"
   fi
   printf '%s' "$v"
 }
 if [[ "$TAG" != "dev" && "${ALLOW_DOWNGRADE:-0}" != "1" ]]; then
-  CUR="$(current_version_best_effort || true)"
-  if [[ -n "$CUR" ]]; then
-    TARGET="${TAG#v}"
-    if [[ "$(semver_cmp "$TARGET" "$CUR")" == "2" ]]; then
-      echo "error: refusing downgrade $CUR -> $TARGET (set ALLOW_DOWNGRADE=1 to bypass)" >&2; exit 1
-    fi
-  else
-    echo "warning: installed version unknown — downgrade check skipped (no --version flag; probed strings/stamp)" >&2
+  CUR="$(current_version || true)"
+  if [[ -z "$CUR" ]]; then
+    echo "error: installed version unknown (blipc --version failed and no $WORK/.installed-version stamp) — refusing to update; re-run the installer once, or set ALLOW_DOWNGRADE=1 to bypass" >&2; exit 1
+  fi
+  TARGET="${TAG#v}"
+  if [[ "$(semver_cmp "$TARGET" "$CUR")" == "2" ]]; then
+    echo "error: refusing downgrade $CUR -> $TARGET (set ALLOW_DOWNGRADE=1 to bypass)" >&2; exit 1
   fi
 fi
 
@@ -84,6 +84,8 @@ trap 'rm -rf "$DL"' EXIT
 curl -fL --proto '=https' --tlsv1.2 "$BASE/$TAG/blipc-linux-amd64" -o "$DL/blipc-linux-amd64"
 curl -fL --proto '=https' --tlsv1.2 "$BASE/$TAG/blipctl-linux-amd64" -o "$DL/blipctl-linux-amd64"
 curl -fsSL --proto '=https' --tlsv1.2 "$BASE/$TAG/SHA256SUMS" -o "$DL/SHA256SUMS"
+curl -fsSL --proto '=https' --tlsv1.2 "$BASE/$TAG/SHA256SUMS.sig" -o "$DL/SHA256SUMS.sig" \
+  || { echo "error: release $TAG has no SHA256SUMS.sig (unsigned release) — refusing to update" >&2; exit 1; }
 
 echo "phase: verifying"
 expected="$(awk '$2=="blipc-linux-amd64" {print $1; exit}' "$DL/SHA256SUMS")"
@@ -97,12 +99,14 @@ actual_ctl="$(sha256sum "$DL/blipctl-linux-amd64" | awk '{print $1}')"
 
 install -m 0755 "$DL/blipc-linux-amd64" "$WORK/blipc.new"
 install -m 0755 "$DL/blipctl-linux-amd64" "$WORK/blipctl.new"
+# Stage the sums + signature for the root helper: it re-verifies the signature
+# (embedded key) and then each staged inode against the SIGNED sums entry.
+install -m 0644 "$DL/SHA256SUMS" "$WORK/SHA256SUMS"
+install -m 0644 "$DL/SHA256SUMS.sig" "$WORK/SHA256SUMS.sig"
 
 # Hand the verified (unprivileged) binaries to the root install helper.
-# Pass the verified checksums so the root side re-verifies the SAME inode (H2).
-# The helper fails closed when the env is stripped (no downgrade to ELF-only):
-# that means the sudoers rule lacks env_keep — re-run install-blipc.sh to
-# refresh it. Never retry without the checksum.
+# Pass the verified checksums too: the root side cross-checks them against the
+# SIGNED SHA256SUMS — never retry without the checksum.
 install_one() {
   local staged="$1" expected_sum="$2" out rc=0
   out="$(sudo -n EXPECTED_SHA256="$expected_sum" /usr/local/sbin/blipc-install "$staged" 2>&1)" || rc=$?
@@ -126,7 +130,7 @@ if ! install_one "$WORK/blipctl.new" "$expected_ctl"; then
   echo "warning: blipctl was not updated (is the install helper current? rerun install-blipc.sh once) — continuing with the blipc update" >&2
 fi
 install_one "$WORK/blipc.new" "$expected"
-# Record the installed version stamp for future downgrade checks (M14).
+# Refresh the installed-version stamp for future downgrade checks.
 if [[ "$TAG" != "dev" ]]; then
   printf '%s\n' "${TAG#v}" > "$WORK/.installed-version" 2>/dev/null || true
 fi

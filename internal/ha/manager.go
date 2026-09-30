@@ -101,7 +101,10 @@ func (m *Manager) SetHAConfig(cfg control.HAConfig) error {
 	// cover it — including on the node that never holds it until failover.
 	// Refresh only when the VIP identity actually changed: every regeneration
 	// changes the served fingerprint (pinning DoS) and rewrites key files.
-	if refresh != nil && cfg.VirtualIP != prevVIP {
+	// Never refresh for a disabled config: an authenticated caller could
+	// otherwise force cert regeneration (breaking mgmt_cert_fp pins) without
+	// enabling HA.
+	if refresh != nil && cfg.Enabled && cfg.VirtualIP != prevVIP {
 		refresh()
 	}
 	return nil
@@ -171,6 +174,7 @@ func (m *Manager) HAStatus() control.HAStatus {
 		Message:    msg,
 		LastError:  lastErr,
 		Updating:   m.isUpdating(),
+		VRRPAuth:   cfg.AuthPass != "",
 	}
 	m.mu.Lock()
 	m.cachedStatus = st
@@ -240,6 +244,11 @@ func (m *Manager) ApplyHA() error {
 		return err
 	}
 	text := render(cfg)
+	// Unauthenticated VRRP lets any LAN host forge advertisements and
+	// seize the VIP: warn loudly, but keep existing valid configs working.
+	if cfg.AuthPass == "" {
+		log.Printf("ha: WARNING: applying VRRP without advertisement authentication; any host on the LAN can seize %s", cfg.VirtualIP)
+	}
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0750); err != nil {
 		return err

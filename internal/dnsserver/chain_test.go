@@ -2,9 +2,13 @@ package dnsserver
 
 import (
 	"fmt"
+	"net"
 	"testing"
 
 	"github.com/miekg/dns"
+
+	"github.com/twobip/BlipDNS/internal/blocklist"
+	"github.com/twobip/BlipDNS/internal/filter"
 )
 
 // TestChainBlockedNinthTarget proves CNAME inspection is not truncated: a
@@ -49,5 +53,28 @@ func TestChainBlockedOverlongFailsClosed(t *testing.T) {
 	}
 	if !chainBlocked(m, func(string) bool { return false }) {
 		t.Fatal("over-long CNAME chain was allowed instead of failing closed")
+	}
+}
+
+// TestClassifyNameGlobalBlockRespectsLogOff proves a global-blocklist chain
+// target inherits the matching policy's log flag instead of always logging:
+// with log disabled the block still fires but must not log.
+func TestClassifyNameGlobalBlockRespectsLogOff(t *testing.T) {
+	for _, logOn := range []bool{false, true} {
+		store := filter.NewStore(nil)
+		if err := store.SetPolicy(&filter.Policy{
+			ID: "p", Networks: []string{"10.0.0.0/8"}, Log: logOn,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		srv := &Server{cfg: Config{Store: store, Blocklist: blocklist.New()}}
+		srv.cfg.Blocklist.FromDomains([]string{"chain-target.example"})
+		ok, _, src, shouldLog := srv.classifyName(net.ParseIP("10.0.0.1"), "", "chain-target.example.")
+		if !ok || src != "global" {
+			t.Fatalf("log=%v: blocked=%v src=%q, want true/global", logOn, ok, src)
+		}
+		if shouldLog != logOn {
+			t.Errorf("log=%v: shouldLog=%v, want %v", logOn, shouldLog, logOn)
+		}
 	}
 }

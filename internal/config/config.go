@@ -32,6 +32,7 @@ type Config struct {
 	AdminSocket          string                    `yaml:"admin_socket"`     // local Unix socket for passwordless admin (0600, blipd user; "" = off)
 	TrustedProxies       []string                  `yaml:"trusted_proxies"`  // CIDRs/IPs allowed to supply X-Forwarded-For / CF-Connecting-IP to DoH
 	AllowedNetworks      []string                  `yaml:"allowed_networks"` // recursion ACL: CIDRs/IPs allowed to recurse; empty = allow all (open, with warning)
+	OpenRecursion        bool                      `yaml:"open_recursion"`   // explicit ack for empty allowed_networks on a non-loopback bind (fail closed without it)
 	StateFile            string                    `yaml:"state_file"`       // persists "adopted" so the claim code isn't regenerated
 	InstanceID           string                    `yaml:"instance_id"`      // stable id shown to the controller
 	Upstream             string                    `yaml:"upstream"`
@@ -92,8 +93,11 @@ func Load(path string) (*Config, error) {
 	return c, nil
 }
 
-// WarnConfigPerms logs a warning if the config file is group- or
-// world-readable, since it may hold tokens or credentials.
+// WarnConfigPerms logs a warning if the config file is world-accessible or
+// group-writable, since it may hold tokens or credentials. Group-readable
+// (e.g. root:blip 0640, the blipd deployment mode so the daemon can read its
+// config without being able to rewrite it) is accepted: only owner and group
+// members can read, and the service group has no login shell.
 func WarnConfigPerms(prog, path string) {
 	if path == "" {
 		WarnEnvCredentials(prog)
@@ -107,8 +111,8 @@ func WarnConfigPerms(prog, path string) {
 		WarnEnvCredentials(prog)
 		return
 	}
-	if m := fi.Mode().Perm(); m&0o077 != 0 {
-		log.Printf("%s: WARNING: config file %s is group/world-accessible (mode %04o); it may contain credentials. Use `chmod 600 %s`.", prog, path, m, path)
+	if m := fi.Mode().Perm(); m&0o007 != 0 || m&0o020 != 0 {
+		log.Printf("%s: WARNING: config file %s is world-accessible or group-writable (mode %04o); it may contain credentials. Use `chmod 600 %s` (or root-owned 0640).", prog, path, m, path)
 	}
 	WarnEnvCredentials(prog)
 }
@@ -138,7 +142,8 @@ func WarnPlainHTTP(prog, what, addr, secretKind string) {
 	if err != nil {
 		return
 	}
-	if h == "" || h == "127.0.0.1" || h == "::1" || h == "localhost" {
+	// Empty host (":8500") binds all interfaces — never loopback.
+	if h == "127.0.0.1" || h == "::1" || h == "localhost" {
 		return
 	}
 	log.Printf("%s: WARNING: %s on %s is plain HTTP on a non-loopback address; %s are sniffable. Terminate TLS in front of it.", prog, what, addr, secretKind)

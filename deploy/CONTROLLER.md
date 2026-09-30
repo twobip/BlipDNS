@@ -169,8 +169,10 @@ the root install helper via sudo. Trade-off: leaving it OFF is what allows the
 narrow `blipc-install .../blipc.new` / `blipctl.new` sudo rule to work; turning
 it ON would break self-updates (the helper could no longer setuid to root) and
 is therefore not recommended. The sudo rule stays pinned to the two fixed
-staged paths plus `EXPECTED_SHA256` re-verify (fail-closed), so the service
-cannot gain arbitrary root file writes.
+staged paths, and the root helper re-verifies the staged binary against the
+SIGNED `SHA256SUMS` (ed25519 release signature, public key embedded in the
+helper), so the service cannot gain arbitrary root file writes and a
+compromised release publisher cannot ship unsigned binaries.
 
 ## Architecture
 

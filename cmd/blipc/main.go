@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/tls"
 	"flag"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -46,6 +47,7 @@ type config struct {
 	InstanceOverrides map[string]*controller.InstanceOverride `yaml:"instance_overrides"`
 	DoHHTTPAddr       string                                  `yaml:"doh_http_addr"`
 	RateLimitQPS      int                                     `yaml:"rate_limit_qps"`
+	AllowedNetworks   []string                                `yaml:"allowed_networks"`
 	// CacheSize is a pointer so "omitted" (nil = blipd keeps its own default)
 	// stays distinct from an explicit "cache_size: 0" (unlimited, F-18).
 	CacheSize              *int                        `yaml:"cache_size"`
@@ -64,7 +66,15 @@ type config struct {
 
 func main() {
 	cfgPath := flag.String("config", "/etc/blipc/blipc.yaml", "path to YAML config")
+	showVersion := flag.Bool("version", false, "print the release version and exit")
 	flag.Parse()
+
+	// Finding 9: downgrade guards need a trustworthy local version, so
+	// --version prints the bare stamped release (e.g. "0.7.0+47cf192").
+	if *showVersion {
+		fmt.Println(controller.ControllerVersion())
+		return
+	}
 
 	cfg, err := load(*cfgPath)
 	if err != nil {
@@ -115,6 +125,9 @@ func main() {
 	}
 	if cfg.RateLimitQPS > 0 {
 		fleet.SetRateLimitQPSDefault(cfg.RateLimitQPS)
+	}
+	if len(cfg.AllowedNetworks) > 0 {
+		fleet.SetAllowedNetworksDefault(cfg.AllowedNetworks)
 	}
 	// F-18: CacheSize is presence-aware (*int). An explicit `cache_size: 0`
 	// means unlimited and must reach the fleet; an omitted field leaves
@@ -360,7 +373,12 @@ func isLoopbackListen(addr string) bool {
 	if err != nil {
 		return false
 	}
-	if h == "" || h == "localhost" || h == "127.0.0.1" || h == "::1" {
+	// Empty host (":8500", "8500") binds ALL interfaces via net.Listen —
+	// it must never count as loopback.
+	if h == "" {
+		return false
+	}
+	if h == "localhost" || h == "127.0.0.1" || h == "::1" {
 		return true
 	}
 	if ip := net.ParseIP(h); ip != nil && ip.IsLoopback() {
