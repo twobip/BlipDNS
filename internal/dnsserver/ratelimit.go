@@ -129,12 +129,21 @@ func (rl *rateLimiter) allow(client string) bool {
 		// a free pass once the table is full, but a transient flood must not
 		// deny legitimate new clients forever either.
 		if len(sh.buckets) >= maxLiveClients/rlShards {
+			// Saturated: evict the oldest entry if idle, else fail closed.
+			// Probe at most maxEvictProbes entries — a full-table scan per
+			// new IP is O(1024) under the shard lock, i.e. CPU amplification
+			// during exactly the flood the limiter should be stopping.
+			const maxEvictProbes = 32
 			var victim string
 			var oldest time.Time
 			first := true
+			probed := 0
 			for k, v := range sh.buckets {
 				if first || v.last.Before(oldest) {
 					victim, oldest, first = k, v.last, false
+				}
+				if probed++; probed >= maxEvictProbes {
+					break
 				}
 			}
 			if first || now.Sub(oldest) <= rlIdleEvict {
