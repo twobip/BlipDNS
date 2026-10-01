@@ -3,17 +3,13 @@
 Three one-time manual steps when upgrading from a release before these fixes.
 Each failure mode prints an actionable error; nothing here is silent.
 
-## 1. blipd refuses to start: empty `allowed_networks` + wildcard bind
+## 1. blipd no longer refuses to start on an empty `allowed_networks` — it warns and defaults closed
 
-`blipd` now refuses to boot as an open resolver. If your `blipd.yaml` has no
-`allowed_networks` (or an empty list) and `dns_addr` is non-loopback, add:
-
-```yaml
-allowed_networks: ["127.0.0.0/8", "::1/128", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7"]
-```
-
-Trim to your LANs. Deliberately open resolver instead: set
-`open_recursion: true` — see `deploy/blipd.yaml`.
+`blipd` boots with the safe closed default (loopback + RFC1918 + ULA,
+`control.DefaultAllowedNetworks`) when `allowed_networks` is empty on a
+non-loopback bind, warning loudly on every start. Serving the world still
+needs the explicit `open_recursion: true`. An explicit list is still
+recommended (the default covers all private ranges, not just your LANs).
 
 ## 2. First self-update fails closed: unknown installed version
 

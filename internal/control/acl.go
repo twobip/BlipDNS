@@ -9,6 +9,14 @@ import (
 	"strings"
 )
 
+// DefaultAllowedNetworks is the safe closed default: loopback + RFC1918 +
+// ULA. Used when blipd boots with no allowed_networks on a non-loopback
+// bind (warn-and-default, never crash, never open) and shipped by the
+// installer and deploy/blipd.yaml. Single source: keep them in sync.
+func DefaultAllowedNetworks() []string {
+	return []string{"127.0.0.0/8", "::1/128", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7"}
+}
+
 // ParseAllowedNetworks parses recursion-ACL CIDRs/IPs. Empty input means
 // allow all (open recursion). Single IPs are treated as /32 (/128 for IPv6).
 // Catch-all /0 CIDRs are rejected, mirroring the trusted-proxy parser: they

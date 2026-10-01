@@ -62,7 +62,7 @@ type Config struct {
 	Blocklist         *blocklist.Blocklist // global blocklist applied before per-client policy
 	BlockAction       filter.BlockAction   // response for global-blocklist hits ("" = nxdomain)
 	TrustedProxies    []string             // CIDRs/IPs trusted for X-Forwarded-For
-	AllowedNetworks   []string             // recursion ACL: CIDRs/IPs allowed to recurse; empty = allow all (open, with warning)
+	AllowedNetworks   []string             // recursion ACL: CIDRs/IPs allowed to recurse; empty on a non-loopback bind falls back to DefaultAllowedNetworks() with a warning (open only with OpenRecursion)
 	OpenRecursion     bool                 // explicit ack for empty allowed_networks on a non-loopback bind (fail closed without it)
 }
 
@@ -131,11 +131,19 @@ func New(cfg Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Fail closed: an empty ACL on a non-loopback bind is an open resolver.
-	// Refuse to start unless the operator explicitly acked it. Loopback-only
-	// binds keep the old warning (tests and single-host setups).
+	// No crash on a missing ACL: an empty list on a non-loopback bind falls
+	// back to the safe closed default in memory (the daemon cannot persist
+	// it — its own config file is read-only by design) and warns loudly on
+	// every boot. Serving the world needs the explicit open_recursion ack.
+	// Loopback-only binds keep the old warning (tests, single-host setups).
 	if len(allowed) == 0 && !cfg.OpenRecursion && !isLoopbackBind(cfg.DNSAddr) {
-		return nil, fmt.Errorf("blipd: refusing to start: empty allowed_networks with non-loopback dns_addr %q is an open resolver; restrict allowed_networks to loopback/private LANs or set open_recursion: true", cfg.DNSAddr)
+		def := control.DefaultAllowedNetworks()
+		log.Printf("blipd: WARNING no allowed_networks configured for non-loopback dns_addr %q: answering local networks only (%v); set allowed_networks explicitly, or open_recursion: true to serve the world", cfg.DNSAddr, def)
+		allowed, err = control.ParseAllowedNetworks(def)
+		if err != nil {
+			return nil, err
+		}
+		cfg.AllowedNetworks = append([]string(nil), def...)
 	}
 	if len(allowed) == 0 {
 		log.Printf("blipd: WARNING open recursion: no allowed_networks configured, answering all clients (restrict with allowed_networks to loopback/private LANs)")
