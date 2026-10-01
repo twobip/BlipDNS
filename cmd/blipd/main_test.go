@@ -3,6 +3,9 @@ package main
 import (
 	"net"
 	"testing"
+
+	"github.com/twobip/BlipDNS/internal/config"
+	"github.com/twobip/BlipDNS/internal/filter"
 )
 
 func testAddrs(ss ...string) []net.Addr {
@@ -36,5 +39,39 @@ func TestPickBundleHost(t *testing.T) {
 		if got := pickBundleHost(tc.admin, tc.addrs); got != tc.want {
 			t.Errorf("pickBundleHost(%q) = %q, want %q", tc.admin, got, tc.want)
 		}
+	}
+}
+
+func TestCheckBootConfig(t *testing.T) {
+	base := func() (*config.Config, *filter.Store) {
+		cfg := config.Default()
+		cfg.DNSAddr = "127.0.0.1:53535"
+		cfg.DoHAddr = "127.0.0.1:18443"
+		cfg.AdminAddr = "127.0.0.1:18444"
+		return cfg, filter.NewStore(nil)
+	}
+	cfg, store := base()
+	if err := checkBootConfig(cfg, store); err != nil {
+		t.Fatalf("valid config rejected: %v", err)
+	}
+	cfg, store = base()
+	cfg.Upstream = "bogus://x"
+	if err := checkBootConfig(cfg, store); err == nil {
+		t.Errorf("bad upstream accepted, want error")
+	}
+	cfg, store = base()
+	cfg.DNSAddr = "999.999.0.1:53"
+	if err := checkBootConfig(cfg, store); err == nil {
+		t.Errorf("unresolvable bind accepted, want error")
+	}
+	cfg, store = base()
+	cfg.AllowedNetworks = []string{"0.0.0.0/0"}
+	if err := checkBootConfig(cfg, store); err == nil {
+		t.Errorf("/0 ACL accepted, want error")
+	}
+	cfg, store = base()
+	cfg.CertFile, cfg.KeyFile = "/nonexistent-cert.pem", "/nonexistent-key.pem"
+	if err := checkBootConfig(cfg, store); err == nil {
+		t.Errorf("missing cert files accepted, want error")
 	}
 }

@@ -38,6 +38,52 @@ func reportedVersion() string {
 	return "blipd/" + control.WithCommit(version)
 }
 
+// checkBootConfig replays every boot-time validation that can fail startup:
+// explicit TLS material, listener address syntax, and the full dnsserver.New
+// build (upstream specs, proxy/ACL parsing, open-recursion rule). New binds
+// nothing and pool construction is parse-only, so this is side-effect-free:
+// no ports, no file writes, no fetches. Warnings New logs (empty-ACL
+// defaulting, plain-HTTP notices) print here too, so the operator sees what
+// boot will do.
+func checkBootConfig(cfg *config.Config, store *filter.Store) error {
+	if cfg.DoHTLS && cfg.CertFile != "" && cfg.KeyFile != "" {
+		if _, err := tls.LoadX509KeyPair(cfg.CertFile, cfg.KeyFile); err != nil {
+			return fmt.Errorf("load tls cert/key: %w", err)
+		}
+	}
+	for _, a := range []string{cfg.DNSAddr, cfg.DoHAddr, cfg.DoHHTTPAddr, cfg.AdminAddr} {
+		if a == "" {
+			continue
+		}
+		if _, err := net.ResolveTCPAddr("tcp", a); err != nil {
+			return fmt.Errorf("bad listen address %q: %w", a, err)
+		}
+	}
+	_, err := dnsserver.New(dnsserver.Config{
+		DNSAddr:           cfg.DNSAddr,
+		DoHAddr:           cfg.DoHAddr,
+		CertFile:          cfg.CertFile,
+		KeyFile:           cfg.KeyFile,
+		DoHTLS:            cfg.DoHTLS,
+		DoHHTTPAddr:       cfg.DoHHTTPAddr,
+		RateLimitQPS:      cfg.RateLimitQPS,
+		RateLimitBurst:    cfg.RateLimitBurst,
+		Upstream:          cfg.Upstream,
+		UpstreamServers:   cfg.UpstreamServers,
+		UpstreamRoutes:    cfg.UpstreamRoutes,
+		UpstreamBootstrap: cfg.UpstreamBootstrap,
+		CacheCap:          cfg.CacheCap,
+		CacheSize:         cfg.CacheSize,
+		Store:             store,
+		Version:           reportedVersion(),
+		Blocklist:         blocklist.New(),
+		TrustedProxies:    cfg.TrustedProxies,
+		AllowedNetworks:   cfg.AllowedNetworks,
+		OpenRecursion:     cfg.OpenRecursion,
+	})
+	return err
+}
+
 // blocklistSources merges the legacy single URL with the new plural list.
 func blocklistSources(cfg *config.Config) []string {
 	if len(cfg.BlocklistURLs) > 0 {
@@ -52,6 +98,7 @@ func blocklistSources(cfg *config.Config) []string {
 func main() {
 	cfgPath := flag.String("config", "", "path to YAML config")
 	showVersion := flag.Bool("version", false, "print the release version and exit")
+	checkConfig := flag.Bool("check-config", false, "validate the config file (policies, upstreams, ACL, TLS material, listen addresses) without binding ports or starting; exit 0 when boot would succeed")
 	// H1: management-API TLS. The config struct has no admin_tls fields, so
 	// flags are the surface: when both are set the management API serves
 	// HTTPS (bearer tokens protected); otherwise plain HTTP with the existing
@@ -103,6 +150,18 @@ func main() {
 		if err := store.SetPolicy(p); err != nil {
 			log.Fatalf("blipd: policy %q: %v", p.ID, err)
 		}
+	}
+
+	// Config self-check: replay every boot-time validation without side
+	// effects (no binds, no file writes, no fetches) so a typo is caught
+	// here instead of as a restart loop.
+	if *checkConfig {
+		if err := checkBootConfig(cfg, store); err != nil {
+			fmt.Fprintln(os.Stderr, "blipd: config INVALID:", err)
+			os.Exit(1)
+		}
+		fmt.Println("blipd: config OK")
+		return
 	}
 
 	bl := blocklist.New()
