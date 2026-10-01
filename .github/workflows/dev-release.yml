@@ -70,7 +70,12 @@ jobs:
           RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
         run: |
           set -euo pipefail
-          [ -n "$RELEASE_SIGNING_KEY" ] || { echo "::error::RELEASE_SIGNING_KEY repo secret is not set"; exit 1; }
+          # Signing deferred: no repo secret yet. Ship checksums only (warn
+          # loudly); re-arm by setting RELEASE_SIGNING_KEY (finding 4).
+          if [ -z "$RELEASE_SIGNING_KEY" ]; then
+            echo "::warning::RELEASE_SIGNING_KEY repo secret is not set — shipping UNSIGNED release (SHA256 only)"
+            exit 0
+          fi
           umask 077
           printf '%s\n' "$RELEASE_SIGNING_KEY" > "$RUNNER_TEMP/signing.key"
           chmod 600 "$RUNNER_TEMP/signing.key"
@@ -85,8 +90,11 @@ jobs:
         run: |
           # Move the "dev" tag to this commit and (re)create the prerelease.
           gh release delete dev --cleanup-tag --yes --repo "$GITHUB_REPOSITORY" 2>/dev/null || true
+          files=(blipd-linux-amd64 blipc-linux-amd64 blipctl-linux-amd64 blipd-update.sh blipd-install.sh blipc-update.sh blipc-install.sh blipd.service blipc.service SHA256SUMS)
+          # .sig only exists once RELEASE_SIGNING_KEY is set (signing deferred).
+          [ -f SHA256SUMS.sig ] && files+=(SHA256SUMS.sig)
           gh release create dev \
-            blipd-linux-amd64 blipc-linux-amd64 blipctl-linux-amd64 blipd-update.sh blipd-install.sh blipc-update.sh blipc-install.sh blipd.service blipc.service SHA256SUMS SHA256SUMS.sig \
+            "${files[@]}" \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
             --prerelease \

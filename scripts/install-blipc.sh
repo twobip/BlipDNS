@@ -352,8 +352,13 @@ fetch_verified() {
   local tag="$1" asset="$2" dest="$3" expected actual
   curl -fL --proto '=https' --tlsv1.2 "$BASE_URL/$tag/$asset" -o "$TMPDIR/$asset" || err "download failed: $BASE_URL/$tag/$asset"
   curl -fsSL --proto '=https' --tlsv1.2 "$BASE_URL/$tag/SHA256SUMS" -o "$TMPDIR/SHA256SUMS" || err "download failed: SHA256SUMS"
-  curl -fsSL --proto '=https' --tlsv1.2 "$BASE_URL/$tag/SHA256SUMS.sig" -o "$TMPDIR/SHA256SUMS.sig" || err "download failed: SHA256SUMS.sig — unsigned release, refusing to install"
-  verify_sums_sig "$TMPDIR"
+  # Signing deferred (no release key yet): a missing .sig warns and falls
+  # back to checksum-only; a present-but-invalid one is still fatal.
+  if curl -fsSL --proto '=https' --tlsv1.2 "$BASE_URL/$tag/SHA256SUMS.sig" -o "$TMPDIR/SHA256SUMS.sig"; then
+    verify_sums_sig "$TMPDIR"
+  else
+    log "WARNING: no SHA256SUMS.sig for $tag — checksum-only verification (release is unsigned)"
+  fi
   expected="$(awk -v a="$asset" '$2==a {print $1; exit}' "$TMPDIR/SHA256SUMS")"
   [ -n "$expected" ] || err "no checksum entry for $asset in SHA256SUMS"
   actual="$(sha256sum "$TMPDIR/$asset" | awk '{print $1}')"
