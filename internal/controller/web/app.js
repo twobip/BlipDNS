@@ -1803,7 +1803,7 @@ function loadACLEditor() {
     badge.textContent = "fleet-wide";
     badge.className = "badge accent";
     ta.value = (nets || []).join("\n");
-    hint.textContent = "Applies to every instance that doesn't have its own override. Empty = open resolver (needs the ack below).";
+    hint.textContent = "Applies to every instance that doesn't have its own override. Empty = answer everyone (needs the ack below).";
   } else {
     badge.textContent = "instance";
     badge.className = "badge purple";

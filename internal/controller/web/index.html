@@ -805,10 +805,10 @@
             <div class="field">
               <label>Scope</label>
               <select class="select" id="s-acl-scope" style="max-width:340px"></select>
-              <span class="hint" id="s-acl-scope-hint">Which client networks may recurse. Empty = open resolver (needs the ack below).</span>
+              <span class="hint" id="s-acl-scope-hint">Which networks this resolver answers queries for. Anyone not listed gets REFUSED. Empty = answer everyone (needs the ack below).</span>
             </div>
             <div class="field">
-              <label>Allowed networks <span class="faint">(one CIDR or IP per line)</span></label>
+              <label>Networks allowed to resolve <span class="faint">(one CIDR or IP per line)</span></label>
               <textarea class="input" id="s-acl-nets" rows="5" placeholder="127.0.0.0/8&#10;::1/128&#10;192.168.0.0/16"></textarea>
             </div>
             <div class="row mt">
@@ -822,12 +822,12 @@
           <div class="panel-head"><h3>Open Resolver</h3><span class="spacer"></span><span class="badge" id="s-open-badge">closed</span></div>
           <div class="panel-body">
             <div class="field">
-              <label class="row" style="gap:8px"><input type="checkbox" id="s-open-ack" style="accent-color:var(--accent)"/> <span>Allow pushing an empty recursion ACL (run instances as open resolvers)</span></label>
-              <span class="hint">Explicit opt-in. Without it, clearing the fleet ACL is refused and empty values are never pushed — an instance keeps its local list. An open resolver answers the whole internet and will be used for reflection attacks.</span>
+              <label class="row" style="gap:8px"><input type="checkbox" id="s-open-ack" style="accent-color:var(--accent)"/> <span>Allow an empty resolver list, so instances answer queries from anyone (open resolver)</span></label>
+              <span class="hint">Explicit opt-in. Without it, clearing the fleet list is refused and empty values are never pushed — an instance keeps its local list. An open resolver answers the whole internet and will be used for reflection attacks.</span>
             </div>
             <div class="table-wrap">
               <table class="tbl">
-                <thead><tr><th>Instance</th><th>Reported ACL</th><th>Boot flag</th></tr></thead>
+                <thead><tr><th>Instance</th><th>Currently answering</th><th>Boot mode</th></tr></thead>
                 <tbody id="s-open-tbody"></tbody>
               </table>
             </div>
