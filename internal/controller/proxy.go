@@ -197,8 +197,11 @@ func probeMgmtTLS(client *http.Client, url string) bool {
 // the presented leaf certificate, or nil. Disabling verification here is
 // safe: the caller never trusts the leaf on sight — it is pinned on first
 // use (TOFU) and compared against the persisted pin afterwards, and the
-// probe endpoint carries no bearer token. The leaf must also name this
-// instance (SAN check), so an unrelated middlebox cert cannot become the pin.
+// probe endpoint carries no bearer token. The leaf is NOT required to name
+// the dialled host: node certificates deliberately omit dialled LAN IPs
+// (no-RFC1918 SAN policy), so the fingerprint pin — exact-cert match — is
+// the authentication, not the SANs. A SAN mismatch is logged loudly so an
+// unexpected middlebox cert is visible instead of silent.
 func fetchMgmtLeaf(httpsURL string) *x509.Certificate {
 	u, err := url.Parse(strings.TrimSpace(httpsURL))
 	if err != nil || u.Scheme != "https" || u.Host == "" {
@@ -209,8 +212,8 @@ func fetchMgmtLeaf(httpsURL string) *x509.Certificate {
 	if port == "" {
 		port = "443"
 	}
-	// ponytail: gosec G402 would flag InsecureSkipVerify — the verify-then-
-	// pin in httpsMgmtClient is the mitigation, not an accident.
+	// ponytail: gosec G402 would flag InsecureSkipVerify — the pin-then-
+	// compare in httpsMgmtClient is the mitigation, not an accident.
 	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: upgradeProbeTimeout}, "tcp",
 		net.JoinHostPort(host, port), &tls.Config{InsecureSkipVerify: true, ServerName: host})
 	if err != nil {
@@ -222,7 +225,7 @@ func fetchMgmtLeaf(httpsURL string) *x509.Certificate {
 		return nil
 	}
 	if err := pcs[0].VerifyHostname(host); err != nil {
-		return nil
+		log.Printf("blipc: management cert for %s does not name the dialled host (%v); pinning by fingerprint — confirm this fingerprint out-of-band if unexpected: %s", httpsURL, err, mgmtCertFP(pcs[0]))
 	}
 	return pcs[0]
 }
@@ -233,11 +236,33 @@ func mgmtCertFP(leaf *x509.Certificate) string {
 	return hex.EncodeToString(sum[:])
 }
 
+// pinnedTLSConfig trusts exactly leaf and nothing else: the peer certificate
+// must byte-match the TOFU pin. Hostname/SAN checks are skipped — node
+// certificates deliberately omit dialled LAN IPs, so the fingerprint pin is
+// the authentication, not the SANs. Without the pinned private key an
+// attacker cannot present this exact certificate. Resumed sessions skip the
+// check: resumption is cryptographically bound to the originally verified
+// session via the server's ticket keys, and carries no certificates.
+// (ponytail: gosec G402 would flag InsecureSkipVerify — the exact-cert
+// VerifyConnection below is the mitigation, not an accident.)
+func pinnedTLSConfig(leaf *x509.Certificate) *tls.Config {
+	return &tls.Config{
+		InsecureSkipVerify: true,
+		VerifyConnection: func(cs tls.ConnectionState) error {
+			if cs.DidResume {
+				return nil
+			}
+			if len(cs.PeerCertificates) == 0 || !cs.PeerCertificates[0].Equal(leaf) {
+				return fmt.Errorf("blipc: management certificate does not match pinned fingerprint")
+			}
+			return nil
+		},
+	}
+}
+
 // pinnedMgmtClient returns a control client trusting only leaf (TOFU pin).
 func pinnedMgmtClient(httpsURL, token string, leaf *x509.Certificate) *control.Client {
-	pool := x509.NewCertPool()
-	pool.AddCert(leaf)
-	return control.NewClientWithTLS(httpsURL, token, &tls.Config{RootCAs: pool})
+	return control.NewClientWithTLS(httpsURL, token, pinnedTLSConfig(leaf))
 }
 
 // httpsMgmtClient returns a control client for an https management URL.
@@ -259,9 +284,7 @@ func httpsMgmtClient(httpsURL, token, pinnedFP string) (client *control.Client, 
 		log.Printf("blipc: REFUSING to trust %s: presented cert fingerprint %s does not match pinned %s (possible MITM or rotated cert; clear mgmt_cert_fp in controller.yaml to re-pin)", httpsURL, fp, pinnedFP)
 		return nil, nil, "", false
 	}
-	pool := x509.NewCertPool()
-	pool.AddCert(leaf)
-	probe := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}}, Timeout: upgradeProbeTimeout}
+	probe := &http.Client{Transport: &http.Transport{TLSClientConfig: pinnedTLSConfig(leaf)}, Timeout: upgradeProbeTimeout}
 	if !probeMgmtTLS(probe, httpsURL) {
 		return nil, nil, "", false
 	}

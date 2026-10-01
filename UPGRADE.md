@@ -23,4 +23,7 @@ no `--version` flag and no install stamp. One-time fix per node, either:
 
 Certs no longer embed RFC1918/Docker IPs, so nodes regenerate once on boot.
 If blipc TOFU-pinned the old cert (`mgmt_cert_fp`), clear the pin to re-pin;
-plain-HTTP-mgmt and explicit-cert nodes are unaffected.
+plain-HTTP-mgmt and explicit-cert nodes are unaffected. The regenerated cert
+no longer names the node's LAN IP, which older controllers additionally
+required (SAN check): update blipc alongside blipd — current blipc pins by
+fingerprint (exact-cert match) and no longer needs the dialled IP in SANs.
