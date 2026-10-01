@@ -805,34 +805,25 @@
             <div class="field">
               <label>Scope</label>
               <select class="select" id="s-acl-scope" style="max-width:340px"></select>
-              <span class="hint" id="s-acl-scope-hint">Which networks this resolver answers queries for. Anyone not listed gets REFUSED. Empty = answer everyone (needs the ack below).</span>
+              <span class="hint" id="s-acl-scope-hint">Which networks this resolver answers queries for. Anyone not listed gets REFUSED. Empty = answer everyone (needs the toggle below).</span>
             </div>
             <div class="field">
               <label>Networks allowed to resolve <span class="faint">(one CIDR or IP per line)</span></label>
               <textarea class="input" id="s-acl-nets" rows="5" placeholder="127.0.0.0/8&#10;::1/128&#10;192.168.0.0/16"></textarea>
             </div>
+            <div class="field">
+              <label class="row" style="gap:8px"><input type="checkbox" id="s-acl-open" style="accent-color:var(--accent)"/> <span>Answer queries from everyone (open resolver)</span></label>
+              <span class="hint">Explicit opt-in. Turning it on clears the fleet list so instances answer the whole internet — they will be used for reflection attacks. Turning it off restores the default local-networks list. Per-instance scopes can't be opened from here.</span>
+            </div>
             <div class="row mt">
               <button class="btn btn-primary" id="s-save-acl">Save</button>
               <span class="hint" id="s-acl-status"></span>
             </div>
-          </div>
-        </div>
-
-        <div class="panel">
-          <div class="panel-head"><h3>Open Resolver</h3><span class="spacer"></span><span class="badge" id="s-open-badge">closed</span></div>
-          <div class="panel-body">
-            <div class="field">
-              <label class="row" style="gap:8px"><input type="checkbox" id="s-open-ack" style="accent-color:var(--accent)"/> <span>Allow an empty resolver list, so instances answer queries from anyone (open resolver)</span></label>
-              <span class="hint">Explicit opt-in. Without it, clearing the fleet list is refused and empty values are never pushed — an instance keeps its local list. An open resolver answers the whole internet and will be used for reflection attacks.</span>
-            </div>
             <div class="table-wrap">
               <table class="tbl">
                 <thead><tr><th>Instance</th><th>Currently answering</th><th>Boot mode</th></tr></thead>
-                <tbody id="s-open-tbody"></tbody>
+                <tbody id="s-acl-tbody"></tbody>
               </table>
-            </div>
-            <div class="row mt">
-              <span class="hint" id="s-open-status"></span>
             </div>
           </div>
         </div>

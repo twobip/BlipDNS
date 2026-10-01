@@ -1811,19 +1811,23 @@ function loadACLEditor() {
     ta.placeholder = nets == null ? savedACL.join("\n") : "";
     hint.textContent = "Blank = inherit the fleet-wide default.";
   }
-  loadOpenEditor();
+  loadAclTable();
 }
-function loadOpenEditor() {
-  const cb = $("s-open-ack");
-  const badge = $("s-open-badge");
-  const tb = $("s-open-tbody");
-  cb.checked = savedOpenAck;
-  const anyOpen = instances.some((i) => {
-    const st = i.stats || {};
-    return (st.allowed_networks || []).length === 0;
-  });
-  badge.textContent = savedOpenAck ? "ack on" : (anyOpen ? "open instances!" : "closed");
-  badge.className = "badge " + (savedOpenAck || anyOpen ? "err" : "on");
+// Default closed resolver list restored when the open toggle is switched
+// off. Mirrors the shipped defaults in deploy/blipd.yaml.
+const ACL_CLOSED_DEFAULT = ["127.0.0.0/8", "::1/128", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7"];
+function loadAclTable() {
+  const cb = $("s-acl-open");
+  const badge = $("s-acl-badge");
+  const tb = $("s-acl-tbody");
+  const open = savedACL.length === 0 && savedOpenAck;
+  cb.checked = open;
+  cb.disabled = aclScopeState !== "default";
+  cb.title = aclScopeState !== "default" ? "Switch scope to fleet-wide default to open or close the fleet" : "";
+  if (aclScopeState === "default" && open) {
+    badge.textContent = "OPEN";
+    badge.className = "badge err";
+  }
   if (!instances.length) {
     tb.innerHTML = `<tr class="empty-row"><td colspan="3"><div class="empty"><h4>No instances</h4></div></td></tr>`;
     return;
@@ -2378,7 +2382,7 @@ function loadReleaseEditor() {
   const paneOf = {
     "Query Log": "ql", "Reset & destroy": "ql",
     "DoH (DNS over HTTPS)": "dns", "Rate Limit": "dns", "Cache": "dns",
-    "Recursion ACL": "sec", "Open Resolver": "sec",
+    "Recursion ACL": "sec",
     "API Keys": "keys",
     "Release Channel": "about", "Controller Update": "about", "About": "about",
     "Reverse Proxy": "sec",
@@ -2668,17 +2672,23 @@ $("s-save-acl").onclick = async () => {
     loadACLEditor();
   } catch (e) { st.textContent = ""; toast("save failed: " + e.message, "err"); }
 };
-$("s-open-ack").addEventListener("change", async (e) => {
-  const st = $("s-open-status");
+$("s-acl-open").addEventListener("change", async (e) => {
+  const st = $("s-acl-status");
   const want = e.target.checked;
   st.textContent = "saving…";
+  // One request: ack+clear opens, unack+closed-list closes. The server
+  // applies the ack first, so the combined clear is accepted.
+  const body = want
+    ? { open_recursion_ack: true, allowed_networks: [] }
+    : { open_recursion_ack: false, allowed_networks: ACL_CLOSED_DEFAULT };
   try {
-    await API("/api/settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ open_recursion_ack: want }) });
+    await API("/api/settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
     savedOpenAck = want;
-    st.textContent = want ? "ack on — clearing the fleet ACL will now open recursion" : "ack off";
-    toast(want ? "open-resolver ack enabled" : "open-resolver ack disabled");
+    savedACL = want ? [] : ACL_CLOSED_DEFAULT.slice();
+    st.textContent = want ? "fleet is now OPEN — answering everyone" : "fleet closed";
+    toast(want ? "open resolver enabled" : "open resolver disabled — default list restored", want ? "err" : "");
     loadACLEditor();
-  } catch (err) { st.textContent = ""; e.target.checked = savedOpenAck; toast("save failed: " + err.message, "err"); }
+  } catch (err) { st.textContent = ""; e.target.checked = !want; toast("save failed: " + err.message, "err"); }
 });
 $("s-rl-scope").addEventListener("change", (e) => {
   rlScopeState = e.target.value;
