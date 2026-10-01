@@ -752,3 +752,29 @@ func TestParseSpecRejectsUserinfo(t *testing.T) {
 		t.Errorf("ParseSpec(%q) = %v, want accepted", "https://9.9.9.9/dns-query", err)
 	}
 }
+
+// TestPoolUnnamedServerKeepsName guards the loop-copy bug where NewPool
+// synthesized fallback names into a range copy, leaving p.servers Name ""
+// so LabelFor skipped unnamed servers and their cache partitions collapsed.
+func TestPoolUnnamedServerKeepsName(t *testing.T) {
+	p, err := NewPool([]UpstreamServer{
+		{Name: "DoH", Address: "https://dns.example.com/dns-query", Priority: 1},
+		{Address: "udp://192.168.30.1:53", Priority: 0},
+	}, []UpstreamRoute{
+		{Name: "local-ptr", QnameSuffix: ".in-addr.arpa.", Server: "server#udp://192.168.30.1:53"},
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := p.servers[1].Name; got != "server#udp://192.168.30.1:53" {
+		t.Fatalf("p.servers[1].Name = %q, want synthesized name", got)
+	}
+	if r := p.Match("4.30.168.192.in-addr.arpa.", net.IPv4(192, 168, 1, 10)); r == nil {
+		t.Fatal("route did not match")
+	} else if got := p.LabelFor(r); got != "server#udp://192.168.30.1:53 (udp://192.168.30.1:53)" {
+		t.Errorf("LabelFor(unnamed server) = %q", got)
+	}
+	if got := p.LabelFor(p.Auto()); got != "auto (DoH)" {
+		t.Errorf("LabelFor(auto) = %q", got)
+	}
+}

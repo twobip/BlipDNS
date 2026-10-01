@@ -66,6 +66,13 @@ type Config struct {
 	OpenRecursion     bool                 // explicit ack for empty allowed_networks on a non-loopback bind (fail closed without it)
 }
 
+// maxInflightQueries bounds concurrent classic-DNS query handlers (UDP+TCP
+// share ServeDNS; miekg/dns spawns a goroutine per datagram with no cap).
+// Saturation sheds load with SERVFAIL instead of queueing: UDP has no
+// backpressure, so blocking would park a goroutine per spoofed packet anyway.
+// ponytail: fixed generous cap; add a Config knob if operators ever need it.
+const maxInflightQueries = 1024
+
 // Server is the DNS + DoH resolver.
 type Server struct {
 	cfg   Config
@@ -92,6 +99,8 @@ type Server struct {
 	once         sync.Once
 	// rl enforces the per-client DNS query rate limit (configurable live).
 	rl *rateLimiter
+	// inflight bounds concurrent ServeDNS handlers (see maxInflightQueries).
+	inflight chan struct{}
 	// cert is the certificate the DoH listener serves. Held atomically so a
 	// re-derived pair (an HA VIP configured after startup) is picked up by the
 	// next handshake without a restart.
@@ -165,6 +174,7 @@ func New(cfg Config) (*Server, error) {
 		ctrl:            ctrl,
 		cnt:             cnt,
 		rl:              newRateLimiter(),
+		inflight:        make(chan struct{}, maxInflightQueries),
 		rec:             NewRecordStore(),
 		cacheSize:       cfg.CacheSize,
 		trustedProxies:  trusted,
@@ -538,6 +548,26 @@ func (s *Server) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
 			}
 		}
 	}()
+	// Shed load past maxInflightQueries instead of growing a goroutine per
+	// spoofed datagram. The nil channel check keeps zero-value Servers
+	// (tests) working.
+	if s.inflight != nil {
+		select {
+		case s.inflight <- struct{}{}:
+			defer func() { <-s.inflight }()
+		default:
+			resp := new(dns.Msg)
+			if req != nil {
+				resp.SetReply(req)
+			}
+			resp.RecursionAvailable = true
+			resp.Rcode = dns.RcodeServerFailure
+			if w != nil {
+				_ = w.WriteMsg(resp)
+			}
+			return
+		}
+	}
 	// Zero-alloc client IP: type-assert the packet address instead of
 	// String()+SplitHostPort+ParseIP (3 allocs per query on the old path).
 	var clientIP net.IP
@@ -628,20 +658,20 @@ type chainBlockedError struct {
 func (e *chainBlockedError) Error() string { return "blipd: cname target blocked: " + e.target }
 
 // responseCap is the largest response that may be sent back on this transport
-// (RFC 8659 §6.1): UDP truncates to the DNS flag-day 1232; TCP honors the
-// client's advertised EDNS0 buffer size capped at 1232, defaulting to 512
-// (Truncate sets TC so the client retries with OPT or over TCP) when the
-// client sent no OPT.
+// (RFC 8659 §6.1): honor the client's advertised EDNS0 buffer size capped at
+// the DNS flag-day 1232 (floored at 512 per RFC 6891), defaulting to 1232 on
+// UDP and 512 on TCP (Truncate sets TC so the client retries with OPT or
+// over TCP) when the client sent no OPT.
 func responseCap(req *dns.Msg, isUDP bool) int {
-	if isUDP {
-		return 1232
-	}
 	if req != nil {
 		if opt := req.IsEdns0(); opt != nil {
 			if sz := int(opt.UDPSize()); sz > 0 {
 				return min(max(sz, 512), 1232)
 			}
 		}
+	}
+	if isUDP {
+		return 1232
 	}
 	return 512
 }

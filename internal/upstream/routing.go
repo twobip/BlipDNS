@@ -85,9 +85,14 @@ func NewPoolWithBootstrap(servers []UpstreamServer, routes []UpstreamRoute, lega
 	if err != nil {
 		return nil, err
 	}
-	for _, sv := range servers {
+	for i := range p.servers {
+		sv := p.servers[i]
 		if sv.Name == "" {
+			// Persist the synthesized name: LabelFor matches on p.servers
+			// names, and a copy-local assignment left them "" (collapsing
+			// cache partitions for unnamed servers).
 			sv.Name = "server#" + sv.Address
+			p.servers[i].Name = sv.Name
 		}
 		if _, dup := p.named[sv.Name]; dup {
 			return nil, fmt.Errorf("upstream: duplicate server name %q", sv.Name)

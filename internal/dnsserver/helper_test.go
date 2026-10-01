@@ -27,7 +27,7 @@ func TestClientIPFromReqUsesTrustedForwardedHeader(t *testing.T) {
 	}
 }
 
-func TestClientIPFromReqPrefersCFConnectingIP(t *testing.T) {
+func TestClientIPFromReqPrefersForwardedOverCF(t *testing.T) {
 	r := httptestRequest("127.0.0.1:1234", "198.51.100.7")
 	r.Header.Set("CF-Connecting-IP", "203.0.113.99")
 	trusted, err := parseTrustedProxies([]string{"127.0.0.1/32"})
@@ -35,8 +35,8 @@ func TestClientIPFromReqPrefersCFConnectingIP(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := clientIPFromReq(r, trusted)
-	if got == nil || got.String() != "203.0.113.99" {
-		t.Fatalf("client IP = %v, want CF-Connecting-IP", got)
+	if got == nil || got.String() != "198.51.100.7" {
+		t.Fatalf("client IP = %v, want X-Forwarded-For (XFF wins over CF-Connecting-IP)", got)
 	}
 }
 

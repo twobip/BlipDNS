@@ -116,6 +116,15 @@ func TestTCPResponseCap(t *testing.T) {
 	if resp.Len() > 1232 {
 		t.Errorf("UDP OPT-4096 len=%d want <=1232", resp.Len())
 	}
+	// UDP honors a small advertised buffer (audit #10): OPT 512 truncates.
+	srv = newBigServer(t)
+	resp = srv.serveInner(context.Background(), net.ParseIP("10.0.0.1"), "", control.ProtoDNS, true, query(true, 512))
+	if resp.Len() > 512 {
+		t.Errorf("UDP OPT-512 len=%d want <=512", resp.Len())
+	}
+	if !resp.Truncated {
+		t.Errorf("UDP OPT-512 TC=0 want 1")
+	}
 }
 
 func TestResponseCapTable(t *testing.T) {
@@ -127,6 +136,9 @@ func TestResponseCapTable(t *testing.T) {
 	smallOpt := new(dns.Msg)
 	smallOpt.SetQuestion("x.test.", dns.TypeA)
 	smallOpt.SetEdns0(100, false) // below floor: treated as 512
+	medOpt := new(dns.Msg)
+	medOpt.SetQuestion("x.test.", dns.TypeA)
+	medOpt.SetEdns0(512, false)
 	for _, tc := range []struct {
 		name  string
 		req   *dns.Msg
@@ -135,6 +147,8 @@ func TestResponseCapTable(t *testing.T) {
 	}{
 		{"udp-noopt", noOpt, true, 1232},
 		{"udp-opt", withOpt, true, 1232},
+		{"udp-opt512", medOpt, true, 512},
+		{"udp-opt100", smallOpt, true, 512},
 		{"tcp-noopt", noOpt, false, 512},
 		{"tcp-nil", nil, false, 512},
 		{"tcp-opt4096", withOpt, false, 1232},

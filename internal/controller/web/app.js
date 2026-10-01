@@ -428,7 +428,7 @@ function connectSSE() {
   try {
     const src = new EventSource("/api/events");
     sse = src;
-    src.onopen = () => { $("ev-live").className = "badge on"; };
+    src.onopen = () => { $("ev-live").textContent = "live"; $("ev-live").className = "badge on"; };
     src.onmessage = (m) => {
       let e; try { e = JSON.parse(m.data); } catch { return; }
       pushEvent(e);

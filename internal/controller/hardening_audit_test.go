@@ -108,7 +108,7 @@ func TestReadKeyDeniedHA(t *testing.T) {
 func TestSetInstanceOverrideUnknown(t *testing.T) {
 	f := NewFleet("")
 	qps := 50
-	res := f.SetInstanceOverride(context.Background(), "ghost", &InstanceOverride{RateLimitQPS: &qps})
+	res, _ := f.SetInstanceOverride(context.Background(), "ghost", &InstanceOverride{RateLimitQPS: &qps})
 	if res["ghost"] != "unknown instance" {
 		t.Fatalf("override ghost: %v, want unknown instance", res)
 	}

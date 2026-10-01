@@ -312,3 +312,71 @@ func TestBlockSource(t *testing.T) {
 		t.Errorf("BlockSource(outside network) = %q, want empty", got)
 	}
 }
+
+func TestNormalizeNameStripsControlBytes(t *testing.T) {
+	// Audit 2026-10-01 #11: qnames land in log lines, so CR/LF/NUL must not
+	// survive normalization (log forging via forged qname).
+	for _, tc := range []struct{ in, want string }{
+		{"evil.example.\nInjected: x", "evil.example.injected: x"},
+		{"EVIL\r\n.EXAMPLE.", "evil.example"},
+		{"a\x00b.example.", "ab.example"},
+		{"plain.example.", "plain.example"},
+		{"UPPER.EXAMPLE.", "upper.example"},
+	} {
+		if got := NormalizeName(tc.in); got != tc.want {
+			t.Errorf("NormalizeName(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// Audit 2026-10-01 #4: a self-asserted client ID must not outrank a more
+// specific CIDR. On 10.9.0.5 with a strict /32, claiming an ID scoped to a
+// broader /16 must still land in the /32.
+func TestClientIDLosesToLongerPrefix(t *testing.T) {
+	strict := &Policy{ID: "strict", Networks: []string{"10.9.0.5/32"}, Block: []string{"ads.example.com"}}
+	broad := &Policy{ID: "guest", Networks: []string{"10.9.0.0/16"}, Clients: []string{"guest-tablet"}, Allow: []string{"ads.example.com"}}
+	s := NewStore(nil)
+	if err := s.SetPolicy(strict); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetPolicy(broad); err != nil {
+		t.Fatal(err)
+	}
+	if blocked, _, _, _ := s.Classify(mustIP("10.9.0.5"), "guest-tablet", "ads.example.com"); !blocked {
+		t.Error("claimed ID in broader /16 escaped the stricter /32")
+	}
+	if src := s.BlockSource(mustIP("10.9.0.5"), "guest-tablet", "ads.example.com"); src != "policy:strict" {
+		t.Errorf("BlockSource = %q, want policy:strict", src)
+	}
+	// The ID must not count as selected when its policy lost.
+	if s.ClientIDSelected(mustIP("10.9.0.5"), "guest-tablet") {
+		t.Error("ClientIDSelected = true for an ID whose policy lost to a longer prefix")
+	}
+	// Sanity: the broad policy still governs its other addresses, where it
+	// is the longest match.
+	if blocked, _, _, _ := s.Classify(mustIP("10.9.1.7"), "guest-tablet", "ads.example.com"); blocked {
+		t.Error("broad /16 allowlist must still apply off the /32")
+	}
+	if !s.ClientIDSelected(mustIP("10.9.1.7"), "guest-tablet") {
+		t.Error("ClientIDSelected = false where the ID policy is the longest match")
+	}
+}
+
+// Between equally specific CIDR matches the client ID breaks the tie.
+func TestClientIDBreaksEqualPrefixTie(t *testing.T) {
+	a := &Policy{ID: "a", Networks: []string{"10.9.0.0/24"}, Block: []string{"ads.example.com"}}
+	b := &Policy{ID: "b", Networks: []string{"10.9.0.0/24"}, Clients: []string{"bravo"}, Allow: []string{"ads.example.com"}}
+	s := NewStore(nil)
+	if err := s.SetPolicy(a); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetPolicy(b); err != nil {
+		t.Fatal(err)
+	}
+	if blocked, _, _, _ := s.Classify(mustIP("10.9.0.9"), "bravo", "ads.example.com"); blocked {
+		t.Error("tied /24s: claimed ID should select its own policy's allowlist")
+	}
+	if src := s.BlockSource(mustIP("10.9.0.9"), "bravo", "ads.example.com"); src != "" {
+		t.Errorf("BlockSource = %q, want empty (allowed by tied ID policy)", src)
+	}
+}

@@ -2,9 +2,13 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/twobip/BlipDNS/internal/control"
 )
 
 func TestQueryLogStoreRoundtrip(t *testing.T) {
@@ -831,5 +835,83 @@ func TestQueryLogProtoFilter(t *testing.T) {
 		if n != tc.want {
 			t.Errorf("QueryCount proto=%q = %d, want %d", tc.proto, n, tc.want)
 		}
+	}
+}
+
+func TestTruncateAnswersForJSONBound(t *testing.T) {
+	// Audit 2026-10-01 #12: truncation must bound storage with a prefix of
+	// the input, and be maximal (one more answer would not fit).
+	answers := make([]control.Answer, 0, 200)
+	for i := 0; i < 200; i++ {
+		answers = append(answers, control.Answer{Type: "TXT", Data: strings.Repeat("x", 500)})
+	}
+	got := truncateAnswersForJSON(answers)
+	b, _ := json.Marshal(got)
+	if len(b) > maxAnswersJSON {
+		t.Fatalf("truncated JSON len=%d, want <= %d", len(b), maxAnswersJSON)
+	}
+	if len(got) == 0 || len(got) >= len(answers) {
+		t.Fatalf("truncated %d answers to %d, want a non-empty strict prefix", len(answers), len(got))
+	}
+	for i := range got {
+		if got[i] != answers[i] {
+			t.Fatalf("truncated answer %d mutated", i)
+		}
+	}
+	// Maximality: re-adding the next dropped answer must overflow again.
+	extended := append(append([]control.Answer{}, got...), answers[len(got)])
+	if eb, _ := json.Marshal(extended); len(eb) <= maxAnswersJSON {
+		t.Errorf("truncation not maximal: %d answers still fit", len(extended))
+	}
+	// Small inputs pass through untouched.
+	small := []control.Answer{{Type: "A", Data: "1.2.3.4"}}
+	if out := truncateAnswersForJSON(small); len(out) != 1 {
+		t.Errorf("small input truncated to %d, want 1", len(out))
+	}
+	if out := truncateAnswersForJSON(nil); out != nil {
+		t.Errorf("nil input = %v, want nil", out)
+	}
+}
+
+func TestQueryPageTotalMatchesCount(t *testing.T) {
+	// Audit 2026-10-01 #13: the window-function total must equal the
+	// standalone count, on every page and under a text filter.
+	store, err := NewQueryLogStore(filepath.Join(t.TempDir(), "querylog-page.db"))
+	if err != nil {
+		t.Fatalf("NewQueryLogStore: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	now := time.Now()
+	for i := 0; i < 5; i++ {
+		if err := store.Insert(ctx, QueryLogEntry{Timestamp: now.Add(-time.Duration(i) * time.Minute), Instance: "a", Client: "c", Domain: "example.com", Action: "PASS"}); err != nil {
+			t.Fatalf("Insert: %v", err)
+		}
+	}
+	since := now.Add(-24 * time.Hour)
+	p0, total0, err := store.QueryPage(ctx, "", "", "", "", "", since, 0, 2)
+	if err != nil {
+		t.Fatalf("QueryPage: %v", err)
+	}
+	if len(p0) != 2 || total0 != 5 {
+		t.Errorf("page0 = %d rows total=%d, want 2 rows total=5", len(p0), total0)
+	}
+	_, total1, err := store.QueryPage(ctx, "", "", "", "", "", since, 4, 2)
+	if err != nil {
+		t.Fatalf("QueryPage last: %v", err)
+	}
+	if total1 != 5 {
+		t.Errorf("last-page total = %d, want 5", total1)
+	}
+	got, totalF, err := store.QueryPage(ctx, "", "example", "", "", "", since, 0, 100)
+	if err != nil {
+		t.Fatalf("QueryPage filter: %v", err)
+	}
+	n, err := store.QueryCount(ctx, "", "example", "", "", "", since)
+	if err != nil {
+		t.Fatalf("QueryCount: %v", err)
+	}
+	if totalF != n || len(got) != n {
+		t.Errorf("filtered total=%d rows=%d count=%d, want all 5", totalF, len(got), n)
 	}
 }

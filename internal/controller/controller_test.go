@@ -673,7 +673,7 @@ func TestFleetSetDefaultPolicy(t *testing.T) {
 	}
 
 	up := "udp://8.8.8.8:53|2 https://1.1.1.1/dns-query|1"
-	res := fleet.SetDefaultPolicy(ctx, &control.Policy{Upstream: up, BlockAction: "nxdomain"})
+	res, _ := fleet.SetDefaultPolicy(ctx, &control.Policy{Upstream: up, BlockAction: "nxdomain"})
 	if res["a"] != "ok" || res["b"] != "ok" {
 		t.Fatalf("expected both instances ok, got %+v", res)
 	}
@@ -803,7 +803,7 @@ func TestFleetInstanceOverride(t *testing.T) {
 
 	defUp := "udp://1.1.1.1:53"
 	ovrUp := "https://9.9.9.9/dns-query|1"
-	res := fleet.SetDefaultPolicy(ctx, &control.Policy{Upstream: defUp, BlockAction: "nxdomain", Log: true})
+	res, _ := fleet.SetDefaultPolicy(ctx, &control.Policy{Upstream: defUp, BlockAction: "nxdomain", Log: true})
 	if res["a"] != "ok" || res["b"] != "ok" {
 		t.Fatalf("expected both ok, got %+v", res)
 	}
@@ -816,7 +816,7 @@ func TestFleetInstanceOverride(t *testing.T) {
 
 	// sparse override: only upstream differs; everything else falls through
 	// to the default.
-	res = fleet.SetInstanceOverride(ctx, "a", &InstanceOverride{Upstream: &ovrUp})
+	res, _ = fleet.SetInstanceOverride(ctx, "a", &InstanceOverride{Upstream: &ovrUp})
 	if res["a"] != "ok" {
 		t.Fatalf("expected instance a ok, got %+v", res)
 	}
@@ -850,7 +850,7 @@ func TestFleetInstanceOverride(t *testing.T) {
 	}
 
 	// clearing the override reverts the instance to the fleet default
-	res = fleet.SetInstanceOverride(ctx, "a", &InstanceOverride{})
+	res, _ = fleet.SetInstanceOverride(ctx, "a", &InstanceOverride{})
 	if res["a"] != "ok" {
 		t.Fatalf("expected clear ok, got %+v", res)
 	}
@@ -1367,7 +1367,7 @@ func TestFleetSetDoHHTTPAddr(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res := fleet.SetDoHHTTPAddr(ctx, "0.0.0.0:8445")
+	res, _ := fleet.SetDoHHTTPAddr(ctx, "0.0.0.0:8445")
 	if res["a"] != "ok" || res["b"] != "ok" {
 		t.Fatalf("expected both ok, got %+v", res)
 	}
@@ -1588,7 +1588,7 @@ func TestFleetDoHOverride(t *testing.T) {
 	}
 	addr := "0.0.0.0:9999"
 	aOvr := addr
-	res := fleet.SetInstanceOverride(ctx, "a", &InstanceOverride{DoHHTTPAddr: &aOvr})
+	res, _ := fleet.SetInstanceOverride(ctx, "a", &InstanceOverride{DoHHTTPAddr: &aOvr})
 	if res["a"] != "ok" {
 		t.Fatalf("expected a ok, got %+v", res)
 	}
@@ -1611,7 +1611,7 @@ func TestFleetDoHOverride(t *testing.T) {
 		t.Errorf("override for a = %+v", o)
 	}
 	// clearing the override reverts the instance to the fleet default
-	if res := fleet.SetInstanceOverride(ctx, "a", &InstanceOverride{}); res["a"] != "ok" {
+	if res, _ := fleet.SetInstanceOverride(ctx, "a", &InstanceOverride{}); res["a"] != "ok" {
 		t.Fatalf("expected clear ok, got %+v", res)
 	}
 	if o := fleet.InstanceOverrideOf("a"); o != nil && !o.IsEmpty() {
@@ -1638,7 +1638,7 @@ func TestFleetSetCache(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res := fleet.SetCache(ctx, 5000)
+	res, _ := fleet.SetCache(ctx, 5000)
 	if res["a"] != "ok" || res["b"] != "ok" {
 		t.Fatalf("expected both ok, got %+v", res)
 	}
@@ -1776,7 +1776,7 @@ func TestFleetCacheOverride(t *testing.T) {
 	}
 
 	size := 1000
-	res := fleet.SetInstanceOverride(ctx, "a", &InstanceOverride{CacheSize: &size})
+	res, _ := fleet.SetInstanceOverride(ctx, "a", &InstanceOverride{CacheSize: &size})
 	if res["a"] != "ok" {
 		t.Fatalf("expected a ok, got %+v", res)
 	}
@@ -1791,7 +1791,7 @@ func TestFleetCacheOverride(t *testing.T) {
 		t.Errorf("override for a = %+v", o)
 	}
 	// clearing the override reverts the instance to the fleet default
-	if res := fleet.SetInstanceOverride(ctx, "a", &InstanceOverride{}); res["a"] != "ok" {
+	if res, _ := fleet.SetInstanceOverride(ctx, "a", &InstanceOverride{}); res["a"] != "ok" {
 		t.Fatalf("expected clear ok, got %+v", res)
 	}
 	if o := fleet.InstanceOverrideOf("a"); o != nil && !o.IsEmpty() {
@@ -1925,7 +1925,7 @@ func TestFleetSetUpstream(t *testing.T) {
 		{Address: "https://1.1.1.1/dns-query"},
 		{Address: "8.8.8.8"},
 	}
-	res := fleet.SetUpstream(ctx, servers, routes, bootstrap)
+	res, _ := fleet.SetUpstream(ctx, servers, routes, bootstrap)
 	if res["a"] != "ok" || res["b"] != "ok" {
 		t.Fatalf("expected both ok, got %+v", res)
 	}
@@ -2023,7 +2023,7 @@ func TestFleetUpstreamOverride(t *testing.T) {
 	}
 
 	servers := []upstream.UpstreamServer{{Name: "cloudflare", Address: "udp://1.1.1.1:53", Priority: 1}}
-	if res := fleet.SetInstanceOverride(ctx, "a", &InstanceOverride{UpstreamServers: &servers}); res["a"] != "ok" {
+	if res, _ := fleet.SetInstanceOverride(ctx, "a", &InstanceOverride{UpstreamServers: &servers}); res["a"] != "ok" {
 		t.Fatalf("expected a ok, got %+v", res)
 	}
 	// Instance a must have received its override pool; b (fleet default empty)
@@ -2038,7 +2038,7 @@ func TestFleetUpstreamOverride(t *testing.T) {
 		t.Errorf("override for a = %+v", o)
 	}
 	// clearing the override removes it entirely.
-	if res := fleet.SetInstanceOverride(ctx, "a", &InstanceOverride{}); res["a"] != "ok" {
+	if res, _ := fleet.SetInstanceOverride(ctx, "a", &InstanceOverride{}); res["a"] != "ok" {
 		t.Fatalf("expected clear ok, got %+v", res)
 	}
 	if o := fleet.InstanceOverrideOf("a"); o != nil && !o.IsEmpty() {
@@ -2171,7 +2171,7 @@ func TestServerSettingsDoHInstanceOverride(t *testing.T) {
 	if err := fleet.Add(context.Background(), InstanceConfig{ID: "b", URL: srvB.URL, Token: "t"}); err != nil {
 		t.Fatal(err)
 	}
-	if res := fleet.SetDoHHTTPAddr(context.Background(), "0.0.0.0:8445"); res["a"] != "ok" || res["b"] != "ok" {
+	if res, _ := fleet.SetDoHHTTPAddr(context.Background(), "0.0.0.0:8445"); res["a"] != "ok" || res["b"] != "ok" {
 		t.Fatalf("fleet doh push: %+v", res)
 	}
 	time.Sleep(150 * time.Millisecond) // let poll reconcile settle
@@ -2504,7 +2504,7 @@ func TestServerSettingsUpstreamInstanceOverride(t *testing.T) {
 
 	// Give the fleet a baseline default so both instances have one.
 	fleetServers := []upstream.UpstreamServer{{Name: "quad9", Address: "udp://9.9.9.9:53", Priority: 1}}
-	if res := fleet.SetUpstream(context.Background(), fleetServers, nil, nil); res["a"] != "ok" || res["b"] != "ok" {
+	if res, _ := fleet.SetUpstream(context.Background(), fleetServers, nil, nil); res["a"] != "ok" || res["b"] != "ok" {
 		t.Fatalf("fleet upstream push: %+v", res)
 	}
 	time.Sleep(150 * time.Millisecond) // let poll reconcile settle
@@ -2687,8 +2687,9 @@ func TestBlocklistAddAcceptsSpaceSeparated(t *testing.T) {
 		t.Fatalf("status = %d, want 200", rec.Code)
 	}
 	got := fleet.ManualDomains()
-	// Single-label names (a, not, domain) are valid blocks (localhost/lan support).
-	want := []string{"a", "a.example.com", "b.example.com", "c.example.net", "domain", "not"}
+	// Audit 2026-10-01 #7: bare single labels (a, not, domain) are rejected —
+	// a stored single label would block a whole TLD via the ancestor walk.
+	want := []string{"a.example.com", "b.example.com", "c.example.net"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("ManualDomains() = %v, want %v", got, want)
 	}
@@ -2765,5 +2766,48 @@ func TestSettingsOpenRecursionAck(t *testing.T) {
 	}
 	if !strings.Contains(string(b), "open_recursion_ack: true") {
 		t.Errorf("controller.yaml lacks persisted ack:\n%s", b)
+	}
+}
+
+// TestFleetListConcurrentWithWriters guards the List RLock-recursion
+// deadlock: List held f.mu.RLock while status() re-took it
+// (UpdateAvailable/LatestVersion/wantConfig), so a writer queuing between
+// the two RLocks wedged List forever. List must finish under writers.
+func TestFleetListConcurrentWithWriters(t *testing.T) {
+	fleet := NewFleet("")
+	for _, id := range []string{"s1", "s2", "s3"} {
+		fleet.instances[id] = &Instance{
+			Config: InstanceConfig{ID: id},
+			fleet:  fleet,
+			health: &control.HealthResponse{OK: true, Version: "v0"},
+		}
+	}
+	var wg sync.WaitGroup
+	for w := 0; w < 2; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 200; i++ {
+				_ = fleet.SetReleaseChannelDefault("stable")
+				fleet.SetDefault(nil)
+			}
+		}()
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 500; i++ {
+			if got := len(fleet.List()); got != 3 {
+				t.Errorf("List() returned %d instances, want 3", got)
+				return
+			}
+		}
+	}()
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(20 * time.Second):
+		t.Fatal("List blocked under concurrent writers (fleet lock deadlock)")
 	}
 }

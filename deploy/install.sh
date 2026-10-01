@@ -26,25 +26,25 @@ fi
 echo ">> installing config -> $CFG_DST"
 mkdir -p "$CFG_DIR"
 mkdir -p /var/lib/blipd
-# M16: the blip service must be able to READ the config (it holds the admin
-# token). With mode 0600 the owner must be the service user itself — a
-# root-owned 0600 file is unreadable to blip without loosening to 0640/0644.
-# Match scripts/install-blipd.sh: dir root:blip 0750 (traversable), file
-# blip:blip 0600 (owner-readable only).
+# M16 + audit 2026-10-01 #8: the config holds the admin token. It must be
+# root-owned and group-readable (not blip-owned 0600, which lets a
+# compromised service user rewrite its own token/upstreams): blipd runs as
+# user blip, so group read is enough. Matches scripts/install-blipd.sh.
 chown -R root:"$SVC_USER" "$CFG_DIR"
 chmod 750 "$CFG_DIR"
 chown -R "$SVC_USER":"$SVC_USER" /var/lib/blipd
 chmod 700 /var/lib/blipd
 if [[ -f "$CFG_DST" ]]; then
   echo "   (existing config preserved — not overwriting; edit $CFG_DST to change)"
-  # Normalize ownership on re-run so an old root-owned config keeps working.
-  chown "$SVC_USER":"$SVC_USER" "$CFG_DST"
-  chmod 0600 "$CFG_DST"
+  # Normalize ownership on re-run so an old blip-owned config stops being
+  # daemon-writable.
+  chown root:"$SVC_USER" "$CFG_DST"
+  chmod 640 "$CFG_DST"
 else
   TOKEN="$(openssl rand -hex 16)"
   sed "s/__BLIP_ADMIN_TOKEN__/$TOKEN/" "$TPL" > "$CFG_DST"
-  chmod 0600 "$CFG_DST"
-  chown "$SVC_USER":"$SVC_USER" "$CFG_DST"
+  chmod 640 "$CFG_DST"
+  chown root:"$SVC_USER" "$CFG_DST"
   echo "   admin token: $TOKEN   (use with: blipctl --token $TOKEN http://127.0.0.1:8444 ...)"
   echo "   claim code is written to /var/lib/blipd/adopt-code (0600); read it box-locally with: sudo cat /var/lib/blipd/adopt-code"
 fi

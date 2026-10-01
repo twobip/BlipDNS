@@ -49,6 +49,11 @@ type Config struct {
 	Policies             []*filter.Policy          `yaml:"policies"`
 }
 
+// maxBlocklistUpdateHours bounds blocklist_update_hours: beyond this the
+// time.Duration conversion overflows int64 nanoseconds (panicking NewTicker),
+// and no operator means "refresh every N centuries".
+const maxBlocklistUpdateHours = 87600 // 10 years
+
 // Default returns a configuration that works out of the box (listens on
 // localhost, forwards to Cloudflare over UDP with DoH failover).
 func Default() *Config {
@@ -82,6 +87,17 @@ func Load(path string) (*Config, error) {
 	}
 	if c.CacheCap <= 0 {
 		c.CacheCap = time.Hour
+	}
+	// blocklist_update_hours feeds time.NewTicker, which panics on a
+	// non-positive interval and overflows time.Duration (int64ns) past
+	// ~2.5M hours. Negative is a typo (0 already means "no auto-refresh");
+	// absurd values are reset to the default (off) with a warning.
+	if c.BlocklistUpdateHours < 0 {
+		return nil, fmt.Errorf("config: blocklist_update_hours must be >= 0 (0 = no auto-refresh)")
+	}
+	if c.BlocklistUpdateHours > maxBlocklistUpdateHours {
+		log.Printf("config: WARNING blocklist_update_hours %d absurd (> %d); auto-refresh disabled", c.BlocklistUpdateHours, maxBlocklistUpdateHours)
+		c.BlocklistUpdateHours = 0
 	}
 	// Fail closed on copy-pasted placeholder tokens: an operator who copies
 	// the example config verbatim would otherwise run with a publicly known

@@ -310,7 +310,9 @@ func main() {
 	srv.ControlServer().SetUpdateController(upMgr)
 	haMgr.SetUpdateController(upMgr)
 
-	// Admin / management API.
+	// Admin / management API. The servers are hoisted so SIGTERM shuts them
+	// down gracefully instead of abandoning in-flight uploads (e.g. blocklist).
+	var adminSrv, localSrv *http.Server
 	if cfg.AdminToken != "" || cfg.StateFile != "" {
 		srv.SetMgmtToken(cfg.AdminToken)
 		srv.ControlServer().ConfigureAdoption(cfg.StateFile, cfg.InstanceID)
@@ -357,27 +359,27 @@ func main() {
 		if cfg.BlocklistCacheFile != "" {
 			srv.ControlServer().SetBlocklistCache(cfg.BlocklistCacheFile)
 		}
+		adminSrv = &http.Server{
+			Addr:    cfg.AdminAddr,
+			Handler: adoptAudit(srv.ControlServer(), srv.ControlServer().Handler()),
+			// The controller ships the blocklist over this API as a single
+			// multi-tens-of-MB JSON body (it caps at 2 GiB server-side).
+			// A 30s Read/WriteTimeout cuts such an upload off on any link
+			// slower than ~3 MB/s, which makes the controller retry the
+			// whole list every poll and burn bandwidth/CPU forever. Use a
+			// generous deadline (matching the controller's 10-minute
+			// SetBlocklist client) and keep a short header timeout for
+			// slowloris protection.
+			ReadHeaderTimeout: 10 * time.Second,
+			ReadTimeout:       10 * time.Minute,
+			WriteTimeout:      10 * time.Minute,
+			IdleTimeout:       60 * time.Second,
+			MaxHeaderBytes:    1 << 20,
+		}
 		go func() {
-			admin := &http.Server{
-				Addr:    cfg.AdminAddr,
-				Handler: adoptAudit(srv.ControlServer(), srv.ControlServer().Handler()),
-				// The controller ships the blocklist over this API as a single
-				// multi-tens-of-MB JSON body (it caps at 2 GiB server-side).
-				// A 30s Read/WriteTimeout cuts such an upload off on any link
-				// slower than ~3 MB/s, which makes the controller retry the
-				// whole list every poll and burn bandwidth/CPU forever. Use a
-				// generous deadline (matching the controller's 10-minute
-				// SetBlocklist client) and keep a short header timeout for
-				// slowloris protection.
-				ReadHeaderTimeout: 10 * time.Second,
-				ReadTimeout:       10 * time.Minute,
-				WriteTimeout:      10 * time.Minute,
-				IdleTimeout:       60 * time.Second,
-				MaxHeaderBytes:    1 << 20,
-			}
 			if adminTLS {
 				log.Printf("blipd: management API on https://%s (TLS)", cfg.AdminAddr)
-				if err := admin.ListenAndServeTLS(*adminTLSCert, *adminTLSKey); err != nil && err != http.ErrServerClosed {
+				if err := adminSrv.ListenAndServeTLS(*adminTLSCert, *adminTLSKey); err != nil && err != http.ErrServerClosed {
 					log.Printf("blipd: admin server: %v", err)
 				}
 				return
@@ -385,15 +387,15 @@ func main() {
 			// No explicit admin TLS flags: reuse the DoH certificate so the
 			// management API is HTTPS by default. Explicit flags above win.
 			if cfg.DoHTLS && tlsCert != nil {
-				admin.TLSConfig = srv.ManagementTLSConfig()
+				adminSrv.TLSConfig = srv.ManagementTLSConfig()
 				log.Printf("blipd: management API on https://%s (DoH certificate)", cfg.AdminAddr)
-				if err := admin.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
+				if err := adminSrv.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
 					log.Printf("blipd: admin server: %v", err)
 				}
 				return
 			}
 			log.Printf("blipd: management API on http://%s", cfg.AdminAddr)
-			if err := admin.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			if err := adminSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 				log.Printf("blipd: admin server: %v", err)
 			}
 		}()
@@ -417,17 +419,17 @@ func main() {
 			} else {
 				defer ln.Close()
 				defer os.Remove(cfg.AdminSocket)
+				localSrv = &http.Server{
+					Handler:           srv.ControlServer().LocalHandler(),
+					ReadHeaderTimeout: 10 * time.Second,
+					ReadTimeout:       10 * time.Minute,
+					WriteTimeout:      10 * time.Minute,
+					IdleTimeout:       60 * time.Second,
+					MaxHeaderBytes:    1 << 20,
+				}
 				go func() {
-					local := &http.Server{
-						Handler:           srv.ControlServer().LocalHandler(),
-						ReadHeaderTimeout: 10 * time.Second,
-						ReadTimeout:       10 * time.Minute,
-						WriteTimeout:      10 * time.Minute,
-						IdleTimeout:       60 * time.Second,
-						MaxHeaderBytes:    1 << 20,
-					}
 					log.Printf("blipd: local admin socket on %s (no token required; file permissions apply)", cfg.AdminSocket)
-					if err := local.Serve(ln); err != nil && err != http.ErrServerClosed {
+					if err := localSrv.Serve(ln); err != nil && err != http.ErrServerClosed {
 						log.Printf("blipd: local admin socket: %v", err)
 					}
 				}()
@@ -454,6 +456,14 @@ func main() {
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 	<-sig
 	log.Println("blipd: shutting down")
+	shutCtx, shutCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer shutCancel()
+	if adminSrv != nil {
+		_ = adminSrv.Shutdown(shutCtx)
+	}
+	if localSrv != nil {
+		_ = localSrv.Shutdown(shutCtx)
+	}
 	srv.Shutdown()
 }
 

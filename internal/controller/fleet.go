@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -59,9 +60,12 @@ type Event struct {
 
 // InstanceConfig is one managed blipd entry (from controller config).
 type InstanceConfig struct {
-	ID         string `yaml:"id" json:"id"`
-	URL        string `yaml:"url" json:"url"` // http://host:8444
-	Token      string `yaml:"token" json:"token"`
+	ID  string `yaml:"id" json:"id"`
+	URL string `yaml:"url" json:"url"` // http://host:8444
+	// Token is write-only over JSON (json:"-"): it is accepted on add but
+	// never serialized back, so no API read discloses instance bearer
+	// tokens. YAML persistence is unaffected.
+	Token      string `yaml:"token" json:"-"`
 	Label      string `yaml:"label" json:"label"`
 	Claim      string `yaml:"claim" json:"claim"`                                   // one-time claim code (optional bootstrap)
 	MgmtCertFP string `yaml:"mgmt_cert_fp,omitempty" json:"mgmt_cert_fp,omitempty"` // pinned SHA256 of the instance's self-signed management cert (TOFU); "" = system trust
@@ -558,30 +562,42 @@ func (f *Fleet) ApplyHA(ctx context.Context, cluster control.HACluster) error {
 	// Serial, primary first: keepalived/VRRP apply is order-sensitive and
 	// concurrent apply risks dual-active VIP flap. Two nodes only, so
 	// parallelism buys nothing.
+	// Partial apply is reported, not rolled back: a compensating disable
+	// would drop the VIP the surviving node just took. Each applied node is
+	// marked inline so the poll reconciler (maybePushHA) retries only the
+	// failed one, and the error names both sides for the operator.
+	var applied []string
 	for _, id := range ids {
 		inst, err := f.haNode(id)
 		if err != nil {
-			return err
+			return partialHAError(applied, id, err, f)
 		}
 		ictx, cancel := context.WithTimeout(ctx, 15*time.Second)
 		err = inst.ctl().ApplyHA(ictx)
 		cancel()
 		if err != nil {
-			return fmt.Errorf("%s apply failed after earlier node(s) may have applied: %w", id, err)
+			return partialHAError(applied, id, err, f)
 		}
-	}
-	for _, id := range ids {
-		if inst := f.get(id); inst != nil {
-			var cfg control.HAConfig
-			if id == cluster.PrimaryInstance {
-				cfg = cluster.Primary
-			} else {
-				cfg = cluster.Secondary
-			}
-			inst.markHAApplied(haConfigHash(&cfg))
+		var cfg control.HAConfig
+		if id == cluster.PrimaryInstance {
+			cfg = cluster.Primary
+		} else {
+			cfg = cluster.Secondary
 		}
+		inst.markHAApplied(haConfigHash(&cfg))
+		applied = append(applied, id)
 	}
 	return nil
+}
+
+// partialHAError records a partial HA apply (bus event for the dashboard)
+// and reports which nodes applied and which failed so the operator can retry
+// the failed node instead of guessing at cluster state.
+func partialHAError(applied []string, failedID string, err error, f *Fleet) error {
+	msg := fmt.Sprintf("HA partially applied (applied: [%s]; %s failed: %v); retry apply for the failed node",
+		strings.Join(applied, ","), failedID, err)
+	f.bus.Publish(Event{InstanceID: failedID, Type: "status", At: f.now(), Msg: msg})
+	return fmt.Errorf("%s", msg)
 }
 
 func (f *Fleet) DisableHA(ctx context.Context, cluster control.HACluster) error {
@@ -677,6 +693,10 @@ const (
 	maxMergedBlocklistDomains = 5_000_000
 	// maxInstanceLabelLen caps instance display labels (UI + events + config).
 	maxInstanceLabelLen = 128
+	// maxAutoUpdateHours caps the blocklist refresh interval: beyond this the
+	// time.Duration conversion in nextAutoUpdateIn overflows into a negative
+	// duration (which self-heals to a 1-minute retry — a hot refresh loop).
+	maxAutoUpdateHours = 87600 // 10 years
 )
 
 // NewFleet creates an empty fleet with a default event buffer.
@@ -890,10 +910,12 @@ func (f *Fleet) Add(ctx context.Context, cfg InstanceConfig) error {
 	// ctx (e.g. an HTTP request) is cancelled when the request returns, which
 	// would kill the goroutines after the first poll.
 	inst.start(context.Background())
-	if f.configPath != "" {
-		if err := f.saveConfig(); err != nil {
-			log.Printf("blipc: warning: failed to persist instance: %v", err)
-		}
+	if err := f.persist("instance"); err != nil {
+		inst.stop()
+		f.mu.Lock()
+		delete(f.instances, cfg.ID)
+		f.mu.Unlock()
+		return err
 	}
 	if cfg.Claim != "" {
 		// Adopt is a network call; run it on a background context so it isn't
@@ -953,7 +975,7 @@ func (f *Fleet) maybeMigrateMgmtTLS(inst *Instance, id, rawURL string) {
 }
 
 // Remove stops and forgets an instance.
-func (f *Fleet) Remove(id string) {
+func (f *Fleet) Remove(id string) error {
 	f.mu.Lock()
 	inst := f.instances[id]
 	delete(f.instances, id)
@@ -964,19 +986,20 @@ func (f *Fleet) Remove(id string) {
 	if inst != nil {
 		inst.stop()
 	}
-	if f.configPath != "" {
-		if err := f.saveConfig(); err != nil {
-			log.Printf("blipc: warning: failed to persist after remove: %v", err)
-		}
+	if err := f.persist("removed instance"); err != nil {
+		return err
 	}
+	return nil
 }
 
 // List returns a snapshot of instances with their current status.
+// Instances are snapshotted under the fleet lock, then status() runs outside
+// it: status() re-enters the fleet lock (UpdateAvailable/LatestVersion/
+// wantConfig), and nested RLocks deadlock once a writer queues between them.
 func (f *Fleet) List() []*InstanceStatus {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
-	out := make([]*InstanceStatus, 0, len(f.instances))
-	for _, inst := range f.instances {
+	insts := f.snapshotInstances()
+	out := make([]*InstanceStatus, 0, len(insts))
+	for _, inst := range insts {
 		out = append(out, inst.status())
 	}
 	return out
@@ -1003,14 +1026,12 @@ func (f *Fleet) SetDefault(p *control.Policy) {
 // SetDefaultPolicy records the fleet-wide default policy, persists it to the
 // controller config, and pushes every instance's effective config to it. It
 // returns the per-instance outcome ("ok" or an error message).
-func (f *Fleet) SetDefaultPolicy(ctx context.Context, p *control.Policy) map[string]string {
+func (f *Fleet) SetDefaultPolicy(ctx context.Context, p *control.Policy) (map[string]string, error) {
 	f.SetDefault(p)
-	if f.configPath != "" {
-		if err := f.saveConfig(); err != nil {
-			log.Printf("blipc: warning: failed to persist default policy: %v", err)
-		}
+	if err := f.persist("default policy"); err != nil {
+		return nil, err
 	}
-	return f.pushConfigs(ctx)
+	return f.pushConfigs(ctx), nil
 }
 
 // effectivePolicy merges the fleet default with the per-instance override:
@@ -1152,12 +1173,12 @@ func (f *Fleet) SetOverride(id string, o *InstanceOverride) {
 // SetInstanceOverride records a sparse per-instance config (only fields that
 // differ from the fleet default), persists it, and pushes it to the instance.
 // If the override is empty the override is removed entirely.
-func (f *Fleet) SetInstanceOverride(ctx context.Context, id string, o *InstanceOverride) map[string]string {
+func (f *Fleet) SetInstanceOverride(ctx context.Context, id string, o *InstanceOverride) (map[string]string, error) {
 	// Unknown instances must not accumulate persisted overrides: a typo'd id
 	// would otherwise linger in controller.yaml and surprise-apply if an
 	// instance with that id is ever added.
 	if f.get(id) == nil {
-		return map[string]string{id: "unknown instance"}
+		return map[string]string{id: "unknown instance"}, nil
 	}
 	f.mu.Lock()
 	if o.IsEmpty() {
@@ -1166,12 +1187,10 @@ func (f *Fleet) SetInstanceOverride(ctx context.Context, id string, o *InstanceO
 		f.overrides[id] = o
 	}
 	f.mu.Unlock()
-	if f.configPath != "" {
-		if err := f.saveConfig(); err != nil {
-			log.Printf("blipc: warning: failed to persist instance override: %v", err)
-		}
+	if err := f.persist("instance override"); err != nil {
+		return nil, err
 	}
-	return f.pushInstance(ctx, id)
+	return f.pushInstance(ctx, id), nil
 }
 
 // InstanceOverrideOf returns the sparse override for an instance (may be nil).
@@ -1296,13 +1315,9 @@ func (f *Fleet) SetOpenRecursionAckDefault(v bool) {
 
 // SetOpenRecursionAck records the ack and persists it. There is nothing to
 // push: the ack only gates future (possibly empty) ACL pushes.
-func (f *Fleet) SetOpenRecursionAck(v bool) {
+func (f *Fleet) SetOpenRecursionAck(v bool) error {
 	f.SetOpenRecursionAckDefault(v)
-	if f.configPath != "" {
-		if err := f.saveConfig(); err != nil {
-			log.Printf("blipc: warning: failed to persist open_recursion_ack: %v", err)
-		}
-	}
+	return f.persist("open_recursion_ack")
 }
 
 // effectiveAllowedNetworks returns the recursion ACL an instance should
@@ -1416,7 +1431,7 @@ func validateUpstreamPool(servers []upstream.UpstreamServer, routes []upstream.U
 // SetUpstream sets the fleet-wide default upstream pool, routes and bootstrap
 // servers, persists them, and pushes the effective value (default or
 // per-instance override) to every adopted instance.
-func (f *Fleet) SetUpstream(ctx context.Context, servers []upstream.UpstreamServer, routes []upstream.UpstreamRoute, bootstrap []upstream.UpstreamServer) map[string]string {
+func (f *Fleet) SetUpstream(ctx context.Context, servers []upstream.UpstreamServer, routes []upstream.UpstreamRoute, bootstrap []upstream.UpstreamServer) (map[string]string, error) {
 	if err := validateUpstreamPool(servers, routes, bootstrap); err != nil {
 		log.Printf("blipc: warning: refusing invalid upstream: %q", err)
 		out := make(map[string]string)
@@ -1426,17 +1441,15 @@ func (f *Fleet) SetUpstream(ctx context.Context, servers []upstream.UpstreamServ
 		if len(out) == 0 {
 			out[""] = "invalid upstream: " + err.Error()
 		}
-		return out
+		return out, nil
 	}
 	prev, _ := f.Upstream()
 	f.SetUpstreamDefault(servers, routes, bootstrap)
-	if f.configPath != "" {
-		if err := f.saveConfig(); err != nil {
-			log.Printf("blipc: warning: failed to persist upstream setting: %v", err)
-		}
+	if err := f.persist("upstream setting"); err != nil {
+		return nil, err
 	}
 	f.warnRemovedPolicyUpstreams(prev, servers)
-	return f.pushUpstream(ctx)
+	return f.pushUpstream(ctx), nil
 }
 
 // serverRefs normalizes a server pool into "type:address" references (UDP
@@ -1739,27 +1752,23 @@ func mergeOverride(existing, partial *InstanceOverride) *InstanceOverride {
 
 // SetDoHHTTPAddr records the fleet-wide plain-HTTP DoH address, persists it and
 // pushes it to every instance. Returns the per-instance outcome.
-func (f *Fleet) SetDoHHTTPAddr(ctx context.Context, addr string) map[string]string {
+func (f *Fleet) SetDoHHTTPAddr(ctx context.Context, addr string) (map[string]string, error) {
 	f.SetDoHDefault(addr)
-	if f.configPath != "" {
-		if err := f.saveConfig(); err != nil {
-			log.Printf("blipc: warning: failed to persist doh setting: %v", err)
-		}
+	if err := f.persist("doh setting"); err != nil {
+		return nil, err
 	}
-	return f.pushDoH(ctx)
+	return f.pushDoH(ctx), nil
 }
 
 // SetRateLimitQPS sets the fleet-wide DNS per-client QPS limit, persists it,
 // and pushes the effective value (default or per-instance override) to every
 // adopted instance.
-func (f *Fleet) SetRateLimitQPS(ctx context.Context, qps int) map[string]string {
+func (f *Fleet) SetRateLimitQPS(ctx context.Context, qps int) (map[string]string, error) {
 	f.SetRateLimitQPSDefault(qps)
-	if f.configPath != "" {
-		if err := f.saveConfig(); err != nil {
-			log.Printf("blipc: warning: failed to persist rate limit setting: %v", err)
-		}
+	if err := f.persist("rate limit setting"); err != nil {
+		return nil, err
 	}
-	return f.pushRateLimit(ctx)
+	return f.pushRateLimit(ctx), nil
 }
 
 // pushRateLimit distributes the effective DNS rate limit to every instance.
@@ -1827,10 +1836,8 @@ func (f *Fleet) SetAllowedNetworks(ctx context.Context, networks []string) (map[
 		return nil, err
 	}
 	f.SetAllowedNetworksDefault(networks)
-	if f.configPath != "" {
-		if err := f.saveConfig(); err != nil {
-			log.Printf("blipc: warning: failed to persist allowed networks: %v", err)
-		}
+	if err := f.persist("allowed networks"); err != nil {
+		return nil, err
 	}
 	return f.pushACL(ctx), nil
 }
@@ -2065,14 +2072,12 @@ func (f *Fleet) SetTrustedProxies(proxies []string) error {
 // SetQueryLogRetention persists the query log retention and applies it to the
 // store immediately. The log lives on blipc, so nothing is pushed to the
 // instances.
-func (f *Fleet) SetQueryLogRetention(ctx context.Context, hours int) map[string]string {
+func (f *Fleet) SetQueryLogRetention(ctx context.Context, hours int) (map[string]string, error) {
 	f.SetQueryLogRetentionDefault(hours)
-	if f.configPath != "" {
-		if err := f.saveConfig(); err != nil {
-			log.Printf("blipc: warning: failed to persist query log retention: %v", err)
-		}
+	if err := f.persist("query log retention"); err != nil {
+		return nil, err
 	}
-	return map[string]string{}
+	return map[string]string{}, nil
 }
 
 // CacheConfig returns the fleet-wide cache size limit (0 = unlimited).
@@ -2127,14 +2132,12 @@ func (f *Fleet) cacheConfiguredFor(id string) bool {
 // SetCache records the fleet-wide cache size, persists it, and pushes the
 // effective value (default or per-instance override) to every adopted
 // instance. Returns the per-instance outcome.
-func (f *Fleet) SetCache(ctx context.Context, size int) map[string]string {
+func (f *Fleet) SetCache(ctx context.Context, size int) (map[string]string, error) {
 	f.SetCacheDefault(size)
-	if f.configPath != "" {
-		if err := f.saveConfig(); err != nil {
-			log.Printf("blipc: warning: failed to persist cache setting: %v", err)
-		}
+	if err := f.persist("cache setting"); err != nil {
+		return nil, err
 	}
-	return f.pushCache(ctx)
+	return f.pushCache(ctx), nil
 }
 
 // pushCache distributes the effective cache size to every adopted instance.
@@ -2207,16 +2210,14 @@ func (f *Fleet) SetRecordsDefault(recs []control.RecordEntry) {
 	f.mu.Unlock()
 }
 
-func (f *Fleet) SetRecords(ctx context.Context, recs []control.RecordEntry) map[string]string {
+func (f *Fleet) SetRecords(ctx context.Context, recs []control.RecordEntry) (map[string]string, error) {
 	f.mu.Lock()
 	f.records = append([]control.RecordEntry(nil), recs...)
 	f.mu.Unlock()
-	if f.configPath != "" {
-		if err := f.saveConfig(); err != nil {
-			log.Printf("blipc: warning: failed to persist records: %v", err)
-		}
+	if err := f.persist("records"); err != nil {
+		return nil, err
 	}
-	return f.pushRecords(ctx)
+	return f.pushRecords(ctx), nil
 }
 
 // recordsHash returns a stable checksum of the fleet-wide records for
@@ -2510,10 +2511,8 @@ func (f *Fleet) Adopt(ctx context.Context, id, code string) error {
 		if old != nil {
 			old.CloseIdleConnections()
 		}
-		if f.configPath != "" {
-			if err := f.saveConfig(); err != nil {
-				log.Printf("blipc: warning: failed to persist adopted token: %v", err)
-			}
+		if err := f.persist("adopted token"); err != nil {
+			return fmt.Errorf("controller: adopted but %w", err)
 		}
 		// Newly adopted instance: hand it the fleet config and blocklist.
 		f.maybePushConfig(context.Background(), inst, nil)
@@ -2569,10 +2568,8 @@ func (f *Fleet) SetLabel(ctx context.Context, id, label string) error {
 	inst.mu.Lock()
 	inst.setLabelLocked(label)
 	inst.mu.Unlock()
-	if f.configPath != "" {
-		if err := f.saveConfig(); err != nil {
-			log.Printf("blipc: warning: failed to persist label: %v", err)
-		}
+	if err := f.persist("label"); err != nil {
+		return err
 	}
 	f.bus.Publish(Event{InstanceID: id, Instance: label, Type: "status", At: f.now(), Msg: "label updated"})
 	return nil
@@ -2682,7 +2679,7 @@ func (f *Fleet) SetBlocklistSourcesDefault(urls []string) {
 // SetBlocklistSources replaces the source URLs, persists them to the config,
 // and starts a background import job. The HTTP caller returns immediately;
 // progress is visible via BlocklistStatus.
-func (f *Fleet) SetBlocklistSources(ctx context.Context, urls []string) {
+func (f *Fleet) SetBlocklistSources(ctx context.Context, urls []string) error {
 	f.blMu.Lock()
 	clean := cleanURLs(urls)
 	f.blocklistSources = clean
@@ -2696,12 +2693,11 @@ func (f *Fleet) SetBlocklistSources(ctx context.Context, urls []string) {
 		f.blocklistDisabled = kept
 	}
 	f.blMu.Unlock()
-	if f.configPath != "" {
-		if err := f.saveConfig(); err != nil {
-			log.Printf("blipc: warning: failed to persist blocklist sources: %v", err)
-		}
+	if err := f.persist("blocklist sources"); err != nil {
+		return err
 	}
 	f.startBlocklistImport("sources-updated")
+	return nil
 }
 
 // EnabledBlocklistSources returns the configured source URLs that are not in
@@ -2722,7 +2718,7 @@ func (f *Fleet) EnabledBlocklistSources() []string {
 // change, and starts a background import so the merged list (and every
 // instance) reflects the new state. Disabling a source removes its domains
 // from the active blocklist; re-enabling restores them on the next import.
-func (f *Fleet) SetBlocklistSourceEnabled(ctx context.Context, url string, enabled bool) {
+func (f *Fleet) SetBlocklistSourceEnabled(ctx context.Context, url string, enabled bool) error {
 	f.blMu.Lock()
 	if enabled {
 		delete(f.blocklistDisabled, url)
@@ -2730,12 +2726,11 @@ func (f *Fleet) SetBlocklistSourceEnabled(ctx context.Context, url string, enabl
 		f.blocklistDisabled[url] = true
 	}
 	f.blMu.Unlock()
-	if f.configPath != "" {
-		if err := f.saveConfig(); err != nil {
-			log.Printf("blipc: warning: failed to persist blocklist source state: %v", err)
-		}
+	if err := f.persist("blocklist source state"); err != nil {
+		return err
 	}
 	f.startBlocklistImport("source-toggle")
+	return nil
 }
 
 // SetBlocklistDisabled records which source URLs are disabled. Used at startup
@@ -2768,23 +2763,25 @@ func (f *Fleet) SetAutoUpdateHoursDefault(h int) {
 	if h < 0 {
 		h = 0
 	}
+	if h > maxAutoUpdateHours {
+		h = maxAutoUpdateHours
+	}
 	f.blMu.Lock()
 	f.autoUpdateHours = h
 	f.blMu.Unlock()
 }
 
-func (f *Fleet) SetAutoUpdateHours(h int) {
+func (f *Fleet) SetAutoUpdateHours(h int) error {
 	if h < 0 {
 		h = 0
+	}
+	if h > maxAutoUpdateHours {
+		h = maxAutoUpdateHours
 	}
 	f.blMu.Lock()
 	f.autoUpdateHours = h
 	f.blMu.Unlock()
-	if f.configPath != "" {
-		if err := f.saveConfig(); err != nil {
-			log.Printf("blipc: warning: failed to persist blocklist auto-update hours: %v", err)
-		}
-	}
+	return f.persist("blocklist auto-update hours")
 }
 
 // StartAutoUpdater runs a background loop that refreshes the blocklist sources
@@ -3702,6 +3699,24 @@ func cleanURLs(urls []string) []string {
 // Serialized via saveMu and written atomically (tmp+rename 0600) so bursty UI
 // saves can't interleave read-modify-writes (lost update) or leave a truncated
 // controller.yaml on crash. The file is re-read to preserve unknown fields.
+// persist saves the controller config and returns any error instead of
+// logging it: a change that isn't persisted is lost on restart, so the
+// operator must know. saveConfig already no-ops with no config path, so
+// callers use this unconditionally. Setters return before pushing on persist
+// failure, so a failed change never reaches instances while the disk still
+// holds the old one; a restart then heals the in-memory divergence.
+// errPersist marks Fleet.persist failures (disk-write errors) so HTTP
+// handlers can map them to 500 instead of 400: validation errors stay
+// client errors, a config that won't save is a server failure.
+var errPersist = errors.New("blipc: failed to persist config")
+
+func (f *Fleet) persist(what string) error {
+	if err := f.saveConfig(); err != nil {
+		return fmt.Errorf("%w (%s): %w", errPersist, what, err)
+	}
+	return nil
+}
+
 func (f *Fleet) saveConfig() error {
 	if f.configPath == "" {
 		return nil

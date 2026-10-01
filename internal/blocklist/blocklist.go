@@ -265,7 +265,7 @@ func addEntry(d string, exact, wild map[string]struct{}) string {
 		return ""
 	}
 	if strings.HasPrefix(d, "*.") {
-		root := normalizeDomain(d[2:])
+		root := normalizeWildcardRoot(d[2:])
 		if root == "" {
 			return ""
 		}
@@ -786,7 +786,7 @@ func parseLine(line string, merged, allowed map[string]struct{}) bool {
 	}
 	// Plain domain or "*." wildcard.
 	if strings.HasPrefix(line, "*.") {
-		if root := normalizeDomain(line[2:]); root != "" {
+		if root := normalizeWildcardRoot(line[2:]); root != "" {
 			merged["*."+root] = struct{}{}
 			return true
 		}
@@ -849,12 +849,12 @@ func isHostsIP(line string) bool {
 func NormalizeDomain(s string) string { return normalizeDomain(s) }
 
 // normalizeDomain returns a lowercase domain with trailing dot removed.
-// It returns empty string if the input is empty or not a valid domain.
+// It returns empty string if the input is empty, malformed, or a bare
+// single label. Single labels ("com", "localhost") are never valid entries:
+// via the ancestor walk in IsBlocked a stored "com" would block the entire
+// .com TLD, and no public DNS name is a single label.
 // Single pass, no per-label allocation: anything except the dot structure
 // goes (punycode is already ASCII by the time we see it).
-// Single-label names (e.g. "localhost", "lan") are valid: via the ancestor
-// walk in IsBlocked an exact single-label entry also covers its subdomains
-// (e.g. storing "localhost" blocks "x.localhost").
 // A leading-dot form (".example.com") is normalized to "example.com" so it is
 // equivalent to "example.com" (exact + subdomains) instead of never matching.
 func normalizeDomain(s string) string {
@@ -886,11 +886,27 @@ func normalizeDomain(s string) string {
 		return ""
 	}
 	if dots < 1 {
-		// Single-label: must be a valid hostname label.
-		if !validSingleLabel(s) {
-			return ""
-		}
-		return s
+		// Bare single labels ("com", "localhost") are rejected: via the
+		// ancestor walk in IsBlocked a stored "com" would block every
+		// .com lookup, and no public DNS name is a single label.
+		return ""
+	}
+	return s
+}
+
+// normalizeWildcardRoot normalizes the root of an explicit "*." wildcard
+// entry. A bare single label is never stored, but an explicit "*.<tld>"
+// states TLD-wide intent (hagezi spam-tlds ships "||*.lol^" to block a whole
+// TLD except named sites), so a valid single-label root is kept here — and
+// only here.
+func normalizeWildcardRoot(s string) string {
+	if h := normalizeDomain(s); h != "" {
+		return h
+	}
+	s = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(s), "."))
+	s = strings.TrimLeft(s, ".")
+	if !validSingleLabel(s) {
+		return ""
 	}
 	return s
 }

@@ -746,6 +746,15 @@ func (s *Server) handleAPIKeys(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// fleetErrStatus maps fleet errors to HTTP status: persist failures are
+// server-side (500); validation and unknown-instance errors stay 400.
+func fleetErrStatus(err error) int {
+	if errors.Is(err, errPersist) {
+		return http.StatusInternalServerError
+	}
+	return http.StatusBadRequest
+}
+
 func writeJSON(w http.ResponseWriter, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
@@ -830,16 +839,33 @@ func bundleURLScheme(bundleURL string) string {
 	return u.Scheme
 }
 
+// addInstanceRequest is the POST /api/instances body. It mirrors
+// InstanceConfig field-for-field but keeps a JSON-visible token: Token is
+// write-only on InstanceConfig (never serialized back), while manual setup
+// still needs to supply one.
+type addInstanceRequest struct {
+	ID         string `json:"id"`
+	URL        string `json:"url"`
+	Token      string `json:"token"`
+	Label      string `json:"label"`
+	Claim      string `json:"claim"`
+	MgmtCertFP string `json:"mgmt_cert_fp"`
+}
+
 func (s *Server) handleInstances(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		writeJSON(w, s.fleet.List())
 	case http.MethodPost:
-		var cfg InstanceConfig
-		if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+		// Token is write-only on InstanceConfig (json:"-": accepted but
+		// never serialized back), so the add body decodes into an intake
+		// struct that still carries a token for manual (non-adopt) setup.
+		var req addInstanceRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		cfg := InstanceConfig{ID: req.ID, URL: req.URL, Token: req.Token, Label: req.Label, Claim: req.Claim, MgmtCertFP: req.MgmtCertFP}
 		// Token file expansion is never allowed via the API: "@..." or
 		// absolute-path-looking tokens are rejected so an API caller cannot
 		// make the controller read arbitrary local files. Use startup config
@@ -871,7 +897,7 @@ func (s *Server) handleInstances(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := s.fleet.Add(r.Context(), cfg); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			http.Error(w, err.Error(), fleetErrStatus(err))
 			return
 		}
 		writeJSON(w, map[string]interface{}{"ok": "added", "id": cfg.ID, "adopted": s.fleet.Adopted(cfg.ID)})
@@ -975,7 +1001,7 @@ func (s *Server) handleInstance(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		if err := s.fleet.Adopt(ctx, id, req.Code); err != nil {
 			log.Printf("blipc: audit: adopt instance %q from %s failed: %v", id, s.clientIP(r), err)
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			http.Error(w, err.Error(), fleetErrStatus(err))
 			return
 		}
 		log.Printf("blipc: audit: adopt instance %q from %s", id, s.clientIP(r))
@@ -1009,7 +1035,7 @@ func (s *Server) handleInstance(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err := s.fleet.SetLabel(ctx, id, req.Label); err != nil {
-			http.Error(w, err.Error(), http.StatusBadGateway)
+			http.Error(w, err.Error(), fleetErrStatus(err))
 			return
 		}
 		writeJSON(w, map[string]string{"ok": "label updated", "id": id})
@@ -1061,7 +1087,10 @@ func (s *Server) handleInstance(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		s.fleet.Remove(id)
+		if err := s.fleet.Remove(id); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 		writeJSON(w, map[string]string{"ok": "removed", "id": id})
 	default:
 		http.Error(w, "not found", http.StatusNotFound)
@@ -1092,10 +1121,18 @@ func (s *Server) handleRecords(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		applied := s.fleet.SetRecords(r.Context(), req.Records)
+		applied, err := s.fleet.SetRecords(r.Context(), req.Records)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 		writeJSON(w, map[string]interface{}{"ok": true, "applied": applied})
 	case http.MethodDelete:
-		applied := s.fleet.SetRecords(r.Context(), nil)
+		applied, err := s.fleet.SetRecords(r.Context(), nil)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 		writeJSON(w, map[string]interface{}{"ok": true, "applied": applied})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1175,11 +1212,19 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 				if *req.DoHHTTPAddr == "" {
 					merged.DoHHTTPAddr = nil
 				}
-				applied := s.fleet.SetInstanceOverride(r.Context(), req.Instance, merged)
+				applied, err := s.fleet.SetInstanceOverride(r.Context(), req.Instance, merged)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
 				writeJSON(w, map[string]interface{}{"ok": true, "applied": applied})
 				return
 			}
-			applied := s.fleet.SetDoHHTTPAddr(r.Context(), addr)
+			applied, err := s.fleet.SetDoHHTTPAddr(r.Context(), addr)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
 			writeJSON(w, map[string]interface{}{"ok": true, "applied": applied})
 			return
 		}
@@ -1191,7 +1236,11 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "invalid query_log_retention_hours: must be 24, 168, 720, 4320 or 8760", http.StatusBadRequest)
 				return
 			}
-			applied := s.fleet.SetQueryLogRetention(r.Context(), hours)
+			applied, err := s.fleet.SetQueryLogRetention(r.Context(), hours)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
 			writeJSON(w, map[string]interface{}{"ok": true, "applied": applied})
 			return
 		}
@@ -1230,18 +1279,29 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 				if qps == 0 {
 					merged.RateLimitQPS = nil
 				}
-				applied := s.fleet.SetInstanceOverride(r.Context(), req.Instance, merged)
+				applied, err := s.fleet.SetInstanceOverride(r.Context(), req.Instance, merged)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
 				writeJSON(w, map[string]interface{}{"ok": true, "applied": applied})
 				return
 			}
-			applied := s.fleet.SetRateLimitQPS(r.Context(), qps)
+			applied, err := s.fleet.SetRateLimitQPS(r.Context(), qps)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
 			writeJSON(w, map[string]interface{}{"ok": true, "applied": applied})
 			return
 		}
 		// Fleet-wide open-resolver ack: explicit opt-in to pushing an empty
 		// ACL. Applied before the ACL below so one request can ack+clear.
 		if req.OpenRecursionAck != nil {
-			s.fleet.SetOpenRecursionAck(*req.OpenRecursionAck)
+			if err := s.fleet.SetOpenRecursionAck(*req.OpenRecursionAck); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
 			// A lone ack flip (no ACL in the same request) is done here.
 			if req.AllowedNetworks == nil {
 				writeJSON(w, map[string]interface{}{"ok": true, "open_recursion_ack": s.fleet.OpenRecursionAck()})
@@ -1269,13 +1329,21 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 				if len(nets) == 0 {
 					merged.AllowedNetworks = nil
 				}
-				applied := s.fleet.SetInstanceOverride(r.Context(), req.Instance, merged)
+				applied, err := s.fleet.SetInstanceOverride(r.Context(), req.Instance, merged)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
 				writeJSON(w, map[string]interface{}{"ok": true, "applied": applied})
+				return
+			}
+			if _, err := control.ParseAllowedNetworks(nets); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
 			applied, err := s.fleet.SetAllowedNetworks(r.Context(), nets)
 			if err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
+				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
 			writeJSON(w, map[string]interface{}{"ok": true, "applied": applied})
@@ -1304,11 +1372,19 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 				if cacheSize == 0 {
 					merged.CacheSize = nil
 				}
-				applied := s.fleet.SetInstanceOverride(r.Context(), req.Instance, merged)
+				applied, err := s.fleet.SetInstanceOverride(r.Context(), req.Instance, merged)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
 				writeJSON(w, map[string]interface{}{"ok": true, "applied": applied})
 				return
 			}
-			applied := s.fleet.SetCache(r.Context(), cacheSize)
+			applied, err := s.fleet.SetCache(r.Context(), cacheSize)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
 			writeJSON(w, map[string]interface{}{"ok": true, "applied": applied})
 			return
 		}
@@ -1357,7 +1433,11 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 					http.Error(w, "invalid upstream: "+err.Error(), http.StatusBadRequest)
 					return
 				}
-				applied := s.fleet.SetInstanceOverride(r.Context(), req.Instance, merged)
+				applied, err := s.fleet.SetInstanceOverride(r.Context(), req.Instance, merged)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
 				writeJSON(w, map[string]interface{}{"ok": true, "applied": applied})
 				return
 			}
@@ -1374,7 +1454,11 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "invalid upstream: "+err.Error(), http.StatusBadRequest)
 				return
 			}
-			applied := s.fleet.SetUpstream(r.Context(), fleetServers, fleetRoutes, fleetBootstrap)
+			applied, err := s.fleet.SetUpstream(r.Context(), fleetServers, fleetRoutes, fleetBootstrap)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
 			writeJSON(w, map[string]interface{}{"ok": true, "applied": applied})
 			return
 		}
@@ -1392,7 +1476,11 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 			}
-			applied := s.fleet.SetInstanceOverride(r.Context(), req.Instance, merged)
+			applied, err := s.fleet.SetInstanceOverride(r.Context(), req.Instance, merged)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
 			writeJSON(w, map[string]interface{}{"ok": true, "applied": applied})
 			return
 		}
@@ -1400,7 +1488,11 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "default_policy required", http.StatusBadRequest)
 			return
 		}
-		applied := s.fleet.SetDefaultPolicy(r.Context(), req.Policy)
+		applied, err := s.fleet.SetDefaultPolicy(r.Context(), req.Policy)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 		writeJSON(w, map[string]interface{}{"ok": true, "applied": applied})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1528,12 +1620,7 @@ func (s *Server) handleQueries(w http.ResponseWriter, r *http.Request) {
 	limit := boundedLimit(r, 100, 500)
 	offset := boundedOffset(r)
 	since := time.Now().Add(-boundedDuration(r, "since", 24*time.Hour, time.Minute, 30*24*time.Hour))
-	entries, err := s.fleet.queryLog.Query(r.Context(), instance, filter, action, cached, proto, since, offset, limit)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
-		return
-	}
-	total, err := s.fleet.queryLog.QueryCount(r.Context(), instance, filter, action, cached, proto, since)
+	entries, total, err := s.fleet.queryLog.QueryPage(r.Context(), instance, filter, action, cached, proto, since, offset, limit)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
@@ -1928,9 +2015,15 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "data: %s\n\n", control.MustJSON(e))
 	}
 	flusher.Flush()
+	// Bound the stream lifetime like blipd's watch endpoint: stalled readers
+	// must not pin goroutines and subscriptions forever. Browsers reconnect.
+	streamMax := time.NewTimer(30 * time.Minute)
+	defer streamMax.Stop()
 	for {
 		select {
 		case <-r.Context().Done():
+			return
+		case <-streamMax.C:
 			return
 		case e := <-ch:
 			fmt.Fprintf(w, "data: %s\n\n", control.MustJSON(e))
@@ -2056,7 +2149,10 @@ func (s *Server) handleBlocklistSources(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 		if req.AutoUpdateHours != nil {
-			s.fleet.SetAutoUpdateHours(*req.AutoUpdateHours)
+			if err := s.fleet.SetAutoUpdateHours(*req.AutoUpdateHours); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
 		}
 		if len(urls) > maxBlocklistSources {
 			http.Error(w, fmt.Sprintf("too many blocklist sources (max %d)", maxBlocklistSources), http.StatusBadRequest)
@@ -2073,7 +2169,10 @@ func (s *Server) handleBlocklistSources(w http.ResponseWriter, r *http.Request) 
 		}
 		if len(urls) == 0 {
 			// clear:true with no URLs: drop the sources and the merged list.
-			s.fleet.SetBlocklistSources(r.Context(), nil)
+			if err := s.fleet.SetBlocklistSources(r.Context(), nil); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
 			s.fleet.Blocklist().FromDomains(nil)
 			if req.ClearManual {
 				s.fleet.ClearManualDomains()
@@ -2083,7 +2182,10 @@ func (s *Server) handleBlocklistSources(w http.ResponseWriter, r *http.Request) 
 			writeJSON(w, map[string]interface{}{"ok": true, "count": 0})
 			return
 		}
-		s.fleet.SetBlocklistSources(r.Context(), urls)
+		if err := s.fleet.SetBlocklistSources(r.Context(), urls); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 		writeJSON(w, map[string]interface{}{"ok": true, "running": true, "sources": urls})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -2120,7 +2222,10 @@ func (s *Server) handleBlocklistSource(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "url required", http.StatusBadRequest)
 		return
 	}
-	s.fleet.SetBlocklistSourceEnabled(r.Context(), url, req.Enabled)
+	if err := s.fleet.SetBlocklistSourceEnabled(r.Context(), url, req.Enabled); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 	writeJSON(w, map[string]interface{}{"ok": true, "enabled": req.Enabled})
 }
 

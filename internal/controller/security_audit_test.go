@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/twobip/BlipDNS/internal/control"
@@ -191,5 +192,38 @@ func TestValidateInstanceURLRemoteHTTP(t *testing.T) {
 		if got := isInsecureInstanceURL(raw); got != want {
 			t.Errorf("isInsecureInstanceURL(%q) = %v, want %v", raw, got, want)
 		}
+	}
+}
+
+// Audit 2026-10-01 #5: the instance bearer token is write-only over JSON —
+// accepted on add, never serialized back in any API read.
+func TestInstanceTokenNeverSerialized(t *testing.T) {
+	b, err := json.Marshal(InstanceConfig{ID: "n1", URL: "http://127.0.0.1:8444", Token: "s3cr3t-token", Label: "site1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "s3cr3t-token") {
+		t.Fatalf("InstanceConfig JSON discloses the token: %s", b)
+	}
+
+	// Intake still works: a token-bearing add is stored (adopted), so the
+	// dashboard's manual-token flow survives json:"-".
+	fake := fakeBlipd(t, "tok-1", "CODE-1",
+		&control.HealthResponse{OK: true, Version: "blipd/0.1.0"},
+		&control.StatsResponse{},
+		&control.ListResponse{},
+	)
+	defer fake.Close()
+	cfg := filepath.Join(t.TempDir(), "blipc.yaml")
+	if err := os.WriteFile(cfg, []byte("listen: \"127.0.0.1:8500\"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	srv := NewServerWithConfig("admin", "test-password-123", NewFleet(cfg), nil, cfg, "")
+	code, res := postInstances(t, srv, `{"id":"nt","url":"`+fake.URL+`","token":"tok-1"}`)
+	if code != http.StatusOK {
+		t.Fatalf("token-bearing add: status=%d (%v)", code, res)
+	}
+	if !srv.fleet.Adopted("nt") {
+		t.Fatal("token-bearing add lost its token (intake broken by json:\"-\")")
 	}
 }

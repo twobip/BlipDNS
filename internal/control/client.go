@@ -43,6 +43,11 @@ func newTransport(disableCompression bool) *http.Transport {
 	}
 }
 
+// noRedirect keeps the admin bearer token off other origins: the management
+// API never redirects, so any 3xx is surfaced to the caller instead of
+// followed (a following client would resend Authorization to the target).
+func noRedirect(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+
 // NewClient creates a controller client for baseURL (e.g.
 // http://host:8444) guarded by token. An https:// baseURL uses TLS with the
 // system roots; use NewClientWithTLS/SetTLSConfig for self-signed certs.
@@ -51,14 +56,17 @@ func NewClient(baseURL, token string) *Client {
 		base:  baseURL,
 		token: token,
 		http: &http.Client{
-			Timeout:   10 * time.Second,
-			Transport: newTransport(false),
+			Timeout:       10 * time.Second,
+			Transport:     newTransport(false),
+			CheckRedirect: noRedirect,
 		},
 		slow: &http.Client{
-			Transport: newTransport(true), // blocklist payloads are already large; no point negotiating gzip
+			Transport:     newTransport(true), // blocklist payloads are already large; no point negotiating gzip
+			CheckRedirect: noRedirect,
 		},
 		watch: &http.Client{
-			Transport: newTransport(false),
+			Transport:     newTransport(false),
+			CheckRedirect: noRedirect,
 		},
 	}
 }

@@ -179,6 +179,20 @@ func warnBroadAllow(policyID string, allow []string) {
 // are ASCII, so strings.ToLower's Unicode handling is unnecessary here.
 func NormalizeName(name string) string {
 	name = strings.TrimSuffix(name, ".")
+	// Audit 2026-10-01 #11: qnames reach log lines (blipd [block] log, query
+	// log, /api/v1/logs), so strip control bytes here at the shared choke
+	// point — every caller normalizes through this function.
+	for i := 0; i < len(name); i++ {
+		if c := name[i]; c < 0x20 || c == 0x7f {
+			name = strings.Map(func(r rune) rune {
+				if r < 0x20 || r == 0x7f {
+					return -1
+				}
+				return r
+			}, name)
+			break
+		}
+	}
 	for i := 0; i < len(name); i++ {
 		if c := name[i]; c >= 'A' && c <= 'Z' {
 			return strings.ToLower(name)
@@ -449,9 +463,11 @@ func foldClientID(id string) string {
 	return strings.ToLower(id)
 }
 
-// lookup returns the policy for a DoH client ID if one matches, otherwise the
-// most specific policy for ip, else the default. Nets are sorted longest-prefix
-// first so the first match wins (early exit, no Mask.Size recompute).
+// lookup returns the most specific (longest-prefix) policy for ip, else the
+// default. A DoH client ID only breaks ties between equally specific CIDR
+// matches: it never outranks a longer prefix, and an ID-only policy (no
+// networks) never matches. Nets are sorted longest-prefix first so the first
+// match wins (early exit, no Mask.Size recompute).
 func (s *Store) lookup(ip net.IP, clientID string) *compiledPolicy {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -464,25 +480,52 @@ func (s *Store) lookupLocked(ip net.IP, clientID string) *compiledPolicy {
 	if ip4 := ip.To4(); ip4 != nil {
 		nip = ip4
 	}
+	// Longest-prefix CIDR match first: nets are sorted most-specific first,
+	// so the first hit is the most specific policy covering ip. A
+	// self-asserted DoH client-ID must not outrank a more specific CIDR: on
+	// 10.9.0.5 with a strict /32, claiming an ID scoped to a broader /16
+	// must still land in the /32.
+	var best *compiledPolicy
+	bestOnes := -1
+	for i := range s.nets {
+		if s.nets[i].net.Contains(nip) {
+			best = s.nets[i].policy
+			bestOnes = s.nets[i].ones
+			break
+		}
+	}
 	if clientID != "" {
 		if p, ok := s.byClient[foldClientID(clientID)]; ok {
-			// A DoH client-ID is self-asserted (no auth), so it only selects
-			// its policy when the source IP also falls inside that policy's
-			// networks. A policy with no networks never matches by ID alone:
-			// otherwise anyone could claim an ID whose policy carries an
-			// allowlist (escaping the global blocklist) or another client's
-			// identity. Scope an ID policy with Networks to use it.
-			if len(p.nets) > 0 && netsContain(p.nets, nip) {
+			// The ID only breaks ties: it selects its policy when the
+			// source IP falls inside that policy's networks at the same
+			// specificity as the longest match. A policy with no
+			// networks never matches by ID alone: otherwise anyone could
+			// claim an ID whose policy carries an allowlist (escaping
+			// the global blocklist) or another client's identity. Scope
+			// an ID policy with Networks to use it.
+			if idOnes := maxContainOnes(p.nets, nip); idOnes >= 0 && idOnes == bestOnes {
 				return p
 			}
 		}
 	}
-	for i := range s.nets {
-		if s.nets[i].net.Contains(nip) {
-			return s.nets[i].policy
-		}
+	if best != nil {
+		return best
 	}
 	return s.defaults
+}
+
+// maxContainOnes returns the longest prefix length among nets containing ip,
+// or -1 when none contains it.
+func maxContainOnes(nets []*net.IPNet, ip net.IP) int {
+	best := -1
+	for _, n := range nets {
+		if n.Contains(ip) {
+			if ones, _ := n.Mask.Size(); ones > best {
+				best = ones
+			}
+		}
+	}
+	return best
 }
 
 // KnowsClientID reports whether any policy (including the default) lists
@@ -520,7 +563,12 @@ func (s *Store) ClientIDSelected(ip net.IP, clientID string) bool {
 	if ip4 := ip.To4(); ip4 != nil {
 		nip = ip4
 	}
-	return netsContain(p.nets, nip)
+	if !netsContain(p.nets, nip) {
+		return false
+	}
+	// The ID counts as selected only when lookup actually picks its policy:
+	// a more specific CIDR may have won instead.
+	return s.lookupLocked(ip, clientID) == p
 }
 
 // Check evaluates allow/block for an already-normalized name in a single
@@ -563,7 +611,8 @@ func (s *Store) AllowedNormalized(clientIP net.IP, clientID, normalizedName stri
 }
 
 // Classify reports whether name from clientIP (or DoH clientID) should be
-// blocked. A matching client ID takes precedence over the IP network.
+// blocked. The longest-prefix CIDR match wins; a client ID only breaks ties
+// between equally specific matches.
 // Allowlist takes precedence over blocklist. Returns the matched policy's
 // block action, upstream override (if any), and whether logging is enabled.
 func (s *Store) Classify(clientIP net.IP, clientID, name string) (blocked bool, action BlockAction, upstream string, log bool) {

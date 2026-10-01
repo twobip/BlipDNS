@@ -232,12 +232,48 @@ func TestChecksumOrderIndependent(t *testing.T) {
 
 func TestFromDomainsMap(t *testing.T) {
 	b := New()
-	b.FromDomainsMap(map[string]struct{}{"evil.com": {}, "*.wild.net": {}, "bad": {}})
+	b.FromDomainsMap(map[string]struct{}{"evil.com": {}, "*.wild.net": {}, "com": {}})
 	if !b.IsBlocked("evil.com") || !b.IsBlocked("x.wild.net") || b.IsBlocked("wild.net") {
 		t.Error("FromDomainsMap normalization failed")
 	}
-	if !b.IsBlocked("bad") {
-		t.Error("single-label domain should be blocked (localhost/lan support)")
+	// Audit 2026-10-01 #7: a bare single label must be dropped at ingest, so
+	// it can never block a whole TLD via the ancestor walk.
+	if b.IsBlocked("com") || b.IsBlocked("anything.com") {
+		t.Error("bare TLD entry must be rejected, not stored")
+	}
+}
+
+// Audit 2026-10-01 #7: no ingest path may store a bare single label — one
+// feed line "com" previously NXDOMAIN'd every .com lookup fleet-wide.
+func TestSingleLabelRejected(t *testing.T) {
+	for _, s := range []string{"com", "localhost", "lan", "COM", "com.", ".com"} {
+		if got := normalizeDomain(s); got != "" {
+			t.Errorf("normalizeDomain(%q) = %q, want empty", s, got)
+		}
+	}
+	merged := map[string]struct{}{}
+	allowed := map[string]struct{}{}
+	for _, line := range []string{"com", "localhost", "||com^", "0.0.0.0 localhost", "*.bad..label", "*."} {
+		if parseLine(line, merged, allowed) {
+			t.Errorf("parseLine(%q) accepted a single-label entry", line)
+		}
+	}
+	if len(merged) != 0 {
+		t.Errorf("parseLine stored single-label entries: %v", merged)
+	}
+	b := New()
+	b.Add("com")
+	b.Add("localhost")
+	b.AddAllowed("com")
+	if b.IsBlocked("example.com") || b.IsBlocked("com") || b.IsBlocked("localhost") {
+		t.Error("stored single label blocks lookups it must not")
+	}
+	// Explicit "*.<tld>" wildcards keep working: unlike a bare feed line,
+	// they state TLD-wide intent (pinned by TestDenyallowExceptionsAllowlisted).
+	w := New()
+	w.FromDomains([]string{"*.lol"})
+	if !w.IsBlocked("evil.lol") {
+		t.Error("explicit *.lol wildcard must still block its subdomains")
 	}
 }
 
@@ -312,16 +348,21 @@ plain.example.org
 	if err != nil {
 		t.Fatalf("LoadFromURLs: %v", err)
 	}
-	if res.Failed != 0 || res.Domains != 6 {
-		t.Fatalf("result = %+v, want 0 failed / 6 domains", res)
+	if res.Failed != 0 || res.Domains != 5 {
+		t.Fatalf("result = %+v, want 0 failed / 5 domains", res)
 	}
 	if !progressed {
 		t.Error("progress callback was not invoked")
 	}
-	for _, d := range []string{"ads.example.com", "tracker.example.net", "plain.example.org", "banner.example.com", "hostfile.example.io", "localhost"} {
+	for _, d := range []string{"ads.example.com", "tracker.example.net", "plain.example.org", "banner.example.com", "hostfile.example.io"} {
 		if !b.IsBlocked(d) {
 			t.Errorf("expected %q blocked", d)
 		}
+	}
+	// Audit 2026-10-01 #7: the hosts-file "localhost" line is a bare single
+	// label and must be dropped, not stored.
+	if b.IsBlocked("localhost") {
+		t.Error("single-label hosts entry must not be blocked")
 	}
 	if b.IsBlocked("example.com") {
 		t.Error("unexpected entries blocked")
