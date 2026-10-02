@@ -39,8 +39,17 @@ const defaultMaxEntries = 100000
 
 // maxInflightUpstream bounds concurrent upstream fetches (singleflight
 // misses) so a cache-bypass flood cannot park thousands of goroutines/FDs on
-// stalled upstreams. DoHit fails fast with an overload error when full.
+// stalled upstreams. DoHit queues up to maxInflightWait for a slot and sheds
+// with an overload error past that.
 const maxInflightUpstream = 256
+
+// maxInflightWait bounds how long a cache miss queues for an inflight slot
+// before it is shed as overload. A burst of distinct names (cold CDN page, an
+// hourly reverse sweep) routinely exceeds one label's slots while the upstream
+// is perfectly healthy; a short wait serves those at the cost of latency
+// instead of SERVFAILing them. Past the wait the old fail-fast applies, so a
+// stalled upstream still sheds rather than parking the DNS path.
+const maxInflightWait = 500 * time.Millisecond
 
 // upstreamPartitions splits the inflight semaphore by upstream label so one
 // blackholed upstream cannot starve every other resolver: each partition
@@ -492,8 +501,9 @@ func MaxAllowedEntries() int { return maxAllowedCacheEntries }
 // behind an in-flight fetch, DoHit returns ctx.Err() instead of blocking on
 // the upstream. A global inflight semaphore bounds concurrent upstream
 // fetches (held by the singleflight leader only, so a burst of identical
-// queries coalesces onto one slot); when saturated DoHit fails fast
-// (overload) instead of parking the DNS path.
+// queries coalesces onto one slot); when saturated DoHit waits up to
+// maxInflightWait for a slot, then sheds with an overload error instead of
+// parking the DNS path.
 func (c *Cache) DoHit(ctx context.Context, k Key, fn func() (*dns.Msg, error)) (*dns.Msg, bool, error) {
 	if m, ok := c.Get(k); ok {
 		return m, true, nil
@@ -507,10 +517,25 @@ func (c *Cache) DoHit(ctx context.Context, k Key, fn func() (*dns.Msg, error)) (
 		sem := inflightFor(k.Label)
 		select {
 		case sem <- struct{}{}:
-			defer func() { <-sem }()
+			// Slot free: the common path, nothing allocated.
 		default:
-			return nil, fmt.Errorf("upstream overloaded: too many concurrent fetches")
+			// Contended: queue briefly instead of shedding at once, so a
+			// burst of distinct names (cold CDN page) is served rather than
+			// SERVFAILed while the upstream is healthy. Bounded by
+			// maxInflightWait and by the caller's context, so a stalled
+			// upstream still sheds. The timer is built only on this path so
+			// the common acquire stays alloc-free.
+			t := time.NewTimer(maxInflightWait)
+			defer t.Stop()
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-t.C:
+				return nil, fmt.Errorf("upstream overloaded: too many concurrent fetches")
+			}
 		}
+		defer func() { <-sem }()
 		m, ferr := fn()
 		if ferr != nil {
 			return nil, ferr

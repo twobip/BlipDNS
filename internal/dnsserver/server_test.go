@@ -1017,3 +1017,44 @@ func TestServeFetchChainBlocked(t *testing.T) {
 		t.Fatalf("upstream calls = %d, want 2 (blocked alias must not cache)", up.calls)
 	}
 }
+
+// TestServePrivatePTRNeverForwards pins the private-reverse short-circuit: a
+// reverse lookup for a LAN address is answered NXDOMAIN locally and never
+// reaches an upstream. Regression guard for the Go trap where
+// net.IP.IsGlobalUnicast() reports true for RFC1918/ULA, which had made this
+// guard a no-op and sent every LAN PTR to the public resolvers.
+func TestServePrivatePTRNeverForwards(t *testing.T) {
+	srv, up := newTestServer(t)
+	private := []string{
+		"243.30.168.192.in-addr.arpa.", // 192.168.30.243 (RFC1918)
+		"1.2.254.169.in-addr.arpa.",    // 169.254.2.1   (link-local)
+		"1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.d.f.ip6.arpa.", // fd00::1 (ULA)
+	}
+	for _, name := range private {
+		q := new(dns.Msg)
+		q.SetQuestion(name, dns.TypePTR)
+		resp := srv.serve(context.Background(), net.ParseIP("10.0.0.1"), "", "dns", q)
+		if resp == nil || resp.Rcode != dns.RcodeNameError {
+			t.Errorf("%s rcode = %v, want NXDOMAIN", name, resp)
+		}
+	}
+	up.mu.Lock()
+	calls := up.calls
+	up.mu.Unlock()
+	if calls != 0 {
+		t.Fatalf("upstream calls = %d for private reverse names, want 0", calls)
+	}
+
+	// A reverse lookup for a public address still forwards.
+	q := new(dns.Msg)
+	q.SetQuestion("8.8.8.8.in-addr.arpa.", dns.TypePTR)
+	if resp := srv.serve(context.Background(), net.ParseIP("10.0.0.1"), "", "dns", q); resp == nil || resp.Rcode != dns.RcodeSuccess {
+		t.Fatalf("public PTR rcode = %v, want NOERROR", resp)
+	}
+	up.mu.Lock()
+	calls = up.calls
+	up.mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("upstream calls = %d after a public PTR, want 1", calls)
+	}
+}

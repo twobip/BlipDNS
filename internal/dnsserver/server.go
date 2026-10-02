@@ -1205,7 +1205,13 @@ func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, prot
 	// structure). An explicit conditional-forwarding route or per-policy
 	// upstream override still wins — the operator asked for it.
 	if q.Qtype == dns.TypePTR && !matchedRoute && upstreamOverride == "" {
-		if ip, ok := ptrIPFromArpa(q.Name); ok && !ip.IsGlobalUnicast() {
+		// IsPrivate is load-bearing: Go's IsGlobalUnicast is true for
+		// RFC1918/ULA, so the test used to be a no-op for 192.168/16 and
+		// every LAN reverse lookup was forwarded (quota burn + LAN-structure
+		// leak). Verified in Go: 192.168.30.1 => IsGlobalUnicast=true.
+		// ponytail: shared 100.64/10 (CGNAT) and reserved blocks still
+		// forward; add a range here if one ever shows up on the LAN.
+		if ip, ok := ptrIPFromArpa(q.Name); ok && (!ip.IsGlobalUnicast() || ip.IsPrivate()) {
 			resp.Rcode = dns.RcodeNameError
 			return resp
 		}

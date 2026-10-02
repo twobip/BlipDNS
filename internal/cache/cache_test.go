@@ -296,3 +296,53 @@ func TestKeyOfLowercasesName(t *testing.T) {
 		t.Error("mixed-case lookup should hit the lowercased entry")
 	}
 }
+
+// TestDoHitContendedQueuesThenSheds pins the contended inflight path: a miss
+// that cannot get a slot immediately must wait for one (a burst of distinct
+// names is served, not SERVFAILed) and only shed with the overload error
+// after maxInflightWait — never instantly, never blocking forever.
+func TestDoHitContendedQueuesThenSheds(t *testing.T) {
+	sem := inflightFor("") // KeyOf leaves Label empty, so this is the partition
+	fill := func() {
+		for len(sem) < cap(sem) {
+			sem <- struct{}{}
+		}
+	}
+	fill()
+	defer func() {
+		for len(sem) > 0 {
+			<-sem
+		}
+	}()
+
+	// A slot frees shortly after the call: the miss must have queued for it.
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		<-sem
+	}()
+	c := New(0, 0)
+	fetched := false
+	q := mkMsg("burst.test", 60)
+	if _, _, err := c.DoHit(context.Background(), KeyOf(q), func() (*dns.Msg, error) {
+		fetched = true
+		return q, nil
+	}); err != nil {
+		t.Fatalf("contended DoHit = %v, want it to wait for the freed slot", err)
+	}
+	if !fetched {
+		t.Fatal("fetch never ran")
+	}
+
+	// Nothing frees a slot now: shed — but only after the bounded wait.
+	fill()
+	start := time.Now()
+	if _, _, err := c.DoHit(context.Background(), KeyOf(mkMsg("shed.test", 60)), func() (*dns.Msg, error) {
+		t.Error("fetch ran without an inflight slot")
+		return nil, nil
+	}); err == nil {
+		t.Fatal("saturated DoHit = nil, want the overload error")
+	}
+	if el := time.Since(start); el < maxInflightWait/2 {
+		t.Errorf("shed after %v, want the %v bounded wait first", el, maxInflightWait)
+	}
+}
