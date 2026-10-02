@@ -551,14 +551,16 @@ func (s *QueryLogStore) Query(ctx context.Context, instance, filter, action, cac
 	return entries, err
 }
 
-// QueryPage is Query plus the exact total in one scan: COUNT(*) OVER()
-// rides along with the page, so the /api/queries handler no longer runs a
-// second full-table COUNT(*) per request (audit 2026-10-01 #13: with a text
-// filter the shared predicates are 4 unindexed LOWER() LIKE '%..%' matches).
+// QueryPage is Query plus the exact total: entries come from one indexed
+// page query (no window count — COUNT(*) OVER() forces SQLite to materialize
+// every matching row including the answers JSON blob before LIMIT, ~8x
+// slower on first load), and the total from a second, blob-free QueryCount
+// over the same predicates (audit 2026-10-01 #13: with a text filter the
+// shared predicates are 4 unindexed LOWER() LIKE '%..%' matches).
 // ponytail: still a full scan under a text filter — an FTS5 index on
 // (client, domain, action) if this stays slow at scale.
 func (s *QueryLogStore) QueryPage(ctx context.Context, instance, filter, action, cached, proto string, since time.Time, offset, limit int) ([]QueryLogEntry, int, error) {
-	query := `SELECT ql.id, ql.timestamp, ql.instance, ql.client, COALESCE(cn.name, ''), ql.domain, ql.action, ql.proto, ql.upstream, ql.q_type, ql.blocklist, ql.ips, ql.answers, ql.duration_us, ql.cached, COUNT(*) OVER() FROM query_log ql LEFT JOIN client_names cn ON cn.client = ql.client WHERE ql.timestamp >= ? AND ql.domain != 'health_check' AND ql.domain != ''`
+	query := `SELECT ql.id, ql.timestamp, ql.instance, ql.client, COALESCE(cn.name, ''), ql.domain, ql.action, ql.proto, ql.upstream, ql.q_type, ql.blocklist, ql.ips, ql.answers, ql.duration_us, ql.cached FROM query_log ql LEFT JOIN client_names cn ON cn.client = ql.client WHERE ql.timestamp >= ? AND ql.domain != 'health_check' AND ql.domain != ''`
 	args := []interface{}{since}
 	query, args = logFilter(query, args, instance, action, cached, filter, proto)
 
@@ -572,14 +574,12 @@ func (s *QueryLogStore) QueryPage(ctx context.Context, instance, filter, action,
 	defer rows.Close()
 
 	var results []QueryLogEntry
-	total := 0
 	for rows.Next() {
 		var e QueryLogEntry
 		var ts string
 		var qProto, qType, bl, ips, ans sql.NullString
 		var dur, cached sql.NullInt64
-		var n int
-		if err := rows.Scan(&e.ID, &ts, &e.Instance, &e.Client, &e.Name, &e.Domain, &e.Action, &qProto, &e.Upstream, &qType, &bl, &ips, &ans, &dur, &cached, &n); err != nil {
+		if err := rows.Scan(&e.ID, &ts, &e.Instance, &e.Client, &e.Name, &e.Domain, &e.Action, &qProto, &e.Upstream, &qType, &bl, &ips, &ans, &dur, &cached); err != nil {
 			return nil, 0, err
 		}
 		e.Timestamp = parseQueryTS(ts)
@@ -601,18 +601,18 @@ func (s *QueryLogStore) QueryPage(ctx context.Context, instance, filter, action,
 		e.DurationUs = dur.Int64
 		e.Cached = cached.Valid && cached.Int64 != 0
 		results = append(results, e)
-		total = n
 	}
-	// No rows to carry the COUNT(*) OVER() total (e.g. offset past the end
-	// of the log): fall back to an explicit count so total stays truthful.
-	// Only the empty page pays for the second query.
-	if len(results) == 0 {
-		total, err = s.QueryCount(ctx, instance, filter, action, cached, proto, since)
-		if err != nil {
-			return nil, 0, err
-		}
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
 	}
-	return results, total, rows.Err()
+	// Blob-free count over the same predicates, so the total is exact on
+	// every page including overrun ones — and far cheaper than a window
+	// count that drags the answers JSON through the sort.
+	total, err := s.QueryCount(ctx, instance, filter, action, cached, proto, since)
+	if err != nil {
+		return nil, 0, err
+	}
+	return results, total, nil
 }
 
 // QueryCount returns the total number of query log entries that match the
