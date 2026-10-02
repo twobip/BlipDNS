@@ -2995,6 +2995,13 @@ func (f *Fleet) LoadAllowedDomains(ctx context.Context) {
 	if src == nil {
 		src = make(map[string]struct{})
 	}
+	// Pre-fix snapshots persisted the effective union in the manual table, so
+	// drop anything a source also declares: manualAllowed — and the UI list
+	// built from it — must hold operator-added entries only. The exceptions
+	// themselves keep applying via sourceAllowed.
+	for d := range src {
+		delete(m, d)
+	}
 	f.blMu.Lock()
 	f.manualAllowed = m
 	f.sourceAllowed = src
@@ -3078,6 +3085,20 @@ func (f *Fleet) AllowedDomains() []string {
 	return out
 }
 
+// ManualAllowedDomains returns the operator's hand-added whitelist, sorted.
+// Source-declared $denyallow= exceptions are excluded: they are managed by
+// the list sources, not added by hand, and the UI shows this list only.
+func (f *Fleet) ManualAllowedDomains() []string {
+	f.blMu.Lock()
+	defer f.blMu.Unlock()
+	out := make([]string, 0, len(f.manualAllowed))
+	for d := range f.manualAllowed {
+		out = append(out, d)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // syncAllowed mirrors the effective whitelist (manual + source-declared
 // $denyallow= exceptions) into the merged in-memory list so the checksum (and
 // therefore the hash distributed to instances) covers both blocked and
@@ -3105,13 +3126,15 @@ func (f *Fleet) ClearAllowedDomains() {
 }
 
 // persistAllowed snapshots the hand-added whitelist to the local DB in the
-// background.
+// background. Source-declared $denyallow= exceptions are left out: they are
+// restored from blocklist_source_allowed at startup, and storing them here
+// would surface them in the UI as hand-added entries.
 func (f *Fleet) persistAllowed() {
 	if f.blocklistDB == nil {
 		return
 	}
 	go func() {
-		if err := f.blocklistDB.replaceDomainSet(context.Background(), "blocklist_manual_allow", f.AllowedDomains()); err != nil {
+		if err := f.blocklistDB.replaceDomainSet(context.Background(), "blocklist_manual_allow", f.ManualAllowedDomains()); err != nil {
 			log.Printf("blipc: warning: persist allowed blocklist: %v", err)
 		}
 	}()

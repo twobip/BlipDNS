@@ -77,7 +77,7 @@ func TestFleetLoadAllowedDomainsUnionsSourceExceptions(t *testing.T) {
 	}
 	defer store.db.Close()
 	ctx := context.Background()
-	if err := store.replaceDomainSet(ctx, "blocklist_manual_allow", []string{"time.nist.gov"}); err != nil {
+	if err := store.replaceDomainSet(ctx, "blocklist_manual_allow", []string{"time.nist.gov", "manual.example.org"}); err != nil {
 		t.Fatalf("seed manual allow: %v", err)
 	}
 	if err := store.ReplaceSourceAllowed(ctx, "https://src.invalid/list", []string{"adsb.lol", "time.nist.gov"}); err != nil {
@@ -89,9 +89,15 @@ func TestFleetLoadAllowedDomainsUnionsSourceExceptions(t *testing.T) {
 	fleet.LoadAllowedDomains(ctx)
 
 	got := fleet.AllowedDomains()
-	want := []string{"adsb.lol", "time.nist.gov"}
+	want := []string{"adsb.lol", "manual.example.org", "time.nist.gov"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("AllowedDomains() = %v, want %v (union, dedup, sorted)", got, want)
+	}
+	// The manual view — what the UI lists and a delete can touch — excludes
+	// entries a source also declares: pre-fix snapshots stored the union in
+	// the manual table and the load must scrub it to operator-added only.
+	if gotM := fleet.ManualAllowedDomains(); !reflect.DeepEqual(gotM, []string{"manual.example.org"}) {
+		t.Errorf("ManualAllowedDomains() = %v, want [manual.example.org]", gotM)
 	}
 	// The load must reach the merged list even though no allow edit bumped
 	// the generation counter: otherwise the first reconcile pushes an empty
@@ -100,7 +106,7 @@ func TestFleetLoadAllowedDomainsUnionsSourceExceptions(t *testing.T) {
 	for _, d := range fleet.Blocklist().Allowed() {
 		synced[d] = true
 	}
-	if !reflect.DeepEqual(synced, map[string]bool{"adsb.lol": true, "time.nist.gov": true}) {
+	if !reflect.DeepEqual(synced, map[string]bool{"adsb.lol": true, "manual.example.org": true, "time.nist.gov": true}) {
 		t.Errorf("merged list allow set = %v, want the loaded union", synced)
 	}
 }

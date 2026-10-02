@@ -2695,6 +2695,34 @@ func TestBlocklistAddAcceptsSpaceSeparated(t *testing.T) {
 	}
 }
 
+// TestBlocklistGetHidesSourceExceptions: the Custom Allowed Domains list —
+// and its delete affordance — covers hand-added entries only. A $denyallow=
+// name declared by a list source stays out of the response while continuing
+// to apply fleet-wide (the union this test does not exercise here lives in
+// TestFleetLoadAllowedDomainsUnionsSourceExceptions).
+func TestBlocklistGetHidesSourceExceptions(t *testing.T) {
+	fleet := NewFleet("")
+	fleet.AddAllowedDomain("keep.example.com")
+	fleet.setSourceAllowed(map[string]struct{}{"src.example.net": {}, "keep.example.com": {}})
+	srv := &Server{fleet: fleet}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/blocklist", nil)
+	rec := httptest.NewRecorder()
+	srv.handleBlocklist(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var body struct {
+		Allowed []string `json:"allowed"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if want := []string{"keep.example.com"}; !reflect.DeepEqual(body.Allowed, want) {
+		t.Errorf("allowed = %v, want %v (hand-added only)", body.Allowed, want)
+	}
+}
+
 // TestSettingsOpenRecursionAck exercises the Security-tab ack gate: clearing
 // the fleet ACL without the ack is refused (400, nothing pushed); flipping
 // the ack persists it; clearing with the ack pushes an empty ACL (open) to

@@ -2050,7 +2050,9 @@ func (s *Server) handleBlocklist(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		domains := s.fleet.ManualDomains()
-		allowed := s.fleet.AllowedDomains()
+		// Only hand-added allows are listed: source-declared $denyallow=
+		// exceptions still apply fleet-wide, they are just not operator state.
+		allowed := s.fleet.ManualAllowedDomains()
 		if lim := r.URL.Query().Get("limit"); lim != "" {
 			if n, err := strconv.Atoi(lim); err == nil && n > 0 {
 				if len(domains) > n {
