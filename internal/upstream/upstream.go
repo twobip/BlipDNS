@@ -189,14 +189,15 @@ type TLSResolver struct {
 const tlsPoolSize = 4
 
 // NewTLS creates a DoT upstream resolver for addr (host:port) with the given
-// timeout (0 = 5 second default). TLS is verified against the system roots.
+// timeout (0 = 5 second default). TLS is verified against the system roots
+// with an explicit TLS 1.2 floor (matching the DoH serving path).
 func NewTLS(addr string, timeout time.Duration) *TLSResolver {
 	if timeout <= 0 {
 		timeout = 5 * time.Second
 	}
 	return &TLSResolver{
 		addr: addr,
-		tls:  dns.Client{Net: "tcp-tls", Timeout: timeout, Dialer: &net.Dialer{Timeout: timeout}},
+		tls:  dns.Client{Net: "tcp-tls", Timeout: timeout, Dialer: &net.Dialer{Timeout: timeout}, TLSConfig: &tls.Config{MinVersion: tls.VersionTLS12}},
 	}
 }
 
@@ -426,7 +427,7 @@ func dialPinnedTLS(ctx context.Context, addr string, timeout time.Duration, base
 		}
 		if !isIPLiteral {
 			if cfg == nil {
-				cfg = &tls.Config{}
+				cfg = &tls.Config{MinVersion: tls.VersionTLS12}
 			}
 			if cfg.ServerName == "" {
 				cfg.ServerName = hostTrimmed
@@ -560,6 +561,8 @@ func NewDoHWithBootstrap(endpoint string, timeout time.Duration, bootstrap Resol
 		TLSHandshakeTimeout:   min(timeout, 10*time.Second),
 		ResponseHeaderTimeout: timeout,
 		ExpectContinueTimeout: 1 * time.Second,
+		// Explicit TLS 1.2 floor (nil RootCAs = system roots, unchanged).
+		TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12},
 	}
 	if bootstrap != nil {
 		// F-01: DialContext only. DialTLSContext must stay nil so net/http
@@ -568,7 +571,7 @@ func NewDoHWithBootstrap(endpoint string, timeout time.Duration, bootstrap Resol
 		// conn where TLS is expected (DoH sent as cleartext HTTP).
 		tr.DialContext = bootstrapDialContext(bootstrap, timeout)
 	} else {
-		tr.DialContext = validatingDialContext(timeout)
+		tr.DialContext = ValidatingDialContext(timeout)
 	}
 	return &DoHResolver{
 		endpoint: endpoint,
@@ -685,13 +688,15 @@ func warnLocalUpstream(ip net.IP) {
 	}
 }
 
-// validatingDialContext returns a DialContext that resolves host via the
-// system resolver, refuses blocked IPs (link-local/multicast/unspecified),
-// warns on loopback/private, and dials the first reachable allowed address.
-// It is installed on every upstream dial path (UDP, DoT, DoH without
-// bootstrap) so a hostname that only resolves into blocked space after the
-// fact (metadata service, DNS rebinding) can never be dialled.
-func validatingDialContext(timeout time.Duration) func(ctx context.Context, network, addr string) (net.Conn, error) {
+// ValidatingDialContext returns a DialContext that resolves host via the
+// system resolver, refuses blocked IPs at dial time (link-local, multicast,
+// unspecified, CGNAT — including the 169.254.169.254 metadata address), and
+// warns sampled on loopback/private. A hostname that flips into blocked
+// space after validation (DNS rebinding) can never be dialled. Loopback and
+// RFC1918 stay allowed: loopback management and LAN resolvers are legitimate
+// targets. Shared by the upstream dial paths and the controller's instance
+// client (bearer tokens must not be delivered to a rebound metadata IP).
+func ValidatingDialContext(timeout time.Duration) func(ctx context.Context, network, addr string) (net.Conn, error) {
 	d := &net.Dialer{Timeout: timeout}
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
 		host, port, err := net.SplitHostPort(addr)

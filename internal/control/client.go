@@ -34,12 +34,16 @@ type Client struct {
 // blipd's management API is cleartext HTTP (the controller connects over
 // http://host:8443/8444), so HTTP/2 is not negotiated here — ForceAttemptHTTP2
 // would be a no-op on http:// URLs without an h2c upgrade handler on the server.
+// Dial-time IP pinning (shared with the upstream path) stops DNS-rebinding
+// theft of the bearer: an instance hostname that flips to link-local/metadata
+// space after validation is refused before the token is sent.
 func newTransport(disableCompression bool) *http.Transport {
 	return &http.Transport{
 		MaxIdleConns:        64,
 		MaxIdleConnsPerHost: 32,
 		IdleConnTimeout:     90 * time.Second,
 		DisableCompression:  disableCompression,
+		DialContext:         upstream.ValidatingDialContext(10 * time.Second),
 	}
 }
 

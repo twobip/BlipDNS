@@ -1,0 +1,11 @@
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    # Vendored tree: PRs update go.mod/go.sum; run `go mod vendor` before merge.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

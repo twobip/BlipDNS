@@ -45,6 +45,16 @@ curl -sL https://raw.githubusercontent.com/twobip/BlipDNS/master/scripts/install
 curl -sL https://raw.githubusercontent.com/twobip/BlipDNS/master/scripts/install-blipc.sh | sudo bash -s -- --install-deps
 ```
 
+Prefer download-then-inspect over piping to root: the installers refuse
+unsigned releases (missing `.sig` is fatal), but a pipe executes whatever
+the mirror serves before you can read it.
+
+```bash
+curl -sL https://raw.githubusercontent.com/twobip/BlipDNS/master/scripts/install-blipd.sh -o /tmp/install-blipd.sh
+less /tmp/install-blipd.sh   # inspect, then:
+sudo bash /tmp/install-blipd.sh --install-deps
+```
+
 ### Resolver daemon (blipd)
 
 ```bash
