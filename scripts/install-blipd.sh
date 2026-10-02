@@ -342,11 +342,10 @@ TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
 
 # fetch_verified <tag> <asset> <destfile> — download one asset, verify the
-# release signature over SHA256SUMS when present (embedded key; a present but
-# invalid signature is fatal), then bind the asset to its hash from the sums
-# before installing. Signing is currently deferred (no release key yet), so a
-# missing .sig warns and falls back to checksum-only: set RELEASE_SIGNING_KEY
-# in CI and this path hardens itself (verify_sums_sig is fail-closed).
+# release signature over SHA256SUMS (embedded key, fail closed), then bind
+# the asset to its hash from the sums before installing. A missing .sig
+# refuses the install: checksum-only fallback would let a mirror serve a
+# matching tampered binary+checksums pair. Set RELEASE_SIGNING_KEY in CI.
 fetch_verified() {
   local tag="$1" asset="$2" dest="$3" expected actual staged
   # Stage under a mktemp name, never $TMPDIR/$asset: a dest inside TMPDIR
@@ -358,7 +357,7 @@ fetch_verified() {
   if curl -fsSL --proto '=https' --tlsv1.2 "$BASE_URL/$tag/SHA256SUMS.sig" -o "$TMPDIR/SHA256SUMS.sig"; then
     verify_sums_sig "$TMPDIR"
   else
-    log "WARNING: no SHA256SUMS.sig for $tag — checksum-only verification (release is unsigned)"
+    err "no SHA256SUMS.sig for $tag — unsigned release, refusing to install (set RELEASE_SIGNING_KEY in CI)"
   fi
   expected="$(awk -v a="$asset" '$2==a {print $1; exit}' "$TMPDIR/SHA256SUMS")"
   [ -n "$expected" ] || err "no checksum entry for $asset in SHA256SUMS"

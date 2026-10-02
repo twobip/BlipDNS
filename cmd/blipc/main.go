@@ -47,7 +47,7 @@ type config struct {
 	DefaultPolicy     *control.Policy                         `yaml:"default_policy"`
 	InstanceOverrides map[string]*controller.InstanceOverride `yaml:"instance_overrides"`
 	DoHHTTPAddr       string                                  `yaml:"doh_http_addr"`
-	RateLimitQPS      int                                     `yaml:"rate_limit_qps"`
+	RateLimitQPS      *int                                    `yaml:"rate_limit_qps"`
 	AllowedNetworks   []string                                `yaml:"allowed_networks"`
 	// OpenRecursionAck persists the Security-tab open-resolver ack: pushing
 	// an empty fleet ACL (open recursion) is refused unless this is true.
@@ -159,8 +159,13 @@ func main() {
 	if cfg.DoHHTTPAddr != "" {
 		fleet.SetDoHDefault(cfg.DoHHTTPAddr)
 	}
-	if cfg.RateLimitQPS > 0 {
-		fleet.SetRateLimitQPSDefault(cfg.RateLimitQPS)
+	if cfg.RateLimitQPS != nil {
+		fleet.SetRateLimitQPSDefault(*cfg.RateLimitQPS)
+	} else {
+		// Absent from controller.yaml: seed the blipd stock default so
+		// reconcile converges instead of pushing 0 (disabled) onto every
+		// adopted instance. Explicit `rate_limit_qps: 0` still disables.
+		fleet.SetRateLimitQPSDefault(blipconfig.DefaultRateLimitQPS)
 	}
 	if len(cfg.AllowedNetworks) > 0 {
 		fleet.SetAllowedNetworksDefault(cfg.AllowedNetworks)

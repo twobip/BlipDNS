@@ -27,6 +27,7 @@ import (
 	_ "modernc.org/sqlite"
 
 	"github.com/twobip/BlipDNS/internal/blocklist"
+	"github.com/twobip/BlipDNS/internal/cache"
 	"github.com/twobip/BlipDNS/internal/control"
 	"github.com/twobip/BlipDNS/internal/upstream"
 	"gopkg.in/yaml.v3"
@@ -143,10 +144,10 @@ type Fleet struct {
 	defaultPolicy     *control.Policy              // fleet-wide default policy (source of truth)
 	overrides         map[string]*InstanceOverride // per-instance partial configs (diff vs default)
 	dohHTTPAddr       string                       // fleet-wide plain-HTTP DoH address ("", off)
-	rateLimitQPS      int                          // fleet-wide DNS per-client QPS limit (0 = disabled)
+	rateLimitQPS      int                          // fleet-wide DNS per-client QPS limit (0 = disabled; startup seeds the blipd stock default when unset)
 	allowedNetworks   []string                     // fleet-wide recursion ACL (nil/empty = no fleet opinion; never pushed)
 	openRecursionAck  bool                         // explicit operator ack: allow pushing an empty ACL (open resolver)
-	cacheSize         int                          // fleet-wide max cached responses (0 = unlimited)
+	cacheSize         int                          // fleet-wide max cached responses (0 = bounded default)
 	cacheConfigured   bool                         // true once the operator explicitly set a fleet-wide cache value
 	upstreamServers   []upstream.UpstreamServer    // fleet-wide default upstream pool
 	upstreamRoutes    []upstream.UpstreamRoute     // fleet-wide default upstream routes
@@ -1238,7 +1239,7 @@ func (f *Fleet) effectiveDoHHTTPAddr(id string) string {
 	return f.dohHTTPAddr
 }
 
-// RateLimitQPS returns the fleet-wide DNS per-client QPS limit (0 = disabled).
+// RateLimitQPS returns the fleet-wide DNS per-client QPS limit (0 = explicitly disabled).
 func (f *Fleet) RateLimitQPS() int {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
@@ -2080,7 +2081,7 @@ func (f *Fleet) SetQueryLogRetention(ctx context.Context, hours int) (map[string
 	return map[string]string{}, nil
 }
 
-// CacheConfig returns the fleet-wide cache size limit (0 = unlimited).
+// CacheConfig returns the fleet-wide cache size limit (0 = bounded default).
 func (f *Fleet) CacheConfig() int {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
@@ -2160,7 +2161,13 @@ func (f *Fleet) maybePushCache(ctx context.Context, i *Instance, reported *contr
 	if !f.cacheConfiguredFor(i.id()) {
 		return
 	}
+	// 0 selects the bounded default on the instance, so compare and push the
+	// substituted value: otherwise repSize (100000) never equals wantSize
+	// (0) and reconcile re-pushes every poll.
 	wantSize := f.effectiveCacheConfig(i.id())
+	if wantSize == 0 {
+		wantSize = cache.DefaultMaxEntries()
+	}
 	repSize := -1
 	if reported != nil {
 		repSize = reported.CacheSize

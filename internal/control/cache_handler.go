@@ -7,7 +7,7 @@ import (
 )
 
 // handleCache gets/sets the runtime response cache size limit. The controller
-// pushes this from the Settings page; an absent value means "0" (unlimited).
+// pushes this from the Settings page; 0 selects the bounded default.
 func (s *Server) handleCache(w http.ResponseWriter, r *http.Request) {
 	cc := s.controllers().Cache
 	if cc == nil {

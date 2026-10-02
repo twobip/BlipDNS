@@ -45,7 +45,8 @@ else
   sed "s/__BLIP_ADMIN_TOKEN__/$TOKEN/" "$TPL" > "$CFG_DST"
   chmod 640 "$CFG_DST"
   chown root:"$SVC_USER" "$CFG_DST"
-  echo "   admin token: $TOKEN   (use with: blipctl --token $TOKEN http://127.0.0.1:8444 ...)"
+  echo "   admin token stored in $CFG_DST (never printed; 640 root-owned)"
+  echo "   read it with: sudo cat $CFG_DST   (use: blipctl --token-file <(sudo cat $CFG_DST) http://127.0.0.1:8444 ...)"
   echo "   claim code is written to /var/lib/blipd/adopt-code (0600); read it box-locally with: sudo cat /var/lib/blipd/adopt-code"
 fi
 
@@ -61,4 +62,7 @@ systemctl status --no-pager blipd
 echo
 echo "BlipDNS is running. Quick test:"
 echo "  dig +short @127.0.0.1 example.com"
-echo "  blipctl --token ${TOKEN:-<see $CFG_DST>} http://127.0.0.1:8444 health"
+echo "  blipctl --token-file <(sudo cat $CFG_DST) http://127.0.0.1:8444 health"
+# The fresh token must not linger in this shell's environment for later
+# commands (or screenshots of them) to leak.
+unset TOKEN
