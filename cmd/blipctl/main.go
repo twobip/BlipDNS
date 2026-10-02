@@ -211,7 +211,7 @@ func socketAlive(path string) bool {
 func isCommand(s string) bool {
 	switch s {
 	case "health", "stats", "policies", "set-policy", "block", "del-policy",
-		"acl", "adopt-status", "adopt", "watch":
+		"acl", "adopt-status", "adopt", "watch", "update", "update-status":
 		return true
 	default:
 		return false
@@ -335,6 +335,23 @@ func run(ctx context.Context, client *control.Client, cmd string, rest []string,
 		} else {
 			fmt.Println("already adopted (token was issued earlier; use the stored token)")
 		}
+	case "update":
+		// Manual escape hatch: trigger the node's self-update directly
+		// (same path the controller drives). Useful when the fleet plane
+		// can't reach the node but its management API is up.
+		channel := string(control.ChannelStable)
+		if len(rest) > 0 {
+			channel = rest[0]
+		}
+		if !control.ValidUpdateChannel(channel) {
+			die(fmt.Errorf("update channel must be stable or dev"))
+		}
+		die(client.StartUpdate(ctx, channel))
+		fmt.Println("update started:", channel)
+	case "update-status":
+		st, err := client.UpdateStatus(ctx)
+		die(err)
+		printJSON(st)
 	case "watch":
 		fmt.Println("watching (ctrl-c to stop)")
 		die(client.Watch(ctx, func(e control.WatchEvent) {
@@ -556,5 +573,7 @@ commands:
   adopt-status           show adoption state (no token needed)
   adopt <code>           claim this instance once; prints its admin token
   watch                  stream events (SSE)
+  update [stable|dev]    trigger the node's self-update (default stable)
+  update-status          show self-update progress
 `)
 }
