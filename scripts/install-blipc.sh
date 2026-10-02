@@ -349,8 +349,12 @@ export GOPATH="$CACHE_DIR/gopath"
 # release signature over SHA256SUMS (embedded key, fail closed), then bind
 # the asset to its hash from the SIGNED sums before installing.
 fetch_verified() {
-  local tag="$1" asset="$2" dest="$3" expected actual
-  curl -fL --proto '=https' --tlsv1.2 "$BASE_URL/$tag/$asset" -o "$TMPDIR/$asset" || err "download failed: $BASE_URL/$tag/$asset"
+  local tag="$1" asset="$2" dest="$3" expected actual staged
+  # Stage under a mktemp name, never $TMPDIR/$asset: a dest inside TMPDIR
+  # with the asset's basename (e.g. the systemd unit) would otherwise make
+  # the final install a same-file no-op-turned-error.
+  staged="$(mktemp "$TMPDIR/stage-XXXXXX")" || err "mktemp failed"
+  curl -fL --proto '=https' --tlsv1.2 "$BASE_URL/$tag/$asset" -o "$staged" || err "download failed: $BASE_URL/$tag/$asset"
   curl -fsSL --proto '=https' --tlsv1.2 "$BASE_URL/$tag/SHA256SUMS" -o "$TMPDIR/SHA256SUMS" || err "download failed: SHA256SUMS"
   # Signing deferred (no release key yet): a missing .sig warns and falls
   # back to checksum-only; a present-but-invalid one is still fatal.
@@ -361,9 +365,9 @@ fetch_verified() {
   fi
   expected="$(awk -v a="$asset" '$2==a {print $1; exit}' "$TMPDIR/SHA256SUMS")"
   [ -n "$expected" ] || err "no checksum entry for $asset in SHA256SUMS"
-  actual="$(sha256sum "$TMPDIR/$asset" | awk '{print $1}')"
+  actual="$(sha256sum "$staged" | awk '{print $1}')"
   [ "$expected" = "$actual" ] || err "checksum verification FAILED for $asset — refusing to install"
-  install -m 0755 "$TMPDIR/$asset" "$dest"
+  install -m 0755 "$staged" "$dest"
   rm -f "$TMPDIR/SHA256SUMS" "$TMPDIR/SHA256SUMS.sig"
 }
 
