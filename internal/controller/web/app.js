@@ -2208,6 +2208,29 @@ $("inst-tbody").addEventListener("click", (e) => {
 $("di-back").onclick = () => go("instances");
 $("di-restart").onclick = () => { if (detailId) restartInstance(detailId); };
 $("di-update").onclick = (e) => { if (detailId) startSingleUpdate(detailId, e.currentTarget); };
+$("di-repin").onclick = () => { if (detailId) repinInstance(detailId); };
+
+// repinInstance re-trusts the certificate the node serves now. The button
+// stays enabled when the instance shows offline: a stale pin is exactly the
+// case that reports offline, and this is the fix for it.
+async function repinInstance(id) {
+  const i = instances.find((x) => x.id === id); if (!i) return;
+  const why = i.error ? `\n\nCurrent error: ${i.error}` : "";
+  confirmDialog(
+    `Trust the certificate ${i.label || i.id} serves now?`,
+    "Only after a legitimate certificate change (an update, a rebuilt node, a new cert policy). " +
+    "This replaces the pinned fingerprint. If you did not expect the change, check the node first." + why,
+    async () => {
+      try {
+        const r = await (await API("/api/instances/repin", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id }) })).json();
+        const same = r.old_fingerprint === r.new_fingerprint;
+        toast(same
+          ? `certificate unchanged — pin re-confirmed for ${i.label || i.id}`
+          : `re-pinned ${i.label || i.id} to ${String(r.new_fingerprint || "").slice(0, 16)}…`);
+        setTimeout(refresh, 800);
+      } catch (e) { toast("re-pin failed: " + e.message, "err"); }
+    });
+}
 
 async function restartInstance(id) {
   const i = instances.find((x) => x.id === id); if (!i) return;

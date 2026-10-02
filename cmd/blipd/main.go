@@ -81,6 +81,7 @@ func checkBootConfig(cfg *config.Config, store *filter.Store) error {
 		TrustedProxies:    cfg.TrustedProxies,
 		AllowedNetworks:   cfg.AllowedNetworks,
 		OpenRecursion:     cfg.OpenRecursion,
+		RecordsCacheFile:  cfg.RecordsCacheFile,
 	})
 	return err
 }
@@ -314,6 +315,7 @@ func main() {
 		TrustedProxies:    cfg.TrustedProxies,
 		AllowedNetworks:   cfg.AllowedNetworks,
 		OpenRecursion:     cfg.OpenRecursion,
+		RecordsCacheFile:  cfg.RecordsCacheFile,
 	})
 	if err != nil {
 		log.Fatalf("blipd: %v", err)

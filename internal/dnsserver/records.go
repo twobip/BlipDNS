@@ -1,8 +1,12 @@
 package dnsserver
 
 import (
+	"encoding/json"
 	"fmt"
+	"log"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -41,6 +45,10 @@ type RecordStore struct {
 	raw []control.RecordEntry
 	// ptrIndex maps string(ip) -> indexes into raw for O(1) PTR synthesis.
 	ptrIndex map[string][]int
+	// cachePath, when set, persists the applied set so a restart serves local
+	// names before the controller re-pushes them (an unreachable controller
+	// otherwise leaves the node answering no local names at all).
+	cachePath string
 }
 
 // compiledRecord is a RecordEntry with its hot-path parsing done once at
@@ -98,6 +106,65 @@ func NewRecordStore() *RecordStore {
 		wildcards: make(map[string][]compiledRecord),
 		ptrIndex:  make(map[string][]int),
 	}
+}
+
+// SetCachePath points the store at the file the applied record set is
+// persisted to and loads any snapshot already there, returning how many
+// records it held. A missing file is not an error (first start after the
+// upgrade, or a node that never received records): 0, nil.
+func (rs *RecordStore) SetCachePath(path string) (int, error) {
+	rs.mu.Lock()
+	rs.cachePath = path
+	rs.mu.Unlock()
+	if path == "" {
+		return 0, nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	var recs []control.RecordEntry
+	if err := json.Unmarshal(data, &recs); err != nil {
+		return 0, fmt.Errorf("records cache %s: %w", path, err)
+	}
+	// Through SetRecords so a corrupted or hand-edited cache is validated
+	// (and rejected wholesale) instead of served.
+	if err := rs.SetRecords(recs); err != nil {
+		return 0, fmt.Errorf("records cache %s: %w", path, err)
+	}
+	return len(recs), nil
+}
+
+// writeRecordCache persists a record set atomically: CreateTemp in the same
+// directory (an unpredictable name, so a local attacker cannot pre-create a
+// symlink for a privileged writer to follow) then rename, 0600 (the set
+// discloses LAN topology). Mirrors blocklist.SaveCache.
+func writeRecordCache(path string, raw []control.RecordEntry) error {
+	data, err := json.Marshal(raw)
+	if err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".records-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if err := tmp.Chmod(0600); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
 }
 
 // SetRecords replaces all local records atomically. Records whose Domain
@@ -159,11 +226,21 @@ func (rs *RecordStore) SetRecords(records []control.RecordEntry) error {
 		}
 	}
 	rs.mu.Lock()
-	defer rs.mu.Unlock()
 	rs.records = recs
 	rs.wildcards = wilds
 	rs.raw = raw
 	rs.ptrIndex = ptrIndex
+	path := rs.cachePath
+	rs.mu.Unlock()
+	// Persist the applied set so the next start serves local names without
+	// waiting for the controller. Best effort: the push itself succeeded, and
+	// failing the call over a cache write would make the controller retry a
+	// push that already landed.
+	if path != "" {
+		if err := writeRecordCache(path, raw); err != nil {
+			log.Printf("blipd: records cache: %v", err)
+		}
+	}
 	return nil
 }
 

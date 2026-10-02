@@ -211,6 +211,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/instances", api(s.handleInstances))
 	mux.HandleFunc("/api/instances/update", api(s.handleInstanceUpdate))
 	mux.HandleFunc("/api/instances/restart", api(s.handleInstanceRestart))
+	mux.HandleFunc("/api/instances/repin", api(s.handleInstanceRepin))
 	mux.HandleFunc("/api/instances/", api(s.handleInstance))            // /add /delete /policies /policy /adopt /adopt/status /adopt/reset /label /query-log
 	mux.HandleFunc("/api/queries", api(s.handleQueries))                // query log
 	mux.HandleFunc("/api/upstream-errors", api(s.handleUpstreamErrors)) // upstream failure details
@@ -929,6 +930,38 @@ func (s *Server) handleInstanceRestart(w http.ResponseWriter, r *http.Request) {
 	}
 	log.Printf("blipc: audit: instance restart id=%q from %s", req.ID, s.clientIP(r))
 	writeJSON(w, map[string]any{"ok": true, "msg": "restarting " + req.ID})
+}
+
+// handleInstanceRepin re-pins one instance's self-signed management
+// certificate (see Fleet.RepinInstance). Session-only: re-pinning is a trust
+// decision about a certificate, and a script key must not be able to make it.
+func (s *Server) handleInstanceRepin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if bearerToken(r) != "" {
+		http.Error(w, "session required", http.StatusForbidden)
+		return
+	}
+	var req struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.ID == "" {
+		http.Error(w, "id required", http.StatusBadRequest)
+		return
+	}
+	oldFP, newFP, err := s.fleet.RepinInstance(req.ID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	log.Printf("blipc: audit: instance repin id=%q old=%s new=%s from %s", req.ID, oldFP, newFP, s.clientIP(r))
+	writeJSON(w, map[string]any{"ok": true, "old_fingerprint": oldFP, "new_fingerprint": newFP})
 }
 
 // handleInstance serves /api/instances/<id>[/policies|/policy].

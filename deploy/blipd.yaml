@@ -46,6 +46,10 @@ cache_cap: 1h
 # auto-refresh from a URL (e.g. a self-hosted EasyList mirror).
 # blocklist_url: ""
 # blocklist_update_hours: 24
+# Last-pushed local records (blipc -> Settings -> Local Records). Persisted so
+# a restart keeps answering local names even while the controller is
+# unreachable; rewritten on every applied push.
+# records_cache_file: "/var/lib/blipd/records.cache"
 
 default_policy:
   id: "default"

@@ -2,6 +2,8 @@ package dnsserver
 
 import (
 	"net"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/miekg/dns"
@@ -329,5 +331,61 @@ func TestRecordStorePTRSynthesis(t *testing.T) {
 	}
 	if _, ok := rs.Lookup(q(t, "1.2.in-addr.arpa.", dns.TypePTR)); ok {
 		t.Error("short arpa PTR should fall through")
+	}
+}
+
+// TestRecordStoreCacheSurvivesRestart pins the records-cache round trip: a
+// restarted blipd whose controller is unreachable must still answer local
+// names (the outage that followed a cert rotation + stale pin). The cache is
+// rewritten on every applied push and reloaded at startup.
+func TestRecordStoreCacheSurvivesRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "records.cache")
+	recs := []control.RecordEntry{
+		{Domain: "galaxy.lan", Type: "A", Value: "192.168.30.154"},
+		{Domain: "*.lan.twobip.com", Type: "A", Value: "192.168.30.250", TTL: 300},
+		{Domain: "nas.lan", Type: "A", Value: "192.168.30.10"},
+	}
+	first := NewRecordStore()
+	if n, err := first.SetCachePath(path); err != nil || n != 0 {
+		t.Fatalf("SetCachePath on a fresh path = %d, %v; want 0, nil", n, err)
+	}
+	if err := first.SetRecords(recs); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("SetRecords did not persist the cache: %v", err)
+	}
+
+	// A fresh store is what a restarted blipd builds: it must answer from the
+	// cache alone, with the same hash the controller reconciles against.
+	second := NewRecordStore()
+	n, err := second.SetCachePath(path)
+	if err != nil || n != len(recs) {
+		t.Fatalf("reload = %d, %v; want %d, nil", n, err, len(recs))
+	}
+	resp, ok := second.Lookup(q(t, "galaxy.lan.", dns.TypeA))
+	if !ok {
+		t.Fatal("reloaded store did not answer a cached record")
+	}
+	if got := aIP(t, resp); got != "192.168.30.154" {
+		t.Errorf("reloaded A = %q, want 192.168.30.154", got)
+	}
+	if _, ok := second.Lookup(q(t, "10.30.168.192.in-addr.arpa.", dns.TypePTR)); !ok {
+		t.Error("reloaded store lost PTR synthesis for a cached record")
+	}
+	if second.Hash() != first.Hash() {
+		t.Errorf("hash after reload = %d, want %d (the controller would re-push forever otherwise)", second.Hash(), first.Hash())
+	}
+
+	// A corrupt cache is rejected wholesale, never half-served.
+	if err := os.WriteFile(path, []byte("{not json"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	third := NewRecordStore()
+	if _, err := third.SetCachePath(path); err == nil {
+		t.Error("corrupt cache loaded without error")
+	}
+	if _, ok := third.Lookup(q(t, "galaxy.lan.", dns.TypeA)); ok {
+		t.Error("corrupt cache left records behind")
 	}
 }

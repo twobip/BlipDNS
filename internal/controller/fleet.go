@@ -975,6 +975,45 @@ func (f *Fleet) maybeMigrateMgmtTLS(inst *Instance, id, rawURL string) {
 	log.Printf("blipc: instance %q management API migrated to HTTPS (%s)", id, up)
 }
 
+// RepinInstance re-pins one instance's self-signed management certificate on
+// operator request, for a legitimate rotation (an update that regenerated the
+// cert, a rebuilt node, a new cert policy). It never re-pins on its own: a
+// changed cert is refused loudly until a human confirms, so a middlebox
+// cannot silently take over management traffic. The new pin is accepted only
+// after the presented certificate has served the management API through the
+// same probe the initial TOFU uses, and it is persisted immediately.
+func (f *Fleet) RepinInstance(id string) (oldFP, newFP string, err error) {
+	inst := f.get(id)
+	if inst == nil {
+		return "", "", fmt.Errorf("unknown instance %q", id)
+	}
+	inst.mu.RLock()
+	url, token, oldFP := inst.Config.URL, inst.Config.Token, inst.Config.MgmtCertFP
+	inst.mu.RUnlock()
+	// pinnedFP "" is the TOFU path: fetch the leaf, build the exact-cert
+	// client, and prove it serves the API before anything is stored.
+	c, leaf, fp, ok := httpsMgmtClient(url, token, "")
+	if !ok {
+		return "", "", fmt.Errorf("instance %s: %s did not answer with a usable certificate", id, url)
+	}
+	if fp == "" || leaf == nil {
+		return "", "", fmt.Errorf("instance %s: %s is system-trusted, nothing to pin", id, url)
+	}
+	inst.mu.Lock()
+	inst.Config.MgmtCertFP = fp
+	prev := inst.client
+	inst.client = c
+	inst.mgmtLeaf = leaf
+	inst.mu.Unlock()
+	if prev != nil {
+		prev.CloseIdleConnections()
+	}
+	if err := f.saveConfig(); err != nil {
+		return oldFP, fp, fmt.Errorf("re-pinned %s but persisting failed: %w", id, err)
+	}
+	return oldFP, fp, nil
+}
+
 // Remove stops and forgets an instance.
 func (f *Fleet) Remove(id string) error {
 	f.mu.Lock()

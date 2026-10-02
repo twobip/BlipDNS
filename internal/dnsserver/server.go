@@ -64,6 +64,7 @@ type Config struct {
 	TrustedProxies    []string             // CIDRs/IPs trusted for X-Forwarded-For
 	AllowedNetworks   []string             // recursion ACL: CIDRs/IPs allowed to recurse; empty on a non-loopback bind falls back to DefaultAllowedNetworks() with a warning (open only with OpenRecursion)
 	OpenRecursion     bool                 // explicit ack for empty allowed_networks on a non-loopback bind (fail closed without it)
+	RecordsCacheFile  string               // persisted local-record snapshot: loaded at startup, rewritten on every applied push ("" = off)
 }
 
 // maxInflightQueries bounds concurrent classic-DNS query handlers (UDP+TCP
@@ -178,6 +179,21 @@ func New(cfg Config) (*Server, error) {
 	}
 	if cfg.TLSCert != nil {
 		s.cert.Store(cfg.TLSCert)
+	}
+	// Restore the last pushed local records before serving: a restart while
+	// the controller is unreachable would otherwise answer no local names at
+	// all until a push lands. The reconcile in blipc re-pushes on hash
+	// mismatch, so a stale cache self-corrects on the next successful poll.
+	if cfg.RecordsCacheFile != "" {
+		n, err := s.rec.SetCachePath(cfg.RecordsCacheFile)
+		switch {
+		case err != nil:
+			log.Printf("blipd: records cache: %v (serving no local records until the controller pushes)", err)
+		case n > 0:
+			log.Printf("blipd: restored %d local records from cache", n)
+		default:
+			log.Printf("blipd: no cached local records: local names resolve only after the controller pushes them")
+		}
 	}
 	// Let the management API toggle the optional plain-HTTP DoH listener, the
 	// per-client rate limit, the conditional-forwarding upstream config, and

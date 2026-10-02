@@ -45,6 +45,7 @@ type Config struct {
 	BlocklistURLs        []string                  `yaml:"blocklist_urls"`         // one or more ABP/hosts feeds (Pi-hole style)
 	BlocklistUpdateHours int                       `yaml:"blocklist_update_hours"` // refresh interval (0 = no auto-refresh)
 	BlocklistCacheFile   string                    `yaml:"blocklist_cache_file"`   // persisted snapshot restored into RAM at startup
+	RecordsCacheFile     string                    `yaml:"records_cache_file"`     // persisted local-record snapshot restored at startup (local names survive a restart without the controller)
 	Default              *filter.Policy            `yaml:"default_policy"`
 	Policies             []*filter.Policy          `yaml:"policies"`
 }
@@ -73,6 +74,7 @@ func Default() *Config {
 		CacheCap:           1 * time.Hour,
 		CacheSize:          10000,
 		BlocklistCacheFile: "/var/lib/blipd/blocklist.cache",
+		RecordsCacheFile:   "/var/lib/blipd/records.cache",
 	}
 }
 
