@@ -740,31 +740,59 @@ const maxChainInspect = 64
 // (or later) evaded filtering and poisoned the cache. Over-long chains
 // (>maxChainInspect) fail closed.
 func chainBlocked(m *dns.Msg, classify func(string) bool) bool {
+	blocked, _, _, _, _ := inspectChain(m, func(target string) (bool, filter.BlockAction, string, bool) {
+		return classify(target), "", "", false
+	})
+	return blocked
+}
+
+// inspectChain fuses the old chainBlocked boolean pass and the
+// findBlockedTarget attribution pass into one walk: each carried name is
+// classified once, and the first blocked target is returned with its action
+// for the query log. Over-long chains fail closed with an empty target (the
+// caller attributes those to the qname, as before).
+func inspectChain(m *dns.Msg, classify func(string) (bool, filter.BlockAction, string, bool)) (blocked bool, target string, act filter.BlockAction, src string, lg bool) {
 	if m == nil {
-		return false
+		return false, "", "", "", false
 	}
 	checked := 0
-	// Check rdata targets plus A/AAAA owner names in all sections.
-	sections := [][]dns.RR{m.Answer, m.Ns, m.Extra}
-	for _, sec := range sections {
-		for _, rr := range sec {
-			if rr == nil || rr.Header() == nil {
-				continue
-			}
-			target, ok := rrTarget(rr)
-			if !ok {
-				continue
-			}
-			if classify(target) {
-				return true
-			}
-			checked++
-			if checked > maxChainInspect {
-				return true
-			}
+	// visit classifies one RR's carried name; true stops the walk.
+	visit := func(rr dns.RR) bool {
+		if rr == nil || rr.Header() == nil {
+			return false
+		}
+		t, ok := rrTarget(rr)
+		if !ok {
+			return false
+		}
+		checked++
+		if checked > maxChainInspect {
+			blocked = true
+			return true
+		}
+		if ok, a, s, l := classify(t); ok {
+			blocked, target, act, src, lg = true, strings.TrimSuffix(t, "."), a, s, l
+			return true
+		}
+		return false
+	}
+	// Three plain loops: ranging a composite literal built a slice per call.
+	for _, rr := range m.Answer {
+		if visit(rr) {
+			return blocked, target, act, src, lg
 		}
 	}
-	return false
+	for _, rr := range m.Ns {
+		if visit(rr) {
+			return blocked, target, act, src, lg
+		}
+	}
+	for _, rr := range m.Extra {
+		if visit(rr) {
+			return blocked, target, act, src, lg
+		}
+	}
+	return false, "", "", "", false
 }
 
 // sanitizeBailiwick strips out-of-bailiwick glue before cache+serve. Only the
@@ -1134,25 +1162,10 @@ func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, prot
 				// Attribute to the first blocked chain target when possible
 				// so the query log shows what was actually blocked.
 				var act filter.BlockAction
-				found := false
-				for _, sec := range [][]dns.RR{recResp.Answer, recResp.Ns, recResp.Extra} {
-					for _, rr := range sec {
-						if rr == nil || rr.Header() == nil {
-							continue
-						}
-						target, ok := rrTarget(rr)
-						if !ok {
-							continue
-						}
-						if ok, a, _, _ := s.classifyName(clientIP, clientID, target); ok {
-							act = a
-							found = true
-							break
-						}
-					}
-					if found {
-						break
-					}
+				if blocked, _, a, _, _ := inspectChain(recResp, func(t string) (bool, filter.BlockAction, string, bool) {
+					return s.classifyName(clientIP, clientID, t)
+				}); blocked {
+					act = a
 				}
 				applyBlockAction(blockedResp, q, act)
 				return blockedResp
@@ -1242,35 +1255,6 @@ func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, prot
 	classifyTarget := func(target string) (bool, filter.BlockAction, string, bool) {
 		return s.classifyName(clientIP, clientID, target)
 	}
-	// findBlockedTarget returns the first blocked rdata target or blocked
-	// A/AAAA owner across all sections for attribution. Bounded like
-	// chainBlocked: over-long chains fail closed via chainBlocked first, so
-	// stopping here just caps attribution work.
-	findBlockedTarget := func(m *dns.Msg) (bool, filter.BlockAction, string, bool, string) {
-		if m == nil {
-			return false, "", "", false, ""
-		}
-		checked := 0
-		for _, sec := range [][]dns.RR{m.Answer, m.Ns, m.Extra} {
-			for _, rr := range sec {
-				if rr == nil || rr.Header() == nil {
-					continue
-				}
-				target, ok := rrTarget(rr)
-				if !ok {
-					continue
-				}
-				checked++
-				if checked > maxChainInspect {
-					return false, "", "", false, ""
-				}
-				if ok, act, src, lg := classifyTarget(target); ok {
-					return true, act, src, lg, strings.TrimSuffix(target, ".")
-				}
-			}
-		}
-		return false, "", "", false, ""
-	}
 	// Fetch-scoped timeout: a stalled upstream with a large TimeoutSec must
 	// not park goroutines/FDs indefinitely. Scoped here (not per query) so
 	// early refusals (blocks, local answers) skip it; the lookup path arms
@@ -1284,15 +1268,21 @@ func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, prot
 	defer fcancel()
 	fetch := func() (*dns.Msg, error) {
 		// Per-upstream TXID: the client chose req.Id (attacker-known for
-		// their own queries). Copy and re-randomize so off-path spoofers
-		// cannot use the known ID against plaintext UDP upstreams. Fail
-		// closed if crypto/rand fails instead of using a predictable ID.
-		upReq := req.Copy()
-		newID, idErr := freshUpstreamID(req.Id)
-		if idErr != nil {
-			return nil, idErr
+		// their own queries). Plaintext UDP copies and re-randomizes so
+		// off-path spoofers cannot use the known ID; encrypted transports
+		// (DoT/DoH) share req — the TLS channel, not the TXID, stops
+		// spoofers. Fail closed if crypto/rand fails instead of using a
+		// predictable ID.
+		upReq := req
+		if !upstream.Encrypted(resolver) {
+			c := req.Copy()
+			newID, idErr := freshUpstreamID(req.Id)
+			if idErr != nil {
+				return nil, idErr
+			}
+			c.Id = newID
+			upReq = c
 		}
-		upReq.Id = newID
 		m, err := resolver.Resolve(fctx, upReq)
 		if err != nil {
 			return nil, err
@@ -1312,15 +1302,13 @@ func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, prot
 		// qname that is allowed but aliases to a blocked domain must be
 		// blocked the same way, without poisoning the cache with the
 		// upstream's alias. Also inspects Ns/Extra targets and A/AAAA
-		// owners (glue for blocked names).
-		if chainBlocked(m, func(target string) bool {
-			ok, _, _, _ := classifyTarget(target)
-			return ok
-		}) {
-			if ok, act, src, lg, target := findBlockedTarget(m); ok {
-				return nil, &chainBlockedError{target: target, action: act, source: src, shouldLog: lg}
+		// owners (glue for blocked names). One walk classifies and
+		// attributes; over-long chains fail closed on the qname.
+		if blocked, target, act, src, lg := inspectChain(m, classifyTarget); blocked {
+			if target == "" {
+				return nil, &chainBlockedError{target: domain, action: "", source: "", shouldLog: false}
 			}
-			return nil, &chainBlockedError{target: domain, action: "", source: "", shouldLog: false}
+			return nil, &chainBlockedError{target: target, action: act, source: src, shouldLog: lg}
 		}
 		return m, nil
 	}
@@ -1368,13 +1356,16 @@ func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, prot
 	// A cached entry may predate a policy/blocklist change: re-inspect its
 	// chain so a newly-blocked alias is not served from cache. Evict the
 	// poisoned entry so later queries miss and refetch.
-	if cached && chainBlocked(out, func(target string) bool {
-		ok, _, _, _ := classifyTarget(target)
-		return ok
-	}) {
+	var chainTarget, chainSrc string
+	var chainAct filter.BlockAction
+	var chainLg, chainHit bool
+	if cached {
+		chainHit, chainTarget, chainAct, chainSrc, chainLg = inspectChain(out, classifyTarget)
+	}
+	if chainHit {
 		var cbe *chainBlockedError
-		if ok, act, src, lg, target := findBlockedTarget(out); ok {
-			cbe = &chainBlockedError{target: target, action: act, source: src, shouldLog: lg}
+		if chainTarget != "" {
+			cbe = &chainBlockedError{target: chainTarget, action: chainAct, source: chainSrc, shouldLog: chainLg}
 		}
 		if s.cache != nil {
 			s.cache.Delete(key)

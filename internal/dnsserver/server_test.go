@@ -31,6 +31,7 @@ type recUp struct {
 	calls  int
 	answer map[string]string
 	txt    map[string][]string
+	cname  map[string]string
 }
 
 // Resolve implements upstream.Resolver.
@@ -44,6 +45,13 @@ func (r *recUp) Resolve(_ context.Context, q *dns.Msg) (*dns.Msg, error) {
 		return m, nil
 	}
 	name := q.Question[0].Name
+	if target, ok := r.cname[name]; ok {
+		m.Answer = []dns.RR{&dns.CNAME{
+			Hdr:    dns.RR_Header{Name: name, Rrtype: dns.TypeCNAME, Class: dns.ClassINET, Ttl: 60},
+			Target: target,
+		}}
+		return m, nil
+	}
 	switch q.Question[0].Qtype {
 	case dns.TypeA:
 		if ip, ok := r.answer[name]; ok {
@@ -983,5 +991,29 @@ func TestStripSubnet(t *testing.T) {
 		if o.Option() == dns.EDNS0SUBNET {
 			t.Fatal("subnet option leaked upstream")
 		}
+	}
+}
+
+// TestServeFetchChainBlocked proves the fused fetch inspection blocks a
+// qname that is allowed but aliases to a blocked domain — and does not
+// poison the cache with the upstream's alias (second query refetches).
+func TestServeFetchChainBlocked(t *testing.T) {
+	srv, up := newTestServer(t)
+	up.cname = map[string]string{"allowed.test.": "blocked.test."}
+	q := new(dns.Msg)
+	q.SetQuestion("allowed.test.", dns.TypeA)
+	resp := srv.serve(context.Background(), net.ParseIP("10.0.0.1"), "", "dns", q)
+	if resp.Rcode != dns.RcodeNameError {
+		t.Fatalf("aliased query rc=%d want NXDOMAIN", resp.Rcode)
+	}
+	q2 := new(dns.Msg)
+	q2.SetQuestion("allowed.test.", dns.TypeA)
+	if resp := srv.serve(context.Background(), net.ParseIP("10.0.0.1"), "", "dns", q2); resp.Rcode != dns.RcodeNameError {
+		t.Fatalf("repeat aliased query rc=%d want NXDOMAIN", resp.Rcode)
+	}
+	up.mu.Lock()
+	defer up.mu.Unlock()
+	if up.calls != 2 {
+		t.Fatalf("upstream calls = %d, want 2 (blocked alias must not cache)", up.calls)
 	}
 }

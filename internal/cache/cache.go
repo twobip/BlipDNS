@@ -247,19 +247,30 @@ func KeyOfNormalized(fqdn string, qtype, qclass uint16, do, cd, ad bool) Key {
 // fetch that would answer both partitions from a single upstream. The DO/CD/AD
 // bits are included so DNSSEC and non-DNSSEC queries are not coalesced either.
 func (k Key) String() string {
-	do := "0"
-	if k.DO {
-		do = "1"
+	// Single alloc in the common case: sized stack scratch for
+	// name+label+separators+numbers (the old concat+Itoa chain built ~5
+	// temporaries per cache miss). Only oversized keys heap-allocate.
+	var fixed [256]byte
+	b := fixed[:0]
+	if need := len(k.Name) + len(k.Label) + 24; need > len(fixed) {
+		b = make([]byte, 0, need)
 	}
-	cd := "0"
-	if k.CD {
-		cd = "1"
+	b = append(b, k.Name...)
+	b = append(b, '|')
+	b = strconv.AppendUint(b, uint64(k.QType), 10)
+	b = append(b, '|')
+	b = strconv.AppendUint(b, uint64(k.QClass), 10)
+	b = append(b, '|')
+	b = append(b, k.Label...)
+	b = append(b, '|', bit(k.DO), bit(k.CD), bit(k.AD))
+	return string(b)
+}
+
+func bit(b bool) byte {
+	if b {
+		return '1'
 	}
-	ad := "0"
-	if k.AD {
-		ad = "1"
-	}
-	return k.Name + "|" + strconv.Itoa(int(k.QType)) + "|" + strconv.Itoa(int(k.QClass)) + "|" + k.Label + "|" + do + cd + ad
+	return '0'
 }
 
 func minTTL(m *dns.Msg) time.Duration {

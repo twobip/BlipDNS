@@ -42,6 +42,11 @@ type UDPResolver struct {
 	tcp     dns.Client
 	mu      sync.Mutex
 	conns   []*dns.Conn // idle connected UDP conns, LIFO
+	// Pre-split once at construction: the per-query path reuses host/port
+	// and the literal IP instead of SplitHostPort+ParseIP per miss.
+	host    string
+	port    string
+	literal []net.IP // non-nil when addr is a literal IP (single element)
 }
 
 // udpPoolSize bounds reused sockets per upstream (LIFO stack, no channel).
@@ -53,12 +58,35 @@ func NewUDP(addr string, timeout time.Duration) *UDPResolver {
 	if timeout <= 0 {
 		timeout = 5 * time.Second
 	}
-	return &UDPResolver{
+	r := &UDPResolver{
 		addr:    addr,
 		timeout: timeout,
 		udp:     dns.Client{Net: "udp", Timeout: timeout, Dialer: &net.Dialer{Timeout: timeout}},
 		tcp:     dns.Client{Net: "tcp", Timeout: timeout, Dialer: &net.Dialer{Timeout: timeout}},
 	}
+	if host, port, err := net.SplitHostPort(addr); err == nil {
+		r.host, r.port = host, port
+		if ip := net.ParseIP(strings.Trim(host, "[]")); ip != nil {
+			r.literal = []net.IP{ip}
+		}
+	}
+	return r
+}
+
+// pinned resolves r.addr to dialable IPs. Literal IPs reuse the
+// construction-time split (no per-query parse); hostnames go through
+// pinnedIPs, whose TTL cache absorbs the system-resolver RTT on pooled-conn
+// hits. Blocked-IP checks run on every call either way (fail closed).
+func (r *UDPResolver) pinned(ctx context.Context) (string, []net.IP, error) {
+	if r.literal != nil {
+		if blockedUpstreamIP(r.literal[0]) {
+			return "", nil, fmt.Errorf("refusing link-local/metadata upstream address %s", r.host)
+		}
+		warnLocalUpstream(r.literal[0])
+		return r.port, r.literal, nil
+	}
+	_, port, ips, err := pinnedIPs(ctx, r.addr)
+	return port, ips, err
 }
 
 func (r *UDPResolver) getConnWithIPs(ctx context.Context, port string, ips []net.IP) (*dns.Conn, error) {
@@ -106,10 +134,10 @@ func (r *UDPResolver) CloseIdleConnections() {
 
 func (r *UDPResolver) Resolve(ctx context.Context, q *dns.Msg) (*dns.Msg, error) {
 	// Single resolution per query (replaces guardUpstreamAddr + dial-time
-	// re-resolve): pinnedIPs fails closed on lookup error and enforces the
+	// re-resolve): pinned fails closed on lookup error and enforces the
 	// blocked-IP checks, so no separate guard pass is needed. The same IPs
 	// back the UDP dial and the TCP truncation fallback.
-	_, port, ips, err := pinnedIPs(ctx, r.addr)
+	port, ips, err := r.pinned(ctx)
 	if err != nil {
 		return nil, errUpstream(r.addr, err)
 	}
@@ -277,6 +305,26 @@ func verifyClassicResponse(q, resp *dns.Msg) error {
 	return nil
 }
 
+// Encrypted reports whether r carries queries over an encrypted transport
+// (DoT/DoH), where TXID secrecy adds nothing: off-path spoofing needs
+// plaintext. The fetch path uses it to skip the per-miss copy +
+// crypto/rand reseeding and share the request message instead. Unknown
+// resolvers report false, keeping today's copy+reseed.
+func Encrypted(r Resolver) bool {
+	switch v := r.(type) {
+	case *TLSResolver, *DoHResolver:
+		return true
+	case *MultiResolver:
+		for _, inner := range v.resolvers {
+			if !Encrypted(inner) {
+				return false
+			}
+		}
+		return len(v.resolvers) > 0
+	}
+	return false
+}
+
 // pinnedIPs resolves addr (host:port) to dialable IPs with per-IP blocked
 // checks. Literal IPs are checked directly; hostnames are resolved via the
 // system resolver and filtered to non-blocked addresses. Lookup failures fail
@@ -295,6 +343,20 @@ func pinnedIPs(ctx context.Context, addr string) (host, port string, ips []net.I
 		warnLocalUpstream(ip)
 		return host, port, []net.IP{ip}, nil
 	}
+	// Hostname fast path: reuse the TTL cache (re-checked below, fail
+	// closed) instead of a system-resolver RTT per query.
+	if cached, ok := bootstrapCacheGet("classic:" + host); ok {
+		for _, ip := range cached {
+			if blockedUpstreamIP(ip) {
+				continue
+			}
+			warnLocalUpstream(ip)
+			ips = append(ips, ip)
+		}
+		if len(ips) > 0 {
+			return host, port, ips, nil
+		}
+	}
 	resolved, lerr := net.DefaultResolver.LookupIP(ctx, "ip", host)
 	if lerr != nil {
 		return "", "", nil, lerr
@@ -309,6 +371,11 @@ func pinnedIPs(ctx context.Context, addr string) (host, port string, ips []net.I
 	if len(ips) == 0 {
 		return "", "", nil, fmt.Errorf("refusing link-local/metadata upstream address %s (resolved to %v)", host, resolved)
 	}
+	// Cache the filtered set (the system resolver gives no TTL, so take the
+	// 60s floor): classic DNS resolves hostnames per query, even on pooled
+	// conn hits. Namespaced to share bootstrapCache's bound without
+	// colliding with DoH bootstrap entries.
+	bootstrapCachePut("classic:"+host, ips, time.Minute)
 	return host, port, ips, nil
 }
 

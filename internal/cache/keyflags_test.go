@@ -1,6 +1,8 @@
 package cache
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -30,5 +32,32 @@ func TestKeySeparatesCDAD(t *testing.T) {
 	do.SetEdns0(4096, true)
 	if KeyOf(base) == KeyOf(do) {
 		t.Error("DO=0 and DO=1 produce the same cache key")
+	}
+}
+
+func TestKeyStringCompact(t *testing.T) {
+	k := Key{Name: "sub.ads.example.com.", QType: 1, QClass: 1, Label: "auto", DO: true}
+	if got, want := k.String(), "sub.ads.example.com.|1|1|auto|100"; got != want {
+		t.Fatalf("String() = %q, want %q", got, want)
+	}
+	if n := testing.AllocsPerRun(100, func() { _ = k.String() }); n != 1 {
+		t.Fatalf("String() allocs = %v, want 1", n)
+	}
+	for _, tc := range []struct {
+		key  Key
+		want string
+	}{
+		{Key{Name: "a.test.", QType: 1, QClass: 1, CD: true}, "a.test.|1|1||010"},
+		{Key{Name: "a.test.", QType: 1, QClass: 1, AD: true}, "a.test.|1|1||001"},
+	} {
+		if got := tc.key.String(); got != tc.want {
+			t.Errorf("String() = %q, want %q", got, tc.want)
+		}
+	}
+	// Oversized keys stay correct on the heap path.
+	long := strings.Repeat("a", 300) + ".test."
+	kl := Key{Name: long, QType: 28, QClass: 1, Label: "x", CD: true, AD: true}
+	if got, want := kl.String(), fmt.Sprintf("%s|%d|%d|%s|011", long, 28, 1, "x"); got != want {
+		t.Errorf("oversized String() = %q, want %q", got, want)
 	}
 }

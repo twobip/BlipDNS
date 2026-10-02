@@ -778,3 +778,67 @@ func TestPoolUnnamedServerKeepsName(t *testing.T) {
 		t.Errorf("LabelFor(auto) = %q", got)
 	}
 }
+
+func TestEncrypted(t *testing.T) {
+	udp := NewUDP("127.0.0.1:53", 0)
+	dot := NewTLS("1.1.1.1:853", 0)
+	doh := NewDoH("https://1.1.1.1/dns-query", 0)
+	if Encrypted(udp) {
+		t.Error("UDP is plaintext")
+	}
+	if !Encrypted(dot) || !Encrypted(doh) {
+		t.Error("DoT/DoH must report encrypted")
+	}
+	if !Encrypted(NewMulti(dot, doh)) {
+		t.Error("all-encrypted multi must report encrypted")
+	}
+	if Encrypted(NewMulti(dot, udp)) {
+		t.Error("mixed multi must stay plaintext")
+	}
+	if Encrypted(NewMulti()) {
+		t.Error("empty multi must stay plaintext")
+	}
+	if Encrypted(&fakeResolver{}) {
+		t.Error("unknown resolvers default to plaintext")
+	}
+}
+
+func TestUDPPresplitAndHostnameCache(t *testing.T) {
+	t.Cleanup(clearBootstrapCache)
+	r := NewUDP("127.0.0.1:53", 0)
+	if r.literal == nil || r.port != "53" || r.host != "127.0.0.1" {
+		t.Fatalf("presplit = %+v, want literal 127.0.0.1:53", r)
+	}
+	if port, _, err := r.pinned(context.Background()); err != nil || port != "53" {
+		t.Fatalf("pinned() = %q, %v, want 53, nil", port, err)
+	}
+	_, port, ips, err := pinnedIPs(context.Background(), "localhost:53")
+	if err != nil || len(ips) == 0 || port != "53" {
+		t.Fatalf("pinnedIPs(localhost) = %v, %v, %v", port, ips, err)
+	}
+	if _, ok := bootstrapCacheGet("classic:localhost"); !ok {
+		t.Fatal("hostname result not cached")
+	}
+	if _, _, ips2, err := pinnedIPs(context.Background(), "localhost:53"); err != nil || len(ips2) == 0 {
+		t.Fatalf("cached pinnedIPs(localhost) = %v, %v", ips2, err)
+	}
+}
+
+func TestPinnedGuardrails(t *testing.T) {
+	t.Cleanup(clearBootstrapCache)
+	if _, _, err := NewUDP("169.254.169.254:53", 0).pinned(context.Background()); err == nil {
+		t.Fatal("link-local literal must fail closed")
+	}
+	if _, _, err := NewUDP("bogus-no-port", 0).pinned(context.Background()); err == nil {
+		t.Fatal("unparseable addr must fail closed")
+	}
+	if _, _, err := (&UDPResolver{}).pinned(context.Background()); err == nil {
+		t.Fatal("zero resolver must fail closed")
+	}
+	// All-cached-blocked must fall through to a fresh lookup (which fails
+	// for .invalid) instead of serving an empty set.
+	bootstrapCachePut("classic:evil.invalid", []net.IP{net.ParseIP("169.254.169.254")}, time.Minute)
+	if _, _, _, err := pinnedIPs(context.Background(), "evil.invalid:53"); err == nil {
+		t.Fatal("all-blocked cache must fall through and fail closed")
+	}
+}
