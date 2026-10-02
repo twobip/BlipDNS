@@ -230,6 +230,12 @@ func load(certPath, keyPath string, extraHosts []string) ([]byte, []byte, error)
 	if err != nil {
 		return nil, nil, err
 	}
+	// A group/world-readable key silently MITMs DoH+management (the pair is
+	// reused for both). Refuse to serve it: the caller regenerates a 0600
+	// pair, so this self-heals instead of stranding the listener.
+	if fi, serr := os.Stat(keyPath); serr == nil && fi.Mode().Perm()&0o077 != 0 {
+		return nil, nil, fmt.Errorf("self-signed key: %s is group/world-accessible (mode %04o)", keyPath, fi.Mode().Perm())
+	}
 	certBlock, _ := pem.Decode(certPEM)
 	if certBlock == nil || certBlock.Type != "CERTIFICATE" {
 		return nil, nil, fmt.Errorf("self-signed cert: no certificate PEM in %s", certPath)

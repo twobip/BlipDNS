@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -45,5 +46,27 @@ func TestClientRedirectPolicyOnAllTransports(t *testing.T) {
 		if err := hc.CheckRedirect(nil, nil); err != http.ErrUseLastResponse {
 			t.Errorf("%s client follows redirects (err=%v)", name, err)
 		}
+	}
+}
+
+// The instance client pins IPs at dial time (2026-10-02 recheck): a hostname
+// that rebinds to link-local/metadata space after validation must be refused
+// before the bearer goes out. Loopback still dials (conn refused, not pin
+// refused) — local management keeps working.
+func TestClientDialPinRefusesMetadata(t *testing.T) {
+	tr := newTransport(false)
+	if tr.DialContext == nil {
+		t.Fatal("control transport has no dial guard")
+	}
+	ctx := context.Background()
+	if _, err := tr.DialContext(ctx, "tcp", "169.254.169.254:8444"); err == nil {
+		t.Error("metadata IP dialed: rebinding pin missing, bearer would leak")
+	} else if !strings.Contains(err.Error(), "refusing") {
+		t.Errorf("metadata IP error=%q want pin refusal", err)
+	}
+	if _, err := tr.DialContext(ctx, "tcp", "127.0.0.1:1"); err == nil {
+		t.Error("loopback dial unexpectedly succeeded")
+	} else if strings.Contains(err.Error(), "refusing") {
+		t.Errorf("loopback pin-refused (%q): local management would break", err)
 	}
 }

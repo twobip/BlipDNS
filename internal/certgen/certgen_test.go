@@ -78,6 +78,37 @@ func TestEnsureFilesPersistsAndReuses(t *testing.T) {
 	}
 }
 
+// A world-readable persisted key must be refused and regenerated with 0600
+// (2026-10-02 recheck): the pair also serves management, so a 0644 key is a
+// silent MITM of both listeners.
+func TestEnsureFilesRegeneratesWorldReadableKey(t *testing.T) {
+	dir := t.TempDir()
+	certPath := filepath.Join(dir, "doh-cert.pem")
+	keyPath := filepath.Join(dir, "doh-key.pem")
+	_, k1, _, err := EnsureFiles(certPath, keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(keyPath, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, k2, persisted, err := EnsureFiles(certPath, keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !persisted {
+		t.Error("expected regenerated pair to be persisted")
+	}
+	if string(k1) == string(k2) {
+		t.Error("world-readable key was reused instead of regenerated")
+	}
+	if fi, err := os.Stat(keyPath); err != nil {
+		t.Fatal(err)
+	} else if fi.Mode().Perm() != 0o600 {
+		t.Errorf("regenerated key mode=%04o want 0600", fi.Mode().Perm())
+	}
+}
+
 func TestEnsureFilesRegeneratesExpired(t *testing.T) {
 	dir := t.TempDir()
 	certPath := filepath.Join(dir, "doh-cert.pem")
