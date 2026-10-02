@@ -380,8 +380,8 @@ if [ "$LOCAL" -eq 1 ]; then
   log "building from local checkout: $SRC_DIR"
   cd "$SRC_DIR"
   log "building blipc and blipctl (first build can take a few minutes — package list below shows progress)"
-  go build -v -ldflags "-X github.com/twobip/BlipDNS/internal/controller.version=$(cat VERSION)" -o "$TMPDIR/blipc" ./cmd/blipc
-  go build -v -ldflags "-X main.version=$(cat VERSION)" -o "$TMPDIR/blipctl" ./cmd/blipctl
+  go build -trimpath -pgo=auto -v -ldflags "-X github.com/twobip/BlipDNS/internal/controller.version=$(cat VERSION)" -o "$TMPDIR/blipc" ./cmd/blipc
+  go build -trimpath -pgo=auto -v -ldflags "-X main.version=$(cat VERSION)" -o "$TMPDIR/blipctl" ./cmd/blipctl
 elif [ "$BUILD_FROM_SOURCE" -eq 1 ]; then
   SRC_DIR="$TMPDIR/src"
   # M13: pin the clone. REF is allow-listed by the channel case above
@@ -405,8 +405,8 @@ elif [ "$BUILD_FROM_SOURCE" -eq 1 ]; then
   fi
   cd "$SRC_DIR"
   log "building blipc and blipctl (first build can take a few minutes — package list below shows progress)"
-  go build -v -ldflags "-X github.com/twobip/BlipDNS/internal/controller.version=$(cat VERSION)" -o "$TMPDIR/blipc" ./cmd/blipc
-  go build -v -ldflags "-X main.version=$(cat VERSION)" -o "$TMPDIR/blipctl" ./cmd/blipctl
+  go build -trimpath -pgo=auto -v -ldflags "-X github.com/twobip/BlipDNS/internal/controller.version=$(cat VERSION)" -o "$TMPDIR/blipc" ./cmd/blipc
+  go build -trimpath -pgo=auto -v -ldflags "-X main.version=$(cat VERSION)" -o "$TMPDIR/blipctl" ./cmd/blipctl
 else
   log "downloading blipc and blipctl from release $TAG"
   fetch_verified "$TAG" blipc-linux-amd64 "$TMPDIR/blipc"

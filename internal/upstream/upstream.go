@@ -271,9 +271,7 @@ func verifyClassicResponse(q, resp *dns.Msg) error {
 	if len(q.Question) == 0 || len(resp.Question) == 0 {
 		return fmt.Errorf("upstream: response question missing")
 	}
-	qname := strings.ToLower(q.Question[0].Name)
-	rname := strings.ToLower(resp.Question[0].Name)
-	if qname != rname || q.Question[0].Qtype != resp.Question[0].Qtype {
+	if !strings.EqualFold(q.Question[0].Name, resp.Question[0].Name) || q.Question[0].Qtype != resp.Question[0].Qtype {
 		return fmt.Errorf("upstream: question echo mismatch (got %s %d, want %s %d)", resp.Question[0].Name, resp.Question[0].Qtype, q.Question[0].Name, q.Question[0].Qtype)
 	}
 	return nil
@@ -599,6 +597,11 @@ func blockedUpstreamIP(ip net.IP) bool {
 	return ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() || blocklist.IsCGNAT(ip)
 }
 
+// warnLocalUpstreamLast bounds warnLocalUpstream the same way as the
+// unverified-ID warning in dnsserver: a LAN deployment would otherwise log
+// (a stderr write + logger lock) on every cache miss.
+var warnLocalUpstreamLast atomic.Int64
+
 // warnLocalUpstream logs when an upstream is loopback or private (RFC1918).
 // These stay allowed — forwarding to a LAN or local resolver is a normal
 // deployment — but the warning surfaces accidental self-reference or overly
@@ -608,7 +611,10 @@ func warnLocalUpstream(ip net.IP) {
 		return
 	}
 	if ip.IsLoopback() || ip.IsPrivate() {
-		log.Printf("upstream: warning: forwarding to local/private address %s (allowed, but verify this is intended)", ip.String())
+		if now, last := time.Now().Unix(), warnLocalUpstreamLast.Load(); now-last >= 10 &&
+			warnLocalUpstreamLast.CompareAndSwap(last, now) {
+			log.Printf("upstream: warning: forwarding to local/private address %s (allowed, but verify this is intended)", ip.String())
+		}
 	}
 }
 
@@ -831,9 +837,7 @@ func verifyDoHResponse(q, resp *dns.Msg) error {
 	if len(q.Question) == 0 || len(resp.Question) == 0 {
 		return fmt.Errorf("doh: response question missing")
 	}
-	qname := strings.ToLower(q.Question[0].Name)
-	rname := strings.ToLower(resp.Question[0].Name)
-	if qname != rname || q.Question[0].Qtype != resp.Question[0].Qtype {
+	if !strings.EqualFold(q.Question[0].Name, resp.Question[0].Name) || q.Question[0].Qtype != resp.Question[0].Qtype {
 		return fmt.Errorf("doh: question echo mismatch (got %s %d, want %s %d)", resp.Question[0].Name, resp.Question[0].Qtype, q.Question[0].Name, q.Question[0].Qtype)
 	}
 	return nil

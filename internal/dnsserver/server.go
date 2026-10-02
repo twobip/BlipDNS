@@ -388,10 +388,11 @@ func (s *Server) handleDoH(w http.ResponseWriter, r *http.Request) {
 		// Grow at most to maxDoHMessage+1 to detect overflow.
 		lr := io.LimitReader(r.Body, maxDoHMessage+1)
 		// Manual read loop into pooled slice to avoid io.ReadAll doubling.
-		tmp := make([]byte, 4096)
+		// Stack scratch: the old heap tmp cost 4 KiB per POST.
+		var tmp [4096]byte
 		tooLarge := false
 		for {
-			n, err := lr.Read(tmp)
+			n, err := lr.Read(tmp[:])
 			if n > 0 {
 				if len(buf)+n > maxDoHMessage+1 {
 					tooLarge = true
@@ -405,13 +406,21 @@ func (s *Server) handleDoH(w http.ResponseWriter, r *http.Request) {
 		}
 		b := buf
 		if tooLarge || len(b) > maxDoHMessage {
-			dohBodyPool.Put(b[:0])
+			// Only pool back small buffers: one attacker-sized POST must not
+			// permanently inflate every reused entry to 64 KiB.
+			if cap(b) <= 16<<10 {
+				dohBodyPool.Put(b[:0])
+			}
 			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
 			return
 		}
 		req = new(dns.Msg)
 		err := req.Unpack(b)
-		dohBodyPool.Put(b[:0])
+		// Only pool back small buffers: one attacker-sized POST must not
+		// permanently inflate every reused entry to 64 KiB.
+		if cap(b) <= 16<<10 {
+			dohBodyPool.Put(b[:0])
+		}
 		if err != nil {
 			http.Error(w, "bad dns message", http.StatusBadRequest)
 			return
@@ -508,22 +517,28 @@ func dohMaxAge(resp *dns.Msg) uint32 {
 		return 0
 	}
 	min, seen := uint32(0), false
-	for _, sec := range [][]dns.RR{resp.Answer, resp.Ns} {
-		for _, rr := range sec {
-			if rr == nil || rr.Header() == nil {
-				continue
-			}
-			t := rr.Header().Ttl
-			// RFC 2308 §3: negative answers cache for min(SOA TTL, SOA
-			// minimum) — mirror cache.minTTL so the advertised HTTP
-			// freshness never exceeds the actual negative-cache TTL.
-			if soa, ok := rr.(*dns.SOA); ok && soa.Minttl < t {
-				t = soa.Minttl
-			}
-			if !seen || t < min {
-				min, seen = t, true
-			}
+	update := func(rr dns.RR) {
+		if rr == nil || rr.Header() == nil {
+			return
 		}
+		t := rr.Header().Ttl
+		// RFC 2308 §3: negative answers cache for min(SOA TTL, SOA
+		// minimum) — mirror cache.minTTL so the advertised HTTP
+		// freshness never exceeds the actual negative-cache TTL.
+		if soa, ok := rr.(*dns.SOA); ok && soa.Minttl < t {
+			t = soa.Minttl
+		}
+		if !seen || t < min {
+			min, seen = t, true
+		}
+	}
+	// Two plain loops: the old [][]dns.RR{...} literal built a 2-elem
+	// slice header per DoH response.
+	for _, rr := range resp.Answer {
+		update(rr)
+	}
+	for _, rr := range resp.Ns {
+		update(rr)
 	}
 	if !seen {
 		return 0
@@ -595,9 +610,10 @@ func (s *Server) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
 			isUDP = true
 		}
 	}
-	ctx, cancel := queryCtx()
-	defer cancel()
-	resp := s.serveInner(ctx, clientIP, "", control.ProtoDNS, isUDP, req)
+	// Classic DNS has no request context: serveInner derives a fetch-scoped
+	// timeout around the upstream lookup below, so blocked, local and
+	// refused answers pay no timer alloc.
+	resp := s.serveInner(context.Background(), clientIP, "", control.ProtoDNS, isUDP, req)
 	// Safety net for every early-return path (blocked/local/refused): a large
 	// answer must still fit the path (UDP: DNS flag-day 1232; TCP: the
 	// client's advertised EDNS0 bufsize capped at 1232, 512 + TC when the
@@ -633,13 +649,6 @@ var unverifiedIDLogLast atomic.Int64
 // control.ProtoDNS) for query-log events. Classic-DNS callers that go through
 // ServeDNS use serveInner directly with a precise UDP flag; direct serve()
 // calls assume classic DNS is UDP so large responses are still truncated.
-// queryCtx bounds one classic-DNS query (filter+cache+upstream) so a stalled
-// upstream with a large TimeoutSec cannot park goroutines/FDs indefinitely.
-// DoH callers already inherit the HTTP request context; classic DNS has none.
-func queryCtx() (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.Background(), 10*time.Second)
-}
-
 func (s *Server) serve(ctx context.Context, clientIP net.IP, clientID, proto string, req *dns.Msg) *dns.Msg {
 	isUDP := proto == control.ProtoDNS
 	return s.serveInner(ctx, clientIP, clientID, proto, isUDP, req)
@@ -767,6 +776,11 @@ func sanitizeBailiwick(qname string, m *dns.Msg) {
 	if m == nil {
 		return
 	}
+	// Fast path: the common upstream answer carries no Ns/Extra, so there
+	// is nothing to sanitize (and no qname ToLower to pay for).
+	if len(m.Ns) == 0 && len(m.Extra) == 0 {
+		return
+	}
 	qn := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(qname), "."))
 	qn = strings.TrimLeft(qn, ".")
 	if qn == "" {
@@ -859,7 +873,7 @@ func (s *Server) classifyName(clientIP net.IP, clientID, target string) (bool, f
 	} else {
 		action = filter.DefaultAction
 	}
-	if s.cfg.Blocklist != nil && s.cfg.Blocklist.IsBlocked(bare) && !allowed {
+	if s.cfg.Blocklist != nil && s.cfg.Blocklist.IsBlockedNormalized(bare) && !allowed {
 		return true, s.cfg.BlockAction, "global", doLog
 	}
 	if blocked {
@@ -890,6 +904,18 @@ func stripSubnet(req *dns.Msg) {
 	}
 	opt := req.IsEdns0()
 	if opt == nil {
+		return
+	}
+	// Fast path: most queries carry OPT without a subnet option — scan
+	// first so the common case pays no slice alloc.
+	hasSubnet := false
+	for _, o := range opt.Option {
+		if o.Option() == dns.EDNS0SUBNET {
+			hasSubnet = true
+			break
+		}
+	}
+	if !hasSubnet {
 		return
 	}
 	kept := make([]dns.EDNS0, 0, len(opt.Option))
@@ -1022,15 +1048,19 @@ func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, prot
 		resp.Rcode = dns.RcodeRefused
 		return resp
 	}
+	// ANY (255) and AXFR (252) are refused: ANY amplifies reflection attacks
+	// and AXFR is a zone transfer, never a resolver query. Built lazily:
+	// the old prebuilt reply was orphaned on the pass path below.
+	if q.Qtype == dns.TypeANY || q.Qtype == dns.TypeAXFR {
+		anyResp := new(dns.Msg)
+		anyResp.SetReply(req)
+		anyResp.RecursionAvailable = true
+		anyResp.Rcode = dns.RcodeRefused
+		return anyResp
+	}
 	resp := new(dns.Msg)
 	resp.SetReply(req)
 	resp.RecursionAvailable = true // locally-built replies must carry RA like relayed ones
-	// ANY (255) and AXFR (252) are refused: ANY amplifies reflection attacks
-	// and AXFR is a zone transfer, never a resolver query.
-	if q.Qtype == dns.TypeANY || q.Qtype == dns.TypeAXFR {
-		resp.Rcode = dns.RcodeRefused
-		return resp
-	}
 	// Normalize once (ASCII fast path, no alloc when already lowercase) and
 	// reuse for blocklist, filter Check and cache key — the old path lowercased
 	// 3-4x per query.
@@ -1051,7 +1081,7 @@ func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, prot
 	// Check global blocklist first (applied to all clients). A per-client
 	// allowlist always wins: a domain the client's policy whitelists is never
 	// blocked by the global blocklist (or any policy block list).
-	if s.cfg.Blocklist != nil && s.cfg.Blocklist.IsBlocked(domain) && !allowed {
+	if s.cfg.Blocklist != nil && s.cfg.Blocklist.IsBlockedNormalized(domain) && !allowed {
 		s.cnt.AddBlocked()
 		c := renderClient()
 		s.notifyBlock(req, resp, c, domain, "global", proto, start)
@@ -1241,6 +1271,17 @@ func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, prot
 		}
 		return false, "", "", false, ""
 	}
+	// Fetch-scoped timeout: a stalled upstream with a large TimeoutSec must
+	// not park goroutines/FDs indefinitely. Scoped here (not per query) so
+	// early refusals (blocks, local answers) skip it; the lookup path arms
+	// it once for both cache hits and coalesced-miss waiters. 10s sits
+	// above the pool's 8s failover budget, so classic-DNS timing is
+	// unchanged; DoH previously had no outer bound and now has 10s.
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	fctx, fcancel := context.WithTimeout(ctx, 10*time.Second)
+	defer fcancel()
 	fetch := func() (*dns.Msg, error) {
 		// Per-upstream TXID: the client chose req.Id (attacker-known for
 		// their own queries). Copy and re-randomize so off-path spoofers
@@ -1252,7 +1293,7 @@ func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, prot
 			return nil, idErr
 		}
 		upReq.Id = newID
-		m, err := resolver.Resolve(ctx, upReq)
+		m, err := resolver.Resolve(fctx, upReq)
 		if err != nil {
 			return nil, err
 		}
@@ -1288,7 +1329,7 @@ func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, prot
 			m, ferr := fetch()
 			return m, false, ferr
 		}
-		return s.cache.DoHit(ctx, key, fetch)
+		return s.cache.DoHit(fctx, key, fetch)
 	}()
 	if err != nil {
 		var cbe *chainBlockedError
@@ -1313,7 +1354,7 @@ func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, prot
 		// Caller went away (DoH disconnect, coalesced waiter gave up): not
 		// an upstream failure — SERVFAIL the (gone) caller without counting
 		// or reporting it. Mirrors upstream.isCallerCancel at the pool.
-		if errors.Is(err, context.Canceled) || (ctx != nil && errors.Is(ctx.Err(), context.Canceled)) {
+		if errors.Is(err, context.Canceled) || errors.Is(fctx.Err(), context.Canceled) {
 			resp.Rcode = dns.RcodeServerFailure
 			resp.AuthenticatedData = false
 			return resp

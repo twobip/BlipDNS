@@ -398,7 +398,7 @@ if [ "$BUILD_FROM_SOURCE" -eq 1 ]; then
 
   cd "$TMPDIR/src"
   log "building blipd (first build can take a few minutes — package list below shows progress)"
-  go build -v -ldflags "-X main.version=$(cat VERSION)" -o "$TMPDIR/blipd" ./cmd/blipd
+  go build -trimpath -pgo=auto -v -ldflags "-X main.version=$(cat VERSION)" -o "$TMPDIR/blipd" ./cmd/blipd
 else
   log "downloading blipd-linux-amd64 from release $TAG"
   curl -fL --proto '=https' --tlsv1.2 "$BASE_URL/$TAG/blipd-linux-amd64" -o "$TMPDIR/blipd" \

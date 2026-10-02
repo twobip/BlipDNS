@@ -2,6 +2,7 @@ package cache
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -64,6 +65,32 @@ func TestPurge(t *testing.T) {
 	c.Set(k, mkMsg("a.test", 60))
 	if _, ok := c.Get(k); !ok {
 		t.Error("expected hit after re-insertion post-purge")
+	}
+}
+
+func TestPurgeExpiredBound(t *testing.T) {
+	c := New(time.Hour, 0)
+	c.now = func() time.Time { return time.Unix(1000, 0) }
+	for i := 0; i < 1090; i++ {
+		name := fmt.Sprintf("gone%d.test", i)
+		c.Set(KeyOf(mkMsg(name, 5)), mkMsg(name, 5))
+	}
+	for i := 0; i < 10; i++ {
+		name := fmt.Sprintf("stay%d.test", i)
+		c.Set(KeyOf(mkMsg(name, 3600)), mkMsg(name, 3600))
+	}
+	c.now = func() time.Time { return time.Unix(1011, 0) }
+	c.purgeExpired()
+	// 1090 expired, capped at 1024/pass: 66 expired + 10 fresh remain.
+	if got := c.Len(); got != 76 {
+		t.Fatalf("Len after capped purge = %d, want 76", got)
+	}
+	if _, ok := c.Get(KeyOf(mkMsg("stay0.test", 3600))); !ok {
+		t.Error("fresh entry evicted by purgeExpired")
+	}
+	c.purgeExpired()
+	if got := c.Len(); got != 10 {
+		t.Fatalf("Len after second purge = %d, want 10", got)
 	}
 }
 

@@ -40,6 +40,9 @@ SystemCallArchitectures=native
 # upstream or allowed_networks. ProtectSystem=strict still allows reads.
 ReadWritePaths=/var/lib/blipd /var/cache/blipd-update /run/lock /usr/local/bin
 LimitNOFILE=65536
+# Bound Go GC heap on small boxes: the blocklist cache can hold ~400-500 MiB.
+# (Same stanza as blipc.service; commented out = Go default.)
+#Environment=GOMEMLIMIT=700MiB
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=blipd

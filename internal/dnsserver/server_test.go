@@ -962,3 +962,26 @@ func TestServeChaosRefused(t *testing.T) {
 		t.Errorf("CHAOS query reached the upstream (%d calls)", up.calls)
 	}
 }
+
+func TestStripSubnet(t *testing.T) {
+	q := new(dns.Msg)
+	q.SetQuestion("x.test.", dns.TypeA)
+	stripSubnet(q) // no OPT: must not panic or add one
+	if q.IsEdns0() != nil {
+		t.Fatal("stripSubnet added OPT")
+	}
+	q.SetEdns0(4096, false)
+	stripSubnet(q) // OPT without subnet: preserved as-is
+	if opt := q.IsEdns0(); opt == nil || len(opt.Option) != 0 {
+		t.Fatal("stripSubnet dropped non-subnet options")
+	}
+	q.IsEdns0().Option = append(q.IsEdns0().Option, &dns.EDNS0_SUBNET{
+		Family: 1, SourceNetmask: 24, Address: net.ParseIP("192.0.2.1"),
+	})
+	stripSubnet(q) // subnet must never leak upstream
+	for _, o := range q.IsEdns0().Option {
+		if o.Option() == dns.EDNS0SUBNET {
+			t.Fatal("subnet option leaked upstream")
+		}
+	}
+}

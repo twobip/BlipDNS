@@ -88,6 +88,32 @@ func TestIsBlocked(t *testing.T) {
 	}
 }
 
+func TestIsBlockedNormalized(t *testing.T) {
+	b := New()
+	b.Add("ads.example.com")
+	for _, h := range []string{"ads.example.com", "sub.ads.example.com"} {
+		if !b.IsBlockedNormalized(h) {
+			t.Errorf("IsBlockedNormalized(%q) = false, want true", h)
+		}
+		if !b.IsBlocked(h) {
+			t.Errorf("precondition: IsBlocked(%q) = false", h)
+		}
+	}
+	for _, h := range []string{"", ".", "..", "example.com"} {
+		if b.IsBlockedNormalized(h) {
+			t.Errorf("IsBlockedNormalized(%q) = true, want false", h)
+		}
+	}
+	// Normalized path skips case-folding by contract (callers pass
+	// filter.NormalizeName output); IsBlocked still folds.
+	if b.IsBlockedNormalized("ADS.EXAMPLE.COM") {
+		t.Error("IsBlockedNormalized must not fold case (precondition: lowercased input)")
+	}
+	if !b.IsBlocked("ADS.EXAMPLE.COM") {
+		t.Error("precondition: IsBlocked folds case")
+	}
+}
+
 func TestAddRemove(t *testing.T) {
 	b := New()
 	b.Add("bad.com")

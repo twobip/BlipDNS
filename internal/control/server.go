@@ -385,6 +385,10 @@ func (s *Server) ServeTLS(addr, certFile, keyFile string) error {
 		Addr:              addr,
 		Handler:           s.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
+		// No WriteTimeout: /api/v1/watch streams events indefinitely and a
+		// whole-response write deadline would kill idle streams.
+		ReadTimeout: 10 * time.Second,
+		IdleTimeout: 60 * time.Second,
 	}
 	return srv.ListenAndServeTLS(certFile, keyFile)
 }
@@ -397,7 +401,10 @@ func (s *Server) ServeTLSConfig(addr string, tlsConf *tls.Config) error {
 		Addr:              addr,
 		Handler:           s.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
-		TLSConfig:         tlsConf,
+		// No WriteTimeout: /api/v1/watch streams events indefinitely (see ServeTLS).
+		ReadTimeout: 10 * time.Second,
+		IdleTimeout: 60 * time.Second,
+		TLSConfig:   tlsConf,
 	}
 	return srv.ListenAndServeTLS("", "")
 }

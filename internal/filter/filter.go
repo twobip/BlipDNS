@@ -217,28 +217,21 @@ func (m *matcher) match(name string) bool {
 	if _, ok := m.exact[name]; ok {
 		return true
 	}
-	// Walk the label boundaries without allocating: instead of Split+Join,
-	// index each dot and probe the remainder as the candidate root in both
-	// sets (plain suffixes and "subdomains only" wildcards share the walk).
-	// Each map is probed only when non-empty so an empty table costs no hash.
-	if len(m.suffix) > 0 {
-		for i := 0; i < len(name); i++ {
-			if name[i] != '.' {
-				continue
-			}
-			if _, ok := m.suffix[name[i+1:]]; ok {
-				return true
-			}
-		}
+	// Single dot-walk probing both tables per label boundary: the old code
+	// walked the name twice (suffix, then subOnly).
+	if len(m.suffix) == 0 && len(m.subOnly) == 0 {
+		return false
 	}
-	if len(m.subOnly) > 0 {
-		for i := 0; i < len(name); i++ {
-			if name[i] != '.' {
-				continue
-			}
-			if _, ok := m.subOnly[name[i+1:]]; ok {
-				return true
-			}
+	for i := 0; i < len(name); i++ {
+		if name[i] != '.' {
+			continue
+		}
+		rest := name[i+1:]
+		if _, ok := m.suffix[rest]; ok {
+			return true
+		}
+		if _, ok := m.subOnly[rest]; ok {
+			return true
 		}
 	}
 	return false

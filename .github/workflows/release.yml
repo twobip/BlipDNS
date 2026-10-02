@@ -60,9 +60,9 @@ jobs:
           # Stamp the short commit SHA as SemVer build metadata so the
           # dashboard badge shows the exact build instead of "unknown build".
           STAMP="${VERSION}+$(git rev-parse --short=7 HEAD)"
-          go build -trimpath -ldflags "-s -w -X main.version=${STAMP}" -o blipd-linux-amd64 ./cmd/blipd
-          go build -trimpath -ldflags "-s -w -X github.com/twobip/BlipDNS/internal/controller.version=${STAMP}" -o blipc-linux-amd64 ./cmd/blipc
-          go build -trimpath -ldflags "-s -w -X main.version=${STAMP}" -o blipctl-linux-amd64 ./cmd/blipctl
+          go build -trimpath -pgo=auto -ldflags "-s -w -X main.version=${STAMP}" -o blipd-linux-amd64 ./cmd/blipd
+          go build -trimpath -pgo=auto -ldflags "-s -w -X github.com/twobip/BlipDNS/internal/controller.version=${STAMP}" -o blipc-linux-amd64 ./cmd/blipc
+          go build -trimpath -pgo=auto -ldflags "-s -w -X main.version=${STAMP}" -o blipctl-linux-amd64 ./cmd/blipctl
           # The root-executed install helpers ship as release assets too so the
           # install scripts can SHA256-verify them like the binaries (a bare
           # curl of raw.githubusercontent would trust the mirror for root code).

@@ -315,7 +315,7 @@ func (b *Blocklist) Remove(domain string) {
 // SetAllowed replaces the allowed (whitelisted) set. Allowed domains are
 // never blocked, even when they appear in the block set or a source list.
 func (b *Blocklist) SetAllowed(list []string) {
-	exact, wild := make(map[string]struct{}), make(map[string]struct{})
+	exact, wild := make(map[string]struct{}, len(list)), make(map[string]struct{})
 	var sum uint64
 	for _, d := range list {
 		if k := addEntry(d, exact, wild); k != "" {
@@ -437,6 +437,18 @@ func (b *Blocklist) IsBlocked(host string) bool {
 	if h == "" {
 		return false
 	}
+	return b.IsBlockedNormalized(h)
+}
+
+// IsBlockedNormalized is IsBlocked for an already-normalized host (e.g.
+// filter.NormalizeName output from the DNS serve path): it skips the second
+// ToLower/Trim pass per query. h must already be lowercased; the leading-dot
+// trim is a free subslice so un-normalized callers stay exact.
+func (b *Blocklist) IsBlockedNormalized(h string) bool {
+	h = strings.TrimLeft(h, ".")
+	if h == "" {
+		return false
+	}
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	if allowMatchLocked(b.allowExact, b.allowWild, h) {
@@ -545,8 +557,17 @@ func (b *Blocklist) LoadFromURLs(ctx context.Context, urls []string, opts *LoadO
 	}
 	wg.Wait()
 
-	merged := make(map[string]struct{})
-	mergedAllowed := make(map[string]struct{})
+	// Presize from the exact per-source counts so a million-entry refresh
+	// does not rehash its way up from empty.
+	total, totalAllowed := 0, 0
+	for i := range results {
+		if results[i].err == nil {
+			total += len(results[i].set)
+			totalAllowed += len(results[i].allowed)
+		}
+	}
+	merged := make(map[string]struct{}, total)
+	mergedAllowed := make(map[string]struct{}, totalAllowed)
 	res := &LoadResult{Sources: len(urls)}
 	for i, u := range urls {
 		per := SourceResult{URL: u}

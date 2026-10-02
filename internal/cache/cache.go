@@ -157,13 +157,31 @@ func (c *Cache) janitor() {
 	}
 }
 
-// purgeExpired removes entries past their expiry under the exclusive lock.
+// purgeExpired removes entries past their expiry without stalling readers:
+// keys are collected under the shared lock, then deleted in short exclusive
+// bursts. Bounded at 1024/pass (janitor runs every minute; leftovers wait
+// for the next pass).
+// ponytail: single-pass full sweep; shard the map if the 60s p99 spike shows.
 func (c *Cache) purgeExpired() {
 	now := c.now()
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.mu.RLock()
+	var expired []Key
 	for k, e := range c.items {
 		if now.After(e.expire) {
+			expired = append(expired, k)
+			if len(expired) >= 1024 {
+				break
+			}
+		}
+	}
+	c.mu.RUnlock()
+	if len(expired) == 0 {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, k := range expired {
+		if e, ok := c.items[k]; ok && now.After(e.expire) {
 			delete(c.items, k)
 			if e.elem != nil {
 				c.lru.Remove(e.elem)
