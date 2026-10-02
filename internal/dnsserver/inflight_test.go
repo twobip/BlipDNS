@@ -37,10 +37,9 @@ func TestServeDNSShedsPastInflightCap(t *testing.T) {
 	req.SetQuestion("example.com.", dns.TypeA)
 	w := &stubWriter{}
 	srv.ServeDNS(w, req)
-	if w.wrote == nil {
-		t.Fatal("saturated ServeDNS wrote nothing")
-	}
-	if w.wrote.Rcode != dns.RcodeServerFailure {
-		t.Fatalf("saturated ServeDNS rcode = %d, want SERVFAIL", w.wrote.Rcode)
+	// Overload shed on UDP is silence, not SERVFAIL: replying to a
+	// spoofable source is reflection (2026-10-02 audit).
+	if w.wrote != nil {
+		t.Fatalf("saturated ServeDNS over UDP wrote rcode=%d, want silence", w.wrote.Rcode)
 	}
 }

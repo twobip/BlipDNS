@@ -70,11 +70,11 @@ jobs:
           RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
         run: |
           set -euo pipefail
-          # Signing deferred: no repo secret yet. Ship checksums only (warn
-          # loudly); re-arm by setting RELEASE_SIGNING_KEY (finding 4).
+          # Fail closed: installers refuse a missing .sig, so shipping
+          # unsigned would strand every install. No silent fallback.
           if [ -z "$RELEASE_SIGNING_KEY" ]; then
-            echo "::warning::RELEASE_SIGNING_KEY repo secret is not set — shipping UNSIGNED release (SHA256 only)"
-            exit 0
+            echo "::error::RELEASE_SIGNING_KEY repo secret is not set — refusing to ship an unsigned release"
+            exit 1
           fi
           umask 077
           printf '%s\n' "$RELEASE_SIGNING_KEY" > "$RUNNER_TEMP/signing.key"

@@ -23,7 +23,7 @@ type Config struct {
 	KeyFile              string                    `yaml:"key_file"`
 	DoHTLS               bool                      `yaml:"doh_tls"`          // serve DoH over HTTPS on DoHAddr (self-signed cert auto-generated when CertFile/KeyFile unset)
 	DoHHTTPAddr          string                    `yaml:"doh_http_addr"`    // additional plain-HTTP DoH listener ("" = off)
-	RateLimitQPS         int                       `yaml:"rate_limit_qps"`   // per-client DNS QPS limit (0 = unlimited; the controller can override live)
+	RateLimitQPS         int                       `yaml:"rate_limit_qps"`   // per-client DNS QPS limit (0 = unlimited; stock default 20)
 	RateLimitBurst       int                       `yaml:"rate_limit_burst"` // per-client burst above QPS (0 = auto = QPS, min 1)
 	TLSDir               string                    `yaml:"tls_dir"`          // where a generated self-signed DoH cert/key are persisted
 	DoHSANs              []string                  `yaml:"doh_san"`          // extra DNS names/IPs the generated self-signed DoH cert must cover (e.g. an HA VIP); changing it regenerates the pair
@@ -40,7 +40,7 @@ type Config struct {
 	UpstreamRoutes       []upstream.UpstreamRoute  `yaml:"upstream_routes"`        // conditional forwarding (qname/client -> server)
 	UpstreamBootstrap    []upstream.UpstreamServer `yaml:"upstream_bootstrap"`     // DNS servers used to resolve DoH upstream hostnames (UDP or DoH)
 	CacheCap             time.Duration             `yaml:"cache_cap"`              // max TTL for cached responses
-	CacheSize            int                       `yaml:"cache_size"`             // max cached responses in RAM (0 = unlimited)
+	CacheSize            int                       `yaml:"cache_size"`             // max cached responses in RAM (0 = bounded default of 100k, never unlimited)
 	BlocklistURL         string                    `yaml:"blocklist_url"`          // AdBlock Plus feed URL (optional, legacy single)
 	BlocklistURLs        []string                  `yaml:"blocklist_urls"`         // one or more ABP/hosts feeds (Pi-hole style)
 	BlocklistUpdateHours int                       `yaml:"blocklist_update_hours"` // refresh interval (0 = no auto-refresh)
@@ -48,6 +48,10 @@ type Config struct {
 	Default              *filter.Policy            `yaml:"default_policy"`
 	Policies             []*filter.Policy          `yaml:"policies"`
 }
+
+// DefaultRateLimitQPS is the stock per-client DNS QPS limit. A fresh blipd
+// must shed load out of the box; explicit 0 still disables the limiter.
+const DefaultRateLimitQPS = 20
 
 // maxBlocklistUpdateHours bounds blocklist_update_hours: beyond this the
 // time.Duration conversion overflows int64 nanoseconds (panicking NewTicker),
@@ -65,6 +69,7 @@ func Default() *Config {
 		AdminAddr:          "127.0.0.1:8444",
 		AdminSocket:        "/var/lib/blipd/blipd.sock",
 		Upstream:           "https://1.1.1.1/dns-query udp://1.1.1.1:53",
+		RateLimitQPS:       DefaultRateLimitQPS,
 		CacheCap:           1 * time.Hour,
 		CacheSize:          10000,
 		BlocklistCacheFile: "/var/lib/blipd/blocklist.cache",
@@ -98,6 +103,15 @@ func Load(path string) (*Config, error) {
 	if c.BlocklistUpdateHours > maxBlocklistUpdateHours {
 		log.Printf("config: WARNING blocklist_update_hours %d absurd (> %d); auto-refresh disabled", c.BlocklistUpdateHours, maxBlocklistUpdateHours)
 		c.BlocklistUpdateHours = 0
+	}
+	// Fail closed on memory-exhaustion typos: a negative cache_size would
+	// otherwise slip past cache.New into truly unbounded growth, and a
+	// negative rate_limit_qps would silently leave the limiter off.
+	if c.CacheSize < 0 {
+		return nil, fmt.Errorf("config: cache_size must be >= 0 (0 = bounded default)")
+	}
+	if c.RateLimitQPS < 0 {
+		return nil, fmt.Errorf("config: rate_limit_qps must be >= 0 (0 = unlimited)")
 	}
 	// Fail closed on copy-pasted placeholder tokens: an operator who copies
 	// the example config verbatim would otherwise run with a publicly known

@@ -259,7 +259,7 @@ func (c *Client) SetAllowedNetworks(ctx context.Context, networks []string) erro
 }
 
 // SetCacheConfig tunes the instance's response cache size: the max cached
-// responses (0 = unlimited).
+// responses (0 = bounded default).
 func (c *Client) SetCacheConfig(ctx context.Context, size int) error {
 	return c.do(ctx, http.MethodPut, "/api/v1/cache", &SetCacheRequest{Size: size}, nil)
 }

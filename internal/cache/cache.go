@@ -490,6 +490,12 @@ func (c *Cache) SetMaxEntries(n int) {
 // MaxAllowedEntries returns the upper bound enforced on cache sizes.
 func MaxAllowedEntries() int { return maxAllowedCacheEntries }
 
+// DefaultMaxEntries returns the bounded default the blipd config and
+// management API substitute when 0 is passed: 0 never means unlimited on
+// those paths. (SetMaxEntries(0) itself remains explicit-unlimited for
+// direct cache users.)
+func DefaultMaxEntries() int { return defaultMaxEntries }
+
 // DoHit returns a cached response if present, otherwise runs fn (coalescing
 // concurrent identical fetches onto one upstream call). The bool reports
 // whether the answer came from cache without waiting: requests coalesced

@@ -48,7 +48,7 @@ type Config struct {
 	KeyFile           string           // optional explicit TLS cert/key for DoH
 	DoHTLS            bool             // serve DoH over HTTPS on DoHAddr (self-signed cert generated when no CertFile/KeyFile)
 	DoHHTTPAddr       string           // also accept plain-HTTP DoH on this addr ("" = off; toggleable at runtime by the controller)
-	RateLimitQPS      int              // per-client DNS QPS limit (0 = unlimited; toggleable at runtime by the controller)
+	RateLimitQPS      int              // per-client DNS QPS limit (0 = unlimited, stock default 20; toggleable at runtime by the controller)
 	RateLimitBurst    int              // per-client burst above QPS (0 = auto = QPS, min 1)
 	TLSCert           *tls.Certificate // in-memory cert+key (e.g. generated self-signed) used when DoHTLS
 	Upstream          string           // upstream spec(s)
@@ -56,7 +56,7 @@ type Config struct {
 	UpstreamRoutes    []upstream.UpstreamRoute
 	UpstreamBootstrap []upstream.UpstreamServer // DNS servers used to resolve DoH upstream hostnames
 	CacheCap          time.Duration
-	CacheSize         int // max cached responses in RAM (0 = unlimited)
+	CacheSize         int // max cached responses in RAM (0 = bounded default)
 	Store             *filter.Store
 	Version           string
 	Blocklist         *blocklist.Blocklist // global blocklist applied before per-client policy
@@ -115,7 +115,7 @@ type Server struct {
 	// cacheMu guards the runtime cache configuration, seeded from cfg and
 	// overridable live by the controller (settings page).
 	cacheMu        sync.RWMutex
-	cacheSize      int // max cached responses (0 = unlimited)
+	cacheSize      int // max cached responses (0 = bounded default)
 	trustedProxies []*net.IPNet
 	// aclMu guards the recursion ACL (allowedNetworks). Empty/nil means
 	// allow all (open recursion, backward-compat with warning).
@@ -157,14 +157,10 @@ func New(cfg Config) (*Server, error) {
 	if len(allowed) == 0 {
 		log.Printf("blipd: WARNING open recursion: no allowed_networks configured, answering all clients (restrict with allowed_networks to loopback/private LANs)")
 	}
+	// cache_size 0 selects cache.New's bounded default, never unlimited: an
+	// unbounded resolver cache is one rotating flood away from OOM. True
+	// unlimited is no longer reachable; set an explicit large size instead.
 	c := cache.New(cfg.CacheCap, cfg.CacheSize)
-	// cache.New maps 0 to a bounded default to prevent unbounded growth for
-	// generic callers; an explicit blipd cache_size of 0 still means
-	// unlimited (backward compat with the config + management API), so opt
-	// back into it here.
-	if cfg.CacheSize == 0 {
-		c.SetMaxEntries(0)
-	}
 	cnt := &control.Counters{}
 	ctrl := control.NewServerWithBlocklist("", cfg.Store, c, cnt, cfg.Version, cfg.Blocklist)
 	s := &Server{
@@ -442,6 +438,19 @@ func (s *Server) handleDoH(w http.ResponseWriter, r *http.Request) {
 			clientID = clientIDFromPath("/dns-query/" + h)
 		}
 	}
+	// Bound DoH with the shared inflight semaphore: handshake + HTTP parse +
+	// Unpack all run before the rate limiter, so uncapped DoH burns more
+	// work per query than classic DNS with its 1024 shed. The nil check
+	// keeps zero-value Servers (tests) working.
+	if s.inflight != nil {
+		select {
+		case s.inflight <- struct{}{}:
+			defer func() { <-s.inflight }()
+		default:
+			http.Error(w, "server busy", http.StatusServiceUnavailable)
+			return
+		}
+	}
 	resp := s.serve(ctx, clientIP, clientID, control.ProtoDoH, req)
 	if resp == nil {
 		http.Error(w, "internal error", http.StatusInternalServerError)
@@ -563,14 +572,29 @@ func (s *Server) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
 			}
 		}
 	}()
+	isUDP := false
+	// The mux serves both UDP and TCP on the same handler; the flag only
+	// selects the response cap (see responseCap). Computed before the shed
+	// below so overload can drop UDP silently.
+	if w != nil {
+		if la := w.LocalAddr(); la != nil && la.Network() == "udp" {
+			isUDP = true
+		} else if ra := w.RemoteAddr(); ra != nil && ra.Network() == "udp" {
+			isUDP = true
+		}
+	}
 	// Shed load past maxInflightQueries instead of growing a goroutine per
 	// spoofed datagram. The nil channel check keeps zero-value Servers
-	// (tests) working.
+	// (tests) working. UDP shed is dropped silently (spoofable source);
+	// TCP gets SERVFAIL (real peer, needs an answer).
 	if s.inflight != nil {
 		select {
 		case s.inflight <- struct{}{}:
 			defer func() { <-s.inflight }()
 		default:
+			if isUDP {
+				return
+			}
 			resp := new(dns.Msg)
 			if req != nil {
 				resp.SetReply(req)
@@ -600,20 +624,14 @@ func (s *Server) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
 			}
 		}
 	}
-	isUDP := false
-	// The mux serves both UDP and TCP on the same handler; the flag only
-	// selects the response cap (see responseCap).
-	if w != nil {
-		if la := w.LocalAddr(); la != nil && la.Network() == "udp" {
-			isUDP = true
-		} else if ra := w.RemoteAddr(); ra != nil && ra.Network() == "udp" {
-			isUDP = true
-		}
-	}
 	// Classic DNS has no request context: serveInner derives a fetch-scoped
 	// timeout around the upstream lookup below, so blocked, local and
 	// refused answers pay no timer alloc.
-	resp := s.serveInner(context.Background(), clientIP, "", control.ProtoDNS, isUDP, req)
+	resp, drop := s.serveInner(context.Background(), clientIP, "", control.ProtoDNS, isUDP, req)
+	// Shed, not reflect: a spoofed UDP source gets silence, never REFUSED.
+	if drop && isUDP {
+		return
+	}
 	// Safety net for every early-return path (blocked/local/refused): a large
 	// answer must still fit the path (UDP: DNS flag-day 1232; TCP: the
 	// client's advertised EDNS0 bufsize capped at 1232, 512 + TC when the
@@ -651,7 +669,10 @@ var unverifiedIDLogLast atomic.Int64
 // calls assume classic DNS is UDP so large responses are still truncated.
 func (s *Server) serve(ctx context.Context, clientIP net.IP, clientID, proto string, req *dns.Msg) *dns.Msg {
 	isUDP := proto == control.ProtoDNS
-	return s.serveInner(ctx, clientIP, clientID, proto, isUDP, req)
+	// UDP shed is only honored by ServeDNS (the live socket); direct callers
+	// (DoH, tests) always need the reply body.
+	resp, _ := s.serveInner(ctx, clientIP, clientID, proto, isUDP, req)
+	return resp
 }
 
 // chainBlockedError carries a CNAME/DNAME chain block out of the cache
@@ -956,7 +977,12 @@ func stripSubnet(req *dns.Msg) {
 	opt.Option = kept
 }
 
-func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, proto string, isUDP bool, req *dns.Msg) *dns.Msg {
+// serveInner resolves one query. The bool reports UDP shed: when true the
+// transport is spoofable and the reply must be dropped, not sent —
+// answering REFUSED/SERVFAIL to a forged source makes blipd a reflector.
+// Only the pre-routing sheds (nil source, ACL, rate limit) set it; policy
+// blocks and upstream errors still reply (TCP/DoH always reply).
+func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, proto string, isUDP bool, req *dns.Msg) (*dns.Msg, bool) {
 	start := time.Now()
 	// Nil guards: never dereference a nil request or server. A nil request
 	// cannot be replied to meaningfully; refuse with an empty message.
@@ -964,18 +990,19 @@ func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, prot
 		resp := new(dns.Msg)
 		resp.RecursionAvailable = true
 		resp.Rcode = dns.RcodeFormatError
-		return resp
+		return resp, false
 	}
 	if s == nil {
 		resp := new(dns.Msg)
 		resp.SetReply(req)
 		resp.RecursionAvailable = true
 		resp.Rcode = dns.RcodeServerFailure
-		return resp
+		return resp, false
 	}
 	// A nil source IP must never be routed, cached or rate-bucketed: refuse
 	// immediately. (DoH with an unparseable RemoteAddr, or a spoofed classic
 	// query, would otherwise mint a "<nil>" bucket or bypass policy CIDRs.)
+	// The source may be spoofed: drop (no reply) rather than reflect.
 	if clientIP == nil {
 		resp := new(dns.Msg)
 		if req != nil {
@@ -983,16 +1010,17 @@ func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, prot
 		}
 		resp.RecursionAvailable = true
 		resp.Rcode = dns.RcodeRefused
-		return resp
+		return resp, true
 	}
 	// H4 open recursion: refuse non-allowlisted sources before any recursion
 	// (filter/cache/upstream). Empty ACL means allow all (backward-compat).
+	// UDP refusals are dropped, not sent: the source may be spoofed.
 	if !s.isRecursionAllowed(clientIP) {
 		resp := new(dns.Msg)
 		resp.SetReply(req)
 		resp.RecursionAvailable = true
 		resp.Rcode = dns.RcodeRefused
-		return resp
+		return resp, true
 	}
 	// Only attribute the self-asserted DoH client-ID when it actually
 	// selected its policy (IP inside that policy's networks). A claimed-but-
@@ -1042,7 +1070,8 @@ func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, prot
 	// clients can't exhaust upstream. REFUSED queries are tracked separately
 	// (AddRateLimited) and excluded from the query totals / query log: only
 	// queries that actually get resolved count toward throughput, cache and
-	// top-domain stats.
+	// top-domain stats. On UDP the refusal is dropped, not sent: replying to
+	// a spoofable source is reflection.
 	if s.rl != nil && !s.rl.off.Load() {
 		if !s.rl.allow(rateLimitKey(clientIP)) {
 			s.cnt.AddRateLimited()
@@ -1050,7 +1079,7 @@ func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, prot
 			resp.SetReply(req)
 			resp.RecursionAvailable = true
 			resp.Rcode = dns.RcodeRefused
-			return resp
+			return resp, true
 		}
 	}
 	s.cnt.AddQuery()
@@ -1063,7 +1092,24 @@ func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, prot
 		resp.SetReply(req)
 		resp.RecursionAvailable = true
 		resp.Rcode = dns.RcodeFormatError
-		return resp
+		return resp, false
+	}
+	// A forwarder only implements QUERY: UPDATE/NOTIFY/etc. must never be
+	// proxied to an upstream that might trust blipd's IP (zone-write
+	// primitive). NOTIMP, before any routing or caching.
+	if req.Opcode != dns.OpcodeQuery {
+		opResp := new(dns.Msg)
+		opResp.SetReply(req)
+		opResp.RecursionAvailable = true
+		opResp.Rcode = dns.RcodeNotImplemented
+		return opResp, false
+	}
+	if len(req.Question) != 1 {
+		multiResp := new(dns.Msg)
+		multiResp.SetReply(req)
+		multiResp.RecursionAvailable = true
+		multiResp.Rcode = dns.RcodeFormatError
+		return multiResp, false
 	}
 	q := req.Question[0]
 	// Never forward CHAOS-class queries (version.bind, hostname.bind, …)
@@ -1074,17 +1120,17 @@ func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, prot
 		resp.SetReply(req)
 		resp.RecursionAvailable = true
 		resp.Rcode = dns.RcodeRefused
-		return resp
+		return resp, false
 	}
-	// ANY (255) and AXFR (252) are refused: ANY amplifies reflection attacks
-	// and AXFR is a zone transfer, never a resolver query. Built lazily:
+	// ANY (255), AXFR (252) and IXFR (251) are refused: ANY amplifies reflection attacks
+	// and AXFR/IXFR are zone transfers, never resolver queries. Built lazily:
 	// the old prebuilt reply was orphaned on the pass path below.
-	if q.Qtype == dns.TypeANY || q.Qtype == dns.TypeAXFR {
+	if q.Qtype == dns.TypeANY || q.Qtype == dns.TypeAXFR || q.Qtype == dns.TypeIXFR {
 		anyResp := new(dns.Msg)
 		anyResp.SetReply(req)
 		anyResp.RecursionAvailable = true
 		anyResp.Rcode = dns.RcodeRefused
-		return anyResp
+		return anyResp, false
 	}
 	resp := new(dns.Msg)
 	resp.SetReply(req)
@@ -1117,7 +1163,7 @@ func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, prot
 			s.logfn(c, domain)
 		}
 		applyBlockAction(resp, q, s.cfg.BlockAction)
-		return resp
+		return resp, false
 	}
 
 	if blocked {
@@ -1128,7 +1174,7 @@ func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, prot
 			s.logfn(c, domain)
 		}
 		applyBlockAction(resp, q, action)
-		return resp
+		return resp, false
 	}
 
 	if doLog && s.logfn != nil {
@@ -1168,7 +1214,7 @@ func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, prot
 					act = a
 				}
 				applyBlockAction(blockedResp, q, act)
-				return blockedResp
+				return blockedResp, false
 			}
 			if s.ctrl.HasWatchers() {
 				s.ctrl.Notify(control.WatchEvent{
@@ -1194,9 +1240,9 @@ func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, prot
 				// than a nil Msg (ServeDNS would panic on WriteMsg(nil)).
 				resp.Rcode = dns.RcodeServerFailure
 				resp.AuthenticatedData = false
-				return resp
+				return resp, false
 			}
-			return out
+			return out, false
 		}
 	}
 	resolver, matchedRoute := s.upstreamForWithPool(pool, q.Name, clientIP)
@@ -1213,7 +1259,7 @@ func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, prot
 		// forward; add a range here if one ever shows up on the LAN.
 		if ip, ok := ptrIPFromArpa(q.Name); ok && (!ip.IsGlobalUnicast() || ip.IsPrivate()) {
 			resp.Rcode = dns.RcodeNameError
-			return resp
+			return resp, false
 		}
 	}
 	if upstreamOverride != "" && !matchedRoute {
@@ -1223,14 +1269,14 @@ func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, prot
 			s.cnt.AddUpErr()
 			s.notifyUpstreamError(renderClient(), domain, "invalid upstream override "+strconv.Quote(upstreamOverride)+": "+err.Error())
 			resp.Rcode = dns.RcodeServerFailure
-			return resp
+			return resp, false
 		}
 	}
 	if resolver == nil {
 		s.cnt.AddUpErr()
 		s.notifyUpstreamError(renderClient(), domain, "no upstream configured")
 		resp.Rcode = dns.RcodeServerFailure
-		return resp
+		return resp, false
 	}
 	upstreamLabel := upstreamLabelWithPool(pool, resolver, matchedRoute, upstreamOverride)
 
@@ -1343,7 +1389,7 @@ func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, prot
 				s.logfn(c, notifyDomain)
 			}
 			applyBlockAction(blockedResp, q, cbe.action)
-			return blockedResp
+			return blockedResp, false
 		}
 		// Caller went away (DoH disconnect, coalesced waiter gave up): not
 		// an upstream failure — SERVFAIL the (gone) caller without counting
@@ -1351,13 +1397,13 @@ func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, prot
 		if errors.Is(err, context.Canceled) || errors.Is(fctx.Err(), context.Canceled) {
 			resp.Rcode = dns.RcodeServerFailure
 			resp.AuthenticatedData = false
-			return resp
+			return resp, false
 		}
 		s.cnt.AddUpErr()
 		s.notifyUpstreamError(renderClient(), domain, upstreamErrText(upstreamLabel, err))
 		resp.Rcode = dns.RcodeServerFailure
 		resp.AuthenticatedData = false
-		return resp
+		return resp, false
 	}
 	// A cached entry may predate a policy/blocklist change: re-inspect its
 	// chain so a newly-blocked alias is not served from cache. Evict the
@@ -1396,12 +1442,12 @@ func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, prot
 			s.logfn(renderClient(), notifyDomain)
 		}
 		applyBlockAction(blockedResp, q, act)
-		return blockedResp
+		return blockedResp, false
 	}
 	if out == nil {
 		resp.Rcode = dns.RcodeServerFailure
 		resp.AuthenticatedData = false
-		return resp
+		return resp, false
 	}
 	out.Id = req.Id
 	out.Question = req.Question
@@ -1411,9 +1457,13 @@ func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, prot
 	out.AuthenticatedData = false
 	// Path-MTU safety: truncate large responses so they fit without IP
 	// fragmentation (see responseCap); the client retries over TCP (TC bit)
-	// or with a larger OPT buffer.
-	if cap := responseCap(req, isUDP); out.Len() > cap {
-		out.Truncate(cap)
+	// or with a larger OPT buffer. DoH rides HTTPS framing, so its answers
+	// are never truncated (a spurious TC bit would only force a useless
+	// retry).
+	if proto != control.ProtoDoH {
+		if cap := responseCap(req, isUDP); out.Len() > cap {
+			out.Truncate(cap)
+		}
 	}
 
 	// Notify pass event for query log (with full answer records + qtype so
@@ -1443,7 +1493,7 @@ func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, prot
 			DurationUs: time.Since(start).Microseconds(),
 		})
 	}
-	return out
+	return out, false
 }
 
 // notifyBlock streams a block event for the query log. Building the event
@@ -1580,8 +1630,8 @@ func newHTTPServer(addr string, h http.Handler) *http.Server {
 // FORMERR every query larger than 512 bytes (EDNS padding, large option
 // sets, long QNAMEs).
 func newClassicServers(addr string, h dns.Handler) (udp, tcp *dns.Server) {
-	udp = &dns.Server{Addr: addr, Net: "udp", Handler: h, UDPSize: 1232, ReadTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second, IdleTimeout: func() time.Duration { return 30 * time.Second }}
-	tcp = &dns.Server{Addr: addr, Net: "tcp", Handler: h, ReadTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second, IdleTimeout: func() time.Duration { return 30 * time.Second }}
+	udp = &dns.Server{Addr: addr, Net: "udp", Handler: h, UDPSize: 1232, ReadTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second, IdleTimeout: func() time.Duration { return 8 * time.Second }}
+	tcp = &dns.Server{Addr: addr, Net: "tcp", Handler: h, ReadTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second, IdleTimeout: func() time.Duration { return 8 * time.Second }}
 	return udp, tcp
 }
 
@@ -1604,9 +1654,13 @@ func (s *Server) Start() error {
 	go func() { errCh <- udp.ListenAndServe() }()
 	go func() { errCh <- tcp.ListenAndServe() }()
 
-	// give UDP/TCP a moment; any immediate error is fatal.
+	// give UDP/TCP a moment; any immediate error is fatal. Close the sibling
+	// listener: otherwise a half-dead Start orphans a bound socket and the
+	// next Start fails with EADDRINUSE on a port nobody serves.
 	select {
 	case err := <-errCh:
+		_ = udp.Shutdown()
+		_ = tcp.Shutdown()
 		return err
 	case <-time.After(50 * time.Millisecond):
 	}
@@ -1729,11 +1783,14 @@ func (s *Server) RateLimitQPS() int {
 	return s.rl.qps()
 }
 
-// SetCacheConfig tunes the response cache size at runtime: the max cached
-// responses (0 = unlimited). Must be >= 0 and <= maxCacheSize.
+// SetCacheConfig tunes the response cache size at runtime: 0 selects the
+// bounded default (never unlimited). Must be >= 0 and <= maxCacheSize.
 func (s *Server) SetCacheConfig(size int) error {
 	if size < 0 {
 		return fmt.Errorf("cache size must be >= 0")
+	}
+	if size == 0 {
+		size = cache.DefaultMaxEntries()
 	}
 	if size > maxCacheSize {
 		return fmt.Errorf("cache size %d exceeds max %d", size, maxCacheSize)
@@ -1747,7 +1804,7 @@ func (s *Server) SetCacheConfig(size int) error {
 	return nil
 }
 
-// CacheSize returns the current max cached responses (0 = unlimited).
+// CacheSize returns the current max cached responses (0 = bounded default).
 func (s *Server) CacheSize() int {
 	s.cacheMu.RLock()
 	defer s.cacheMu.RUnlock()
