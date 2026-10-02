@@ -517,6 +517,16 @@ if [ -d "$SYSTEMD_DIR" ] && command -v systemctl >/dev/null 2>&1; then
       -e "s#/var/lib/blipc#$STATE_DIR#g" \
       "$UNIT_SRC" > "$TMPDIR/blipc.service.inst" \
     || err "failed to stage systemd unit"
+  # Hosts that cannot build mount namespaces (unprivileged containers, old
+  # kernels) fail the hardened unit with 226/NAMESPACE. Probe with the same
+  # directives and strip the mount-namespace family when unsupported, loudly:
+  # an unhardened controller serves the fleet; a non-starting one serves nothing.
+  if ! systemd-run --pipe --wait -p PrivateTmp=true -p ProtectSystem=strict -p PrivateDevices=true -p ProtectHome=true /bin/true >/dev/null 2>&1; then
+    log "WARNING: this host cannot set up mount namespaces — installing the unit WITHOUT sandbox directives (ProtectSystem/PrivateTmp/PrivateDevices/ProtectHome/Tunables/Modules/ControlGroups/ReadWritePaths)"
+    sed -i -e '/^ProtectSystem=/d' -e '/^ProtectHome=/d' -e '/^PrivateTmp=/d' -e '/^PrivateDevices=/d' \
+      -e '/^ProtectKernelTunables=/d' -e '/^ProtectKernelModules=/d' -e '/^ProtectControlGroups=/d' -e '/^ReadWritePaths=/d' \
+      "$TMPDIR/blipc.service.inst" || err "failed to weaken systemd unit"
+  fi
   install -m 0644 "$TMPDIR/blipc.service.inst" "$SYSTEMD_DIR/$SERVICE_NAME.service"
   log "reloading systemd daemon"
   systemctl daemon-reload || true
