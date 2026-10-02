@@ -14,6 +14,12 @@ import (
 	"github.com/twobip/BlipDNS/internal/control"
 )
 
+// ScriptPath is the installed updater script: the download + minimal root
+// install/restart helper. The management API and the `blipd update`
+// subcommand both exec this same path so daemon-triggered and manual
+// recoveries can't drift apart.
+const ScriptPath = "/usr/local/sbin/blipd-update"
+
 // Manager runs the installed download script as the blip service user; the
 // script itself escalates for exactly one fixed root helper (install + restart).
 type Manager struct {
@@ -45,7 +51,7 @@ func (m *Manager) UpdateStatus() control.UpdateStatus {
 }
 
 func (m *Manager) run() {
-	cmd := exec.Command("/usr/local/sbin/blipd-update", m.UpdateStatus().Channel)
+	cmd := exec.Command(ScriptPath, m.UpdateStatus().Channel)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		m.finish(fmt.Errorf("open updater output: %w", err))

@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -84,6 +85,27 @@ func checkBootConfig(cfg *config.Config, store *filter.Store) error {
 	return err
 }
 
+// runUpdateSubcommand execs the installed updater script with stdio attached
+// and exits with its status. The daemon is not started.
+func runUpdateSubcommand(channel string) {
+	if !control.ValidUpdateChannel(channel) {
+		fmt.Fprintln(os.Stderr, "blipd update: channel must be stable or dev")
+		os.Exit(2)
+	}
+	cmd := exec.Command(update.ScriptPath, channel)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			os.Exit(ee.ExitCode())
+		}
+		fmt.Fprintln(os.Stderr, "blipd update:", err)
+		os.Exit(1)
+	}
+	os.Exit(0)
+}
+
 // blocklistSources merges the legacy single URL with the new plural list.
 func blocklistSources(cfg *config.Config) []string {
 	if len(cfg.BlocklistURLs) > 0 {
@@ -96,6 +118,17 @@ func blocklistSources(cfg *config.Config) []string {
 }
 
 func main() {
+	// Manual recovery subcommand, handled before flags: exec the installed
+	// updater script in the foreground (same script the management API
+	// triggers) so a crashed blipd can still be updated from the node
+	// itself. `blipd update [stable|dev]`, default stable.
+	if len(os.Args) > 1 && os.Args[1] == "update" {
+		channel := string(control.ChannelStable)
+		if len(os.Args) > 2 {
+			channel = os.Args[2]
+		}
+		runUpdateSubcommand(channel)
+	}
 	cfgPath := flag.String("config", "", "path to YAML config")
 	showVersion := flag.Bool("version", false, "print the release version and exit")
 	checkConfig := flag.Bool("check-config", false, "validate the config file (policies, upstreams, ACL, TLS material, listen addresses) without binding ports or starting; exit 0 when boot would succeed")
