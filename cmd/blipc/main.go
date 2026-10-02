@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"syscall"
@@ -67,7 +68,39 @@ type config struct {
 	ReleaseChannel         string                      `yaml:"release_channel"`
 }
 
+// runUpdateSubcommand execs the installed updater script with stdio attached
+// and exits with its status. The dashboard is not started.
+func runUpdateSubcommand(channel string) {
+	if !control.ValidUpdateChannel(channel) {
+		fmt.Fprintln(os.Stderr, "blipc update: channel must be stable or dev")
+		os.Exit(2)
+	}
+	cmd := exec.Command(controller.UpdateScriptPath, channel)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			os.Exit(ee.ExitCode())
+		}
+		fmt.Fprintln(os.Stderr, "blipc update:", err)
+		os.Exit(1)
+	}
+	os.Exit(0)
+}
+
 func main() {
+	// Manual recovery subcommand, handled before flags: exec the installed
+	// updater script in the foreground (same script the dashboard
+	// self-update triggers) so a crashed blipc can still be updated from
+	// its own host. `blipc update [stable|dev]`, default stable.
+	if len(os.Args) > 1 && os.Args[1] == "update" {
+		channel := string(control.ChannelStable)
+		if len(os.Args) > 2 {
+			channel = os.Args[2]
+		}
+		runUpdateSubcommand(channel)
+	}
 	cfgPath := flag.String("config", "/etc/blipc/blipc.yaml", "path to YAML config")
 	showVersion := flag.Bool("version", false, "print the release version and exit")
 	flag.Parse()

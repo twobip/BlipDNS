@@ -24,8 +24,14 @@ func ControllerVersion() string {
 	return "blipc/" + control.WithCommit(version)
 }
 
+// UpdateScriptPath is the installed controller updater: the download +
+// minimal root install/restart helper. The dashboard self-update and the
+// `blipc update` subcommand both exec this same path so triggered and manual
+// recoveries can't drift apart.
+const UpdateScriptPath = "/usr/local/sbin/blipc-update"
+
 // SelfUpdater starts the controller's own update. It is deliberately minimal:
-// the download runs as the blipc service user via /usr/local/sbin/blipc-update,
+// the download runs as the blipc service user via UpdateScriptPath,
 // which escalates for a single fixed root install/restart helper.
 type SelfUpdater struct {
 	mu     sync.Mutex
@@ -58,7 +64,7 @@ func (u *SelfUpdater) UpdateStatus() control.UpdateStatus {
 }
 
 func (u *SelfUpdater) run(channel string) {
-	cmd := exec.Command("/usr/local/sbin/blipc-update", channel)
+	cmd := exec.Command(UpdateScriptPath, channel)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		u.finishRun(fmt.Errorf("open updater output: %w", err))
