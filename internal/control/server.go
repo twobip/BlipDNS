@@ -2,6 +2,7 @@ package control
 
 import (
 	"bytes"
+	"compress/gzip"
 	"crypto/rand"
 	"crypto/subtle"
 	"crypto/tls"
@@ -950,6 +951,24 @@ func decodeBlocklistStrings(dec *json.Decoder) ([]string, error) {
 	return out, nil
 }
 
+// decodeBlocklistBody unwraps a push body (plain or gzip) under the wire cap,
+// then streams it through decodeBlocklistPush.
+// ponytail: decompressed cap mirrors the wire cap; domain-count caps bound memory past it.
+func decodeBlocklistBody(w http.ResponseWriter, r *http.Request) (SetBlocklistRequest, error) {
+	var req SetBlocklistRequest
+	limited := http.MaxBytesReader(w, r.Body, 256<<20)
+	body := io.Reader(limited)
+	if r.Header.Get("Content-Encoding") == "gzip" {
+		zr, err := gzip.NewReader(limited)
+		if err != nil {
+			return req, errors.New("bad request")
+		}
+		defer zr.Close()
+		body = io.LimitReader(zr, 256<<20)
+	}
+	return decodeBlocklistPush(body)
+}
+
 // handleBlocklist replaces the instance's global blocklist with the given
 // domains. It accepts a large payload (multi-million entry lists).
 func (s *Server) handleBlocklist(w http.ResponseWriter, r *http.Request) {
@@ -974,7 +993,9 @@ func (s *Server) handleBlocklist(w http.ResponseWriter, r *http.Request) {
 	}
 	// Stream the body instead of decoding it whole: abort as soon as either
 	// list exceeds the domain cap, before millions of strings are built.
-	req, err := decodeBlocklistPush(http.MaxBytesReader(w, r.Body, 256<<20))
+	// Pushes arrive gzipped (see Client.SetBlocklist); plain is still
+	// accepted so mixed-version fleets keep working during rollout.
+	req, err := decodeBlocklistBody(w, r)
 	if err != nil {
 		if errors.Is(err, errBlocklistTooLarge) {
 			http.Error(w, "blocklist too large", http.StatusRequestEntityTooLarge)

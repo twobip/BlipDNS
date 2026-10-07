@@ -3659,10 +3659,16 @@ func (f *Fleet) pushBlocklist(ctx context.Context) map[string]string {
 	domains := f.blocklist.List()
 	allowed := f.blocklist.Allowed()
 	hash := f.blocklist.Checksum()
+	// Marshal + gzip once: every instance shares the same bytes instead of
+	// each paying a tens-of-MB marshal (see control.EncodeBlocklistPayload).
+	plain, gzipped, err := control.EncodeBlocklistPayload(domains, allowed)
+	if err != nil {
+		log.Printf("blipc: encode blocklist payload: %v", err)
+	}
 
 	insts := f.snapshotInstances()
 
-	log.Printf("blipc: distributing blocklist to %d instance(s): domains=%d allowed=%d hash=%016x", len(insts), len(domains), len(allowed), hash)
+	log.Printf("blipc: distributing blocklist to %d instance(s): domains=%d allowed=%d hash=%016x plain=%dB gz=%dB", len(insts), len(domains), len(allowed), hash, len(plain), len(gzipped))
 	results := make(map[string]string, len(insts))
 	var mu sync.Mutex
 	var wg sync.WaitGroup
@@ -3688,7 +3694,7 @@ func (f *Fleet) pushBlocklist(ctx context.Context) map[string]string {
 			// Per-instance budget: blocklist uploads are multi-MB.
 			ictx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 			defer cancel()
-			if err := in.ctl().SetBlocklist(ictx, domains, allowed); err != nil {
+			if err := in.ctl().SetBlocklistPayload(ictx, plain, gzipped); err != nil {
 				log.Printf("blipc: distribute blocklist instance=%q FAILED after %s: %q", in.id(), f.now().Sub(t0).Round(time.Millisecond), err)
 				mu.Lock()
 				results[in.id()] = err.Error()

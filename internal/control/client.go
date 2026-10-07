@@ -3,6 +3,7 @@ package control
 import (
 	"bufio"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/tls"
 	"encoding/json"
@@ -208,35 +209,80 @@ func (c *Client) SetPolicy(ctx context.Context, p *Policy) error {
 	return c.do(ctx, http.MethodPut, "/api/v1/policy", &req, nil)
 }
 
+// EncodeBlocklistPayload marshals + gzips a blocklist push body once so fleet
+// fan-out shares both across instances (N nodes = 1 marshal + 1 gzip).
+// Domain JSON compresses ~4-5x.
+func EncodeBlocklistPayload(domains, allowed []string) (plain, gzipped []byte, err error) {
+	plain, err = json.Marshal(SetBlocklistRequest{Domains: domains, Allowed: allowed})
+	if err != nil {
+		return nil, nil, err
+	}
+	var buf bytes.Buffer
+	w := gzip.NewWriter(&buf)
+	if _, err := w.Write(plain); err != nil {
+		w.Close()
+		return nil, nil, err
+	}
+	if err := w.Close(); err != nil {
+		return nil, nil, err
+	}
+	return plain, buf.Bytes(), nil
+}
+
 // SetBlocklist replaces the instance's global blocklist and its whitelist.
 // Large lists (e.g. oisd.big, ~2M domains) produce payloads of tens of MB, so
 // this uses a much longer timeout than the default client. The shared slow
-// client (one Transport) is reused with a per-request deadline.
+// client (one Transport) is reused with a per-request deadline. The body goes
+// gzipped, with a plain fallback for pre-gzip blipds during rollout.
 func (c *Client) SetBlocklist(ctx context.Context, domains, allowed []string) error {
-	req := SetBlocklistRequest{Domains: domains, Allowed: allowed}
-	body, err := json.Marshal(req)
+	plain, gzipped, err := EncodeBlocklistPayload(domains, allowed)
 	if err != nil {
 		return err
 	}
+	return c.SetBlocklistPayload(ctx, plain, gzipped)
+}
+
+// SetBlocklistPayload sends a pre-encoded payload (see EncodeBlocklistPayload)
+// so fan-out marshals once; gzipped first, plain retried once on a 400
+// (a well-formed gzipped push 400s only on a pre-gzip blipd, or on a
+// genuinely invalid entry which the plain retry surfaces as-is).
+func (c *Client) SetBlocklistPayload(ctx context.Context, plain, gzipped []byte) error {
+	if len(gzipped) > 0 {
+		status, err := c.putBlocklistBody(ctx, gzipped, true)
+		if err == nil {
+			return nil
+		}
+		if status != http.StatusBadRequest {
+			return err
+		}
+	}
+	_, err := c.putBlocklistBody(ctx, plain, false)
+	return err
+}
+
+func (c *Client) putBlocklistBody(ctx context.Context, body []byte, gzipped bool) (int, error) {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPut, c.base+"/api/v1/blocklist", bytes.NewReader(body))
 	if err != nil {
-		return err
+		return 0, err
 	}
 	httpReq.Header.Set("Authorization", "Bearer "+c.token)
 	httpReq.Header.Set("Content-Type", "application/json")
+	if gzipped {
+		httpReq.Header.Set("Content-Encoding", "gzip")
+	}
 
 	resp, err := c.slow.Do(httpReq)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("control: set blocklist -> %d: %s", resp.StatusCode, string(b))
+		return resp.StatusCode, fmt.Errorf("control: set blocklist -> %d: %s", resp.StatusCode, string(b))
 	}
-	return nil
+	return resp.StatusCode, nil
 }
 
 func (c *Client) DeletePolicy(ctx context.Context, id string) error {
