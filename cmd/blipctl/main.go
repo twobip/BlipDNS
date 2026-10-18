@@ -326,7 +326,9 @@ func run(ctx context.Context, client *control.Client, cmd string, rest []string,
 					die(err)
 				}
 				// WriteFile does not chmod existing files; enforce 0600.
-				_ = os.Chmod(outTokenFile, 0600)
+				if err := os.Chmod(outTokenFile, 0600); err != nil {
+					die(fmt.Errorf("chmod %s: %w (token file may be world-readable)", outTokenFile, err))
+				}
 				fmt.Println("adopted. admin token written to", outTokenFile, "(mode 0600; keep it private)")
 			} else {
 				fmt.Fprintln(os.Stderr, "WARNING: this admin token is printed once — store it in a 0600 file (see --out-token-file) and clear your terminal history")

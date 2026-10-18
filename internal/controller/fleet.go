@@ -760,6 +760,17 @@ func validateInstanceURL(raw string) error {
 	if u.Host == "" || u.Hostname() == "" {
 		return fmt.Errorf("invalid instance url: host required")
 	}
+	// F-28: the client joins base+path with plain string concatenation
+	// (control/client.go do), so a base carrying ?/# (or an encoded %3F/%23
+	// that decodes into one) collapses every API path onto "/" — with the
+	// bearer token attached. Reject at validation; the join side needs no
+	// change.
+	if u.ForceQuery || u.RawQuery != "" || u.Fragment != "" || u.RawFragment != "" || strings.Contains(raw, "#") {
+		return fmt.Errorf("invalid instance url: query and fragment not allowed")
+	}
+	if strings.Contains(strings.ToUpper(raw), "%3F") || strings.Contains(strings.ToUpper(raw), "%23") {
+		return fmt.Errorf("invalid instance url: encoded query/fragment not allowed")
+	}
 	// Literal link-local hosts (incl. cloud metadata 169.254.169.254) are
 	// never legitimate management targets: an admin pointing the controller
 	// at one would send the instance bearer token there on every poll/push.
@@ -905,6 +916,7 @@ func (f *Fleet) Add(ctx context.Context, cfg InstanceConfig) error {
 	}
 	inst := &Instance{Config: cfg, client: client, mgmtLeaf: leaf, fleet: f, last: f.now()}
 	f.mu.Lock()
+	old := f.instances[cfg.ID]
 	f.instances[cfg.ID] = inst
 	f.mu.Unlock()
 	// Use a background context for the long-lived poll/watch loops: the caller's
@@ -914,9 +926,24 @@ func (f *Fleet) Add(ctx context.Context, cfg InstanceConfig) error {
 	if err := f.persist("instance"); err != nil {
 		inst.stop()
 		f.mu.Lock()
-		delete(f.instances, cfg.ID)
+		// F-13: a duplicate-ID Add displaces the old instance. On
+		// persist failure restore it (it was never stopped) instead of
+		// wiping the entry — but only when the map still holds this
+		// failed add; a concurrent writer wins otherwise.
+		if cur, ok := f.instances[cfg.ID]; ok && cur == inst {
+			if old != nil {
+				f.instances[cfg.ID] = old
+			} else {
+				delete(f.instances, cfg.ID)
+			}
+		}
 		f.mu.Unlock()
 		return err
+	}
+	// Success: stop the displaced instance so its orphaned poll/watch loops
+	// cannot keep pushing fleet config with the stale token (F-13).
+	if old != nil {
+		old.stop()
 	}
 	if cfg.Claim != "" {
 		// Adopt is a network call; run it on a background context so it isn't

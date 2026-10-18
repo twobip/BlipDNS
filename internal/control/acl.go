@@ -4,8 +4,11 @@
 package control
 
 import (
+	"bytes"
+	"encoding/binary"
 	"fmt"
 	"net"
+	"sort"
 	"strings"
 )
 
@@ -51,4 +54,123 @@ func ParseAllowedNetworks(values []string) ([]*net.IPNet, error) {
 		out = append(out, n)
 	}
 	return out, nil
+}
+
+// FullSpaceCovered reports whether nets collectively cover the entire IPv4
+// or the entire IPv6 address space (e.g. 0.0.0.0/1 + 128.0.0.0/1). Split
+// CIDRs like that bypass per-entry /0 rejection and re-trust the whole
+// internet (F-17: forwarded-header spoofing via trusted proxies). Shared by
+// the trusted-proxy and recursion-ACL parsers so both stay consistent.
+func FullSpaceCovered(nets []*net.IPNet) bool {
+	var v4 [][2]uint32
+	var v6 [][2][16]byte
+	for _, n := range nets {
+		if n == nil {
+			continue
+		}
+		ones, bits := n.Mask.Size()
+		if ones < 0 {
+			continue
+		}
+		switch bits {
+		case 32:
+			ip := n.IP.To4()
+			if ip == nil {
+				continue
+			}
+			m := net.CIDRMask(ones, 32)
+			mask := binary.BigEndian.Uint32(m)
+			base := binary.BigEndian.Uint32(ip.Mask(m))
+			v4 = append(v4, [2]uint32{base, base | ^mask})
+		case 128:
+			ip := n.IP.To16()
+			if ip == nil {
+				continue
+			}
+			m := net.CIDRMask(ones, 128)
+			var lo, hi [16]byte
+			copy(lo[:], ip.Mask(m))
+			for i := range hi {
+				hi[i] = lo[i] | ^m[i]
+			}
+			v6 = append(v6, [2][16]byte{lo, hi})
+		}
+	}
+	return coversV4(v4) || coversV6(v6)
+}
+
+// coversV4 reports whether sorted-and-merged ranges cover [0, 2^32).
+func coversV4(rs [][2]uint32) bool {
+	if len(rs) == 0 {
+		return false
+	}
+	sort.Slice(rs, func(i, j int) bool {
+		if rs[i][0] != rs[j][0] {
+			return rs[i][0] < rs[j][0]
+		}
+		return rs[i][1] > rs[j][1]
+	})
+	if rs[0][0] != 0 {
+		return false
+	}
+	end := rs[0][1]
+	for _, r := range rs[1:] {
+		if r[0] > end {
+			if end == ^uint32(0) {
+				continue
+			}
+			if r[0] != end+1 {
+				return false
+			}
+		}
+		if r[1] > end {
+			end = r[1]
+		}
+	}
+	return end == ^uint32(0)
+}
+
+// coversV6 reports whether ranges cover the whole 128-bit space.
+func coversV6(rs [][2][16]byte) bool {
+	if len(rs) == 0 {
+		return false
+	}
+	sort.Slice(rs, func(i, j int) bool {
+		if c := bytes.Compare(rs[i][0][:], rs[j][0][:]); c != 0 {
+			return c < 0
+		}
+		return bytes.Compare(rs[i][1][:], rs[j][1][:]) > 0
+	})
+	var zero [16]byte
+	if rs[0][0] != zero {
+		return false
+	}
+	end := rs[0][1]
+	for _, r := range rs[1:] {
+		if bytes.Compare(r[0][:], end[:]) > 0 {
+			next := end
+			incr16(&next)
+			if r[0] != next {
+				return false
+			}
+		}
+		if bytes.Compare(r[1][:], end[:]) > 0 {
+			end = r[1]
+		}
+	}
+	var full [16]byte
+	for i := range full {
+		full[i] = 0xff
+	}
+	return end == full
+}
+
+// incr16 increments a 128-bit address (for adjacency checks in coversV6).
+func incr16(a *[16]byte) {
+	for i := len(a) - 1; i >= 0; i-- {
+		a[i]++
+		if a[i] != 0 {
+			return
+		}
+	}
 }

@@ -59,6 +59,13 @@ func buildMatcher(domains []string) *matcher {
 		if d == "" {
 			continue
 		}
+		// A bare "*" matches nothing in this matcher (there is no
+		// match-all representation): skip it loudly so a "block all"
+		// intent fails visibly instead of silently failing open.
+		if d == "*" {
+			log.Printf("filter: ignoring bare %q entry (matches nothing; use an explicit suffix or TLD entry)", d)
+			continue
+		}
 		if strings.HasPrefix(d, "*.") {
 			root := strings.TrimSuffix(d[2:], ".")
 			// A leading-dot remainder (e.g. "*..example.com") is a typo, not

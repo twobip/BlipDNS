@@ -700,6 +700,15 @@ func FetchSource(ctx context.Context, rawURL string, v Validators) (*FetchResult
 	if err := sc.Err(); err != nil {
 		return nil, err
 	}
+	// F-15: a LimitReader EOF is indistinguishable from a real EOF, so an
+	// over-cap body used to parse as its truncated prefix. Any byte left on
+	// the underlying body means the cap cut the feed: fail closed.
+	var probe [1]byte
+	if n, perr := resp.Body.Read(probe[:]); n > 0 {
+		return nil, fmt.Errorf("source too large: exceeds %d MiB cap", maxSourceBytes>>20)
+	} else if perr != nil && perr != io.EOF {
+		return nil, perr
+	}
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}

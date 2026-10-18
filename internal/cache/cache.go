@@ -315,10 +315,15 @@ func minTTL(m *dns.Msg) time.Duration {
 		}
 	}
 	if !seen {
-		return 30 * time.Second
+		// No records at all: a bare negative without SOA must not be
+		// cached (RFC 2308) — a spoofed negative would otherwise pin the
+		// name. Zero is the no-cache signal (see Set).
+		return 0
 	}
-	if min < 1 {
-		min = 1
+	if min == 0 {
+		// TTL-0 means "do not cache": re-serve it and the owner can pin
+		// fresh answers every query.
+		return 0
 	}
 	return time.Duration(min) * time.Second
 }
@@ -429,14 +434,19 @@ func (c *Cache) Set(k Key, m *dns.Msg) {
 		return
 	}
 	// Only NOERROR and NXDOMAIN are cacheable. A transient SERVFAIL/REFUSED
-	// carries no TTL, so it would be pinned for minTTL's 30s fallback and keep
-	// every client on that upstream view broken for the whole window
-	// (RFC 9520 §5: do not cache SERVFAIL).
+	// carries no TTL, so it must never be pinned (RFC 9520 §5: do not cache
+	// SERVFAIL) — every client on that upstream view would otherwise stay
+	// broken for the whole window.
 	if m.Rcode != dns.RcodeSuccess && m.Rcode != dns.RcodeNameError {
 		return
 	}
 	now := c.now()
 	ttl := minTTL(m)
+	if ttl <= 0 {
+		// No-cache signal from minTTL: bare negatives without SOA and
+		// TTL-0 records are never stored.
+		return
+	}
 	if ttl > c.ttlCap {
 		ttl = c.ttlCap
 	}

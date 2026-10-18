@@ -7,6 +7,24 @@ import (
 
 func mustIP(s string) net.IP { return net.ParseIP(s) }
 
+// A bare "*" entry is skipped (loudly): it must never silently fail open
+// nor match anything.
+func TestBareStarMatchesNothing(t *testing.T) {
+	s := NewStore(nil)
+	if err := s.SetPolicy(&Policy{
+		ID:       "p",
+		Networks: []string{"10.0.0.0/8"},
+		Block:    []string{"*"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"anything.test", "a.b.c"} {
+		if blocked, _, _, _ := s.Classify(mustIP("10.1.2.3"), "", name); blocked {
+			t.Errorf("Classify(*, %s) = blocked, want allow (bare * matches nothing)", name)
+		}
+	}
+}
+
 func TestSuffixAndWildcard(t *testing.T) {
 	p := &Policy{
 		ID:       "p",

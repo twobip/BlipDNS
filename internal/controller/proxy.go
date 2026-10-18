@@ -62,6 +62,12 @@ func ParseTrustedProxies(values []string) (*ProxyTrust, error) {
 		}
 		out.nets = append(out.nets, n)
 	}
+	// F-17: split CIDRs (e.g. 0.0.0.0/1 + 128.0.0.0/1) cover the whole space
+	// without any single /0 entry. Shared check in control (dnsserver's
+	// parseTrustedProxies still needs the same call — owned by another agent).
+	if control.FullSpaceCovered(out.nets) {
+		return nil, fmt.Errorf("invalid trusted_proxies: entries collectively cover the whole internet; list explicit proxy IPs instead")
+	}
 	return out, nil
 }
 
@@ -86,10 +92,6 @@ func (t *ProxyTrust) IsTrustedPeer(r *http.Request) bool {
 	return false
 }
 
-func firstForwardedToken(s string) string {
-	return lastForwardedToken(s)
-}
-
 // lastForwardedToken returns the rightmost token of a forwarded-header value.
 // F-09: trusting the first token lets a client spoof its address whenever the
 // trusted proxy appends (nginx `$proxy_add_x_forwarded_for`). The last token
@@ -108,26 +110,26 @@ func lastForwardedToken(s string) string {
 }
 
 // ClientIP returns the real client IP: the last X-Forwarded-For token when
-// the peer is trusted, else the direct peer. X-Forwarded-For wins over
-// CF-Connecting-IP: a generic trusted proxy forwards client headers
-// verbatim, letting the client dictate CF-Connecting-IP directly. Either
-// way the proxy must strip/spoof-proof these headers (e.g. only
-// $proxy_add_x_forwarded_for); trusting them also makes rate-limit keys
-// spoofable by anyone behind the proxy.
+// the peer is trusted, else the direct peer. A present-but-unusable XFF
+// falls back to the direct peer, never to CF-Connecting-IP/X-Real-IP: a
+// generic trusted proxy forwards client headers verbatim, letting the
+// client dictate those directly (F-4). CF/X-Real-IP are only consulted when
+// no XFF was sent at all.
 func (t *ProxyTrust) ClientIP(r *http.Request) string {
 	if t != nil && t.IsTrustedPeer(r) {
 		if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
-			if ip := net.ParseIP(firstForwardedToken(fwd)); ip != nil {
+			if ip := net.ParseIP(lastForwardedToken(fwd)); ip != nil {
 				return ip.String()
 			}
+			return ClientIP(r)
 		}
 		if cf := strings.TrimSpace(r.Header.Get("CF-Connecting-IP")); cf != "" {
-			if ip := net.ParseIP(firstForwardedToken(cf)); ip != nil {
+			if ip := net.ParseIP(lastForwardedToken(cf)); ip != nil {
 				return ip.String()
 			}
 		}
 		if real := strings.TrimSpace(r.Header.Get("X-Real-IP")); real != "" {
-			if ip := net.ParseIP(firstForwardedToken(real)); ip != nil {
+			if ip := net.ParseIP(lastForwardedToken(real)); ip != nil {
 				return ip.String()
 			}
 		}

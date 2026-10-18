@@ -258,8 +258,8 @@ func TestCoalesceSeparatesUpstreamPartitions(t *testing.T) {
 }
 
 // A SERVFAIL/REFUSED answer carries no TTL: caching it would pin the failure
-// for minTTL's 30s fallback and keep every client on that upstream view broken
-// for the whole window (RFC 9520 §5).
+// and keep every client on that upstream view broken for the whole window
+// (RFC 9520 §5).
 func TestSetSkipsFailureRcodes(t *testing.T) {
 	c := New(time.Hour, 0)
 	for _, rc := range []int{dns.RcodeServerFailure, dns.RcodeRefused, dns.RcodeNotImplemented} {
@@ -344,5 +344,24 @@ func TestDoHitContendedQueuesThenSheds(t *testing.T) {
 	}
 	if el := time.Since(start); el < maxInflightWait/2 {
 		t.Errorf("shed after %v, want the %v bounded wait first", el, maxInflightWait)
+	}
+}
+
+// Bare negatives without SOA must not be cached (RFC 2308), and TTL-0
+// records must not be cached either: both return the no-cache signal.
+func TestSetSkipsBareNegativeAndZeroTTL(t *testing.T) {
+	c := New(time.Hour, 0)
+	bare := new(dns.Msg)
+	bare.SetRcode(new(dns.Msg).SetQuestion("nx.test.", dns.TypeA), dns.RcodeNameError)
+	k := KeyOf(bare)
+	c.Set(k, bare)
+	if _, ok := c.Get(k); ok {
+		t.Error("bare negative without SOA was cached, want no-cache")
+	}
+	zero := mkMsg("zero.test", 0)
+	kz := KeyOf(zero)
+	c.Set(kz, zero)
+	if _, ok := c.Get(kz); ok {
+		t.Error("TTL-0 record was cached, want no-cache")
 	}
 }

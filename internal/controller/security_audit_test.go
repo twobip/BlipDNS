@@ -227,3 +227,67 @@ func TestInstanceTokenNeverSerialized(t *testing.T) {
 		t.Fatal("token-bearing add lost its token (intake broken by json:\"-\")")
 	}
 }
+
+// Audit 2026-10-07 F-4: a present-but-unusable XFF must fall back to the
+// direct peer, never to attacker-settable CF-Connecting-IP/X-Real-IP.
+func TestClientIPGarbageXFFNeverFallsThrough(t *testing.T) {
+	trust, err := ParseTrustedProxies([]string{"10.0.0.0/8"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mk := func(xff, cf string) *http.Request {
+		r := httptest.NewRequest(http.MethodGet, "http://x/", nil)
+		r.RemoteAddr = "10.1.2.3:1234"
+		if xff != "" {
+			r.Header.Set("X-Forwarded-For", xff)
+		}
+		if cf != "" {
+			r.Header.Set("CF-Connecting-IP", cf)
+		}
+		return r
+	}
+	if got := trust.ClientIP(mk("garbage", "1.2.3.4")); got != "10.1.2.3" {
+		t.Fatalf("garbage XFF + CF: got %q, want direct peer", got)
+	}
+	if got := trust.ClientIP(mk("9.9.9.9", "1.2.3.4")); got != "9.9.9.9" {
+		t.Fatalf("valid XFF: got %q, want 9.9.9.9", got)
+	}
+	if got := trust.ClientIP(mk("", "1.2.3.4")); got != "1.2.3.4" {
+		t.Fatalf("CF without XFF: got %q, want 1.2.3.4", got)
+	}
+}
+
+// Audit 2026-10-07 F-17: split CIDRs covering the whole space must be
+// rejected like a single /0.
+func TestParseTrustedProxiesRejectsSplitCatchAll(t *testing.T) {
+	if _, err := ParseTrustedProxies([]string{"0.0.0.0/1", "128.0.0.0/1"}); err == nil {
+		t.Fatal("split v4 catch-all accepted, want rejection")
+	}
+	if _, err := ParseTrustedProxies([]string{"::/1", "8000::/1"}); err == nil {
+		t.Fatal("split v6 catch-all accepted, want rejection")
+	}
+	if _, err := ParseTrustedProxies([]string{"10.0.0.0/8", "192.168.0.0/16"}); err != nil {
+		t.Fatalf("partial coverage rejected: %v", err)
+	}
+}
+
+// Audit 2026-10-07 F-28: ?/# (and encoded %3F/%23) in an instance URL
+// collapse API paths onto "/" with the bearer attached — reject them.
+func TestValidateInstanceURLRejectsQueryFragment(t *testing.T) {
+	for _, bad := range []string{
+		"http://192.168.1.5:8444/?x",
+		"http://192.168.1.5:8444#frag",
+		"http://192.168.1.5:8444#",
+		"http://192.168.1.5:8444/api?x=1",
+		"http://192.168.1.5:8444/%3F",
+		"http://192.168.1.5:8444/%23",
+		"http://192.168.1.5:8444/%3f",
+	} {
+		if err := validateInstanceURL(bad); err == nil {
+			t.Errorf("validate %q: expected error, got nil", bad)
+		}
+	}
+	if err := validateInstanceURL("http://192.168.1.5:8444/prefix"); err != nil {
+		t.Errorf("path prefix rejected: %v", err)
+	}
+}

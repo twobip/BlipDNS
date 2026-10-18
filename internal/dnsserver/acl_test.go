@@ -95,7 +95,15 @@ func TestSetAllowedNetworks(t *testing.T) {
 	if got := s.AllowedNetworks(); len(got) != 2 {
 		t.Errorf("ACL changed by rejected push: %v", got)
 	}
-	// Empty clears back to open (with warning).
+	// Empty clears back to open only with the open_recursion ack; without it
+	// the clear is refused and the ACL is unchanged.
+	if err := s.SetAllowedNetworks(nil); err == nil {
+		t.Fatal("SetAllowedNetworks(nil) cleared without the open_recursion ack, want refusal")
+	}
+	if got := s.AllowedNetworks(); len(got) != 2 {
+		t.Errorf("AllowedNetworks after refused clear = %v, want 2 entries", got)
+	}
+	s.cfg.OpenRecursion = true
 	if err := s.SetAllowedNetworks(nil); err != nil {
 		t.Fatal(err)
 	}

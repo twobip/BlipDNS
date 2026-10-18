@@ -766,9 +766,9 @@ func (s *Server) handleRateLimit(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleACL gets/sets the recursion ACL (CIDRs/IPs allowed to recurse). The
-// controller pushes this from the Settings page; an empty list opens
-// recursion. Entries are validated with the shared parser (including the /0
-// catch-all guard) so a push can never silently restore open recursion.
+// controller pushes this from the Settings page; an empty list is refused
+// without the boot-time open_recursion ack. Entries are validated with the
+// shared parser (including the /0 catch-all guard) so a push can never silently restore open recursion.
 func (s *Server) handleACL(w http.ResponseWriter, r *http.Request) {
 	ac := s.controllers().ACL
 	if ac == nil {
@@ -1245,21 +1245,25 @@ func (s *Server) handleRestart(w http.ResponseWriter, r *http.Request) {
 	}()
 }
 
+// sseWriteTimeout bounds each /api/v1/watch SSE write (F-11): a
+// zero-window reader trips this instead of stalling the stream writer
+// forever. The 30-minute stream cap still bounds total lifetime.
+const sseWriteTimeout = 10 * time.Second
+
 func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
 		return
 	}
-	// SSE must outlive the API server's absolute Read/WriteTimeout (10 minutes
-	// each): the write deadline cuts the stream at 10:00, and the read
-	// deadline fires the connection's background read, whose timeout cancels
-	// this request's context. Either one made every watch stream die at
-	// exactly 10:00 and the controller reconnect on a timer, losing whatever
-	// events fell in the gap. Clearing both lets the stream live until the
-	// client leaves (the 15s keepalives below keep it healthy).
+	// SSE must outlive the API server's absolute ReadTimeout (10 minutes):
+	// the read deadline fires the connection's background read, whose
+	// timeout cancels this request's context. That made every watch stream
+	// die at exactly 10:00 and the controller reconnect on a timer, losing
+	// whatever events fell in the gap. Only the read deadline is cleared:
+	// writes keep a per-write deadline (F-11) so a slow reader drops the
+	// stream instead of stalling inside Flush forever.
 	rc := http.NewResponseController(w)
-	_ = rc.SetWriteDeadline(time.Time{})
 	_ = rc.SetReadDeadline(time.Time{})
 	ch := make(chan WatchEvent, 4096)
 	s.watchMu.Lock()
@@ -1294,6 +1298,17 @@ func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request) {
 	// ponytail: fixed 30m ceiling, configurable max age if operators need it.
 	streamMax := time.NewTimer(30 * time.Minute)
 	defer streamMax.Stop()
+	// writeEvent bounds each SSE write (F-11): a zero-window reader trips the
+	// deadline instead of pinning this goroutine, its 4k-event channel and
+	// fd until the 30-minute stream cap below.
+	writeEvent := func(e WatchEvent) error {
+		_ = rc.SetWriteDeadline(time.Now().Add(sseWriteTimeout))
+		if err := writeSSEEvent(w, e); err != nil {
+			return err
+		}
+		flusher.Flush()
+		return nil
+	}
 	for {
 		select {
 		case <-r.Context().Done():
@@ -1301,10 +1316,9 @@ func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request) {
 		case <-streamMax.C:
 			return
 		case e := <-ch:
-			if err := writeSSEEvent(w, e); err != nil {
+			if err := writeEvent(e); err != nil {
 				return
 			}
-			flusher.Flush()
 		case <-ticker.C:
 			// Keepalive: a lightweight stats ping so the controller can
 			// detect liveness on the live event stream.
@@ -1314,10 +1328,9 @@ func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request) {
 				st.UpstreamServers = nil
 				st.UpstreamRoutes = nil
 			}
-			if err := writeSSEEvent(w, WatchEvent{Type: "stats", At: time.Now(), Stats: st}); err != nil {
+			if err := writeEvent(WatchEvent{Type: "stats", At: time.Now(), Stats: st}); err != nil {
 				return
 			}
-			flusher.Flush()
 		}
 	}
 }

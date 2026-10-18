@@ -716,19 +716,25 @@ func TestServeRecordsNodataForMissingType(t *testing.T) {
 		{Domain: "*.apps.lan.", Type: "A", Value: "192.168.30.155", TTL: 60},
 	})
 
-	// AAAA for an A-only name (and its wildcard sibling) is NODATA: NOERROR
-	// with no answers, served locally — never upstream NXDOMAIN.
-	for _, name := range []string{"galaxy.lan.", "www.apps.lan."} {
-		up.calls = 0
-		q := new(dns.Msg)
-		q.SetQuestion(name, dns.TypeAAAA)
-		resp := srv.serve(context.Background(), net.ParseIP("192.168.1.5"), "", "dns", q)
-		if resp.Rcode != dns.RcodeSuccess || len(resp.Answer) != 0 || !resp.RecursionAvailable {
-			t.Errorf("%s AAAA: rc=%d answers=%d ra=%v, want NOERROR with 0 (NODATA) + RA", name, resp.Rcode, len(resp.Answer), resp.RecursionAvailable)
-		}
-		if up.calls != 0 {
-			t.Errorf("%s AAAA: upstream calls = %d, want 0", name, up.calls)
-		}
+	// AAAA for an A-only exact name is NODATA: NOERROR with no answers,
+	// served locally — never upstream NXDOMAIN. A wildcard (*.apps.lan)
+	// proves no name exists, so its type-miss falls through to upstream
+	// instead of voiding TXT/MX/SPF under the suffix with local NODATA.
+	up.calls = 0
+	q := new(dns.Msg)
+	q.SetQuestion("galaxy.lan.", dns.TypeAAAA)
+	resp := srv.serve(context.Background(), net.ParseIP("192.168.1.5"), "", "dns", q)
+	if resp.Rcode != dns.RcodeSuccess || len(resp.Answer) != 0 || !resp.RecursionAvailable {
+		t.Errorf("galaxy.lan. AAAA: rc=%d answers=%d ra=%v, want NOERROR with 0 (NODATA) + RA", resp.Rcode, len(resp.Answer), resp.RecursionAvailable)
+	}
+	if up.calls != 0 {
+		t.Errorf("galaxy.lan. AAAA: upstream calls = %d, want 0", up.calls)
+	}
+	up.calls = 0
+	q.SetQuestion("www.apps.lan.", dns.TypeAAAA)
+	resp = srv.serve(context.Background(), net.ParseIP("192.168.1.5"), "", "dns", q)
+	if up.calls == 0 {
+		t.Errorf("www.apps.lan. AAAA: upstream calls = 0, want fallthrough (no local NODATA from a wildcard)")
 	}
 }
 

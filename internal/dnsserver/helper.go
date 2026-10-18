@@ -5,6 +5,8 @@ import (
 	"net"
 	"net/http"
 	"strings"
+
+	"github.com/twobip/BlipDNS/internal/control"
 )
 
 // clientIDFromPath extracts an optional DoH client identity from a request
@@ -55,12 +57,15 @@ func clientIPFromReq(r *http.Request, trusted []*net.IPNet) net.IP {
 		return net.ParseIP(r.RemoteAddr)
 	}
 	if isTrustedPeer(r, trusted) {
+		// XFF wins over CF when both are present (see above). When XFF
+		// is present but unusable, fall back to RemoteAddr — never to
+		// CF-Connecting-IP, which a verbatim-forwarding proxy lets the
+		// client dictate directly.
 		if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
 			if ip := net.ParseIP(lastToken(fwd)); ip != nil {
 				return ip
 			}
-		}
-		if cf := r.Header.Get("CF-Connecting-IP"); cf != "" {
+		} else if cf := r.Header.Get("CF-Connecting-IP"); cf != "" {
 			if ip := net.ParseIP(lastToken(cf)); ip != nil {
 				return ip
 			}
@@ -119,11 +124,12 @@ func parseTrustedProxies(values []string) ([]*net.IPNet, error) {
 		}
 		out = append(out, n)
 	}
+	// Split CIDRs (e.g. 0.0.0.0/1 + 128.0.0.0/1) cover the whole space
+	// without any single /0 entry — reject the union, not just each entry.
+	if control.FullSpaceCovered(out) {
+		return nil, fmt.Errorf("invalid trusted proxy: entries collectively cover the whole internet; leave trusted_proxies empty instead")
+	}
 	return out, nil
-}
-
-func firstToken(s string) string {
-	return lastToken(s)
 }
 
 // lastToken returns the rightmost (closest-to-proxy) token of a comma/space

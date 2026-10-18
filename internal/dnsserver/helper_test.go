@@ -49,6 +49,19 @@ func TestClientIPFromReqIgnoresCFConnectingIPWhenUntrusted(t *testing.T) {
 	}
 }
 
+func TestClientIPFromReqGarbageXFFIgnoresCF(t *testing.T) {
+	r := httptestRequest("127.0.0.1:1234", "garbage")
+	r.Header.Set("CF-Connecting-IP", "203.0.113.99")
+	trusted, err := parseTrustedProxies([]string{"127.0.0.1/32"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := clientIPFromReq(r, trusted)
+	if got == nil || got.String() != "127.0.0.1" {
+		t.Fatalf("client IP = %v, want RemoteAddr peer (XFF garbage must not fall through to CF)", got)
+	}
+}
+
 func httptestRequest(remote, forwarded string) *http.Request {
 	r, _ := http.NewRequest(http.MethodGet, "http://example.test/dns-query", nil)
 	r.RemoteAddr = remote

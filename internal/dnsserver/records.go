@@ -301,7 +301,8 @@ func (rs *RecordStore) Lookup(req *dns.Msg) (*dns.Msg, bool) {
 	// Dot-walk without Split/Join allocations.
 	rs.mu.RLock()
 	recs := rs.records[domain]
-	if len(recs) == 0 {
+	exact := len(recs) > 0
+	if !exact {
 		for i := 0; i < len(domain); i++ {
 			if domain[i] != '.' {
 				continue
@@ -325,7 +326,13 @@ func (rs *RecordStore) Lookup(req *dns.Msg) (*dns.Msg, bool) {
 	var matched, nameKnown bool
 	for _, r := range recs {
 		rrType := r.rrType
-		nameKnown = true
+		// Only an exact match proves the name exists: a wildcard (*.lan)
+		// covering the suffix must not answer authoritative NODATA for
+		// types it does not carry (it would void TXT/MX/SPF under the
+		// suffix). A wildcard type-miss falls through to upstream instead.
+		if exact {
+			nameKnown = true
+		}
 		if rrType != q.Qtype {
 			continue
 		}

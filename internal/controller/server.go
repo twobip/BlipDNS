@@ -281,6 +281,10 @@ func (s *Server) securityHeaders(next http.Handler) http.Handler {
 const (
 	maxControllerRateLimitQPS = 100000
 	maxControllerCacheSize    = 1000000
+	// sseWriteTimeout bounds each SSE write on /api/events (F-11): a
+	// zero-window reader trips this instead of stalling the stream writer
+	// forever. The 30-minute stream cap still bounds total lifetime.
+	sseWriteTimeout = 10 * time.Second
 )
 
 func (s *Server) requireAuth(h http.HandlerFunc) http.HandlerFunc {
@@ -2029,10 +2033,11 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// The dashboard's SSE stream must outlive the server's 30s absolute
-	// Read/WriteTimeout, otherwise every browser's event stream is cut and
-	// re-connected on a 30s cycle instead of streaming.
+	// ReadTimeout, otherwise every browser's event stream is cut when the
+	// read deadline fires. Only the read deadline is cleared: writes keep a
+	// per-write deadline (F-11) so a slow reader drops the stream instead of
+	// stalling the writer forever.
 	rc := http.NewResponseController(w)
-	_ = rc.SetWriteDeadline(time.Time{})
 	_ = rc.SetReadDeadline(time.Time{})
 	ch, backlog, ok := s.fleet.Bus().TrySubscribe()
 	if !ok {
@@ -2041,13 +2046,26 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	}
 	defer s.fleet.Bus().Unsubscribe(ch)
 
+	// writeEvent bounds each SSE write: a zero-window reader trips the
+	// deadline instead of pinning this goroutine (and the subscription slot)
+	// until the 30-minute stream cap below.
+	writeEvent := func(data string) error {
+		_ = rc.SetWriteDeadline(time.Now().Add(sseWriteTimeout))
+		if _, err := fmt.Fprintf(w, "data: %s\n\n", data); err != nil {
+			return err
+		}
+		flusher.Flush()
+		return nil
+	}
+
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-store")
 
 	for _, e := range backlog {
-		fmt.Fprintf(w, "data: %s\n\n", control.MustJSON(e))
+		if err := writeEvent(control.MustJSON(e)); err != nil {
+			return
+		}
 	}
-	flusher.Flush()
 	// Bound the stream lifetime like blipd's watch endpoint: stalled readers
 	// must not pin goroutines and subscriptions forever. Browsers reconnect.
 	streamMax := time.NewTimer(30 * time.Minute)
@@ -2059,9 +2077,11 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		case <-streamMax.C:
 			return
 		case e := <-ch:
-			fmt.Fprintf(w, "data: %s\n\n", control.MustJSON(e))
-			flusher.Flush()
+			if err := writeEvent(control.MustJSON(e)); err != nil {
+				return
+			}
 		case <-time.After(15 * time.Second):
+			_ = rc.SetWriteDeadline(time.Now().Add(sseWriteTimeout))
 			fmt.Fprint(w, ": keepalive\n\n")
 			flusher.Flush()
 		}

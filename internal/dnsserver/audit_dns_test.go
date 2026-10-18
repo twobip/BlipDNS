@@ -63,8 +63,8 @@ func TestUDPListenerAcceptsPaddedQuery(t *testing.T) {
 	}
 }
 
-// TCP responses honor the advertised EDNS0 bufsize capped at 1232, defaulting
-// to 512 + TC with no OPT (RFC 8659 §6.1, audit #6).
+// TCP has no datagram ceiling: large answers are honored whole (65535),
+// never truncated — a TC retry over TCP must not re-truncate (audit F-20).
 func TestTCPResponseCap(t *testing.T) {
 	newBigServer := func(t *testing.T) *Server {
 		t.Helper()
@@ -89,26 +89,25 @@ func TestTCPResponseCap(t *testing.T) {
 		}
 		return q
 	}
-	// No OPT over TCP: 512 + TC.
+	// No OPT over TCP: served whole, never truncated.
 	srv := newBigServer(t)
 	resp, _ := srv.serveInner(context.Background(), net.ParseIP("10.0.0.1"), "", control.ProtoDNS, false, query(false, 0))
-	if resp.Len() > 512 {
-		t.Errorf("TCP no-OPT len=%d want <=512", resp.Len())
+	if resp.Truncated {
+		t.Errorf("TCP no-OPT TC=1 want 0 (TCP honors large answers)")
 	}
-	if !resp.Truncated {
-		t.Errorf("TCP no-OPT TC=0 want 1")
+	if len(resp.Answer) == 0 {
+		t.Errorf("TCP no-OPT answers=0 want the full TXT rrset")
 	}
-	// OPT 4096 over TCP: capped at 1232.
-	srv = newBigServer(t)
-	resp, _ = srv.serveInner(context.Background(), net.ParseIP("10.0.0.1"), "", control.ProtoDNS, false, query(true, 4096))
-	if resp.Len() > 1232 {
-		t.Errorf("TCP OPT-4096 len=%d want <=1232", resp.Len())
-	}
-	// OPT 512 over TCP: capped at 512.
-	srv = newBigServer(t)
-	resp, _ = srv.serveInner(context.Background(), net.ParseIP("10.0.0.1"), "", control.ProtoDNS, false, query(true, 512))
-	if resp.Len() > 512 {
-		t.Errorf("TCP OPT-512 len=%d want <=512", resp.Len())
+	// OPT sizes over TCP are ignored: the full answer is served.
+	for _, bufsize := range []uint16{512, 4096} {
+		srv = newBigServer(t)
+		resp, _ = srv.serveInner(context.Background(), net.ParseIP("10.0.0.1"), "", control.ProtoDNS, false, query(true, bufsize))
+		if resp.Truncated {
+			t.Errorf("TCP OPT-%d TC=1 want 0", bufsize)
+		}
+		if len(resp.Answer) == 0 {
+			t.Errorf("TCP OPT-%d answers=0 want the full TXT rrset", bufsize)
+		}
 	}
 	// UDP still caps at 1232 even with a large OPT.
 	srv = newBigServer(t)
@@ -149,13 +148,38 @@ func TestResponseCapTable(t *testing.T) {
 		{"udp-opt", withOpt, true, 1232},
 		{"udp-opt512", medOpt, true, 512},
 		{"udp-opt100", smallOpt, true, 512},
-		{"tcp-noopt", noOpt, false, 512},
-		{"tcp-nil", nil, false, 512},
-		{"tcp-opt4096", withOpt, false, 1232},
-		{"tcp-opt100", smallOpt, false, 512},
+		{"tcp-noopt", noOpt, false, 65535},
+		{"tcp-nil", nil, false, 65535},
+		{"tcp-opt4096", withOpt, false, 65535},
+		{"tcp-opt100", smallOpt, false, 65535},
 	} {
 		if got := responseCap(tc.req, tc.isUDP); got != tc.want {
 			t.Errorf("%s: cap=%d want %d", tc.name, got, tc.want)
+		}
+	}
+}
+
+// A rogue upstream alias (attacker.com CNAME victim.com + victim.com A in
+// Answer) must not survive sanitizeBailiwick: only the qname and in-chain
+// targets are kept.
+func TestSanitizeBailiwickDropsPoisonAnswer(t *testing.T) {
+	m := new(dns.Msg)
+	m.SetQuestion("attacker.com.", dns.TypeA)
+	m.Answer = []dns.RR{
+		&dns.CNAME{Hdr: dns.RR_Header{Name: "attacker.com.", Rrtype: dns.TypeCNAME, Class: dns.ClassINET, Ttl: 60}, Target: "victim.com."},
+		&dns.A{Hdr: dns.RR_Header{Name: "victim.com.", Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60}, A: net.ParseIP("1.2.3.4")},
+		&dns.A{Hdr: dns.RR_Header{Name: "evil.com.", Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60}, A: net.ParseIP("5.6.7.8")},
+	}
+	sanitizeBailiwick("attacker.com.", m)
+	// The qname CNAME and its in-chain target stay; the unrelated
+	// out-of-bailiwick A is dropped. (Whether the chain itself is
+	// allowed is decided by chain inspection, not bailiwick.)
+	if len(m.Answer) != 2 {
+		t.Fatalf("Answer = %d rrs, want 2 (qname CNAME + in-chain target)", len(m.Answer))
+	}
+	for _, rr := range m.Answer {
+		if strings.EqualFold(rr.Header().Name, "evil.com.") {
+			t.Fatalf("out-of-bailiwick owner %q survived sanitize", rr.Header().Name)
 		}
 	}
 }

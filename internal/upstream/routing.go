@@ -6,6 +6,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/miekg/dns"
 )
 
 // UpstreamServer is a named upstream endpoint. A server is part of the
@@ -369,8 +371,9 @@ func (p *ResolverPool) Match(qname string, client net.IP) Resolver {
 		// subdomain ("host.corp." has suffix ".corp."); root "." matches all.
 		if rt.suffix == "." {
 			// match all (CIDR still applies below)
-		} else if q == strings.TrimPrefix(rt.suffix, ".") || strings.HasSuffix(q, rt.suffix) {
-			// match
+		} else if dns.IsSubDomain(strings.TrimPrefix(rt.suffix, "."), q) {
+			// match: label-aware, so an escaped dot ("a\.corp.") cannot
+			// end-match a ".corp." route the way HasSuffix did
 		} else {
 			continue
 		}

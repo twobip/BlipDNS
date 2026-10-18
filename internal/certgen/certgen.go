@@ -258,7 +258,18 @@ func load(certPath, keyPath string, extraHosts []string) ([]byte, []byte, error)
 	// legacy cert with link-local/docker-bridge/RFC1918/multicast identities
 	// discloses topology and keeps unintended identities valid. Force
 	// regeneration. Loopback and operator-configured (doh_san) SANs stay.
+	// F-3: expectedSANs mints extraHosts unfiltered, so load must exempt
+	// those same IPs here — otherwise a private doh_san re-keys every boot.
+	extra := make(map[string]struct{}, len(extraHosts))
+	for _, h := range extraHosts {
+		if ip := net.ParseIP(strings.TrimSpace(h)); ip != nil {
+			extra[ip.String()] = struct{}{}
+		}
+	}
 	for _, ip := range cert.IPAddresses {
+		if _, ok := extra[ip.String()]; ok {
+			continue
+		}
 		if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() || ip.IsPrivate() {
 			return nil, nil, fmt.Errorf("self-signed cert: contains disallowed SAN IP %s", ip.String())
 		}

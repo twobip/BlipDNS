@@ -281,13 +281,18 @@ func isLoopbackBind(addr string) bool {
 	return false
 }
 
-// SetAllowedNetworks replaces the recursion ACL at runtime. Empty/nil allows
-// all (open recursion). Returns an error for invalid CIDRs (including /0
-// catch-alls) without changing the current ACL.
+// SetAllowedNetworks replaces the recursion ACL at runtime. Empty/nil clears
+// to open recursion, which needs the boot-time OpenRecursion ack — without
+// it an authed push (or a controller reconcile) silently re-opens a closed
+// resolver. Returns an error for invalid CIDRs (including /0 catch-alls)
+// without changing the current ACL.
 func (s *Server) SetAllowedNetworks(values []string) error {
 	nets, err := control.ParseAllowedNetworks(values)
 	if err != nil {
 		return err
+	}
+	if len(nets) == 0 && !s.cfg.OpenRecursion {
+		return fmt.Errorf("refusing to clear allowed_networks without the open_recursion ack")
 	}
 	s.aclMu.Lock()
 	s.allowedNetworks = nets
@@ -362,6 +367,19 @@ var dohBodyPool = sync.Pool{New: func() any { return make([]byte, 0, 4096) }}
 
 func (s *Server) handleDoH(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+	// Shed load before any body read or Unpack: concurrent garbage POSTs
+	// must not burn parse CPU pre-gate. Mirrors the classic-DNS path
+	// (ServeDNS acquires the same semaphore before serveInner). The nil
+	// check keeps zero-value Servers (tests) working.
+	if s.inflight != nil {
+		select {
+		case s.inflight <- struct{}{}:
+			defer func() { <-s.inflight }()
+		default:
+			http.Error(w, "server busy", http.StatusServiceUnavailable)
+			return
+		}
+	}
 	var req *dns.Msg
 	switch r.Method {
 	case http.MethodGet:
@@ -452,19 +470,6 @@ func (s *Server) handleDoH(w http.ResponseWriter, r *http.Request) {
 		// Avoid string concat when the header is empty (common case).
 		if h := r.Header.Get("X-Device-ID"); h != "" {
 			clientID = clientIDFromPath("/dns-query/" + h)
-		}
-	}
-	// Bound DoH with the shared inflight semaphore: handshake + HTTP parse +
-	// Unpack all run before the rate limiter, so uncapped DoH burns more
-	// work per query than classic DNS with its 1024 shed. The nil check
-	// keeps zero-value Servers (tests) working.
-	if s.inflight != nil {
-		select {
-		case s.inflight <- struct{}{}:
-			defer func() { <-s.inflight }()
-		default:
-			http.Error(w, "server busy", http.StatusServiceUnavailable)
-			return
 		}
 	}
 	resp := s.serve(ctx, clientIP, clientID, control.ProtoDoH, req)
@@ -706,9 +711,13 @@ func (e *chainBlockedError) Error() string { return "blipd: cname target blocked
 // responseCap is the largest response that may be sent back on this transport
 // (RFC 8659 §6.1): honor the client's advertised EDNS0 buffer size capped at
 // the DNS flag-day 1232 (floored at 512 per RFC 6891), defaulting to 1232 on
-// UDP and 512 on TCP (Truncate sets TC so the client retries with OPT or
-// over TCP) when the client sent no OPT.
+// UDP when the client sent no OPT. TCP has no datagram ceiling, so large
+// answers are honored whole (Truncate sets TC so the client retries with OPT
+// or over TCP — truncating TCP itself only re-truncates the retry).
 func responseCap(req *dns.Msg, isUDP bool) int {
+	if !isUDP {
+		return 65535
+	}
 	if req != nil {
 		if opt := req.IsEdns0(); opt != nil {
 			if sz := int(opt.UDPSize()); sz > 0 {
@@ -716,10 +725,7 @@ func responseCap(req *dns.Msg, isUDP bool) int {
 			}
 		}
 	}
-	if isUDP {
-		return 1232
-	}
-	return 512
+	return 1232
 }
 
 // rrTarget returns the domain name carried by rr for blocklist inspection:
@@ -832,27 +838,35 @@ func inspectChain(m *dns.Msg, classify func(string) (bool, filter.BlockAction, s
 	return false, "", "", "", false
 }
 
-// sanitizeBailiwick strips out-of-bailiwick glue before cache+serve. Only the
-// Answer section plus in-bailiwick Ns records are kept; Extra is dropped
-// except OPT (which carries no addresses). At minimum this drops Extra
-// A/AAAA whose owner is out-of-bailiwick of the query name and Ns records
-// whose owner is out-of-zone.
+// sanitizeBailiwick strips out-of-bailiwick records before cache+serve. Only
+// the qname's own Answer records plus in-chain CNAME/DNAME targets (and
+// in-bailiwick Ns records) are kept; Extra is dropped except OPT (which
+// carries no addresses). At minimum this drops Answer A/AAAA whose owner is
+// out-of-bailiwick of the query name and Ns records whose owner is
+// out-of-zone.
+
+// bailiwickName normalizes a DNS name for bailiwick comparison: lowercase,
+// no root dot, no leading dots.
+func bailiwickName(name string) string {
+	return strings.TrimLeft(strings.ToLower(strings.TrimSuffix(strings.TrimSpace(name), ".")), ".")
+}
+
 func sanitizeBailiwick(qname string, m *dns.Msg) {
 	if m == nil {
 		return
 	}
-	// Fast path: the common upstream answer carries no Ns/Extra, so there
-	// is nothing to sanitize (and no qname ToLower to pay for).
-	if len(m.Ns) == 0 && len(m.Extra) == 0 {
-		return
-	}
 	qn := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(qname), "."))
 	qn = strings.TrimLeft(qn, ".")
+	// Fast path: nothing to sanitize.
+	if len(m.Answer) == 0 && len(m.Ns) == 0 && len(m.Extra) == 0 {
+		return
+	}
 	if qn == "" {
-		// Without a query name we cannot judge bailiwick: drop Ns/Extra
-		// except OPT rather than serve attacker glue.
+		// Without a query name we cannot judge bailiwick: drop Answer and
+		// Ns/Extra except OPT rather than serve attacker glue.
 		var keptNs []dns.RR
 		_ = keptNs
+		m.Answer = nil
 		m.Ns = nil
 		keptExtra := m.Extra[:0]
 		for _, rr := range m.Extra {
@@ -863,6 +877,34 @@ func sanitizeBailiwick(qname string, m *dns.Msg) {
 		m.Extra = keptExtra
 		return
 	}
+	// Keep Answer records whose owner is the qname or an in-chain
+	// CNAME/DNAME target: a rogue upstream alias (attacker.com CNAME
+	// victim.com + victim.com A) must not be cached or served. Anything
+	// else is out-of-bailiwick.
+	allowed := map[string]struct{}{qn: {}}
+	keptAnswer := m.Answer[:0]
+	for _, rr := range m.Answer {
+		if rr == nil || rr.Header() == nil {
+			continue
+		}
+		owner := strings.ToLower(strings.TrimSuffix(rr.Header().Name, "."))
+		owner = strings.TrimLeft(owner, ".")
+		if _, ok := allowed[owner]; !ok {
+			continue
+		}
+		keptAnswer = append(keptAnswer, rr)
+		switch v := rr.(type) {
+		case *dns.CNAME:
+			allowed[bailiwickName(v.Target)] = struct{}{}
+		case *dns.DNAME:
+			allowed[bailiwickName(v.Target)] = struct{}{}
+		}
+	}
+	// Clear the tail so dropped records are not retained via the backing array.
+	for i := len(keptAnswer); i < len(m.Answer); i++ {
+		m.Answer[i] = nil
+	}
+	m.Answer = keptAnswer
 	// Keep Ns records whose owner is in-bailiwick: owner == qname, owner is an
 	// ancestor of qname (qname is subdomain of owner), or owner is a subdomain
 	// of qname (delegation child). Anything else is out-of-zone glue.

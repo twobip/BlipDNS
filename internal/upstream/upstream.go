@@ -972,6 +972,9 @@ func (m *MultiResolver) Resolve(ctx context.Context, q *dns.Msg) (*dns.Msg, erro
 	// Pool-level budget so serial failover can't park a handler for
 	// Σ(timeouts) (3 down upstreams ≈ 15s before). 8s covers typical RTTs
 	// while bounding outage latency; an existing tighter deadline is kept.
+	// F-9: classify against the pre-budget parent — the internal 8s expiry
+	// is a pool failure (trips the breaker), not a caller cancel.
+	parent := ctx
 	if _, ok := ctx.Deadline(); !ok {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, 8*time.Second)
@@ -1034,7 +1037,7 @@ func (m *MultiResolver) Resolve(ctx context.Context, q *dns.Msg) (*dns.Msg, erro
 			// resolver would misattribute a multi-upstream outage.
 			firstErr = err
 		}
-		if isCallerCancel(ctx, err) {
+		if isCallerCancel(parent, err) {
 			// The caller went away; don't blame the upstream.
 			return nil
 		}
