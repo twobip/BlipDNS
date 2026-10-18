@@ -34,6 +34,12 @@ type HealthResponse struct {
 	DroppedEvents int64 `json:"dropped_events"`
 }
 
+// ClientRefusals is one client's rate-limited (REFUSED) query tally.
+type ClientRefusals struct {
+	Client  string `json:"client"`
+	Refused uint64 `json:"refused"`
+}
+
 type StatsResponse struct {
 	Cached         int    `json:"cached"`
 	QueriesTotal   uint64 `json:"queries_total"`
@@ -52,6 +58,10 @@ type StatsResponse struct {
 	// RateLimited counts queries dropped because they exceeded the per-client
 	// rate limit.
 	RateLimited uint64 `json:"rate_limited,omitempty"`
+	// RefusedClients lists the top clients by rate-limited queries, highest
+	// first. Bounded server-side so a spoofed-source flood cannot bloat the
+	// stats payload.
+	RefusedClients []ClientRefusals `json:"refused_clients,omitempty"`
 	// AllowedNetworks is the instance's recursion ACL (CIDRs/IPs allowed to
 	// recurse). Empty/nil means open recursion. Reported so the controller
 	// can reconcile it.

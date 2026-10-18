@@ -1841,6 +1841,15 @@ func (s *Server) RateLimitQPS() int {
 	return s.rl.qps()
 }
 
+// Refusals reports the top clients by rate-limited queries for the management
+// API's stats payload (the dashboard's refused-queries breakdown).
+func (s *Server) Refusals() []control.ClientRefusals {
+	if s.rl == nil {
+		return nil
+	}
+	return s.rl.refusals(refusalsTopN)
+}
+
 // SetCacheConfig tunes the response cache size at runtime: 0 selects the
 // bounded default (never unlimited). Must be >= 0 and <= maxCacheSize.
 func (s *Server) SetCacheConfig(size int) error {

@@ -77,7 +77,7 @@
             <div class="stat-value" id="d-errors">—</div>
             <div class="stat-sub">failed upstream requests</div>
           </div>
-          <div class="stat" title="Queries refused by the per-client rate limiter (tracked separately from resolved-totals)">
+          <div class="stat" id="stat-refused" role="button" tabindex="0" title="Queries refused by the per-client rate limiter — click for the per-client breakdown">
             <div class="stat-icon i-amber">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>
             </div>
@@ -1060,6 +1060,21 @@
       <button class="btn" data-close="modal-confirm">Cancel</button>
       <button class="btn btn-danger" id="cf-ok">Confirm</button>
     </div>
+  </div>
+</div>
+
+<div class="overlay hidden" id="modal-refused">
+  <div class="modal" style="max-width:520px">
+    <div class="modal-head"><h3>Refused queries by client</h3><button class="icon-btn x" data-close="modal-refused">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button></div>
+    <div class="modal-body">
+      <table class="tbl">
+        <thead><tr><th>Client</th><th class="num">Refused</th></tr></thead>
+        <tbody id="refused-tbody"></tbody>
+      </table>
+      <span class="hint">By source IP, highest first · counts reset when the rate limit is re-applied. Refused queries are not written to the query log.</span>
+    </div>
+    <div class="modal-foot"><button class="btn" data-close="modal-refused">Close</button></div>
   </div>
 </div>
 

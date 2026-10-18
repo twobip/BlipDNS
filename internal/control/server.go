@@ -135,6 +135,9 @@ func (s *Server) SetDoHController(c DoHController) {
 type RateLimitController interface {
 	SetRateLimit(qps, burst int) error
 	RateLimitQPS() int
+	// Refusals returns the top clients by rate-limited queries, highest
+	// first (bounded; "" when the limiter is disabled).
+	Refusals() []ClientRefusals
 }
 
 // SetRateLimitController wires the DNS server (which owns its rate limiter)
@@ -660,6 +663,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		// and surface it in the UI.
 		if ifc := ctrls.RateLimit; ifc != nil {
 			st.RateLimitQPS = ifc.RateLimitQPS()
+			st.RefusedClients = ifc.Refusals()
 		}
 		// Report the recursion ACL so the controller can converge it
 		// (e.g. after a restart) by re-pushing on drift.

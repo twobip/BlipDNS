@@ -2,9 +2,12 @@ package dnsserver
 
 import (
 	"net"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/twobip/BlipDNS/internal/control"
 )
 
 // tokenBucket is a simple per-client token bucket (leaky refill). It is NOT a
@@ -13,6 +16,10 @@ import (
 type tokenBucket struct {
 	tokens float64
 	last   time.Time
+	// refused counts queries this client had refused (dashboard breakdown).
+	// Lives with the bucket: reset when the limit is re-applied, dropped
+	// with the bucket on eviction.
+	refused uint64
 }
 
 // rlShards splits the bucket map so concurrent queries from different clients
@@ -166,8 +173,43 @@ func (rl *rateLimiter) allow(client string) bool {
 		sh.mu.Unlock()
 		return true
 	}
+	b.refused++
 	sh.mu.Unlock()
 	return false
+}
+
+// refusalsTopN bounds the per-client refusal list shipped in stats (and
+// therefore the dashboard dialog): enough to see the top talkers, small
+// enough that a spoofed-source flood cannot bloat the payload.
+const refusalsTopN = 50
+
+// refusals returns the top-n clients by refused queries, highest first.
+// Ties break on client key so the order is stable. Clients with no refusals
+// are omitted; denials in the saturated-table fail-closed path carry no
+// bucket and are therefore unattributed (the cumulative counter still
+// includes them).
+func (rl *rateLimiter) refusals(n int) []control.ClientRefusals {
+	var out []control.ClientRefusals
+	for i := range rl.shards {
+		sh := &rl.shards[i]
+		sh.mu.Lock()
+		for k, b := range sh.buckets {
+			if b.refused > 0 {
+				out = append(out, control.ClientRefusals{Client: k, Refused: b.refused})
+			}
+		}
+		sh.mu.Unlock()
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Refused != out[j].Refused {
+			return out[i].Refused > out[j].Refused
+		}
+		return out[i].Client < out[j].Client
+	})
+	if n > 0 && len(out) > n {
+		out = out[:n]
+	}
+	return out
 }
 
 // rateLimitKey returns the rate-limiter bucket key for ip: the full address

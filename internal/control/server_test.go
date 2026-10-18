@@ -754,3 +754,34 @@ func TestAdoptControllerPin(t *testing.T) {
 		t.Errorf("loopback status = %d, want 200", resp.StatusCode)
 	}
 }
+
+// fakeRateLimit implements RateLimitController for stats assertions.
+type fakeRateLimit struct{ refs []ClientRefusals }
+
+func (f *fakeRateLimit) SetRateLimit(int, int) error { return nil }
+func (f *fakeRateLimit) RateLimitQPS() int           { return 0 }
+func (f *fakeRateLimit) Refusals() []ClientRefusals  { return f.refs }
+
+// Stats must carry the per-client refusal breakdown (the dashboard's
+// refused-by-client dialog reads it from the instance stats).
+func TestStatsIncludesRefusedClients(t *testing.T) {
+	srv := NewServerWithBlocklist("tok", filter.NewStore(nil), cache.New(0, 0), &Counters{}, "blipd/test", nil)
+	srv.SetRateLimitController(&fakeRateLimit{refs: []ClientRefusals{{Client: "10.0.0.1", Refused: 7}}})
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/api/v1/stats", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var st StatsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&st); err != nil {
+		t.Fatal(err)
+	}
+	if len(st.RefusedClients) != 1 || st.RefusedClients[0].Client != "10.0.0.1" || st.RefusedClients[0].Refused != 7 {
+		t.Errorf("refused_clients = %+v, want one entry 10.0.0.1 with 7", st.RefusedClients)
+	}
+}

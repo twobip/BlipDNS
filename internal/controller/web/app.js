@@ -189,6 +189,7 @@ function toast(msg, kind = "ok") {
 
 /* ---------- state ---------- */
 let instances = [];
+let refusedByClient = []; // [[client, refusedCount]] fleet-wide, worst first
 let blDomains = [];
 let blAllowed = [];
 let blSourceStats = [];
@@ -259,15 +260,42 @@ async function renderDashboard() {
   // Fleet-wide refused count = sum of each instance's cumulative rate_limited
   // counter (cumulative since its last restart; tracked separately from the
   // resolved query totals so the limiter no longer pollutes QPS/cache stats).
+  // Also fold the per-client breakdown for the refused-by-client dialog.
   let refused = 0;
+  const byClient = new Map();
   for (const i of instances) {
-    if (i.online && i.stats) {
-      refused += Number(i.stats.rate_limited) || 0;
+    if (!i.online || !i.stats) continue;
+    refused += Number(i.stats.rate_limited) || 0;
+    for (const r of i.stats.refused_clients || []) {
+      byClient.set(r.client, (byClient.get(r.client) || 0) + (Number(r.refused) || 0));
     }
   }
+  refusedByClient = [...byClient.entries()].sort((a, b) => b[1] - a[1]);
   $("d-refused").textContent = fmt(refused);
   fetchStats();
 }
+
+// refusedRowsHtml renders the refused-by-client dialog body from
+// refusedByClient (populated by renderDashboard from the per-instance stats).
+function refusedRowsHtml() {
+  if (!refusedByClient.length) {
+    return `<tr class="empty-row"><td colspan="2"><div class="empty"><div class="empty-ic">${IC.warn}</div><h4>No refused queries</h4><p>Nothing has been rate-limited since the limit was last applied.</p></div></td></tr>`;
+  }
+  return refusedByClient.map(([c, n]) =>
+    `<tr><td class="mono">${esc(c)}</td><td class="num">${fmt(n)}</td></tr>`).join("");
+}
+
+function openRefusedModal() {
+  $("refused-tbody").innerHTML = refusedRowsHtml();
+  show("modal-refused");
+}
+$("stat-refused").onclick = (e) => {
+  if (e.target.closest("[data-goto]")) return; // "tune limit" link handles itself
+  openRefusedModal();
+};
+$("stat-refused").onkeydown = (e) => {
+  if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openRefusedModal(); }
+};
 
 function renderDashInstances(perInstance) {
   const el = $("d-instances");
