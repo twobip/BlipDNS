@@ -86,6 +86,15 @@ type Server struct {
 	// conditional-forwarding routes. nil only when no upstream is configured.
 	pool  *upstream.ResolverPool
 	logfn func(client, domain string)
+	// slowQueryMin is the answer-time threshold above which one diagnostic
+	// line per query is logged (0 = off; see SetSlowQueryThreshold).
+	slowQueryMin time.Duration
+	// slowLogMu guards the slow-query log rate cap, so an upstream outage
+	// (every query slow) cannot turn diagnostics into a journal flood.
+	slowLogMu       sync.Mutex
+	slowLogWindow   int64
+	slowLogCount    int
+	slowLogSuppress int
 	// lifeMu guards udp/tcp/doch so Start (which publishes the listeners
 	// from a goroutine in tests) never races Shutdown (which reads them).
 	// The blocking Serve calls use the local copies taken under the lock.
@@ -648,7 +657,10 @@ func (s *Server) ServeDNS(w dns.ResponseWriter, req *dns.Msg) {
 	// Classic DNS has no request context: serveInner derives a fetch-scoped
 	// timeout around the upstream lookup below, so blocked, local and
 	// refused answers pay no timer alloc.
-	resp, drop := s.serveInner(context.Background(), clientIP, "", control.ProtoDNS, isUDP, req)
+	trace := s.newSlowTrace()
+	start := time.Now()
+	resp, drop := s.serveInner(context.Background(), clientIP, "", control.ProtoDNS, isUDP, req, trace)
+	s.logSlowQuery(start, trace, clientIP, "", control.ProtoDNS, req, resp)
 	// Shed, not reflect: a spoofed UDP source gets silence, never REFUSED.
 	if drop && isUDP {
 		return
@@ -692,8 +704,27 @@ func (s *Server) serve(ctx context.Context, clientIP net.IP, clientID, proto str
 	isUDP := proto == control.ProtoDNS
 	// UDP shed is only honored by ServeDNS (the live socket); direct callers
 	// (DoH, tests) always need the reply body.
-	resp, _ := s.serveInner(ctx, clientIP, clientID, proto, isUDP, req)
+	trace := s.newSlowTrace()
+	start := time.Now()
+	resp, _ := s.serveInner(ctx, clientIP, clientID, proto, isUDP, req, trace)
+	s.logSlowQuery(start, trace, clientIP, clientID, proto, req, resp)
 	return resp
+}
+
+// queryTrace carries the per-query detail a slow-query log line needs. It is
+// allocated only while slow logging is enabled (newSlowTrace), so the hot
+// path pays one nil check and nothing else when the knob is off.
+type queryTrace struct {
+	resolveUs int64  // cache lookup + upstream fetch (a coalesced waiter's wait counts here)
+	cached    bool   // served from the response cache
+	upstream  string // upstream label the answer came from ("" when unresolved)
+}
+
+func (s *Server) newSlowTrace() *queryTrace {
+	if s == nil || s.slowQueryMin <= 0 {
+		return nil
+	}
+	return &queryTrace{}
 }
 
 // chainBlockedError carries a CNAME/DNAME chain block out of the cache
@@ -1040,8 +1071,14 @@ func stripSubnet(req *dns.Msg) {
 // answering REFUSED/SERVFAIL to a forged source makes blipd a reflector.
 // Only the pre-routing sheds (nil source, ACL, rate limit) set it; policy
 // blocks and upstream errors still reply (TCP/DoH always reply).
-func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, proto string, isUDP bool, req *dns.Msg) (*dns.Msg, bool) {
+func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, proto string, isUDP bool, req *dns.Msg, trace ...*queryTrace) (*dns.Msg, bool) {
 	start := time.Now()
+	// Slow-query tracing is opt-in: trace is nil (and stays nil) unless
+	// slow_query_ms is set, so the common path pays one nil compare.
+	var tr *queryTrace
+	if len(trace) > 0 {
+		tr = trace[0]
+	}
 	// Nil guards: never dereference a nil request or server. A nil request
 	// cannot be replied to meaningfully; refuse with an empty message.
 	if req == nil {
@@ -1422,6 +1459,7 @@ func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, prot
 		}
 		return m, nil
 	}
+	resolveStart := time.Now()
 	out, cached, err := func() (*dns.Msg, bool, error) {
 		if s.cache == nil {
 			m, ferr := fetch()
@@ -1429,6 +1467,9 @@ func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, prot
 		}
 		return s.cache.DoHit(fctx, key, fetch)
 	}()
+	if tr != nil {
+		tr.cached, tr.upstream, tr.resolveUs = cached, upstreamLabel, time.Since(resolveStart).Microseconds()
+	}
 	if err != nil {
 		var cbe *chainBlockedError
 		if errors.As(err, &cbe) {
@@ -1577,6 +1618,80 @@ func qType(req *dns.Msg) string {
 		return ""
 	}
 	return dns.TypeToString[req.Question[0].Qtype]
+}
+
+// slowQueryLogPerSec caps emitted slow-query lines so a dead upstream (every
+// query slow) cannot flood the journal. Suppressed lines are counted and
+// reported on the next line that is emitted.
+const slowQueryLogPerSec = 10
+
+// SetSlowQueryThreshold makes blipd log one diagnostic line per query whose
+// answer time exceeds d (0 disables). Wired from blipd.yaml slow_query_ms and
+// set at startup, before serving, so the read on the hot path needs no lock.
+func (s *Server) SetSlowQueryThreshold(d time.Duration) {
+	if s == nil {
+		return
+	}
+	if d < 0 {
+		d = 0
+	}
+	s.slowQueryMin = d
+}
+
+// logSlowQuery emits the slow-query diagnostic: what was asked, who asked,
+// whether the answer came from cache, how long resolution took versus the
+// whole query, the rcode and which upstream served it. Clients are identified
+// by source IP only (the DoH client-ID is appended verbatim when present but
+// is self-asserted, so it is context, not identity).
+func (s *Server) logSlowQuery(start time.Time, tr *queryTrace, clientIP net.IP, clientID, proto string, req, resp *dns.Msg) {
+	if tr == nil || s == nil {
+		return
+	}
+	total := time.Since(start)
+	if total < s.slowQueryMin {
+		return
+	}
+	s.slowLogMu.Lock()
+	now := time.Now().Unix()
+	if now != s.slowLogWindow {
+		s.slowLogWindow, s.slowLogCount = now, 0
+	}
+	if s.slowLogCount >= slowQueryLogPerSec {
+		s.slowLogSuppress++
+		s.slowLogMu.Unlock()
+		return
+	}
+	s.slowLogCount++
+	suppressed := s.slowLogSuppress
+	s.slowLogSuppress = 0
+	s.slowLogMu.Unlock()
+
+	cache := "miss"
+	if tr.cached {
+		cache = "hit"
+	}
+	up := tr.upstream
+	if up == "" {
+		up = "-"
+	}
+	rcode := "none"
+	if resp != nil {
+		rcode = dns.RcodeToString[resp.Rcode]
+	}
+	name := ""
+	if req != nil && len(req.Question) > 0 {
+		name = req.Question[0].Name
+	}
+	who := clientIP.String()
+	if clientID != "" {
+		who += " id=" + clientID
+	}
+	extra := ""
+	if suppressed > 0 {
+		extra = fmt.Sprintf(" suppressed=%d", suppressed)
+	}
+	log.Printf("blipd: slow query %s %s client=%s proto=%s cache=%s resolve_ms=%.3f total_ms=%.3f rcode=%s upstream=%s%s",
+		name, qType(req), who, proto, cache, float64(tr.resolveUs)/1000, float64(total.Microseconds())/1000, rcode, up, extra)
 }
 
 // isAddressType reports whether a rendered RR type is an IP address answer.

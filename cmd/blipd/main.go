@@ -324,6 +324,8 @@ func main() {
 	srv.SetBlockLogger(func(client, domain string) {
 		log.Printf("[block] %s -> %s", client, domain)
 	})
+	// Opt-in slow-query diagnostic (blipd.yaml slow_query_ms; 0 = off).
+	srv.SetSlowQueryThreshold(time.Duration(cfg.SlowQueryMS) * time.Millisecond)
 	srv.ControlServer().SetHAController(haMgr)
 	srv.ControlServer().SetLogRing(logRing)
 	// A VIP arriving from the controller must reach the certificate without a

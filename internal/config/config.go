@@ -25,6 +25,7 @@ type Config struct {
 	DoHHTTPAddr          string                    `yaml:"doh_http_addr"`    // additional plain-HTTP DoH listener ("" = off)
 	RateLimitQPS         int                       `yaml:"rate_limit_qps"`   // per-client DNS QPS limit (0 = unlimited; stock default 20)
 	RateLimitBurst       int                       `yaml:"rate_limit_burst"` // per-client burst above QPS (0 = auto = QPS, min 1)
+	SlowQueryMS          int                       `yaml:"slow_query_ms"`    // log one diagnostic line per query slower than this (0 = off)
 	TLSDir               string                    `yaml:"tls_dir"`          // where a generated self-signed DoH cert/key are persisted
 	DoHSANs              []string                  `yaml:"doh_san"`          // extra DNS names/IPs the generated self-signed DoH cert must cover (e.g. an HA VIP); changing it regenerates the pair
 	AdminAddr            string                    `yaml:"admin_addr"`
