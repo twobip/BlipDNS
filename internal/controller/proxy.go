@@ -238,23 +238,24 @@ func mgmtCertFP(leaf *x509.Certificate) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// pinnedTLSConfig trusts exactly leaf and nothing else: the peer certificate
-// must byte-match the TOFU pin. Hostname/SAN checks are skipped — node
-// certificates deliberately omit dialled LAN IPs, so the fingerprint pin is
-// the authentication, not the SANs. Without the pinned private key an
-// attacker cannot present this exact certificate. Resumed sessions skip the
-// check: resumption is cryptographically bound to the originally verified
-// session via the server's ticket keys, and carries no certificates.
+// pinnedTLSConfig trusts exactly the certificate whose SHA-256 matches fp and
+// nothing else. Hostname/SAN checks are skipped — node certificates
+// deliberately omit dialled LAN IPs, so the fingerprint pin is the
+// authentication, not the SANs. The pin is compared on every handshake (not
+// once at load) so a client stays valid across a peer restart. Resumed
+// sessions skip the check: resumption is cryptographically bound to the
+// originally verified session via the server's ticket keys, and carries no
+// certificates.
 // (ponytail: gosec G402 would flag InsecureSkipVerify — the exact-cert
 // VerifyConnection below is the mitigation, not an accident.)
-func pinnedTLSConfig(leaf *x509.Certificate) *tls.Config {
+func pinnedTLSConfig(fp string) *tls.Config {
 	return &tls.Config{
 		InsecureSkipVerify: true,
 		VerifyConnection: func(cs tls.ConnectionState) error {
 			if cs.DidResume {
 				return nil
 			}
-			if len(cs.PeerCertificates) == 0 || !cs.PeerCertificates[0].Equal(leaf) {
+			if len(cs.PeerCertificates) == 0 || subtle.ConstantTimeCompare([]byte(mgmtCertFP(cs.PeerCertificates[0])), []byte(fp)) != 1 {
 				return fmt.Errorf("blipc: management certificate does not match pinned fingerprint")
 			}
 			return nil
@@ -262,9 +263,10 @@ func pinnedTLSConfig(leaf *x509.Certificate) *tls.Config {
 	}
 }
 
-// pinnedMgmtClient returns a control client trusting only leaf (TOFU pin).
-func pinnedMgmtClient(httpsURL, token string, leaf *x509.Certificate) *control.Client {
-	return control.NewClientWithTLS(httpsURL, token, pinnedTLSConfig(leaf))
+// pinnedMgmtClient returns a control client trusting only the cert with
+// fingerprint fp (TOFU pin).
+func pinnedMgmtClient(httpsURL, token, fp string) *control.Client {
+	return control.NewClientWithTLS(httpsURL, token, pinnedTLSConfig(fp))
 }
 
 // httpsMgmtClient returns a control client for an https management URL.
@@ -273,7 +275,14 @@ func pinnedMgmtClient(httpsURL, token string, leaf *x509.Certificate) *control.C
 // sight and matched against pinnedFP afterwards: a changed cert refuses
 // loudly (possible MITM or legit rotation — clear mgmt_cert_fp in
 // controller.yaml to re-pin) instead of silently re-pinning.
+//
+// A persisted pin needs no dial: the pin is verified per handshake, so a node
+// that is still restarting must not latch the instance onto an unverifiable
+// plain client for the whole run.
 func httpsMgmtClient(httpsURL, token, pinnedFP string) (client *control.Client, leaf *x509.Certificate, fp string, ok bool) {
+	if pinnedFP != "" {
+		return pinnedMgmtClient(httpsURL, token, pinnedFP), nil, pinnedFP, true
+	}
 	if probeMgmtTLS(&http.Client{Timeout: upgradeProbeTimeout}, httpsURL) {
 		return control.NewClient(httpsURL, token), nil, "", true
 	}
@@ -282,16 +291,10 @@ func httpsMgmtClient(httpsURL, token, pinnedFP string) (client *control.Client, 
 		return nil, nil, "", false
 	}
 	fp = mgmtCertFP(leaf)
-	if pinnedFP != "" && subtle.ConstantTimeCompare([]byte(fp), []byte(pinnedFP)) != 1 {
-		log.Printf("blipc: REFUSING to trust %s: presented cert fingerprint %s does not match pinned %s (possible MITM or rotated cert; clear mgmt_cert_fp in controller.yaml to re-pin)", httpsURL, fp, pinnedFP)
-		return nil, nil, "", false
-	}
-	probe := &http.Client{Transport: &http.Transport{TLSClientConfig: pinnedTLSConfig(leaf)}, Timeout: upgradeProbeTimeout}
+	probe := &http.Client{Transport: &http.Transport{TLSClientConfig: pinnedTLSConfig(fp)}, Timeout: upgradeProbeTimeout}
 	if !probeMgmtTLS(probe, httpsURL) {
 		return nil, nil, "", false
 	}
-	if pinnedFP == "" {
-		log.Printf("blipc: pinned self-signed management cert for %s (fingerprint %s)", httpsURL, fp)
-	}
-	return pinnedMgmtClient(httpsURL, token, leaf), leaf, fp, true
+	log.Printf("blipc: pinned self-signed management cert for %s (fingerprint %s)", httpsURL, fp)
+	return pinnedMgmtClient(httpsURL, token, fp), leaf, fp, true
 }

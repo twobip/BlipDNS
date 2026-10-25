@@ -88,12 +88,47 @@ func TestSANLessCertPinsAndServes(t *testing.T) {
 	}
 }
 
-// A wrong pin must still refuse, even when the presented cert is SAN-less.
-func TestSANLessCertWrongPinRefuses(t *testing.T) {
-	pair, _ := mintBareCert(t)
-	url := serveBareTLS(t, pair)
-	if _, _, _, ok := httpsMgmtClient(url, "tok", strings.Repeat("0", 64)); ok {
-		t.Fatal("httpsMgmtClient with wrong pin succeeded, want refusal")
+// The pin is the authentication, so it must be enforced per handshake rather
+// than checked once at load: a pinned client both serves a SAN-less node and
+// refuses a different certificate.
+func TestPinnedClientServesAndEnforcesPin(t *testing.T) {
+	pair, leaf := mintBareCert(t)
+	url, _ := serveSwappableTLS(t, pair)
+
+	c, _, fp, ok := httpsMgmtClient(url, "tok", mgmtCertFP(leaf))
+	if !ok || c == nil {
+		t.Fatal("httpsMgmtClient with a matching pin returned no client")
+	}
+	if want := mgmtCertFP(leaf); fp != want {
+		t.Fatalf("returned fp = %q, want %q", fp, want)
+	}
+	if _, err := c.Health(context.Background()); err != nil {
+		t.Fatalf("health through the pinned client: %v", err)
+	}
+
+	bad, _, _, _ := httpsMgmtClient(url, "tok", strings.Repeat("0", 64))
+	if bad == nil {
+		t.Fatal("httpsMgmtClient with a wrong pin returned no client, want a client that refuses")
+	}
+	if _, err := bad.Health(context.Background()); err == nil {
+		t.Fatal("wrong pin still served the management API, want handshake refusal")
+	}
+}
+
+// A persisted pin must build a usable client even when the node is not up
+// yet: blipc restarting seconds before blipd (host reboot, update) must not
+// latch the instance onto an unverifiable plain client for the whole run —
+// the failure mode that leaves a healthy resolver permanently "offline".
+func TestPinnedClientBuiltWhilePeerDown(t *testing.T) {
+	_, leaf := mintBareCert(t)
+	fp := mgmtCertFP(leaf)
+	// Nothing is listening: the pin alone must be enough to build the client.
+	c, _, gotFP, ok := httpsMgmtClient("https://127.0.0.1:1", "tok", fp)
+	if !ok || c == nil {
+		t.Fatal("httpsMgmtClient refused a persisted pin because the peer was down, want a pinned client")
+	}
+	if gotFP != fp {
+		t.Fatalf("returned fp = %q, want the persisted pin %q", gotFP, fp)
 	}
 }
 
@@ -104,7 +139,7 @@ func TestPinnedTLSConfigRejectsImpostor(t *testing.T) {
 	url := serveBareTLS(t, impostor)
 	hostport := strings.TrimPrefix(url, "https://")
 	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: upgradeProbeTimeout}, "tcp",
-		hostport, pinnedTLSConfig(leaf))
+		hostport, pinnedTLSConfig(mgmtCertFP(leaf)))
 	if err == nil {
 		conn.Close()
 		t.Fatal("pinned config accepted an impostor cert, want handshake failure")

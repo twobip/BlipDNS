@@ -7,7 +7,6 @@ package controller
 import (
 	"context"
 	"crypto/sha256"
-	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -900,13 +899,12 @@ func (f *Fleet) Add(ctx context.Context, cfg InstanceConfig) error {
 		target = up
 	}
 	client := control.NewClient(cfg.URL, cfg.Token)
-	var leaf *x509.Certificate
 	if strings.HasPrefix(target, "https://") {
-		if c, l, fp, ok := httpsMgmtClient(target, cfg.Token, cfg.MgmtCertFP); ok {
+		if c, _, fp, ok := httpsMgmtClient(target, cfg.Token, cfg.MgmtCertFP); ok {
 			if target != cfg.URL {
 				log.Printf("blipc: instance %q management API upgraded to HTTPS (%s)", cfg.ID, target)
 			}
-			cfg.URL, cfg.MgmtCertFP, client, leaf = target, fp, c, l
+			cfg.URL, cfg.MgmtCertFP, client = target, fp, c
 		}
 	}
 	warnInsecureInstanceURL(cfg.ID, cfg.URL)
@@ -914,7 +912,7 @@ func (f *Fleet) Add(ctx context.Context, cfg InstanceConfig) error {
 	if cfg.Label == "" {
 		cfg.Label = cfg.ID
 	}
-	inst := &Instance{Config: cfg, client: client, mgmtLeaf: leaf, fleet: f, last: f.now()}
+	inst := &Instance{Config: cfg, client: client, fleet: f, last: f.now()}
 	f.mu.Lock()
 	old := f.instances[cfg.ID]
 	f.instances[cfg.ID] = inst
@@ -980,7 +978,18 @@ func (f *Fleet) maybeMigrateMgmtTLS(inst *Instance, id, rawURL string) {
 	inst.mu.Lock()
 	inst.lastTLSProbe = f.now()
 	inst.mu.Unlock()
-	c, leaf, fp, ok := httpsMgmtClient(up, token, pinned)
+	// A persisted pin is checked per handshake, so httpsMgmtClient cannot tell
+	// a rotated cert from a matching one without a request. Persisting the
+	// migrated URL is a trust decision, so prove the cert first: a rotated or
+	// unreachable endpoint retries next interval and is never silently
+	// re-pinned.
+	if pinned != "" {
+		leaf := fetchMgmtLeaf(up)
+		if leaf == nil || mgmtCertFP(leaf) != pinned {
+			return
+		}
+	}
+	c, _, fp, ok := httpsMgmtClient(up, token, pinned)
 	if !ok {
 		return
 	}
@@ -989,7 +998,6 @@ func (f *Fleet) maybeMigrateMgmtTLS(inst *Instance, id, rawURL string) {
 	inst.Config.MgmtCertFP = fp
 	old := inst.client
 	inst.client = c
-	inst.mgmtLeaf = leaf
 	inst.mu.Unlock()
 	if old != nil {
 		old.CloseIdleConnections()
@@ -1030,7 +1038,6 @@ func (f *Fleet) RepinInstance(id string) (oldFP, newFP string, err error) {
 	inst.Config.MgmtCertFP = fp
 	prev := inst.client
 	inst.client = c
-	inst.mgmtLeaf = leaf
 	inst.mu.Unlock()
 	if prev != nil {
 		prev.CloseIdleConnections()
@@ -2573,10 +2580,10 @@ func (f *Fleet) Adopt(ctx context.Context, id, code string) error {
 		// saveConfig below snapshots inst.Config, so clear before it.
 		inst.Config.Claim = ""
 		old := inst.client
-		// Preserve the pinned management leaf across the token rotation:
+		// Preserve the pinned management cert across the token rotation:
 		// rebuilding a standard client would drop self-signed trust.
-		if inst.mgmtLeaf != nil && strings.HasPrefix(inst.Config.URL, "https://") {
-			inst.client = pinnedMgmtClient(inst.Config.URL, resp.Token, inst.mgmtLeaf)
+		if fp := inst.Config.MgmtCertFP; fp != "" && strings.HasPrefix(inst.Config.URL, "https://") {
+			inst.client = pinnedMgmtClient(inst.Config.URL, resp.Token, fp)
 		} else {
 			inst.client = control.NewClient(inst.Config.URL, resp.Token)
 		}

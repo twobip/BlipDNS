@@ -2,7 +2,6 @@ package controller
 
 import (
 	"context"
-	"crypto/x509"
 	"log"
 	"runtime/debug"
 	"strings"
@@ -46,10 +45,9 @@ type InstanceStatus struct {
 
 // Instance is a managed blipd with background poll + watch loops.
 type Instance struct {
-	Config   InstanceConfig
-	client   *control.Client
-	mgmtLeaf *x509.Certificate // pinned self-signed management leaf (in-memory; fingerprint persists as Config.MgmtCertFP)
-	fleet    *Fleet
+	Config InstanceConfig
+	client *control.Client
+	fleet  *Fleet
 
 	mu           sync.RWMutex
 	online       bool
