@@ -151,9 +151,10 @@ body.sidebar-collapsed .main { margin-left: 60px; }
   display: flex; align-items: center; gap: 12px;
   padding: 20px 0 16px;
   margin-bottom: 20px;
-  background: var(--bg-top);
+  background: var(--bg);
   /* ponytail: opaque, no backdrop-filter — a blurred sticky bar re-composites
-  every scroll frame; solid is visually identical on this theme, ~free. */
+  every scroll frame. Match the page base colour so the sticky bar masks
+  scrolled content without showing as a lighter band behind the title. */
 }
 .topbar-title h1 { margin: 0; font-size: 20px; font-weight: 650; letter-spacing: -0.02em; }
 .topbar-title p { margin: 2px 0 0; color: var(--muted); font-size: 12.5px; }
