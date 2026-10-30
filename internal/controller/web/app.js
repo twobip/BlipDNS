@@ -244,10 +244,10 @@ function updateConn() {
 /* ---------- dashboard ---------- */
 // d-range maps a dropdown value to a backend `since` window and chart bucket.
 const STAT_RANGES = {
-  "1h":  { since: "1h",   bucket: "10s", label: "1 hour",  dates: false },
-  "1d":  { since: "24h",  bucket: "5m",  label: "1 day",   dates: false },
-  "1w":  { since: "168h", bucket: "1h",  label: "1 week",  dates: true },
-  "1mo": { since: "720h", bucket: "6h",  label: "1 month", dates: true },
+  "1h":  { since: "1h",   bucket: "10m", label: "1 hour",  dates: false },
+  "1d":  { since: "24h",  bucket: "1h",  label: "1 day",   dates: false },
+  "1w":  { since: "168h", bucket: "24h", label: "1 week",  dates: true },
+  "1mo": { since: "720h", bucket: "24h", label: "1 month", dates: true },
 };
 
 // Dashboard totals come from blipc's persisted stats samples (SQLite), so they
@@ -371,6 +371,37 @@ function renderTopDomains(domains) {
 }
 
 /* ---------- chart ---------- */
+// clockHourSeries snaps the 1-hour chart to the current clock hour and
+// zero-fills the rest of the hour, so the x-axis always runs e.g. 10:00–11:00
+// even when it is only 10:30. Backend buckets are 10 minutes; the final point
+// is the hour boundary and only exists to anchor the right edge at 11:00.
+const HOUR_BUCKET_MS = 10 * 60 * 1000;
+function clockHourSeries(points) {
+  const start = new Date();
+  start.setMinutes(0, 0, 0);
+  const startMs = start.getTime();
+  const out = [];
+  for (let i = 0; i <= 6; i++) {
+    const lo = startMs + i * HOUR_BUCKET_MS;
+    let total = 0, blocked = 0;
+    if (i < 6) {
+      for (const p of points) {
+        const ts = new Date(p.timestamp).getTime();
+        if (ts >= lo && ts < lo + HOUR_BUCKET_MS) {
+          total += Number(p.total_queries) || 0;
+          blocked += Number(p.blocked_queries) || 0;
+        }
+      }
+    }
+    out.push({
+      timestamp: new Date(lo).toISOString(),
+      total_queries: total,
+      blocked_queries: blocked,
+    });
+  }
+  return out;
+}
+
 async function fetchStats() {
   const ctx = $("chart-queries");
   const rng = STAT_RANGES[chartRange] || STAT_RANGES["1d"];
@@ -402,7 +433,7 @@ async function fetchStats() {
       .catch(() => { /* best-effort */ });
     if (!ctx) return;
     const gl = ctx.getContext("2d");
-    const stats = d.series;
+    const stats = chartRange === "1h" ? clockHourSeries(d.series) : d.series;
     const labels = stats.map((s) => fmtChartTick(new Date(s.timestamp), rng.dates));
     const tq = stats.map((s) => s.total_queries);
     const bq = stats.map((s) => s.blocked_queries);
