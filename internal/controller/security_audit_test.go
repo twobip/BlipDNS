@@ -70,8 +70,9 @@ func TestReadKeyDeniedQueryHistory(t *testing.T) {
 	}
 
 	for _, path := range []string{"/api/queries", "/api/clients", "/api/client-names", "/api/events", "/api/upstream-errors",
-		"/api/settings", "/api/instances", "/api/records", "/api/blocklist", "/api/blocklist/export", "/api/doh-mobileconfig",
-		"/api/instances/demo/policies"} {
+		"/api/settings", "/api/instances", "/api/instances/update", "/api/records", "/api/blocklist", "/api/blocklist/export",
+		"/api/blocklist/sources", "/api/blocklist/status", "/api/doh-mobileconfig",
+		"/api/instances/demo/policies", "/api/instances/demo/adopt/status"} {
 		req := httptest.NewRequest(http.MethodGet, path, nil)
 		req.Header.Set("Authorization", "Bearer "+out.Key)
 		r := httptest.NewRecorder()

@@ -1221,6 +1221,22 @@ func TestServerFirstRunUI(t *testing.T) {
 	}
 }
 
+// Embedders that pass a setup token get the stricter behavior; the
+// standalone daemon passes "" and keeps first-claim setup.
+func TestServerFirstRunSetupOptionalToken(t *testing.T) {
+	srv := NewServerWithConfig("", "", NewFleet(""), nil, "", "optional-token")
+	body, _ := json.Marshal(map[string]string{
+		"username": "admin",
+		"password": "correct horse",
+		"confirm":  "correct horse",
+	})
+	rec := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/setup", bytes.NewReader(body)))
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("setup without configured token status = %d, want 403", rec.Code)
+	}
+}
+
 func TestServerFirstRunSetup(t *testing.T) {
 	cfgPath := filepath.Join(t.TempDir(), "blipc.yaml")
 	initial := []byte("listen: \"127.0.0.1:8500\"\ndefault_policy:\n  id: default\n  block_action: nxdomain\n")
@@ -1228,7 +1244,7 @@ func TestServerFirstRunSetup(t *testing.T) {
 		t.Fatal(err)
 	}
 	fleet := NewFleet(cfgPath)
-	// No token: first-run setup is AdGuard-style, whoever gets here first.
+	// Standalone default: first-claim setup, no token required.
 	srv := NewServerWithConfig("", "", fleet, nil, cfgPath, "")
 	body, _ := json.Marshal(map[string]string{
 		"username": "admin",

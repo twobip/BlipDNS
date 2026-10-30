@@ -6,6 +6,8 @@
   var skipBtn = document.getElementById("setup-skip");
   var nav = document.getElementById("setup-nav");
 
+  // Optional: embedders can supply #token=...; the standalone daemon uses
+  // first-claim setup and sends an empty token.
   var setupToken = new URLSearchParams(window.location.hash.replace(/^#/, "")).get("token") || "";
   var step = 1;
   var accountDone = false;

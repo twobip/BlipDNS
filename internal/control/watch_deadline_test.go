@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -13,16 +14,40 @@ import (
 )
 
 // deadlineSpy records deadline calls so the SSE handler's write deadlines
-// are observable without waiting out a real server timeout.
+// are observable without waiting out a real server timeout. The handler runs
+// on its own goroutine, so all fields are behind mu.
 type deadlineSpy struct {
 	http.ResponseWriter
-	writeAt, readAt       time.Time
-	writeCalls, readCalls int
+	mu         sync.Mutex
+	writeAt    time.Time
+	readAt     time.Time
+	writeCalls int
+	readCalls  int
 }
 
-func (s *deadlineSpy) SetWriteDeadline(t time.Time) error { s.writeCalls++; s.writeAt = t; return nil }
-func (s *deadlineSpy) SetReadDeadline(t time.Time) error  { s.readCalls++; s.readAt = t; return nil }
-func (s *deadlineSpy) Flush()                             {}
+func (s *deadlineSpy) SetWriteDeadline(t time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.writeCalls++
+	s.writeAt = t
+	return nil
+}
+
+func (s *deadlineSpy) SetReadDeadline(t time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.readCalls++
+	s.readAt = t
+	return nil
+}
+
+func (s *deadlineSpy) Flush() {}
+
+func (s *deadlineSpy) snapshot() (writeCalls int, writeAt time.Time, readCalls int, readAt time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.writeCalls, s.writeAt, s.readCalls, s.readAt
+}
 
 // The watch stream must outlive the API server's absolute ReadTimeout
 // (10 minutes): it used to die at exactly 10:00, making the controller
@@ -36,14 +61,15 @@ func TestWatchClearsReadDeadline(t *testing.T) {
 
 	srv.handleWatch(spy, req)
 
-	if spy.readCalls == 0 || !spy.readAt.IsZero() {
-		t.Errorf("read deadline = %v (%d calls), want the zero time (cleared)", spy.readAt, spy.readCalls)
+	writeCalls, writeAt, readCalls, readAt := spy.snapshot()
+	if readCalls == 0 || !readAt.IsZero() {
+		t.Errorf("read deadline = %v (%d calls), want the zero time (cleared)", readAt, readCalls)
 	}
 	// F-11: the write deadline must never be cleared — each write carries
 	// its own deadline instead, so a slow reader cannot stall the stream
 	// writer forever.
-	if spy.writeCalls != 0 && spy.writeAt.IsZero() {
-		t.Errorf("write deadline cleared (%d calls), want per-write deadlines", spy.writeCalls)
+	if writeCalls != 0 && writeAt.IsZero() {
+		t.Errorf("write deadline cleared (%d calls), want per-write deadlines", writeCalls)
 	}
 }
 
@@ -68,19 +94,24 @@ func TestWatchSetsPerWriteDeadline(t *testing.T) {
 	before := time.Now()
 	srv.Notify(WatchEvent{Type: "test"})
 	deadline := time.Now().Add(2 * time.Second)
-	for spy.writeCalls == 0 && time.Now().Before(deadline) {
+	for {
+		writeCalls, _, _, _ := spy.snapshot()
+		if writeCalls != 0 || !time.Now().Before(deadline) {
+			break
+		}
 		time.Sleep(5 * time.Millisecond)
 	}
 	cancel()
 	<-done
 
-	if spy.writeCalls == 0 {
+	writeCalls, writeAt, _, _ := spy.snapshot()
+	if writeCalls == 0 {
 		t.Fatal("no write deadline set for the SSE event write")
 	}
-	if spy.writeAt.IsZero() {
+	if writeAt.IsZero() {
 		t.Fatal("write deadline is the zero time (cleared), want a bounded per-write deadline")
 	}
-	if spy.writeAt.Before(before) || spy.writeAt.After(before.Add(sseWriteTimeout+time.Minute)) {
-		t.Fatalf("write deadline = %v, want ~%v after the write", spy.writeAt, sseWriteTimeout)
+	if writeAt.Before(before) || writeAt.After(before.Add(sseWriteTimeout+time.Minute)) {
+		t.Fatalf("write deadline = %v, want ~%v after the write", writeAt, sseWriteTimeout)
 	}
 }

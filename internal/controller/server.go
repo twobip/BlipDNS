@@ -34,9 +34,12 @@ type Server struct {
 	ui         fs.FS // embedded web assets (index.html etc.)
 	configPath string
 	setupToken string
-	setupMu    sync.Mutex
-	sweepOnce  sync.Once
-	selfUpdate *SelfUpdater
+	// setupTokenFile is the 0600 box-local file the token was read from; it
+	// is removed after a successful setup so the secret does not linger.
+	setupTokenFile string
+	setupMu        sync.Mutex
+	sweepOnce      sync.Once
+	selfUpdate     *SelfUpdater
 	// trustedProxies gates X-Forwarded-For/Proto/Host for reverse-proxy
 	// deployments. Nil/empty = forwarded headers are never trusted.
 	trustedProxies *ProxyTrust
@@ -142,6 +145,14 @@ func NewServer(username, password string, fleet *Fleet, ui fs.FS) *Server {
 // token used by first-run setup.
 func NewServerWithConfig(username, password string, fleet *Fleet, ui fs.FS, configPath, setupToken string) *Server {
 	return &Server{auth: NewAuth(username, password), fleet: fleet, ui: ui, configPath: configPath, setupToken: setupToken, selfUpdate: NewSelfUpdater()}
+}
+
+// SetSetupTokenFile records the 0600 file the first-run setup token was read
+// from, so handleSetup can remove it once the administrator account exists.
+func (s *Server) SetSetupTokenFile(path string) {
+	s.setupMu.Lock()
+	s.setupTokenFile = path
+	s.setupMu.Unlock()
 }
 
 // SetTrustedProxies configures which immediate peers may supply
@@ -507,15 +518,24 @@ func readScopeDenied(path string) bool {
 		// infrastructure a dashboard-read key has no need for.
 		"/api/settings",
 		"/api/instances",
+		"/api/instances/update",
 		"/api/records",
 		"/api/blocklist",
 		"/api/blocklist/export",
+		"/api/blocklist/sources",
+		"/api/blocklist/status",
 		"/api/doh-mobileconfig":
 		return true
 	}
 	// Per-instance policies carry per-client allow/block domain lists plus
 	// client IDs and networks — the same policy class as /api/blocklist.
-	if strings.HasPrefix(path, "/api/instances/") && strings.HasSuffix(path, "/policies") {
+	// Adoption state and process/query-log tails are infrastructure detail
+	// too, so keep them off a least-privilege read credential.
+	if strings.HasPrefix(path, "/api/instances/") &&
+		(strings.HasSuffix(path, "/policies") ||
+			strings.HasSuffix(path, "/adopt/status") ||
+			strings.HasSuffix(path, "/logs") ||
+			strings.HasSuffix(path, "/query-log")) {
 		return true
 	}
 	return false
@@ -574,9 +594,9 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 // handleSetup creates the first controller credentials and immediately signs
 // the operator in. It is deliberately unavailable after the first success.
-// AdGuard-style: no setup token — whoever reaches this first-boot page first
-// claims the controller, so only boot unconfigured on a trusted network. The
-// per-IP brute-force limiter still applies.
+// The standalone daemon uses first-claim setup (the operator starts it
+// manually via systemd); embedders can pass a setup token to require one.
+// Keep the first boot on a trusted network or behind HTTPS.
 func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -592,6 +612,7 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 		Username string `json:"username"`
 		Password string `json:"password"`
 		Confirm  string `json:"confirm"`
+		Token    string `json:"token"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -600,10 +621,18 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 	}
 	// Setup mints a session cookie, so require the same Origin check as
 	// login; otherwise a cross-site auto-POST mints a session (setup CSRF).
-	// (Tokenless first-run setup has no secret to guess, so there is no
-	// failure bucket here: the endpoint goes inert after first success.)
-	if !s.csrfOriginAllowed(r) {
+	if !s.csrfOriginAllowed(r) || r.Header.Get("Sec-Fetch-Site") == "cross-site" {
 		http.Error(w, "cross-site request rejected", http.StatusForbidden)
+		return
+	}
+	// setupMu is held for the whole handler, so these fields are stable. A
+	// token is optional: the standalone daemon deliberately uses first-claim
+	// setup (the operator starts it manually via systemd); embedders that
+	// pass a token get the additional check.
+	wantToken := s.setupToken
+	tokenFile := s.setupTokenFile
+	if wantToken != "" && !constantTimeEq(req.Token, wantToken) {
+		http.Error(w, "invalid setup token", http.StatusForbidden)
 		return
 	}
 	req.Username = strings.TrimSpace(req.Username)
@@ -642,6 +671,11 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.auth.MintCookieSecure(w, r, id, s.isSecure(r))
+	if tokenFile != "" {
+		// The account is live; a stale token file is no longer useful. Ignore
+		// removal errors: setup already succeeded and the endpoint is inert.
+		_ = os.Remove(tokenFile)
+	}
 	writeJSON(w, map[string]bool{"ok": true})
 }
 

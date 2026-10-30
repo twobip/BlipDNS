@@ -1386,10 +1386,33 @@ func (s *Server) handleAdopt(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req AdoptRequest
-	// Limiter state is checked before the body is read, and the body itself
-	// is a few dozen bytes: reject a lying Content-Length up front and bound
-	// the read in time so trickled bodies cannot pin a goroutine + fd for
-	// the server's 10-minute ReadTimeout.
+	// Early adopted check without holding adoptMu across the body read: a
+	// slow unauthenticated POST must not stall management auth (which also
+	// reads adoptMu to check the controller pin). The body is a few dozen
+	// bytes; reject a lying Content-Length up front and bound the read in
+	// time so trickled bodies cannot pin a goroutine + fd for the server's
+	// 10-minute ReadTimeout.
+	s.adoptMu.Lock()
+	adopted := s.adopted
+	s.adoptMu.Unlock()
+	if adopted {
+		writeJSON(w, AdoptResponse{Adopted: true, Message: "already adopted"})
+		return
+	}
+	if r.ContentLength > 2<<20 {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(15 * time.Second))
+	// Bound the body like every other management endpoint so a giant payload
+	// cannot be slurped (the claim code itself is a few dozen bytes).
+	r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	// Re-check under the lock: another request may have adopted (or reset)
+	// while this body was being read.
 	s.adoptMu.Lock()
 	defer s.adoptMu.Unlock()
 	if s.adopted {
@@ -1403,18 +1426,6 @@ func (s *Server) handleAdopt(w http.ResponseWriter, r *http.Request) {
 	src := adoptIP(r)
 	if f := s.adoptFails[src]; f != nil && time.Now().Before(f.until) {
 		http.Error(w, "too many attempts; try again later", http.StatusTooManyRequests)
-		return
-	}
-	if r.ContentLength > 2<<20 {
-		http.Error(w, "bad request", http.StatusBadRequest)
-		return
-	}
-	_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(15 * time.Second))
-	// Bound the body like every other management endpoint so a giant payload
-	// cannot be slurped (the claim code itself is a few dozen bytes).
-	r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
 	if req.Code == "" || !checkClaimCode(req.Code, s.claimCode) {

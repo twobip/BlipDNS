@@ -233,9 +233,11 @@ func main() {
 	}
 	// Effective dashboard scheme is needed for the first-run setup URL.
 	dashboardTLS := effectiveDashboardTLS(cfg)
-	// First-run bootstrap: no admin exists yet. AdGuard-style, no token —
-	// whoever opens this one-time setup page first claims the controller,
-	// so only boot unconfigured on a trusted network.
+	// First-run bootstrap: no admin exists yet. AdGuard-style: whoever opens
+	// this one-time setup page first claims the controller. The daemon is
+	// normally started manually via systemd after installation, so keep the
+	// first boot on a trusted network or behind HTTPS. An embedder can still
+	// pass a setup token to NewServerWithConfig to require one.
 	if cfg.Username == "" || authPass == "" || !controller.NewAuth(cfg.Username, authPass).Configured() {
 		log.Printf("blipc: first-run setup (one-time): open http%s://%s/setup to create the administrator account", map[bool]string{true: "s", false: ""}[dashboardTLS], cfg.Listen)
 	}

@@ -54,6 +54,7 @@ jobs:
           go build -trimpath -pgo=auto -ldflags "-s -w -X main.version=${STAMP}" -o blipctl-linux-amd64 ./cmd/blipctl
           cp scripts/blipd-update.sh blipd-update.sh
           cp scripts/blipd-install.sh blipd-install.sh
+          cp scripts/blipd-keepalived.sh blipd-keepalived.sh
           cp scripts/blipc-update.sh blipc-update.sh
           cp scripts/blipc-install.sh blipc-install.sh
           # Finding 21: ship the hardened systemd units as signed release
@@ -61,7 +62,7 @@ jobs:
           # re-emitting weaker inline copies.
           cp deploy/blipd.service blipd.service
           cp deploy/blipc.service blipc.service
-          sha256sum blipd-linux-amd64 blipc-linux-amd64 blipctl-linux-amd64 blipd-update.sh blipd-install.sh blipc-update.sh blipc-install.sh blipd.service blipc.service > SHA256SUMS
+          sha256sum blipd-linux-amd64 blipc-linux-amd64 blipctl-linux-amd64 blipd-update.sh blipd-install.sh blipd-keepalived.sh blipc-update.sh blipc-install.sh blipd.service blipc.service > SHA256SUMS
           echo "--- built artifacts ---"
           ls -la blipd-linux-amd64 blipc-linux-amd64 blipctl-linux-amd64 SHA256SUMS
 
@@ -90,7 +91,7 @@ jobs:
         run: |
           # Move the "dev" tag to this commit and (re)create the prerelease.
           gh release delete dev --cleanup-tag --yes --repo "$GITHUB_REPOSITORY" 2>/dev/null || true
-          files=(blipd-linux-amd64 blipc-linux-amd64 blipctl-linux-amd64 blipd-update.sh blipd-install.sh blipc-update.sh blipc-install.sh blipd.service blipc.service SHA256SUMS)
+          files=(blipd-linux-amd64 blipc-linux-amd64 blipctl-linux-amd64 blipd-update.sh blipd-install.sh blipd-keepalived.sh blipc-update.sh blipc-install.sh blipd.service blipc.service SHA256SUMS)
           # .sig only exists once RELEASE_SIGNING_KEY is set (signing deferred).
           [ -f SHA256SUMS.sig ] && files+=(SHA256SUMS.sig)
           gh release create dev \

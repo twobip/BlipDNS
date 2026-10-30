@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -19,12 +20,14 @@ import (
 )
 
 const (
-	// Keepalived reads the config via a one-time symlink:
-	//   ln -s /var/lib/blipd/keepalived.conf /etc/keepalived/keepalived.conf
-	// This keeps the API writing only inside blipd's own state dir, which the
-	// service user can always write regardless of ProtectSystem settings.
-	defaultConfigPath = "/var/lib/blipd/keepalived.conf"
+	// Keepalived reads a root-owned config. The service user cannot write it:
+	// ApplyHA hands structured fields to the root helper, which validates them
+	// and renders the fixed template itself. This closes the service→root path
+	// where a compromised blipd could inject vrrp_script/notify_* commands.
+	defaultConfigPath = "/etc/keepalived/keepalived.conf"
 	defaultStatePath  = "/var/lib/blipd/ha.json"
+	// applyHelperPath is the root-owned helper installed by install-blipd.sh.
+	applyHelperPath = "/usr/local/sbin/blipd-keepalived"
 )
 
 var (
@@ -243,79 +246,21 @@ func (m *Manager) ApplyHA() error {
 		m.recordError(err)
 		return err
 	}
-	text := render(cfg)
 	// Unauthenticated VRRP lets any LAN host forge advertisements and
 	// seize the VIP: warn loudly, but keep existing valid configs working.
 	if cfg.AuthPass == "" {
 		log.Printf("ha: WARNING: applying VRRP without advertisement authentication; any host on the LAN can seize %s", cfg.VirtualIP)
 	}
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0750); err != nil {
-		return err
+	// Apply through the root helper: it validates every field and renders the
+	// fixed keepalived template itself. The service never writes a config that
+	// keepalived will execute as root.
+	if err := runCommand("/usr/bin/sudo", append([]string{"-n", applyHelperPath}, applyArgs(cfg)...)...); err != nil {
+		m.recordError(err)
+		return fmt.Errorf("apply keepalived configuration: %w", err)
 	}
-	tmp, err := os.CreateTemp(dir, ".keepalived-*")
-	if err != nil {
-		return err
-	}
-	name := tmp.Name()
-	defer os.Remove(name)
-	if err := tmp.Chmod(0600); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if _, err := tmp.WriteString(text); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(name, path); err != nil {
-		return err
-	}
-	if err := os.Chmod(path, 0600); err != nil {
-		return err
-	}
-	// Reload keepalived so it picks up the new config. keepalived handles
-	// SIGHUP by re-reading its config and doing a graceful restart of VRRP
-	// advertisements. blipd runs as the unprivileged 'blip' user, so we
-	// escalate via sudo (with a narrow NOPASSWD sudoers rule installed by
-	// the install script) to reload the root-owned keepalived service.
-	//
-	// Two reload strategies are tried, both via sudo -n (non-interactive):
-	//   1. systemctl reload — preferred but only works if the keepalived
-	//      systemd unit defines ExecReload.
-	//   2. pkill -HUP — sends SIGHUP directly; used when the systemd unit
-	//      has no reload handler. Requires a sudoers rule for pkill too.
-	//
-	// Both the systemctl and pkill sudoers rules are installed by
-	// install-blipd.sh. Absolute paths only: bare names would resolve via
-	// PATH (restricted but attacker-influenced under systemd), and the old
-	// unsudoed last-resort pkill is dead code as the unprivileged blip user.
-	reloadCmds := [][]string{
-		{"/usr/bin/sudo", "-n", "/usr/bin/systemctl", "reload", "keepalived"},
-	}
-	for _, args := range reloadCmds {
-		if commandSucceeds(args[0], args[1:]...) {
-			m.clearError()
-			return nil
-		}
-	}
-	// Fallback: send SIGHUP directly to keepalived via sudo. This works
-	// when blipd runs as the unprivileged 'blip' user with a matching
-	// NOPASSWD sudoers rule for pkill.
-	hupCmds := [][]string{
-		{"/usr/bin/sudo", "-n", "/usr/bin/pkill", "-HUP", "keepalived"},
-	}
-	for _, args := range hupCmds {
-		if commandSucceeds(args[0], args[1:]...) {
-			m.clearError()
-			return nil
-		}
-	}
-	err = fmt.Errorf("keepalived reload unavailable: no sudo rule matched (need systemctl reload or pkill -HUP)")
-	m.recordError(err)
-	return err
+	m.clearError()
+	log.Printf("ha: keepalived configuration applied (path %s)", path)
+	return nil
 }
 
 func (m *Manager) DisableHA() error {
@@ -407,11 +352,9 @@ func interfaceHasIP(name string, want net.IP) error {
 }
 
 func (m *Manager) validateRendered(cfg control.HAConfig) error {
-	dir := filepath.Dir(m.path)
-	if err := os.MkdirAll(dir, 0750); err != nil {
-		return err
-	}
-	tmp, err := os.CreateTemp(dir, ".keepalived-validate-*")
+	// The live config is root-owned under /etc/keepalived, which the service
+	// cannot write. Validate a throwaway copy in the system temp dir instead.
+	tmp, err := os.CreateTemp("", ".keepalived-validate-*")
 	if err != nil {
 		return err
 	}
@@ -432,6 +375,31 @@ func (m *Manager) validateRendered(cfg control.HAConfig) error {
 		return fmt.Errorf("keepalived configuration validation failed: %w", err)
 	}
 	return nil
+}
+
+// applyArgs renders cfg into the fixed positional contract understood by
+// scripts/blipd-keepalived.sh. Keep this in sync with that helper: it is the
+// trust boundary that prevents a compromised service from writing a raw
+// keepalived config.
+func applyArgs(cfg control.HAConfig) []string {
+	peer := cfg.PeerIP
+	if cfg.Mode != "unicast" {
+		// render() ignores peer_ip outside unicast mode; the helper rejects a
+		// non-empty peer there, so keep the two paths consistent.
+		peer = ""
+	}
+	return []string{
+		cfg.Mode,
+		cfg.NodeRole,
+		cfg.Interface,
+		cfg.SourceIP,
+		peer,
+		cfg.VirtualIP,
+		strconv.Itoa(cfg.VirtualRouterID),
+		strconv.Itoa(cfg.Priority),
+		strconv.Itoa(cfg.AdvertIntervalSec),
+		cfg.AuthPass,
+	}
 }
 
 func render(cfg control.HAConfig) string {

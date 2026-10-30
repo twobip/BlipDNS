@@ -100,7 +100,7 @@ If systemd is not available, run blipc manually and keep it running:
 sudo /usr/local/bin/blipc -config /etc/blipc/blipc.yaml
 ```
 
-Copy the setup URL printed by blipc. Open it in a browser. The setup wizard walks through three steps: administrator account (an **8–72 character** password, you are signed in automatically), dashboard bind address (applies after a controller restart), and adopting a blipd instance (skippable). After the account is created, setup is disabled and you can manage instances from the dashboard. No token is needed: whoever opens the setup page first claims the controller, so use it on a trusted network or over HTTPS.
+Copy the setup URL printed by blipc. Open it in a browser. The setup wizard walks through three steps: administrator account (an **8–72 character** password, you are signed in automatically), dashboard bind address (applies after a controller restart), and adopting a blipd instance (skippable). After the account is created, setup is disabled and you can manage instances from the dashboard. No token is needed: whoever opens the setup page first claims the controller, so use it on a trusted network or over HTTPS, and start the service only when you are ready to claim it.
 
 Both scripts accept an optional argument: `master` (default), `stable`, or a version tag (e.g. `v1.2.3`), plus the `--install-deps` option. They clone the repo, build from source, and install under `/usr/local/bin` with secure config directories.
 

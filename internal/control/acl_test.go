@@ -31,6 +31,15 @@ func TestParseAllowedNetworks(t *testing.T) {
 			t.Errorf("ParseAllowedNetworks(%q) accepted, want rejection", bad)
 		}
 	}
+	// Split CIDRs can cover the whole space without any single /0 entry.
+	for _, bad := range [][]string{
+		{"0.0.0.0/1", "128.0.0.0/1"},
+		{"::/1", "8000::/1"},
+	} {
+		if _, err := ParseAllowedNetworks(bad); err == nil {
+			t.Errorf("ParseAllowedNetworks(%v) accepted, want full-space rejection", bad)
+		}
+	}
 }
 
 // fakeACLController validates with the shared parser, like dnsserver does.

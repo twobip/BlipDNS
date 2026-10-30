@@ -53,6 +53,13 @@ func ParseAllowedNetworks(values []string) ([]*net.IPNet, error) {
 		}
 		out = append(out, n)
 	}
+	// Reject split full-space coverage too (0.0.0.0/1 + 128.0.0.0/1, or the
+	// IPv6 equivalent): a single /0 is not the only way to allow the whole
+	// internet, and this check is the last line of defense against an
+	// accidental open resolver. The trusted-proxy parser uses the same guard.
+	if FullSpaceCovered(out) {
+		return nil, fmt.Errorf("allowed_networks entries collectively cover the whole internet; leave the list empty (with open_recursion: true) for open recursion instead")
+	}
 	return out, nil
 }
 

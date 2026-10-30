@@ -71,6 +71,24 @@ func TestRenderDoesNotContainRawUnsafeAuth(t *testing.T) {
 	}
 }
 
+func TestApplyArgsContract(t *testing.T) {
+	cfg := control.HAConfig{
+		Enabled: true, Mode: "unicast", NodeRole: "primary", Interface: "eth0",
+		SourceIP: "192.0.2.10", PeerIP: "192.0.2.11", VirtualIP: "192.0.2.1/24",
+		VirtualRouterID: 51, Priority: 101, AdvertIntervalSec: 1, AuthPass: "safe1234",
+	}
+	got := applyArgs(cfg)
+	want := []string{"unicast", "primary", "eth0", "192.0.2.10", "192.0.2.11", "192.0.2.1/24", "51", "101", "1", "safe1234"}
+	if len(got) != len(want) {
+		t.Fatalf("applyArgs len = %d, want %d (%v)", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("applyArgs[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
 func TestRenderSpecifiesScriptUser(t *testing.T) {
 	// enable_script_security makes keepalived run scripts as a non-root user;
 	// without an explicit `user` directive keepalived falls back to the

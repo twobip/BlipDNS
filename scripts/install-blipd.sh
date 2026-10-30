@@ -424,12 +424,14 @@ install -m 0755 "$TMPDIR/blipd" "$BIN_DIR/blipd"
 if [ "$BUILD_FROM_SOURCE" -eq 1 ]; then
   install -m 0755 "$TMPDIR/src/scripts/blipd-update.sh" /usr/local/sbin/blipd-update
   install -m 0755 "$TMPDIR/src/scripts/blipd-install.sh" /usr/local/sbin/blipd-install
+  install -m 0755 "$TMPDIR/src/scripts/blipd-keepalived.sh" /usr/local/sbin/blipd-keepalived
 else
   # Same as blipc: the install helper runs as root, so fetch it through
   # SHA256SUMS verification like the binary (see release.yml assets).
   fetch_verified "$TAG" blipd-update.sh /usr/local/sbin/blipd-update
   fetch_verified "$TAG" blipd-install.sh /usr/local/sbin/blipd-install
-  chmod 0755 /usr/local/sbin/blipd-update /usr/local/sbin/blipd-install
+  fetch_verified "$TAG" blipd-keepalived.sh /usr/local/sbin/blipd-keepalived
+  chmod 0755 /usr/local/sbin/blipd-update /usr/local/sbin/blipd-install /usr/local/sbin/blipd-keepalived
 fi
 # Only the install helper is allowed to run as root; the download (blipd-update)
 # runs unprivileged as the blip service user.
@@ -451,14 +453,13 @@ EOF
 chmod 0440 /etc/sudoers.d/blipd-restart
 visudo -cf /etc/sudoers.d/blipd-restart
 
-# Allow the 'blip' user to reload keepalived (needed for HA priority changes
-# during fleet updates — blipd reloads keepalived to re-read the rendered
-# config). Both `systemctl reload` and `pkill -HUP` are permitted: the
-# former is preferred, the latter is the SIGHUP fallback when the systemd
-# unit lacks an ExecReload handler.
+# HA config is applied by a root-owned helper that accepts structured fields
+# only and renders the fixed keepalived template itself. Do NOT grant the
+# service account a raw keepalived reload: keepalived executes vrrp_script /
+# notify_* as root, and a service-writable config would be a service→root
+# escalation path.
 cat > /etc/sudoers.d/blipd-keepalived <<'EOF'
-blip ALL=(root) NOPASSWD: /usr/bin/systemctl reload keepalived
-blip ALL=(root) NOPASSWD: /usr/bin/pkill -HUP keepalived
+blip ALL=(root) NOPASSWD: /usr/local/sbin/blipd-keepalived
 EOF
 chmod 0440 /etc/sudoers.d/blipd-keepalived
 visudo -cf /etc/sudoers.d/blipd-keepalived
@@ -468,12 +469,13 @@ log "creating config and state directories"
 mkdir -p "$CONFIG_DIR" "$STATE_DIR" /etc/keepalived
 chmod 700 "$CONFIG_DIR" "$STATE_DIR"
 
-# Point keepalived at blipd's rendered config. Debian's keepalived.service ships
-# with "ConditionFileNotEmpty=/etc/keepalived/keepalived.conf", so without this
-# symlink keepalived refuses to start and the VRRP VIP never comes up. The target
-# won't exist until HA is first applied in the controller; a dangling symlink is
-# fine (keepalived simply won't start until then, which is correct).
-ln -sfn "$STATE_DIR/keepalived.conf" /etc/keepalived/keepalived.conf
+# The root helper writes /etc/keepalived/keepalived.conf itself. Remove the
+# legacy symlink to the old service-writable path: keeping it would point
+# keepalived back at a file the blip user can rewrite (service→root path).
+if [ -L /etc/keepalived/keepalived.conf ]; then
+  rm -f /etc/keepalived/keepalived.conf
+fi
+chmod 0755 /etc/keepalived
 
 # Create a default config if none exists.
 if [ ! -f "$CONFIG_DIR/blipd.yaml" ]; then
