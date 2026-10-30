@@ -29,6 +29,9 @@
   --red:       #f76b6b;
   --purple:    #a78bfa;
 
+  /* width of the centered content column (and the title bar above it) */
+  --content-w:  1440px;
+
   --radius:    12px;
   --radius-sm: 8px;
   --shadow-1:  0 1px 2px rgba(0,0,0,.4), 0 2px 12px rgba(0,0,0,.25);
@@ -149,8 +152,8 @@ body.sidebar-collapsed .main { margin-left: 60px; }
 .topbar {
   position: sticky; top: 0; z-index: 30;
   display: flex; align-items: center; gap: 12px;
+  width: 100%; max-width: var(--content-w); margin: 0 auto 20px;
   padding: 20px 0 16px;
-  margin-bottom: 20px;
   background: var(--bg-top);
   /* ponytail: opaque, no backdrop-filter — a blurred sticky bar re-composites
   every scroll frame; solid is visually identical on this theme, ~free. */
@@ -622,7 +625,9 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
 .seg button { border: none; background: transparent; color: var(--muted); font-size: 12.5px; font-weight: 500; padding: 5px 12px; border-radius: 7px; cursor: pointer; transition: all .15s; }
 .seg button.active { background: var(--surface-3); color: var(--text); box-shadow: 0 1px 3px rgba(0,0,0,.3); }
 
-.stack { display: flex; flex-direction: column; gap: 24px; }
+/* Content column: the sidebar and topbar stay full-bleed, while every page's
+   body is capped to a fixed width and centered on wider displays. */
+.stack { display: flex; flex-direction: column; gap: 24px; width: 100%; max-width: var(--content-w); margin-inline: auto; }
 .row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
 .mt { margin-top: 16px; }
 .muted { color: var(--muted); } .faint { color: var(--faint); }
