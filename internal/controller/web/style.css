@@ -367,6 +367,9 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
 .ql-table {
   border: none; border-radius: 0; box-shadow: none; background: transparent;
   max-height: min(80vh, 900px); overflow-y: auto;
+  /* Rows are windowed: the spacer <tr>s above/below the window already keep the
+     scroll offset stable, so the browser's scroll anchoring must not "help". */
+  overflow-anchor: none;
 }
 .ql-foot { font-size: 12.5px; }
 .ql-foot .hint { margin-left: auto; }
@@ -377,7 +380,9 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
   padding: 11px 16px;
 }
 #view-queries .tbl tbody tr { transition: none; }
-#view-queries .tbl tbody td { padding: 13px 16px; }
+/* Every row renders on exactly one line: the windowed table derives its spacer
+   heights from a single measured row height, so rows may never wrap. */
+#view-queries .tbl tbody td { padding: 13px 16px; white-space: nowrap; }
 #view-queries .tbl>thead th:nth-child(1) { width: 96px; }
 #view-queries .tbl>thead th:nth-child(2) { width: auto; }
 #view-queries .tbl>thead th:nth-child(3) { width: 112px; }
@@ -389,7 +394,11 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
 
 #view-queries .tbl tbody tr:hover { background: rgba(255,255,255,.025); }
 #view-queries .tbl tbody td { border-bottom: none; }
-#view-queries .tbl tbody tr:nth-child(even):not(.q-row-block) { background: rgba(255,255,255,.022); }
+/* Zebra striping follows the absolute row index (.q-alt), not :nth-child, so it
+   stays stable while the window scrolls. */
+#view-queries .tbl tbody tr.q-alt:not(.q-row-block) { background: rgba(255,255,255,.022); }
+/* Height-only stand-in for the rows outside the render window. */
+#view-queries .tbl tbody tr.q-pad td { padding: 0; border: 0; }
 
 /* blocked rows get a red tint + accent edge */
 #view-queries .tbl tbody tr.q-row-block { background: rgba(247,107,107,.05); }
