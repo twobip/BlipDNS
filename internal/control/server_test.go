@@ -785,3 +785,81 @@ func TestStatsIncludesRefusedClients(t *testing.T) {
 		t.Errorf("refused_clients = %+v, want one entry 10.0.0.1 with 7", st.RefusedClients)
 	}
 }
+
+type fakeDNSSEC struct {
+	on   bool
+	sets int
+}
+
+func (f *fakeDNSSEC) SetDNSSEC(on bool)   { f.on = on; f.sets++ }
+func (f *fakeDNSSEC) DNSSECEnabled() bool { return f.on }
+
+func TestDNSSECEndpoint(t *testing.T) {
+	srv := NewServerWithBlocklist("tok", filter.NewStore(nil), cache.New(0, 0), &Counters{}, "blipd/test", nil)
+	dc := &fakeDNSSEC{}
+	srv.SetDNSSECController(dc)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	req, _ := http.NewRequest(http.MethodPut, ts.URL+"/api/v1/dnssec", strings.NewReader(`{"enabled":true}`))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("unauth status = %d, want 401", resp.StatusCode)
+	}
+
+	authReq := func(method, body string) *http.Response {
+		req, _ := http.NewRequest(method, ts.URL+"/api/v1/dnssec", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer tok")
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp
+	}
+
+	resp = authReq(http.MethodGet, "")
+	var got map[string]bool
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if got["enabled"] {
+		t.Fatal("GET enabled = true, want false")
+	}
+
+	resp = authReq(http.MethodPut, `{"enabled":true}`)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("PUT status = %d, want 200", resp.StatusCode)
+	}
+	if !dc.on || dc.sets != 1 {
+		t.Fatalf("SetDNSSEC calls = %d, on = %v; want 1, true", dc.sets, dc.on)
+	}
+
+	// /stats reports the mode so the controller can reconcile after a restart.
+	req, _ = http.NewRequest(http.MethodGet, ts.URL+"/api/v1/stats", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var st StatsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&st); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if !st.DNSSEC {
+		t.Fatal("stats dnssec = false, want true")
+	}
+
+	resp = authReq(http.MethodPut, `{"enabled":false}`)
+	resp.Body.Close()
+	if dc.on {
+		t.Fatal("SetDNSSEC(false) did not disable")
+	}
+}

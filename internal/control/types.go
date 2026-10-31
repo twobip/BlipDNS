@@ -58,6 +58,9 @@ type StatsResponse struct {
 	// RateLimited counts queries dropped because they exceeded the per-client
 	// rate limit.
 	RateLimited uint64 `json:"rate_limited,omitempty"`
+	// DNSSEC reports whether delegated DNSSEC is enabled on this instance.
+	// Always serialized: false is a meaningful state the controller reconciles.
+	DNSSEC bool `json:"dnssec"`
 	// RefusedClients lists the top clients by rate-limited queries, highest
 	// first. Bounded server-side so a spoofed-source flood cannot bloat the
 	// stats payload.
@@ -109,6 +112,12 @@ type SetDoHRequest struct {
 type SetRateLimitRequest struct {
 	QPS   int `json:"qps"`
 	Burst int `json:"burst,omitempty"`
+}
+
+// SetDNSSECRequest toggles delegated DNSSEC (validation is performed by
+// trusted upstreams, not by blipd).
+type SetDNSSECRequest struct {
+	Enabled bool `json:"enabled"`
 }
 
 // SetACLRequest replaces the instance's recursion ACL (CIDRs/IPs allowed to
@@ -194,6 +203,10 @@ type WatchEvent struct {
 	// Cached reports whether the answer was served from the response cache.
 	DurationUs int64 `json:"duration_us,omitempty"`
 	Cached     bool  `json:"cached,omitempty"`
+	// DNSSEC reports that the upstream answer was DNSSEC-validated (AD=1),
+	// even when the client did not ask for the AD bit. False for local,
+	// blocked, or error answers.
+	DNSSEC bool `json:"dnssec,omitempty"`
 	// Upstream names the resolver that answered a "pass" event (e.g.
 	// "auto (DoH)" or "Local (udp://...)"); "" when unknown or cache-served.
 	Upstream string `json:"upstream,omitempty"`

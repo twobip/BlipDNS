@@ -301,6 +301,12 @@ func (c *Client) SetRateLimit(ctx context.Context, qps, burst int) error {
 	return c.do(ctx, http.MethodPut, "/api/v1/ratelimit", &SetRateLimitRequest{QPS: qps, Burst: burst}, nil)
 }
 
+// SetDNSSEC enables or disables delegated DNSSEC on the instance. Validation
+// is performed by the upstreams marked trust_ad, not by blipd itself.
+func (c *Client) SetDNSSEC(ctx context.Context, enabled bool) error {
+	return c.do(ctx, http.MethodPut, "/api/v1/dnssec", &SetDNSSECRequest{Enabled: enabled}, nil)
+}
+
 // SetAllowedNetworks replaces the instance's recursion ACL (CIDRs/IPs
 // allowed to recurse). An empty list opens recursion. Invalid entries and
 // catch-all /0 CIDRs are rejected server-side.

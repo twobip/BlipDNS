@@ -98,6 +98,7 @@ type Server struct {
 type Controllers struct {
 	DoH       DoHController
 	RateLimit RateLimitController
+	DNSSEC    DNSSECController
 	ACL       ACLController
 	Cache     CacheController
 	Records   RecordController
@@ -146,6 +147,22 @@ type RateLimitController interface {
 func (s *Server) SetRateLimitController(c RateLimitController) {
 	s.mu.Lock()
 	s.ctrls.RateLimit = c
+	s.mu.Unlock()
+}
+
+// DNSSECController is the piece of the DNS server the management API can
+// reconfigure at runtime: delegated DNSSEC on/off. The controller reports it
+// back via stats so its poll loop can converge it after a restart.
+type DNSSECController interface {
+	SetDNSSEC(enabled bool)
+	DNSSECEnabled() bool
+}
+
+// SetDNSSECController wires the DNS server (which owns the DNSSEC mode and
+// cache) into the management API so Settings changes can toggle it live.
+func (s *Server) SetDNSSECController(c DNSSECController) {
+	s.mu.Lock()
+	s.ctrls.DNSSEC = c
 	s.mu.Unlock()
 }
 
@@ -434,6 +451,7 @@ func (s *Server) handler(local bool) http.Handler {
 	mux.HandleFunc("/api/v1/blocklist", auth(s.handleBlocklist))
 	mux.HandleFunc("/api/v1/doh", auth(s.handleDoH))             // toggle plain-HTTP DoH
 	mux.HandleFunc("/api/v1/ratelimit", auth(s.handleRateLimit)) // per-client QPS
+	mux.HandleFunc("/api/v1/dnssec", auth(s.handleDNSSEC))       // delegated DNSSEC on/off
 	mux.HandleFunc("/api/v1/acl", auth(s.handleACL))             // recursion ACL
 	mux.HandleFunc("/api/v1/upstream", auth(s.handleUpstream))   // conditional forwarding
 	mux.HandleFunc("/api/v1/cache", auth(s.handleCache))         // cache size + auto-refresh
@@ -665,6 +683,11 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 			st.RateLimitQPS = ifc.RateLimitQPS()
 			st.RefusedClients = ifc.Refusals()
 		}
+		// Report delegated DNSSEC mode so the controller can converge it
+		// (e.g. after a restart) by re-pushing on drift.
+		if dc := ctrls.DNSSEC; dc != nil {
+			st.DNSSEC = dc.DNSSECEnabled()
+		}
 		// Report the recursion ACL so the controller can converge it
 		// (e.g. after a restart) by re-pushing on drift.
 		if ac := ctrls.ACL; ac != nil {
@@ -764,6 +787,33 @@ func (s *Server) handleRateLimit(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, AckResponse{OK: true, Msg: "rate limit set"})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// handleDNSSEC gets/sets delegated DNSSEC. When enabled, blipd forces DO on
+// upstream queries and serves the AD bit only from upstreams marked trusted
+// (per-server trust_ad; DoT/DoH default trusted, plain UDP/TCP not). blipd
+// does not validate signatures itself.
+func (s *Server) handleDNSSEC(w http.ResponseWriter, r *http.Request) {
+	dc := s.controllers().DNSSEC
+	if dc == nil {
+		http.Error(w, "dnssec control not available on this instance", http.StatusServiceUnavailable)
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, map[string]interface{}{"enabled": dc.DNSSECEnabled()})
+	case http.MethodPut, http.MethodPost:
+		var req SetDNSSECRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			log.Printf("blipd: management: bad request body: %v", err)
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		dc.SetDNSSEC(req.Enabled)
+		writeJSON(w, AckResponse{OK: true, Msg: "dnssec set"})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}

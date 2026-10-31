@@ -61,3 +61,21 @@ func TestKeyStringCompact(t *testing.T) {
 		t.Errorf("oversized String() = %q, want %q", got, want)
 	}
 }
+
+// TestKeyGenerationPartitions proves the runtime generation separates cache
+// entries across upstream/trust changes, so an in-flight fetch from the old
+// policy cannot be served under the new one.
+func TestKeyGenerationPartitions(t *testing.T) {
+	k := Key{Name: "a.test.", QType: 1, QClass: 1, Label: "auto"}
+	k2 := k
+	k2.Gen = 1
+	if k == k2 {
+		t.Fatal("Gen=0 and Gen=1 produce the same cache key")
+	}
+	if k.String() == k2.String() {
+		t.Fatal("Gen=0 and Gen=1 produce the same String()")
+	}
+	if got, want := k2.String(), "a.test.|1|1|auto|000|1"; got != want {
+		t.Fatalf("String() with Gen = %q, want %q", got, want)
+	}
+}

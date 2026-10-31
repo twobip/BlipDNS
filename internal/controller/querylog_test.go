@@ -29,6 +29,7 @@ func TestQueryLogStoreRoundtrip(t *testing.T) {
 		IPs:        []string{"9.9.9.9", "::1"},
 		DurationUs: 420,
 		Cached:     true,
+		DNSSEC:     true,
 	}
 	if err := store.Insert(ctx, want); err != nil {
 		t.Fatalf("Insert: %v", err)
@@ -41,8 +42,8 @@ func TestQueryLogStoreRoundtrip(t *testing.T) {
 		t.Fatalf("Query returned %d entries, want 1", len(entries))
 	}
 	got := entries[0]
-	if got.Domain != want.Domain || got.DurationUs != want.DurationUs || !got.Cached {
-		t.Errorf("roundtrip mismatch: duration_us=%d cached=%v, want %d/%v", got.DurationUs, got.Cached, want.DurationUs, want.Cached)
+	if got.Domain != want.Domain || got.DurationUs != want.DurationUs || !got.Cached || !got.DNSSEC {
+		t.Errorf("roundtrip mismatch: duration_us=%d cached=%v dnssec=%v, want %d/%v/%v", got.DurationUs, got.Cached, got.DNSSEC, want.DurationUs, want.Cached, want.DNSSEC)
 	}
 	if len(got.IPs) != 2 || got.IPs[0] != "9.9.9.9" || got.IPs[1] != "::1" {
 		t.Errorf("roundtrip IPs = %v, want [9.9.9.9 ::1]", got.IPs)

@@ -35,11 +35,17 @@ type Resolver interface {
 // small pool of connected sockets reused across queries. miekg/dns Exchange
 // dials + closes per call; reusing connected conns via ExchangeWithConnContext
 // removes a socket+connect+close per DNS query and honors ctx cancellation.
+// AD is cleared unless this server is explicitly trusted (trust_ad: true):
+// plain UDP/TCP is not an authenticated transport, so its Authenticated Data
+// bit cannot be trusted by default.
 type UDPResolver struct {
 	addr    string
 	timeout time.Duration
 	udp     dns.Client // pre-built; reused across queries (no per-query alloc)
 	tcp     dns.Client
+	// trustAD keeps the upstream's AD bit (per-server trust_ad: true).
+	// The zero value clears it.
+	trustAD bool
 	mu      sync.Mutex
 	conns   []*dns.Conn // idle connected UDP conns, LIFO
 	// Pre-split once at construction: the per-query path reuses host/port
@@ -159,7 +165,7 @@ func (r *UDPResolver) Resolve(ctx context.Context, q *dns.Msg) (*dns.Msg, error)
 	}
 	if !resp.Truncated {
 		r.putConn(c)
-		return resp, nil
+		return filterAD(resp, r.trustAD), nil
 	}
 	// Truncated: return the UDP conn and fall back to TCP over the same
 	// pinned IPs (no second resolution).
@@ -171,7 +177,19 @@ func (r *UDPResolver) Resolve(ctx context.Context, q *dns.Msg) (*dns.Msg, error)
 	if err := verifyClassicResponse(q, resp2); err != nil {
 		return nil, errUpstream(r.addr, err)
 	}
-	return resp2, nil
+	return filterAD(resp2, r.trustAD), nil
+}
+
+// filterAD clears the Authenticated Data bit unless this resolver's upstream
+// is trusted (per-server trust_ad). RFC 6840 §5.8: AD may only be asserted by
+// a resolver that validated the answer (or by an authenticated forwarder).
+// Plain UDP/TCP defaults to untrusted; DoT/DoH default to trusted because the
+// channel authenticates the endpoint.
+func filterAD(m *dns.Msg, trust bool) *dns.Msg {
+	if m != nil && !trust {
+		m.AuthenticatedData = false
+	}
+	return m
 }
 
 // TLSResolver forwards over DNS-over-TLS (RFC 7858, port 853) on a small pool
@@ -179,10 +197,13 @@ func (r *UDPResolver) Resolve(ctx context.Context, q *dns.Msg) (*dns.Msg, error)
 // conn + single mutex capped throughput at 1/RTT; pooling K conns lets K
 // queries proceed concurrently.
 type TLSResolver struct {
-	addr  string
-	tls   dns.Client // pre-built; reused across queries (no per-query alloc)
-	mu    sync.Mutex
-	conns []*dns.Conn // idle TLS conns, LIFO
+	addr string
+	tls  dns.Client // pre-built; reused across queries (no per-query alloc)
+	// trustAD keeps the upstream's AD bit (default true for DoT; trust_ad:
+	// false opts out).
+	trustAD bool
+	mu      sync.Mutex
+	conns   []*dns.Conn // idle TLS conns, LIFO
 }
 
 // tlsPoolSize bounds concurrent DoT connections per upstream.
@@ -196,8 +217,9 @@ func NewTLS(addr string, timeout time.Duration) *TLSResolver {
 		timeout = 5 * time.Second
 	}
 	return &TLSResolver{
-		addr: addr,
-		tls:  dns.Client{Net: "tcp-tls", Timeout: timeout, Dialer: &net.Dialer{Timeout: timeout}, TLSConfig: &tls.Config{MinVersion: tls.VersionTLS12}},
+		addr:    addr,
+		tls:     dns.Client{Net: "tcp-tls", Timeout: timeout, Dialer: &net.Dialer{Timeout: timeout}, TLSConfig: &tls.Config{MinVersion: tls.VersionTLS12}},
+		trustAD: true,
 	}
 }
 
@@ -271,7 +293,7 @@ func (r *TLSResolver) Resolve(ctx context.Context, q *dns.Msg) (*dns.Msg, error)
 				return nil, errUpstream(r.addr, verr)
 			}
 			r.putConn(c)
-			return resp, nil
+			return filterAD(resp, r.trustAD), nil
 		}
 		// The pooled connection is dead (typically server-closed idle, e.g.
 		// Quad9 timing out the TLS session); its idle siblings died the same
@@ -322,6 +344,27 @@ func Encrypted(r Resolver) bool {
 			}
 		}
 		return len(v.resolvers) > 0
+	}
+	return false
+}
+
+// anyTrusted reports whether r, or any member of a MultiResolver, may assert
+// AD (its trust_ad is not explicitly false). Used to detect a DNSSEC-enabled
+// instance that has no upstream left to trust.
+func anyTrusted(r Resolver) bool {
+	switch v := r.(type) {
+	case *UDPResolver:
+		return v.trustAD
+	case *TLSResolver:
+		return v.trustAD
+	case *DoHResolver:
+		return v.trustAD
+	case *MultiResolver:
+		for _, inner := range v.resolvers {
+			if anyTrusted(inner) {
+				return true
+			}
+		}
 	}
 	return false
 }
@@ -532,6 +575,9 @@ type DoHResolver struct {
 	endpoint  string
 	client    *http.Client
 	bootstrap Resolver
+	// trustAD keeps the upstream's AD bit (default true for DoH; trust_ad:
+	// false opts out).
+	trustAD bool
 }
 
 // NewDoH creates a DoH upstream resolver for endpoint (e.g.
@@ -584,6 +630,7 @@ func NewDoHWithBootstrap(endpoint string, timeout time.Duration, bootstrap Resol
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 		},
 		bootstrap: bootstrap,
+		trustAD:   true,
 	}
 }
 
@@ -893,7 +940,7 @@ func (r *DoHResolver) Resolve(ctx context.Context, q *dns.Msg) (*dns.Msg, error)
 	if err := verifyDoHResponse(q, out); err != nil {
 		return nil, errUpstream(r.endpoint, err)
 	}
-	return out, nil
+	return filterAD(out, r.trustAD), nil
 }
 
 // verifyDoHResponse checks that resp answers q: matching ID, QR set, and a

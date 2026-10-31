@@ -136,9 +136,51 @@ It listens on:
 
 The `upstream` field accepts space/comma-separated specs with failover:
 - `udp://host:port` (or a bare `ip`/`host:port`; missing port defaults to 53)
+- `tls://host` (DNS-over-TLS, port 853)
 - `https://host/dns-query` or `doh://host/dns-query`
 
 Example: `upstream: "https://1.1.1.1/dns-query https://8.8.8.8/dns-query"`
+
+## DNSSEC
+
+blipd is a forwarder and does **not** validate DNSSEC itself. `dnssec: true`
+in `blipd.yaml` (or **Upstream → Use DNSSEC** in blipc) delegates
+validation to the upstream resolver:
+
+- upstream queries get `DO=1`, so a validating upstream returns signatures and
+  sets `AD` on secure answers;
+- `AD` is served only from **trusted** upstreams and only to clients that asked
+  with `DO` or `AD` (RFC 6840), with `CD=0`;
+- trust defaults to `tls://` (DoT) and `https://`/`doh://` (DoH). Plain UDP/TCP
+  is untrusted unless the server sets `trust_ad: true` — for example a local
+  validating Unbound. `trust_ad: false` opts an encrypted server out. Only do
+  this on a trusted path (loopback/LAN): a plaintext AD bit is forgeable on the
+  wire. The legacy `upstream:` string and per-policy `upstream` overrides have
+  no per-server metadata and follow the transport default;
+- DNSSEC records are stripped from answers to clients that did not set `DO`
+  (except a type they explicitly queried), per RFC 4035.
+
+```yaml
+upstream_servers:
+  - name: unbound
+    address: "udp://127.0.0.1:53"
+    priority: 1
+    trust_ad: true      # Unbound validates; trust its AD over plain DNS
+```
+
+In blipc, tick **All upstream servers** to trust the whole list, or untick it
+and open the **Select resolvers** picker to search and tick individual
+resolvers. The setting is pushed live and reconciled after an instance
+restarts; blipd purges its response cache when the mode or upstream trust
+changes. When blipc manages an instance, its fleet default/override is
+authoritative — the `blipd.yaml` value only seeds the mode until the first
+push.
+
+This is the AdGuard-Home-style "trusted forwarder" model, not Pi-hole-style
+local validation: a bogus signed answer is only rejected if the upstream
+rejects it. A validating client (browser, OS stub) can still validate
+end-to-end because RRSIGs pass through when it sets `DO`. `dnssec: false` (the
+default) keeps the previous behavior: `AD` is always cleared.
 
 ## Per-client filtering
 

@@ -80,6 +80,17 @@ default_policy:
 #   - name: "internal"
 #     address: "udp://10.0.0.53:53"
 #     priority: 0 # route-only: never used unless a route points at it
+#   - name: "unbound"
+#     address: "udp://127.0.0.1:53"
+#     priority: 3
+#     trust_ad: true   # Unbound validates DNSSEC; trust its AD over plain DNS
+# Fleet-wide delegated DNSSEC (also the Upstream page -> Use DNSSEC). blipd
+# does not validate; it forces DO upstream and serves AD only from trusted
+# servers. Trust defaults to DoT/DoH; `trust_ad: true` opts a plaintext
+# validator in (only on a trusted path such as loopback/LAN), and
+# `trust_ad: false` opts a DoT/DoH server out. Legacy `upstream:` strings use
+# the transport default. Pushed live and reconciled after a restart.
+# dnssec: false
 # upstream_routes:
 #   - name: "split-tunnel"
 #     qname_suffix: ".internal.corp."

@@ -212,6 +212,10 @@ type Key struct {
 	DO     bool // DNSSEC OK bit from the query OPT (DO=1 answers differ: RRSIGs)
 	CD     bool // Checking-Disabled bit: CD=1 answers skip validation
 	AD     bool // Authenticated-Data bit: AD=1 signals validated data
+	// Gen versions the partition across runtime upstream/trust changes. It is
+	// set by the DNS server (0 otherwise) so a fetch started under the old
+	// policy can never be read back under the new one.
+	Gen uint64
 }
 
 // KeyOf returns the cache key for the first question of m.
@@ -261,7 +265,7 @@ func (k Key) String() string {
 	// temporaries per cache miss). Only oversized keys heap-allocate.
 	var fixed [256]byte
 	b := fixed[:0]
-	if need := len(k.Name) + len(k.Label) + 24; need > len(fixed) {
+	if need := len(k.Name) + len(k.Label) + 45; need > len(fixed) {
 		b = make([]byte, 0, need)
 	}
 	b = append(b, k.Name...)
@@ -272,6 +276,12 @@ func (k Key) String() string {
 	b = append(b, '|')
 	b = append(b, k.Label...)
 	b = append(b, '|', bit(k.DO), bit(k.CD), bit(k.AD))
+	// Keep the zero generation's format stable (existing tests/logs); runtime
+	// generations append a suffix so they never coalesce with generation 0.
+	if k.Gen != 0 {
+		b = append(b, '|')
+		b = strconv.AppendUint(b, k.Gen, 10)
+	}
 	return string(b)
 }
 

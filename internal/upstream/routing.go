@@ -19,6 +19,12 @@ type UpstreamServer struct {
 	Address    string `json:"address" yaml:"address"` // single endpoint spec: "udp://host:port", "tls://host[:port]" (DoT, default 853) or "https://host/dns-query"
 	Priority   int    `json:"priority" yaml:"priority"`
 	TimeoutSec int    `json:"timeout_sec,omitempty" yaml:"timeout_sec,omitempty"` // seconds to wait before failing over to next server (0 = 5s default)
+	// TrustAD selects whether this server's Authenticated Data (AD) bit may be
+	// served when delegated DNSSEC is enabled. nil = transport default (DoT and
+	// DoH trusted, plain UDP/TCP not); true = trust this server even over plain
+	// DNS (e.g. a local validating Unbound); false = never trust it, even over
+	// TLS. The server must actually validate; blipd does not verify signatures.
+	TrustAD *bool `json:"trust_ad,omitempty" yaml:"trust_ad,omitempty"`
 }
 
 // UpstreamRoute conditionally forwards a query to a named server when its qname
@@ -103,6 +109,7 @@ func NewPoolWithBootstrap(servers []UpstreamServer, routes []UpstreamRoute, lega
 		if err != nil {
 			return nil, fmt.Errorf("upstream: server %q: %w", sv.Name, err)
 		}
+		applyTrustAD(r, sv.TrustAD)
 		p.named[sv.Name] = r
 	}
 	// Automatic rotation: Priority>0 servers, lowest number first.
@@ -318,6 +325,45 @@ func fqdn(s string) string {
 // legacy upstream), or nil if there is none.
 func (p *ResolverPool) Auto() Resolver {
 	return p.auto
+}
+
+// AnyTrusted reports whether at least one configured resolver (the automatic
+// failover pool or a named server) is allowed to assert AD. Used to warn when
+// delegated DNSSEC is enabled but every upstream's AD will be discarded. Safe
+// on a nil pool.
+func (p *ResolverPool) AnyTrusted() bool {
+	if p == nil {
+		return false
+	}
+	if anyTrusted(p.auto) {
+		return true
+	}
+	for _, r := range p.named {
+		if anyTrusted(r) {
+			return true
+		}
+	}
+	return false
+}
+
+// applyTrustAD applies a per-server trust_ad override to a freshly built
+// resolver. nil keeps the transport default (DoT/DoH trusted, UDP/TCP not).
+func applyTrustAD(r Resolver, trust *bool) {
+	if r == nil || trust == nil {
+		return
+	}
+	switch v := r.(type) {
+	case *UDPResolver:
+		v.trustAD = *trust
+	case *TLSResolver:
+		v.trustAD = *trust
+	case *DoHResolver:
+		v.trustAD = *trust
+	case *MultiResolver:
+		for _, inner := range v.resolvers {
+			applyTrustAD(inner, trust)
+		}
+	}
 }
 
 // Servers and Routes expose the configured set (for stats readback).

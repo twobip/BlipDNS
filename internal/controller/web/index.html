@@ -583,6 +583,35 @@
                 <button class="btn btn-sm" id="s-up-add">+ Add server</button>
                 <span class="hint" id="s-up-hint"></span>
               </div>
+              <div class="field">
+                <label class="row" style="gap:8px;align-items:center;margin:0">
+                  <input type="checkbox" id="s-dnssec"/>
+                  <span>Use DNSSEC</span>
+                </label>
+                <span class="hint">Delegated validation: blipd sets DO on upstream queries and trusts the AD bit only from the servers you tick. It does not verify signatures itself. Only tick plaintext resolvers on a trusted path (loopback/LAN).</span>
+                <label class="row hidden" id="s-dnssec-inherit-wrap" style="gap:8px;align-items:center;margin-top:6px">
+                  <input type="checkbox" id="s-dnssec-inherit"/>
+                  <span class="faint">Inherit the fleet-wide DNSSEC setting</span>
+                </label>
+                <div id="s-dnssec-opts" class="hidden" style="margin-top:8px">
+                  <label class="row" style="gap:8px;align-items:center;margin:0">
+                    <input type="checkbox" id="s-dnssec-all"/>
+                    <span>All upstream servers</span>
+                  </label>
+                  <button type="button" class="list-select hidden" id="s-dnssec-select">
+                    <span class="list-ic">
+                      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a15 15 0 0 1 0 18M12 3a15 15 0 0 0 0 18"/></svg>
+                    </span>
+                    <span class="grow" style="text-align:left;min-width:0">
+                      <span class="list-title" id="s-dnssec-selected-title">Select resolvers</span>
+                      <span class="list-sub" id="s-dnssec-selected-sub"></span>
+                    </span>
+                    <span class="list-chev">&rsaquo;</span>
+                  </button>
+                  <span class="hint" id="s-dnssec-list-hint">Choose which resolvers validate DNSSEC.</span>
+                  <div class="hint" id="s-dnssec-warn" style="color:var(--amber)"></div>
+                </div>
+              </div>
               <div class="row mt">
                 <button class="btn btn-primary" id="s-save-upstream">Save</button>
                 <input class="input" id="s-up-test-domain" style="width:200px" value="example.com" title="Domain to query on each server"/>
@@ -1047,6 +1076,28 @@
     <div class="modal-foot">
       <button class="btn" data-close="modal-record">Cancel</button>
       <button class="btn btn-primary" id="r-save">Save Record</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ RESOLVER SELECT MODAL (UniFi-style) ============ -->
+<div class="overlay hidden" id="modal-resolvers">
+  <div class="modal resolver-modal">
+    <div class="modal-head"><h3>Select resolvers</h3><button class="icon-btn x" data-close="modal-resolvers">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button></div>
+    <div class="modal-body">
+      <div class="search-wrap">
+        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+        <input class="input" id="resolver-search" placeholder="Search" autocomplete="off"/>
+      </div>
+      <div class="resolver-list" id="resolver-list"></div>
+      <div class="hint hidden" id="resolver-empty">No resolvers match.</div>
+    </div>
+    <div class="modal-foot resolver-foot">
+      <label class="resolver-selectall"><input type="checkbox" id="resolver-all"/><span>Select All</span></label>
+      <span style="flex:1"></span>
+      <button class="btn" data-close="modal-resolvers">Cancel</button>
+      <button class="btn btn-primary" id="resolver-save">Save</button>
     </div>
   </div>
 </div>
