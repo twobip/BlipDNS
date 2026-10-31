@@ -53,9 +53,16 @@ const maxInflightWait = 500 * time.Millisecond
 
 // upstreamPartitions splits the inflight semaphore by upstream label so one
 // blackholed upstream cannot starve every other resolver: each partition
-// holds maxInflightUpstream/upstreamPartitions slots (16×16 = 256 total, same
+// holds maxInflightUpstream/upstreamPartitions slots (4×64 = 256 total, same
 // ceiling as the old global). The label is only hashed, never parsed.
-const upstreamPartitions = 16
+//
+// 16 partitions gave each label only 16 slots, which a typical install (one
+// "auto" rotation label for the whole pool) saturates the moment an upstream
+// starts timing out: at the 5s default timeout that is ~3 fetches/s, so every
+// other miss sheds. Four partitions keep the isolation (a blackholed upstream
+// can still only hold a quarter of the ceiling) while giving a small pool 64
+// slots per label.
+const upstreamPartitions = 4
 
 // upstreamInflight bounds concurrent upstream fetches across all Cache
 // instances in the process, partitioned for per-upstream fairness.
