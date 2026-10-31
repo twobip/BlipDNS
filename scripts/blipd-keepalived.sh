@@ -1,5 +1,13 @@
-#!/usr/bin/env bash
+#!/bin/bash
 set -euo pipefail
+# Pin PATH before any external command runs. This helper executes as root
+# through sudo; when the host's sudoers has no secure_path, sudo preserves the
+# caller's PATH, and a compromised blipd account could shadow keepalived,
+# systemctl, pkill, flock or mktemp with binaries it controls. A fixed,
+# root-owned search path is the primary defense (the sudoers snippet sets
+# secure_path as well, but existing installs may predate it). Every command in
+# this file resolves from here.
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 umask 077
 
 # Root half of the HA apply path.

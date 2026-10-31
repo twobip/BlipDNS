@@ -443,6 +443,12 @@ fi
 
 cat > /etc/sudoers.d/blipd-install <<'EOF'
 Defaults:blip env_keep += "EXPECTED_SHA256"
+# Fixed root-owned search path for every command the root helpers run.
+# Without this (when /etc/sudoers has no system-wide secure_path) sudo keeps
+# the caller's PATH, so a compromised blip account could shadow ssh-keygen,
+# sha256sum or systemctl. The helpers also pin PATH themselves; this covers
+# any future command added to them. Applies to all of blip's sudo invocations.
+Defaults:blip secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 blip ALL=(root) NOPASSWD: /usr/local/sbin/blipd-install /var/lib/blipd/update/blipd.new
 EOF
 chmod 0440 /etc/sudoers.d/blipd-install
