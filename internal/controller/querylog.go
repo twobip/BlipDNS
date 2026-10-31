@@ -528,15 +528,42 @@ func logFilter(query string, args []interface{}, instance, action, cached, filte
 		query += " AND ql.cached = ?"
 		args = append(args, cached)
 	}
-	if filter != "" {
-		// Escape LIKE wildcards so a user filter is matched literally: % _
-		// and the escape char itself must not act as wildcards. The query
-		// lowercases the columns, so lowercase the filter too.
-		fl := "%" + escapeLike(strings.ToLower(filter)) + "%"
-		query += " AND (LOWER(ql.client) LIKE ? ESCAPE '\\' OR LOWER(cn.name) LIKE ? ESCAPE '\\' OR LOWER(ql.domain) LIKE ? ESCAPE '\\' OR LOWER(ql.action) LIKE ? ESCAPE '\\')"
-		args = append(args, fl, fl, fl, fl)
+	if terms := filterTerms(filter); len(terms) > 0 {
+		// Commas separate alternative searches: "client1,client2" matches
+		// queries from either client. Each term keeps the original any-field
+		// substring match (client, friendly name, domain or action), and the
+		// terms are OR'd together. Escape LIKE wildcards so a user filter is
+		// matched literally: % _ and the escape char itself must not act as
+		// wildcards. The query lowercases the columns, so lowercase each term.
+		clauses := make([]string, 0, len(terms))
+		for _, term := range terms {
+			fl := "%" + escapeLike(strings.ToLower(term)) + "%"
+			clauses = append(clauses, "(LOWER(ql.client) LIKE ? ESCAPE '\\' OR LOWER(cn.name) LIKE ? ESCAPE '\\' OR LOWER(ql.domain) LIKE ? ESCAPE '\\' OR LOWER(ql.action) LIKE ? ESCAPE '\\')")
+			args = append(args, fl, fl, fl, fl)
+		}
+		query += " AND (" + strings.Join(clauses, " OR ") + ")"
 	}
 	return query, args
+}
+
+// maxFilterTerms bounds the comma-separated search terms so a crafted filter
+// cannot grow the predicate list without limit (each term adds four LIKE
+// parameters).
+const maxFilterTerms = 20
+
+// filterTerms splits a query-log filter on commas, trimming whitespace and
+// dropping empty entries so "a, b,," behaves like "a,b".
+func filterTerms(filter string) []string {
+	var terms []string
+	for _, t := range strings.Split(filter, ",") {
+		if t = strings.TrimSpace(t); t != "" {
+			terms = append(terms, t)
+			if len(terms) == maxFilterTerms {
+				break
+			}
+		}
+	}
+	return terms
 }
 
 // escapeLike escapes the LIKE metacharacters % _ and \ with a backslash so

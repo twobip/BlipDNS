@@ -915,3 +915,62 @@ func TestQueryPageTotalMatchesCount(t *testing.T) {
 		t.Errorf("filtered total=%d rows=%d count=%d, want all 5", totalF, len(got), n)
 	}
 }
+
+func TestQueryLogStoreCommaFilter(t *testing.T) {
+	// Commas separate alternative searches: "client1,client2" must match
+	// either client, with whitespace/empty terms ignored and LIKE wildcards
+	// still treated literally per term.
+	store, err := NewQueryLogStore(filepath.Join(t.TempDir(), "querylog-filter.db"))
+	if err != nil {
+		t.Fatalf("NewQueryLogStore: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	now := time.Now()
+	entries := []QueryLogEntry{
+		{Timestamp: now.Add(-1 * time.Minute), Instance: "a", Client: "client1", Domain: "one.test", Action: "PASS"},
+		{Timestamp: now.Add(-2 * time.Minute), Instance: "a", Client: "client2", Domain: "two.test", Action: "BLOCK"},
+		{Timestamp: now.Add(-3 * time.Minute), Instance: "a", Client: "client3", Domain: "three.test", Action: "PASS"},
+		{Timestamp: now.Add(-4 * time.Minute), Instance: "a", Client: "client4", Domain: "percent%host.test", Action: "PASS"},
+	}
+	for _, e := range entries {
+		if err := store.Insert(ctx, e); err != nil {
+			t.Fatalf("Insert: %v", err)
+		}
+	}
+	if err := store.SetClientName(ctx, "client2", "Bob"); err != nil {
+		t.Fatalf("SetClientName: %v", err)
+	}
+
+	tests := []struct {
+		name   string
+		filter string
+		want   int
+	}{
+		{"two clients", "client1,client2", 2},
+		{"spaces and empty terms", " client1 , , CLIENT2 , ", 2},
+		{"client and domain", "client1,two.test", 2},
+		{"friendly name", "client1,bob", 2},
+		{"single term", "client1", 1},
+		{"one match one miss", "client1,missing", 1},
+		{"three terms", "client1,client2,client3", 3},
+		{"wildcard stays literal", "percent%", 1},
+		{"wildcard term with alternative", "percent%,client1", 2},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := store.Query(ctx, "", tc.filter, "", "", "", now.Add(-24*time.Hour), 0, 100)
+			if err != nil {
+				t.Fatalf("Query(%q): %v", tc.filter, err)
+			}
+			n, err := store.QueryCount(ctx, "", tc.filter, "", "", "", now.Add(-24*time.Hour))
+			if err != nil {
+				t.Fatalf("QueryCount(%q): %v", tc.filter, err)
+			}
+			if len(got) != tc.want || n != tc.want {
+				t.Errorf("filter %q: rows=%d count=%d, want %d", tc.filter, len(got), n, tc.want)
+			}
+		})
+	}
+}
