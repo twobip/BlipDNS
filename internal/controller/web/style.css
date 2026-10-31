@@ -6,7 +6,6 @@
 :root {
   /* surfaces */
   --bg:        #0a0b0d;
-  --bg-top:    #0f1115;
   --surface:   #12141a;
   --surface-2: #181b22;
   --surface-3: #1e222b;
@@ -44,9 +43,7 @@
 html, body { height: 100%; }
 body {
   margin: 0;
-  background:
-    radial-gradient(1200px 600px at 75% -10%, rgba(79,140,255,.06), transparent 60%),
-    var(--bg);
+  background: var(--bg);
   color: var(--text);
   font-family: var(--font);
   font-size: 14px;
@@ -155,9 +152,9 @@ body.sidebar-collapsed .main { margin-left: 60px; }
   width: 100%; max-width: var(--content-w); margin: 0 auto 20px;
   padding: 20px 0 16px;
   background: var(--bg);
-  /* ponytail: opaque, no backdrop-filter — a blurred sticky bar re-composites
-  every scroll frame. Match the page base colour so the sticky bar masks
-  scrolled content without showing as a lighter band behind the title. */
+  /* ponytail: flat page colour, matching body — the sticky bar masks scrolled
+  content without painting a visible box. No backdrop-filter (re-composites
+  every scroll frame) and no viewport-fixed gradient (can band on scroll). */
 }
 .topbar-title h1 { margin: 0; font-size: 20px; font-weight: 650; letter-spacing: -0.02em; }
 .topbar-title p { margin: 2px 0 0; color: var(--muted); font-size: 12.5px; }
