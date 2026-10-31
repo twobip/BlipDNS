@@ -11,6 +11,7 @@ admin_token: "REPLACE-ME-generate-with-openssl-rand-hex-32"
 # Upstream DNS resolvers - space/comma-separated specs for failover.
 # Supported formats:
 #   udp://host:port         - classic UDP/TCP DNS (e.g. udp://1.1.1.1:53)
+#   tls://host[:port]       - DNS-over-TLS (port 853)
 #   https://host/dns-query  - DNS-over-HTTPS (RFC 8484)
 #   doh://host/dns-query    - DNS-over-HTTPS (shorthand)
 # Multiple specs provide failover (tried in order).
@@ -24,6 +25,25 @@ admin_token: "REPLACE-ME-generate-with-openssl-rand-hex-32"
 #   upstream: "https://1.1.1.1/dns-query udp://1.1.1.1:53"  # DoH primary, UDP failover
 #   upstream: "udp://8.8.8.8:53|2 https://1.1.1.1/dns-query|1"  # DoH is primary
 upstream: "https://1.1.1.1/dns-query udp://1.1.1.1:53"
+# DNSSEC (delegated validation). blipd does NOT verify signatures itself.
+# When true, it sets DO=1 on upstream queries and serves the upstream's AD
+# (Authenticated Data) bit only from trusted servers. Trust defaults to DoT
+# (tls://) and DoH (https:// / doh://) and is off for plain UDP/TCP; override
+# per named server with `trust_ad`:
+#   trust_ad: true   trust this server's AD (it must validate; e.g. a local
+#                    Unbound reached over udp://127.0.0.1:53; only on a
+#                    trusted path — loopback/LAN — since plaintext is forgeable)
+#   trust_ad: false  never trust this server, even over DoT/DoH
+# The legacy `upstream:` string (and per-policy `upstream` overrides) has no
+# per-server metadata, so it follows the transport default (DoT/DoH trusted,
+# UDP/TCP not).
+# Clients that set DO or AD (and not CD) receive AD=1 for answers a validating
+# upstream marked secure. DNSSEC records are stripped from answers to clients
+# that did not set DO (except a type they explicitly queried), per RFC 4035.
+# A bogus signed answer is only rejected if the upstream rejects it, so use
+# DoH/DoT to a resolver you trust (or trust_ad on a local validator).
+# Runtime toggle: blipc Upstream page -> Use DNSSEC (pushed live).
+# dnssec: false
 # Named upstream pool with conditional routing (optional). Each server gets a
 # priority (0 = never forwarded to directly, route-only). Routes send matching
 # queries to a named server; everything else follows the `upstream` failover
@@ -32,10 +52,12 @@ upstream: "https://1.1.1.1/dns-query udp://1.1.1.1:53"
 #   - name: "home"
 #     address: "udp://192.168.1.1:53"
 #     priority: 1
+#     # trust_ad: true          # only if "home" validates DNSSEC (e.g. Unbound)
 #   - name: "work-doh"
 #     address: "https://dns.work.example/dns-query"
 #     priority: 2
 #     timeout_sec: 3            # per-server failover timeout (0 = 5s default)
+#     # trust_ad: false         # opt an encrypted server out of AD trust
 # upstream_routes:
 #   - name: "internal-to-home"
 #     qname_suffix: "internal.example"   # queries ending in this go to "home"

@@ -48,6 +48,7 @@ type config struct {
 	InstanceOverrides map[string]*controller.InstanceOverride `yaml:"instance_overrides"`
 	DoHHTTPAddr       string                                  `yaml:"doh_http_addr"`
 	RateLimitQPS      *int                                    `yaml:"rate_limit_qps"`
+	DNSSEC            bool                                    `yaml:"dnssec,omitempty"`
 	AllowedNetworks   []string                                `yaml:"allowed_networks"`
 	// OpenRecursionAck persists the Security-tab open-resolver ack: pushing
 	// an empty fleet ACL (open recursion) is refused unless this is true.
@@ -167,6 +168,7 @@ func main() {
 		// adopted instance. Explicit `rate_limit_qps: 0` still disables.
 		fleet.SetRateLimitQPSDefault(blipconfig.DefaultRateLimitQPS)
 	}
+	fleet.SetDNSSECDefault(cfg.DNSSEC)
 	if len(cfg.AllowedNetworks) > 0 {
 		fleet.SetAllowedNetworksDefault(cfg.AllowedNetworks)
 	}

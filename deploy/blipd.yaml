@@ -40,6 +40,21 @@ admin_socket: "/var/lib/blipd/blipd.sock"
 state_file: "/var/lib/blipd/adopted.json"
 # Production upstreams with failover (override in /etc/blipd/blipd.yaml).
 upstream: "https://1.1.1.1/dns-query https://8.8.8.8/dns-query"
+# Delegate DNSSEC validation to the upstream resolver. blipd does not verify
+# signatures itself. When true, upstream queries get DO=1 and the AD bit is
+# served only from trusted servers: DoT/DoH by default, or any named server
+# with `trust_ad: true` (e.g. a local validating Unbound over plain UDP);
+# `trust_ad: false` opts a DoT/DoH server out. Clients that set DO or AD (and
+# not CD) see AD=1 for answers the upstream marked secure. The legacy
+# `upstream:` string has no per-server trust metadata, so it uses the
+# transport default. Toggle live from the blipc Upstream page -> Use DNSSEC.
+# dnssec: false
+# Example: trust a local Unbound validator over plain UDP.
+# upstream_servers:
+#   - name: "unbound"
+#     address: "udp://127.0.0.1:53"
+#     priority: 1
+#     trust_ad: true
 cache_cap: 1h
 # Bootstrap DNS servers: used to resolve the hostname of a DoH upstream server
 # (e.g. https://dns.google/dns-query) before dialing it. Each entry is a single

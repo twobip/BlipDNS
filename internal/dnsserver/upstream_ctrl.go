@@ -16,6 +16,16 @@ func (s *Server) safePool() *upstream.ResolverPool {
 	return s.pool
 }
 
+// safePoolGen snapshots the pool and its cache generation under one lock. A
+// query must not pair an old resolver with a new cache partition (or vice
+// versa) across a SetUpstream swap, or an AD=1 answer from a previously
+// trusted pool could land in the new generation's cache.
+func (s *Server) safePoolGen() (*upstream.ResolverPool, uint64) {
+	s.upMu.RLock()
+	defer s.upMu.RUnlock()
+	return s.pool, s.cacheGen.Load()
+}
+
 // SetUpstream atomically replaces the upstream pool, conditional-forwarding
 // routes, and bootstrap DNS servers. Passing nil/empty for all reverts to the
 // blipd config-file upstream. This implements control.LocalResolverController
@@ -29,8 +39,21 @@ func (s *Server) SetUpstream(servers []upstream.UpstreamServer, routes []upstrea
 	}
 	s.upMu.Lock()
 	prev := s.pool
+	s.cacheGen.Add(1)
 	s.pool = pool
 	s.upMu.Unlock()
+	// A pool swap can change which upstreams are trusted (and which answers
+	// are cached under a label): drop cached answers so AD/DNSSEC filtering
+	// from the previous trust policy is never served, even by a fetch that was
+	// already in flight. The generation bump above is paired with the pool
+	// swap under upMu, so an in-flight fetch uses either the old pool+gen or
+	// the new pool+gen, never a mix.
+	if s.cache != nil {
+		s.cache.Purge()
+	}
+	if s.DNSSECEnabled() && !pool.AnyTrusted() {
+		log.Printf("blipd: WARNING dnssec is enabled but the pushed upstream set has no trusted server; AD will be discarded")
+	}
 	if prev != nil {
 		prev.CloseIdleConnections()
 		if pool != nil {

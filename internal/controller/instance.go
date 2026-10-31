@@ -416,10 +416,11 @@ func (i *Instance) poll(ctx context.Context) {
 		// Converge reconcilers concurrently per tick (was 8 sequential RTTs).
 		// Blocklist/HA stay on their own cadence inside maybePush*.
 		var wg sync.WaitGroup
-		wg.Add(8)
+		wg.Add(9)
 		go func() { defer wg.Done(); i.fleet.maybePushConfig(ctx, i, s) }()
 		go func() { defer wg.Done(); i.fleet.maybePushDoH(ctx, i, s) }()
 		go func() { defer wg.Done(); i.fleet.maybePushRateLimit(ctx, i, s) }()
+		go func() { defer wg.Done(); i.fleet.maybePushDNSSEC(ctx, i, s) }()
 		go func() { defer wg.Done(); i.fleet.maybePushACL(ctx, i, s) }()
 		go func() { defer wg.Done(); i.fleet.maybePushCache(ctx, i, s) }()
 		go func() { defer wg.Done(); i.fleet.maybePushUpstream(ctx, i, s) }()
@@ -457,6 +458,7 @@ func (i *Instance) watch(ctx context.Context) {
 				IPs:        e.IPs,
 				Answers:    e.Answers,
 				Cached:     e.Cached,
+				DNSSEC:     e.DNSSEC,
 				Upstream:   e.Upstream,
 				DurationUs: e.DurationUs,
 			})
@@ -481,6 +483,7 @@ func (i *Instance) watch(ctx context.Context) {
 					Answers:    e.Answers,
 					DurationUs: e.DurationUs,
 					Cached:     e.Cached,
+					DNSSEC:     e.DNSSEC,
 				})
 			}
 			// Upstream failures are persisted individually for the errors page.

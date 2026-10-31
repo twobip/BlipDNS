@@ -52,6 +52,8 @@ type Event struct {
 	Answers []control.Answer `json:"answers,omitempty"`
 	// Cached reports whether a "pass" event was served from the response cache.
 	Cached bool `json:"cached,omitempty"`
+	// DNSSEC reports that a "pass" answer was DNSSEC-validated upstream (AD=1).
+	DNSSEC bool `json:"dnssec,omitempty"`
 	// Upstream names the resolver that answered a pass event.
 	Upstream string `json:"upstream,omitempty"`
 	// DurationUs is the query latency in microseconds.
@@ -84,6 +86,9 @@ type InstanceOverride struct {
 	// RateLimitQPS, when set, overrides the fleet-wide DNS query rate limit
 	// (QPS per client) for this instance. 0 disables rate limiting.
 	RateLimitQPS *int `json:"rate_limit_qps,omitempty" yaml:"rate_limit_qps,omitempty"`
+	// DNSSEC, when set, overrides the fleet-wide delegated-DNSSEC switch for
+	// this instance. nil = inherit the fleet default.
+	DNSSEC *bool `json:"dnssec,omitempty" yaml:"dnssec,omitempty"`
 	// AllowedNetworks, when set, overrides the fleet-wide recursion ACL
 	// (CIDRs/IPs allowed to recurse) for this instance. nil = inherit the
 	// fleet default.
@@ -108,7 +113,7 @@ type InstanceOverride struct {
 
 // IsEmpty reports whether the override changes nothing.
 func (o *InstanceOverride) IsEmpty() bool {
-	return o == nil || (o.Upstream == nil && o.BlockAction == nil && o.Log == nil && o.DoHHTTPAddr == nil && o.RateLimitQPS == nil && o.AllowedNetworks == nil && o.UpstreamServers == nil && o.UpstreamRoutes == nil && o.UpstreamBootstrap == nil && o.CacheSize == nil && o.Records == nil)
+	return o == nil || (o.Upstream == nil && o.BlockAction == nil && o.Log == nil && o.DoHHTTPAddr == nil && o.RateLimitQPS == nil && o.DNSSEC == nil && o.AllowedNetworks == nil && o.UpstreamServers == nil && o.UpstreamRoutes == nil && o.UpstreamBootstrap == nil && o.CacheSize == nil && o.Records == nil)
 }
 
 // Fleet holds all instances, the event bus, and the global blocklist.
@@ -144,6 +149,7 @@ type Fleet struct {
 	overrides         map[string]*InstanceOverride // per-instance partial configs (diff vs default)
 	dohHTTPAddr       string                       // fleet-wide plain-HTTP DoH address ("", off)
 	rateLimitQPS      int                          // fleet-wide DNS per-client QPS limit (0 = disabled; startup seeds the blipd stock default when unset)
+	dnssec            bool                         // fleet-wide delegated DNSSEC switch (validation is delegated to trusted upstreams)
 	allowedNetworks   []string                     // fleet-wide recursion ACL (nil/empty = no fleet opinion; never pushed)
 	openRecursionAck  bool                         // explicit operator ack: allow pushing an empty ACL (open resolver)
 	cacheSize         int                          // fleet-wide max cached responses (0 = bounded default)
@@ -1206,6 +1212,10 @@ func cloneInstanceOverride(o *InstanceOverride) *InstanceOverride {
 		v := *o.RateLimitQPS
 		out.RateLimitQPS = &v
 	}
+	if o.DNSSEC != nil {
+		v := *o.DNSSEC
+		out.DNSSEC = &v
+	}
 	if o.AllowedNetworks != nil {
 		v := append([]string(nil), *o.AllowedNetworks...)
 		out.AllowedNetworks = &v
@@ -1347,6 +1357,32 @@ func (f *Fleet) effectiveRateLimitQPS(id string) int {
 		return *o.RateLimitQPS
 	}
 	return f.rateLimitQPS
+}
+
+// DNSSEC returns the fleet-wide delegated-DNSSEC switch.
+func (f *Fleet) DNSSEC() bool {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return f.dnssec
+}
+
+// SetDNSSECDefault records the fleet-wide DNSSEC switch without pushing it.
+// Used at startup from the controller config.
+func (f *Fleet) SetDNSSECDefault(enabled bool) {
+	f.mu.Lock()
+	f.dnssec = enabled
+	f.mu.Unlock()
+}
+
+// effectiveDNSSEC returns whether an instance should run delegated DNSSEC:
+// its own override if set, otherwise the fleet-wide default.
+func (f *Fleet) effectiveDNSSEC(id string) bool {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	if o := f.overrides[id]; o != nil && o.DNSSEC != nil {
+		return *o.DNSSEC
+	}
+	return f.dnssec
 }
 
 // AllowedNetworks returns the fleet-wide recursion ACL (nil/empty = no fleet
@@ -1803,6 +1839,9 @@ func mergeOverride(existing, partial *InstanceOverride) *InstanceOverride {
 	if partial.RateLimitQPS != nil {
 		merged.RateLimitQPS = partial.RateLimitQPS
 	}
+	if partial.DNSSEC != nil {
+		merged.DNSSEC = partial.DNSSEC
+	}
 	if partial.AllowedNetworks != nil {
 		merged.AllowedNetworks = partial.AllowedNetworks
 	}
@@ -1854,6 +1893,44 @@ func (f *Fleet) pushRateLimit(ctx context.Context) map[string]string {
 		}
 		return "ok"
 	})
+}
+
+// SetDNSSEC sets the fleet-wide delegated-DNSSEC switch, persists it, and
+// pushes the effective value (default or per-instance override) to every
+// adopted instance.
+func (f *Fleet) SetDNSSEC(ctx context.Context, enabled bool) (map[string]string, error) {
+	f.SetDNSSECDefault(enabled)
+	if err := f.persist("dnssec setting"); err != nil {
+		return nil, err
+	}
+	return f.pushDNSSEC(ctx), nil
+}
+
+// pushDNSSEC distributes the effective DNSSEC mode to every instance.
+func (f *Fleet) pushDNSSEC(ctx context.Context) map[string]string {
+	return f.fanOut(ctx, func(ictx context.Context, i *Instance) string {
+		want := f.effectiveDNSSEC(i.id())
+		if err := i.ctl().SetDNSSEC(ictx, want); err != nil {
+			return err.Error()
+		}
+		return "ok"
+	})
+}
+
+// maybePushDNSSEC converges an instance's DNSSEC mode to its fleet default (or
+// per-instance override) when the instance reports a divergent value — e.g.
+// after a restart it reverted to its own YAML.
+func (f *Fleet) maybePushDNSSEC(ctx context.Context, i *Instance, reported *control.StatsResponse) {
+	want := f.effectiveDNSSEC(i.id())
+	if reported != nil && reported.DNSSEC == want {
+		return
+	}
+	if !i.hasToken() {
+		return
+	}
+	if err := i.ctl().SetDNSSEC(ctx, want); err != nil {
+		log.Printf("blipc: reconcile dnssec for %q: %q", i.id(), err)
+	}
 }
 
 // pushDoH distributes the effective plain-HTTP DoH address to every instance.
@@ -2385,7 +2462,7 @@ func (f *Fleet) pushConfigs(ctx context.Context) map[string]string {
 // per-instance override is saved. Returns a single-entry result map. The DoH
 // address is always pushed (it can override even with no policy set); the
 // policy is pushed only when an effective one exists. Independent scopes push
-// concurrently (was 7 serial RTTs).
+// concurrently (was 8 serial RTTs).
 func (f *Fleet) pushInstance(ctx context.Context, id string) map[string]string {
 	i := f.get(id)
 	if i == nil {
@@ -2396,6 +2473,7 @@ func (f *Fleet) pushInstance(ctx context.Context, id string) map[string]string {
 	wantDoH := f.effectiveDoHHTTPAddr(id)
 	wantSize := f.effectiveCacheConfig(id)
 	wantQPS := f.effectiveRateLimitQPS(id)
+	wantDNSSEC := f.effectiveDNSSEC(id)
 	wantACL := f.effectiveAllowedNetworks(id)
 	wantRecs := f.effectiveRecords(id)
 	wantServers, wantRoutes, wantBootstrap := f.effectiveUpstream(id)
@@ -2407,9 +2485,9 @@ func (f *Fleet) pushInstance(ctx context.Context, id string) map[string]string {
 	}
 	// Collect per-step errors instead of last-wins overwriting, so a partial
 	// failure is surfaced honestly (e.g. "doh: …; upstream: …"). Scopes push
-	// concurrently (was 7 serial RTTs). The join is bounded: the scopes share
+	// concurrently (was 8 serial RTTs). The join is bounded: the scopes share
 	// the caller's ctx, so one hung instance would otherwise hang this
-	// handler forever. One budget covers all seven (they run concurrently).
+	// handler forever. One budget covers all eight (they run concurrently).
 	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 	var mu sync.Mutex
@@ -2420,7 +2498,7 @@ func (f *Fleet) pushInstance(ctx context.Context, id string) map[string]string {
 		errs = append(errs, msg)
 		mu.Unlock()
 	}
-	wg.Add(7)
+	wg.Add(8)
 	go func() {
 		defer wg.Done()
 		if err := i.ctl().SetDoHHTTPAddr(ctx, wantDoH); err != nil {
@@ -2437,6 +2515,12 @@ func (f *Fleet) pushInstance(ctx context.Context, id string) map[string]string {
 		defer wg.Done()
 		if err := i.ctl().SetRateLimit(ctx, wantQPS, 0); err != nil {
 			addErr("rate_limit: " + err.Error())
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		if err := i.ctl().SetDNSSEC(ctx, wantDNSSEC); err != nil {
+			addErr("dnssec: " + err.Error())
 		}
 	}()
 	go func() {
@@ -3856,6 +3940,7 @@ func (f *Fleet) saveConfig() error {
 		InstancePolicies  map[string]*InstanceOverride `yaml:"instance_overrides"`
 		DoHHTTPAddr       string                       `yaml:"doh_http_addr"`
 		RateLimitQPS      int                          `yaml:"rate_limit_qps"`
+		DNSSEC            bool                         `yaml:"dnssec,omitempty"`
 		AllowedNetworks   []string                     `yaml:"allowed_networks,omitempty"`
 		OpenRecursionAck  bool                         `yaml:"open_recursion_ack,omitempty"`
 		UpstreamServers   []upstream.UpstreamServer    `yaml:"upstream_servers"`
@@ -3903,6 +3988,7 @@ func (f *Fleet) saveConfig() error {
 	}
 	dohAddr := f.dohHTTPAddr
 	rateQPS := f.rateLimitQPS
+	dnssec := f.dnssec
 	allowed := append([]string(nil), f.allowedNetworks...)
 	openAck := f.openRecursionAck
 	upServers := append([]upstream.UpstreamServer(nil), f.upstreamServers...)
@@ -3926,6 +4012,7 @@ func (f *Fleet) saveConfig() error {
 	cfg.InstancePolicies = overs
 	cfg.DoHHTTPAddr = dohAddr
 	cfg.RateLimitQPS = rateQPS
+	cfg.DNSSEC = dnssec
 	cfg.AllowedNetworks = allowed
 	cfg.OpenRecursionAck = openAck
 	upstreamServers, upstreamRoutes := upServers, upRoutes

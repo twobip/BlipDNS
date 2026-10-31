@@ -36,6 +36,7 @@ type Config struct {
 	OpenRecursion        bool                      `yaml:"open_recursion"`   // explicit ack for empty allowed_networks on a non-loopback bind (fail closed without it)
 	StateFile            string                    `yaml:"state_file"`       // persists "adopted" so the claim code isn't regenerated
 	InstanceID           string                    `yaml:"instance_id"`      // stable id shown to the controller
+	DNSSEC               bool                      `yaml:"dnssec"`           // delegate validation to authenticated (DoT/DoH) upstreams and honor their AD bit; blipd does not validate signatures itself
 	Upstream             string                    `yaml:"upstream"`
 	UpstreamServers      []upstream.UpstreamServer `yaml:"upstream_servers"`       // named upstream pool (priority 0 = route-only)
 	UpstreamRoutes       []upstream.UpstreamRoute  `yaml:"upstream_routes"`        // conditional forwarding (qname/client -> server)

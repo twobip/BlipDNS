@@ -77,6 +77,8 @@ type QueryLogEntry struct {
 	// Cached reports whether the answer was served from the response cache.
 	DurationUs int64 `json:"duration_us,omitempty"`
 	Cached     bool  `json:"cached"`
+	// DNSSEC reports that the upstream answer was DNSSEC-validated (AD=1).
+	DNSSEC bool `json:"dnssec,omitempty"`
 }
 
 // ClientStat is the per-client summary shown on the Clients tab.
@@ -386,7 +388,8 @@ func NewQueryLogStore(dbPath string) (*QueryLogStore, error) {
 		answers TEXT,
 		duration_us INTEGER,
 		cached INTEGER,
-		proto TEXT
+		proto TEXT,
+		dnssec INTEGER
 	);
 	CREATE INDEX IF NOT EXISTS idx_query_log_timestamp ON query_log(timestamp);
 	CREATE INDEX IF NOT EXISTS idx_query_log_instance ON query_log(instance);
@@ -438,6 +441,7 @@ func NewQueryLogStore(dbPath string) (*QueryLogStore, error) {
 		"ALTER TABLE query_log ADD COLUMN cached INTEGER",
 		"ALTER TABLE query_log ADD COLUMN blocklist TEXT",
 		"ALTER TABLE query_log ADD COLUMN proto TEXT",
+		"ALTER TABLE query_log ADD COLUMN dnssec INTEGER",
 		"ALTER TABLE stats_samples ADD COLUMN duration_us INTEGER NOT NULL DEFAULT 0",
 	} {
 		_, _ = db.Exec(col)
@@ -484,22 +488,25 @@ func truncateAnswersForJSON(answers []control.Answer) []control.Answer {
 }
 
 // row renders the columns shared by the single- and batched-insert paths.
-func (e QueryLogEntry) row() (ips, ans string, cached int) {
+func (e QueryLogEntry) row() (ips, ans string, cached, dnssec int) {
 	ips = strings.Join(e.IPs, ",")
 	b, _ := json.Marshal(truncateAnswersForJSON(e.Answers))
 	ans = string(b)
 	if e.Cached {
 		cached = 1
 	}
-	return ips, ans, cached
+	if e.DNSSEC {
+		dnssec = 1
+	}
+	return ips, ans, cached, dnssec
 }
 
 // Insert adds a new query log entry
 func (s *QueryLogStore) Insert(ctx context.Context, e QueryLogEntry) error {
-	ips, ans, cached := e.row()
+	ips, ans, cached, dnssec := e.row()
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO query_log (timestamp, instance, client, domain, action, upstream, q_type, blocklist, ips, answers, duration_us, cached, proto) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		e.Timestamp, e.Instance, e.Client, e.Domain, e.Action, e.Upstream, e.QType, e.BlockList, ips, ans, e.DurationUs, cached, e.Proto)
+		`INSERT INTO query_log (timestamp, instance, client, domain, action, upstream, q_type, blocklist, ips, answers, duration_us, cached, proto, dnssec) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		e.Timestamp, e.Instance, e.Client, e.Domain, e.Action, e.Upstream, e.QType, e.BlockList, ips, ans, e.DurationUs, cached, e.Proto, dnssec)
 	return err
 }
 
@@ -587,7 +594,7 @@ func (s *QueryLogStore) Query(ctx context.Context, instance, filter, action, cac
 // ponytail: still a full scan under a text filter — an FTS5 index on
 // (client, domain, action) if this stays slow at scale.
 func (s *QueryLogStore) QueryPage(ctx context.Context, instance, filter, action, cached, proto string, since time.Time, offset, limit int) ([]QueryLogEntry, int, error) {
-	query := `SELECT ql.id, ql.timestamp, ql.instance, ql.client, COALESCE(cn.name, ''), ql.domain, ql.action, ql.proto, ql.upstream, ql.q_type, ql.blocklist, ql.ips, ql.answers, ql.duration_us, ql.cached FROM query_log ql LEFT JOIN client_names cn ON cn.client = ql.client WHERE ql.timestamp >= ? AND ql.domain != 'health_check' AND ql.domain != ''`
+	query := `SELECT ql.id, ql.timestamp, ql.instance, ql.client, COALESCE(cn.name, ''), ql.domain, ql.action, ql.proto, ql.upstream, ql.q_type, ql.blocklist, ql.ips, ql.answers, ql.duration_us, ql.cached, ql.dnssec FROM query_log ql LEFT JOIN client_names cn ON cn.client = ql.client WHERE ql.timestamp >= ? AND ql.domain != 'health_check' AND ql.domain != ''`
 	args := []interface{}{since}
 	query, args = logFilter(query, args, instance, action, cached, filter, proto)
 
@@ -605,8 +612,8 @@ func (s *QueryLogStore) QueryPage(ctx context.Context, instance, filter, action,
 		var e QueryLogEntry
 		var ts string
 		var qProto, qType, bl, ips, ans sql.NullString
-		var dur, cached sql.NullInt64
-		if err := rows.Scan(&e.ID, &ts, &e.Instance, &e.Client, &e.Name, &e.Domain, &e.Action, &qProto, &e.Upstream, &qType, &bl, &ips, &ans, &dur, &cached); err != nil {
+		var dur, cached, dnssec sql.NullInt64
+		if err := rows.Scan(&e.ID, &ts, &e.Instance, &e.Client, &e.Name, &e.Domain, &e.Action, &qProto, &e.Upstream, &qType, &bl, &ips, &ans, &dur, &cached, &dnssec); err != nil {
 			return nil, 0, err
 		}
 		e.Timestamp = parseQueryTS(ts)
@@ -627,6 +634,7 @@ func (s *QueryLogStore) QueryPage(ctx context.Context, instance, filter, action,
 		}
 		e.DurationUs = dur.Int64
 		e.Cached = cached.Valid && cached.Int64 != 0
+		e.DNSSEC = dnssec.Valid && dnssec.Int64 != 0
 		results = append(results, e)
 	}
 	if err := rows.Err(); err != nil {
@@ -980,15 +988,15 @@ func (s *QueryLogStore) insertBatch(ctx context.Context, entries []QueryLogEntry
 	if err != nil {
 		return
 	}
-	stmt, err := tx.Prepare(`INSERT INTO query_log (timestamp, instance, client, domain, action, upstream, q_type, blocklist, ips, answers, duration_us, cached, proto) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+	stmt, err := tx.Prepare(`INSERT INTO query_log (timestamp, instance, client, domain, action, upstream, q_type, blocklist, ips, answers, duration_us, cached, proto, dnssec) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		_ = tx.Rollback()
 		return
 	}
 	defer stmt.Close()
 	for _, e := range entries {
-		ips, ans, cached := e.row()
-		if _, err := stmt.Exec(e.Timestamp, e.Instance, e.Client, e.Domain, e.Action, e.Upstream, e.QType, e.BlockList, ips, ans, e.DurationUs, cached, e.Proto); err != nil {
+		ips, ans, cached, dnssec := e.row()
+		if _, err := stmt.Exec(e.Timestamp, e.Instance, e.Client, e.Domain, e.Action, e.Upstream, e.QType, e.BlockList, ips, ans, e.DurationUs, cached, e.Proto, dnssec); err != nil {
 			_ = tx.Rollback()
 			return
 		}

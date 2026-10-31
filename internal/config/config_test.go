@@ -34,6 +34,49 @@ func TestRateLimitDefaultOn(t *testing.T) {
 	}
 }
 
+func TestDNSSECConfig(t *testing.T) {
+	c, err := Load(writeCfg(t, "dns_addr: 127.0.0.1:5353\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.DNSSEC {
+		t.Fatal("dnssec defaults to true; want false (validation is opt-in)")
+	}
+	c, err = Load(writeCfg(t, "dns_addr: 127.0.0.1:5353\ndnssec: true\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.DNSSEC {
+		t.Fatal("dnssec: true was not parsed")
+	}
+}
+
+func TestUpstreamTrustAD(t *testing.T) {
+	c, err := Load(writeCfg(t, `
+upstream_servers:
+  - name: unbound
+    address: "udp://127.0.0.1:53"
+    priority: 1
+    trust_ad: true
+  - name: doh
+    address: "https://1.1.1.1/dns-query"
+    priority: 2
+    trust_ad: false
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.UpstreamServers) != 2 {
+		t.Fatalf("upstream_servers = %d, want 2", len(c.UpstreamServers))
+	}
+	if v := c.UpstreamServers[0].TrustAD; v == nil || !*v {
+		t.Fatalf("unbound trust_ad = %v, want true", v)
+	}
+	if v := c.UpstreamServers[1].TrustAD; v == nil || *v {
+		t.Fatalf("doh trust_ad = %v, want false", v)
+	}
+}
+
 func TestBlocklistUpdateHoursValidation(t *testing.T) {
 	if _, err := Load(writeCfg(t, "blocklist_update_hours: -1\n")); err == nil {
 		t.Fatal("negative hours: expected error, got nil")

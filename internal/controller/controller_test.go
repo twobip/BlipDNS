@@ -224,6 +224,33 @@ func (r *cacheRec) snapshot() []cacheCall {
 	return out
 }
 
+// dnssecRec records every delegated-DNSSEC push to a fake blipd and reports
+// the current value back from /api/v1/stats (for reconcile).
+type dnssecRec struct {
+	mu      sync.Mutex
+	enabled bool
+	calls   []bool
+}
+
+func (r *dnssecRec) applied(enabled bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.enabled = enabled
+	r.calls = append(r.calls, enabled)
+}
+
+func (r *dnssecRec) current() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.enabled
+}
+
+func (r *dnssecRec) snapshot() []bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]bool(nil), r.calls...)
+}
+
 // fakeBlipd is a minimal blipd management API for controller tests. It
 // supports the claim-code adoption handshake: unauthenticated /adopt/status,
 // POST /adopt with the code returns a token once, then rejects re-adopt.
@@ -244,6 +271,7 @@ func fakeBlipdWithRec(t *testing.T, token, claimCode string, health *control.Hea
 	var recCtrl *recRec
 	var acl *aclRec
 	var gate *policyGate
+	var dnssec *dnssecRec
 	for _, r := range recs {
 		switch rv := r.(type) {
 		case *upstreamRec:
@@ -256,6 +284,8 @@ func fakeBlipdWithRec(t *testing.T, token, claimCode string, health *control.Hea
 			gate = rv
 		case *recRec:
 			recCtrl = rv
+		case *dnssecRec:
+			dnssec = rv
 		}
 	}
 	mux := http.NewServeMux()
@@ -300,6 +330,9 @@ func fakeBlipdWithRec(t *testing.T, token, claimCode string, health *control.Hea
 		}
 		if acl != nil {
 			st.AllowedNetworks = acl.current()
+		}
+		if dnssec != nil {
+			st.DNSSEC = dnssec.current()
 		}
 		writeJSONH(w, &st)
 	})
@@ -369,6 +402,32 @@ func fakeBlipdWithRec(t *testing.T, token, claimCode string, health *control.Hea
 			}
 			appliedRL = append(appliedRL, req.QPS)
 			writeJSONH(w, map[string]int{"qps": req.QPS, "burst": req.Burst})
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+	})
+	mux.HandleFunc("/api/v1/dnssec", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+token {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		switch r.Method {
+		case http.MethodGet:
+			on := false
+			if dnssec != nil {
+				on = dnssec.current()
+			}
+			writeJSONH(w, map[string]bool{"enabled": on})
+		case http.MethodPut, http.MethodPost:
+			var req control.SetDNSSECRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if dnssec != nil {
+				dnssec.applied(req.Enabled)
+			}
+			writeJSONH(w, map[string]bool{"ok": true})
 		default:
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
@@ -2853,5 +2912,201 @@ func TestFleetListConcurrentWithWriters(t *testing.T) {
 	case <-done:
 	case <-time.After(20 * time.Second):
 		t.Fatal("List blocked under concurrent writers (fleet lock deadlock)")
+	}
+}
+
+// TestFleetSetDNSSEC verifies the fleet-wide switch is pushed, persisted, and
+// overridable per instance; clearing the override falls back to the fleet
+// default. It also covers the poll-loop reconcile after a simulated restart.
+func TestFleetSetDNSSEC(t *testing.T) {
+	recA, recB := &dnssecRec{}, &dnssecRec{}
+	srvA := fakeBlipdWithRec(t, "t", "", &control.HealthResponse{OK: true}, &control.StatsResponse{}, &control.ListResponse{}, nil, nil, recA)
+	defer srvA.Close()
+	srvB := fakeBlipdWithRec(t, "t", "", &control.HealthResponse{OK: true}, &control.StatsResponse{}, &control.ListResponse{}, nil, nil, recB)
+	defer srvB.Close()
+
+	cfgPath := filepath.Join(t.TempDir(), "blipc.yaml")
+	fleet := NewFleet(cfgPath)
+	ctx := context.Background()
+	if err := fleet.Add(ctx, InstanceConfig{ID: "a", URL: srvA.URL, Token: "t"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := fleet.Add(ctx, InstanceConfig{ID: "b", URL: srvB.URL, Token: "t"}); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := fleet.SetDNSSEC(ctx, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res["a"] != "ok" || res["b"] != "ok" {
+		t.Fatalf("expected both ok, got %+v", res)
+	}
+	if !recA.current() || !recB.current() {
+		t.Fatalf("DNSSEC pushes = %v / %v, want true/true", recA.current(), recB.current())
+	}
+	if !fleet.DNSSEC() {
+		t.Fatal("fleet DNSSEC = false, want true")
+	}
+	b, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(b, []byte("dnssec: true")) {
+		t.Errorf("dnssec not persisted:\n%s", b)
+	}
+
+	// Per-instance override off: a turns off, b keeps the fleet default.
+	off := false
+	if _, err := fleet.SetInstanceOverride(ctx, "a", &InstanceOverride{DNSSEC: &off}); err != nil {
+		t.Fatal(err)
+	}
+	if recA.current() {
+		t.Fatal("instance a DNSSEC = true, want override false")
+	}
+	if !recB.current() {
+		t.Fatal("instance b lost the fleet DNSSEC default")
+	}
+	if fleet.effectiveDNSSEC("a") {
+		t.Fatal("effectiveDNSSEC(a) = true, want false")
+	}
+	if !fleet.effectiveDNSSEC("b") {
+		t.Fatal("effectiveDNSSEC(b) = false, want true")
+	}
+
+	// Clearing the override inherits the fleet default again.
+	if _, err := fleet.SetInstanceOverride(ctx, "a", nil); err != nil {
+		t.Fatal(err)
+	}
+	if !recA.current() {
+		t.Fatal("clearing the override did not restore the fleet DNSSEC default")
+	}
+
+	// Simulate a restart reverting the instance, then run the poll reconciler.
+	recA.mu.Lock()
+	recA.enabled = false
+	recA.mu.Unlock()
+	fleet.maybePushDNSSEC(ctx, fleet.get("a"), &control.StatsResponse{DNSSEC: false})
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && !recA.current() {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !recA.current() {
+		t.Fatal("reconcile did not restore DNSSEC after a simulated restart")
+	}
+}
+
+// TestSettingsDNSSEC exercises the Settings -> Upstream DNSSEC controls:
+// fleet toggle, per-instance override, inherit-clears-override, validation,
+// stats/push propagation, and persistence.
+func TestSettingsDNSSEC(t *testing.T) {
+	rec := &dnssecRec{}
+	srv := fakeBlipdWithRec(t, "t", "", &control.HealthResponse{OK: true}, &control.StatsResponse{}, &control.ListResponse{}, nil, nil, rec)
+	defer srv.Close()
+
+	cfgPath := filepath.Join(t.TempDir(), "blipc.yaml")
+	fleet := NewFleet(cfgPath)
+	if err := fleet.Add(context.Background(), InstanceConfig{ID: "a", URL: srv.URL, Token: "t"}); err != nil {
+		t.Fatal(err)
+	}
+	s := NewServer("admin", "secret", fleet, nil)
+	c := newAuthedClient(t, s)
+	put := func(body string) (int, map[string]interface{}) {
+		t.Helper()
+		req, _ := http.NewRequest(http.MethodPut, "/api/settings", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := c.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		var d map[string]interface{}
+		if resp.StatusCode == http.StatusOK {
+			if err := json.NewDecoder(resp.Body).Decode(&d); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return resp.StatusCode, d
+	}
+
+	if code, _ := put(`{"dnssec":true}`); code != http.StatusOK {
+		t.Fatalf("fleet enable: status=%d, want 200", code)
+	}
+	if !fleet.DNSSEC() {
+		t.Fatal("fleet DNSSEC not enabled")
+	}
+	if !rec.current() {
+		t.Fatal("fleet DNSSEC not pushed to the instance")
+	}
+
+	if code, _ := put(`{"scope":"instance","instance":"a","dnssec":false}`); code != http.StatusOK {
+		t.Fatalf("instance disable: status=%d, want 200", code)
+	}
+	if rec.current() {
+		t.Fatal("instance DNSSEC override false not pushed")
+	}
+	if !fleet.DNSSEC() {
+		t.Fatal("instance override changed the fleet default")
+	}
+
+	resp, err := c.Get("/api/settings")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if got["dnssec"] != true {
+		t.Errorf("GET dnssec = %v, want true", got["dnssec"])
+	}
+	overs, _ := got["instance_overrides"].(map[string]interface{})
+	a, _ := overs["a"].(map[string]interface{})
+	if a["dnssec"] != false {
+		t.Errorf("GET instance a dnssec = %v, want false", a["dnssec"])
+	}
+
+	// Inherit clears the override and restores the fleet default.
+	if code, _ := put(`{"scope":"instance","instance":"a","dnssec_inherit":true}`); code != http.StatusOK {
+		t.Fatalf("instance inherit: status=%d, want 200", code)
+	}
+	if o := fleet.InstanceOverrideOf("a"); o != nil && o.DNSSEC != nil {
+		t.Fatal("instance DNSSEC override was not cleared")
+	}
+	if !rec.current() {
+		t.Fatal("inherit did not restore the fleet DNSSEC default")
+	}
+
+	// Inherit is instance-only; a fleet-scope request without a value is invalid.
+	if code, _ := put(`{"dnssec_inherit":true}`); code != http.StatusBadRequest {
+		t.Fatalf("fleet inherit: status=%d, want 400", code)
+	}
+
+	b, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), "dnssec: true") {
+		t.Errorf("controller.yaml lacks the persisted DNSSEC default:\n%s", b)
+	}
+}
+
+// TestUpstreamHashTrustAD proves a per-server trust_ad change is part of the
+// drift hash, so the controller re-pushes the pool when trust is edited.
+func TestUpstreamHashTrustAD(t *testing.T) {
+	trust, distrust := true, false
+	base := []upstream.UpstreamServer{{Name: "x", Address: "udp://1.1.1.1:53", Priority: 1}}
+	trusted := []upstream.UpstreamServer{{Name: "x", Address: "udp://1.1.1.1:53", Priority: 1, TrustAD: &trust}}
+	untrusted := []upstream.UpstreamServer{{Name: "x", Address: "udp://1.1.1.1:53", Priority: 1, TrustAD: &distrust}}
+
+	hBase := upstreamHash(base, nil, nil)
+	hTrusted := upstreamHash(trusted, nil, nil)
+	hUntrusted := upstreamHash(untrusted, nil, nil)
+	if hBase == hTrusted {
+		t.Error("trust_ad=true produced the same hash as an unset trust_ad")
+	}
+	if hTrusted == hUntrusted {
+		t.Error("trust_ad=true and trust_ad=false produced the same hash")
 	}
 }

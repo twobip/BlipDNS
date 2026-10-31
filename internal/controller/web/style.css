@@ -399,9 +399,13 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
 .q-time { color: var(--muted); font-size: 12px; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .q-count { font-variant-numeric: tabular-nums; font-size: 11.5px; white-space: nowrap; }
 
-.q-domain { min-width: 0; }
+.q-domain { min-width: 0; position: relative; }
 .q-domain-line { display: flex; align-items: center; min-width: 0; }
 .q-domain-line .q-globe { flex-shrink: 0; }
+/* Gutter padlock: absolute in the cell's left padding so the globe/domain
+   positions (and therefore every row) stay aligned. */
+.q-dnssec { position: absolute; left: 0; top: 50%; transform: translateY(-50%); width: 12px; height: 12px; color: var(--green); display: grid; place-items: center; }
+.q-dnssec svg { width: 12px; height: 12px; }
 .q-globe { color: var(--faint); display: inline-grid; place-items: center; vertical-align: middle; margin-right: 8px; }
 .q-globe svg { width: 14px; height: 14px; }
 .q-dom {
@@ -502,6 +506,41 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
 .modal-head .x { margin-left: auto; }
 .modal-body { padding: 26px; display: flex; flex-direction: column; gap: 18px; }
 .modal-foot { display: flex; justify-content: flex-end; gap: 10px; padding: 16px 22px; border-top: 1px solid var(--border); background: rgba(0,0,0,.15); border-radius: 0 0 14px 14px; }
+
+/* ============================================================
+   RESOLVER MULTISELECT (UniFi-style)
+   ============================================================ */
+.resolver-modal { max-width: 440px; }
+.resolver-modal .modal-head { padding: 16px 18px; }
+.resolver-modal .modal-body { padding: 14px 16px 16px; gap: 10px; }
+.search-wrap { position: relative; }
+.search-wrap > svg { position: absolute; left: 11px; top: 50%; transform: translateY(-50%); color: var(--muted); pointer-events: none; }
+.search-wrap .input { padding-left: 34px; }
+.resolver-list { display: flex; flex-direction: column; gap: 2px; max-height: 330px; overflow-y: auto; margin: 0 -6px; padding: 0 6px; }
+.resolver-row { display: flex; align-items: center; gap: 12px; padding: 8px; border-radius: 8px; cursor: pointer; user-select: none; }
+.resolver-row:hover { background: var(--surface-3); }
+.resolver-check { width: 16px; height: 16px; accent-color: var(--accent); flex: 0 0 auto; }
+.resolver-ic { width: 34px; height: 34px; border-radius: 8px; display: grid; place-items: center; font-size: 9.5px; font-weight: 700; letter-spacing: .02em; flex: 0 0 auto; }
+.resolver-ic.doh { background: rgba(79,140,255,.15); color: #82b1ff; }
+.resolver-ic.dot { background: rgba(53,210,154,.14); color: var(--green); }
+.resolver-ic.udp { background: var(--surface-3); color: var(--muted); }
+.resolver-text { display: flex; flex-direction: column; min-width: 0; }
+.resolver-name { font-size: 13.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.resolver-addr { font-family: var(--mono); font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.resolver-warn { color: var(--amber); display: flex; flex: 0 0 auto; }
+.resolver-warn svg { width: 17px; height: 17px; }
+.resolver-foot { align-items: center; justify-content: flex-start; }
+.resolver-selectall { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-2); cursor: pointer; }
+.resolver-selectall input { width: 16px; height: 16px; accent-color: var(--accent); }
+
+/* DNSSEC resolver picker summary row */
+.list-select { width: 100%; display: flex; align-items: center; gap: 10px; padding: 10px 12px; margin-top: 8px; background: var(--surface-3); border: 1px solid var(--border-2); border-radius: 10px; color: var(--text); cursor: pointer; text-align: left; font: inherit; }
+.list-select:hover { border-color: var(--accent); background: var(--surface-2); }
+.list-select:disabled { opacity: .55; cursor: default; }
+.list-select .list-ic { width: 30px; height: 30px; border-radius: 8px; background: rgba(79,140,255,.14); color: var(--accent); display: grid; place-items: center; flex: 0 0 auto; }
+.list-select .list-title { display: block; font-weight: 600; font-size: 13px; }
+.list-select .list-sub { display: block; color: var(--muted); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.list-select .list-chev { color: var(--muted); font-size: 20px; line-height: 1; margin-left: auto; }
 .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
 .adv { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
 .adv summary { cursor: pointer; font-size: 12.5px; color: var(--muted); }

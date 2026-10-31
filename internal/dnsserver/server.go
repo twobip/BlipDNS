@@ -50,6 +50,7 @@ type Config struct {
 	DoHHTTPAddr       string           // also accept plain-HTTP DoH on this addr ("" = off; toggleable at runtime by the controller)
 	RateLimitQPS      int              // per-client DNS QPS limit (0 = unlimited, stock default 20; toggleable at runtime by the controller)
 	RateLimitBurst    int              // per-client burst above QPS (0 = auto = QPS, min 1)
+	DNSSEC            bool             // delegate validation to authenticated (DoT/DoH) upstreams: force DO upstream and serve their AD bit
 	TLSCert           *tls.Certificate // in-memory cert+key (e.g. generated self-signed) used when DoHTLS
 	Upstream          string           // upstream spec(s)
 	UpstreamServers   []upstream.UpstreamServer
@@ -107,6 +108,18 @@ type Server struct {
 	dohPlain     *http.Server
 	dohPlainAddr string
 	once         sync.Once
+	// dnssec delegates DNSSEC validation to trusted upstreams: upstream
+	// queries get DO=1 and the AD bit from a trusted server (per-server
+	// trust_ad, defaulting to DoT/DoH yes and plain UDP/TCP no) is served to
+	// clients that asked for it. Toggleable at runtime by the controller;
+	// SetDNSSEC purges the cache because AD and DNSSEC-RR filtering differ
+	// between modes.
+	dnssec atomic.Bool
+	// cacheGen bumps when the upstream pool or DNSSEC mode changes. Cache keys
+	// carry it so a fetch started under the old policy cannot be read back
+	// under the new one (SetUpstream/SetDNSSEC also purge, but a fetch already
+	// in flight can land after the purge).
+	cacheGen atomic.Uint64
 	// rl enforces the per-client DNS query rate limit (configurable live).
 	rl *rateLimiter
 	// inflight bounds concurrent ServeDNS handlers (see maxInflightQueries).
@@ -141,6 +154,9 @@ func New(cfg Config) (*Server, error) {
 	up, err := upstream.NewPoolWithBootstrap(cfg.UpstreamServers, cfg.UpstreamRoutes, cfg.Upstream, cfg.UpstreamBootstrap)
 	if err != nil {
 		return nil, err
+	}
+	if cfg.DNSSEC && !up.AnyTrusted() {
+		log.Printf("blipd: WARNING dnssec: true but no upstream is trusted; AD will be discarded, so clients will never receive validated answers")
 	}
 	trusted, err := parseTrustedProxies(cfg.TrustedProxies)
 	if err != nil {
@@ -186,6 +202,7 @@ func New(cfg Config) (*Server, error) {
 		trustedProxies:  trusted,
 		allowedNetworks: allowed,
 	}
+	s.dnssec.Store(cfg.DNSSEC)
 	if cfg.TLSCert != nil {
 		s.cert.Store(cfg.TLSCert)
 	}
@@ -209,6 +226,7 @@ func New(cfg Config) (*Server, error) {
 	// the response cache (size / purge) at runtime.
 	ctrl.SetDoHController(s)
 	ctrl.SetRateLimitController(s)
+	ctrl.SetDNSSECController(s)
 	ctrl.SetACLController(s)
 	ctrl.SetLocalResolverController(s)
 	ctrl.SetCacheController(s)
@@ -1066,6 +1084,105 @@ func stripSubnet(req *dns.Msg) {
 	opt.Option = kept
 }
 
+// upstreamEDNSUDPSize is the EDNS0 payload size blipd advertises when it must
+// add an OPT RR to an upstream query itself. 1232 follows DNS Flag Day 2020:
+// large enough for most signed answers, small enough to avoid IP
+// fragmentation (UDPResolver retries over TCP if the upstream truncates).
+const upstreamEDNSUDPSize = 1232
+
+// setUpstreamDO forces the EDNS0 DNSSEC OK bit on an upstream query, adding an
+// OPT RR when the client sent none. Used only with dnssec: true so a
+// validating upstream returns RRSIGs and can assert AD.
+func setUpstreamDO(m *dns.Msg) {
+	if m == nil {
+		return
+	}
+	if opt := m.IsEdns0(); opt != nil {
+		opt.SetDo()
+		return
+	}
+	m.SetEdns0(upstreamEDNSUDPSize, true)
+}
+
+// stripDNSSEC removes DNSSEC RRs the client did not explicitly ask for. RFC
+// 4035 §3.2.1 says a security-aware server must not include them unless the
+// request had DO=1; keep is the question type, so DNSKEY/DS/RRSIG queries
+// still work with DO=0.
+func stripDNSSEC(m *dns.Msg, keep uint16) {
+	if m == nil {
+		return
+	}
+	m.Answer = dropDNSSECRRs(m.Answer, keep)
+	m.Ns = dropDNSSECRRs(m.Ns, keep)
+	m.Extra = dropDNSSECRRs(m.Extra, keep)
+}
+
+func dropDNSSECRRs(rrs []dns.RR, keep uint16) []dns.RR {
+	if len(rrs) == 0 {
+		return rrs
+	}
+	out := rrs[:0]
+	for _, rr := range rrs {
+		if rr == nil {
+			continue
+		}
+		t := rr.Header().Rrtype
+		if t != keep && isDNSSECRR(t) {
+			continue
+		}
+		out = append(out, rr)
+	}
+	// Drop references to filtered RRs so they can be GC'd with the slice.
+	for i := len(out); i < len(rrs); i++ {
+		rrs[i] = nil
+	}
+	return out
+}
+
+// isDNSSECRR reports whether t is a DNSSEC record type that is only included
+// when the client set DO=1 or explicitly queried that type.
+func isDNSSECRR(t uint16) bool {
+	switch t {
+	case dns.TypeDS, dns.TypeRRSIG, dns.TypeNSEC, dns.TypeDNSKEY,
+		dns.TypeNSEC3, dns.TypeNSEC3PARAM, dns.TypeCDS, dns.TypeCDNSKEY,
+		dns.TypeSIG, dns.TypeKEY, dns.TypeDLV:
+		return true
+	default:
+		return false
+	}
+}
+
+// normalizeResponseOPT aligns the response's OPT RR with the client's EDNS
+// state. Forcing DO upstream can make the upstream echo an OPT (with DO=1) to
+// a client that never sent EDNS, and DO must mirror the client's request, not
+// our internal upstream query (RFC 3225 §3). A non-EDNS client gets no OPT;
+// an EDNS client's response OPT keeps the remaining options but takes the
+// client's DO bit.
+func normalizeResponseOPT(out, req *dns.Msg, do bool) {
+	if out == nil {
+		return
+	}
+	opt := out.IsEdns0()
+	if opt == nil {
+		return
+	}
+	if req == nil || req.IsEdns0() == nil {
+		kept := out.Extra[:0]
+		for _, rr := range out.Extra {
+			if rr != nil && rr.Header().Rrtype == dns.TypeOPT {
+				continue
+			}
+			kept = append(kept, rr)
+		}
+		for i := len(kept); i < len(out.Extra); i++ {
+			out.Extra[i] = nil
+		}
+		out.Extra = kept
+		return
+	}
+	opt.SetDo(do)
+}
+
 // serveInner resolves one query. The bool reports UDP shed: when true the
 // transport is spoofable and the reply must be dropped, not sent —
 // answering REFUSED/SERVFAIL to a forged source makes blipd a reflector.
@@ -1280,8 +1397,9 @@ func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, prot
 	// + client CIDR) wins; otherwise a per-policy upstream override that only
 	// applies when no route matched; otherwise the automatic rotation.
 	// Check local static records first — these short-circuit before cache/upstream.
-	// Snapshot the pool once so Match+Auto+LabelFor cost one RLock, not three.
-	pool := s.safePool()
+	// Snapshot the pool once so Match+Auto+LabelFor cost one RLock, not three,
+	// and pair it with the cache generation under the same lock.
+	pool, cacheGen := s.safePoolGen()
 	if s.rec != nil {
 		if recResp, ok := s.rec.Lookup(req); ok {
 			// M2 AD: local records are not DNSSEC-validated; clear AD.
@@ -1388,6 +1506,7 @@ func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, prot
 	}
 	stripSubnet(req)
 	key := cache.KeyOfNormalized(q.Name, q.Qtype, q.Qclass, do, req.CheckingDisabled, req.AuthenticatedData)
+	key.Gen = cacheGen
 	if upstreamLabel != "" {
 		// Partition the cache by the resolver that will answer: routes and
 		// per-policy overrides can give different clients different answers
@@ -1420,14 +1539,25 @@ func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, prot
 		// (DoT/DoH) share req — the TLS channel, not the TXID, stops
 		// spoofers. Fail closed if crypto/rand fails instead of using a
 		// predictable ID.
+		//
+		// Delegated DNSSEC needs a copy even on an encrypted transport:
+		// forcing DO must not mutate the client's request (responseCap
+		// reads its OPT size later).
 		upReq := req
-		if !upstream.Encrypted(resolver) {
+		encrypted := upstream.Encrypted(resolver)
+		forceDO := s.dnssec.Load() && !do
+		if !encrypted || forceDO {
 			c := req.Copy()
-			newID, idErr := freshUpstreamID(req.Id)
-			if idErr != nil {
-				return nil, idErr
+			if !encrypted {
+				newID, idErr := freshUpstreamID(req.Id)
+				if idErr != nil {
+					return nil, idErr
+				}
+				c.Id = newID
 			}
-			c.Id = newID
+			if forceDO {
+				setUpstreamDO(c)
+			}
 			upReq = c
 		}
 		m, err := resolver.Resolve(fctx, upReq)
@@ -1437,10 +1567,14 @@ func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, prot
 		if m == nil {
 			return nil, fmt.Errorf("upstream returned nil response")
 		}
-		// M2 AD: never cache or serve upstream AD=1 as validated. We do not
-		// validate DNSSEC, so clear AD on all upstream answers (CD/DO bits
-		// are still forwarded via the query and the cache key).
-		m.AuthenticatedData = false
+		// Delegated DNSSEC (dnssec: true): the AD bit is only meaningful
+		// from an authenticated transport, and upstream.UDPResolver clears
+		// it for plain UDP/TCP, so a mixed failover pool cannot launder an
+		// unauthenticated AD=1. With the feature off, keep the historical
+		// M2 behavior of never propagating upstream AD.
+		if !s.dnssec.Load() {
+			m.AuthenticatedData = false
+		}
 		// H5 bailiwick: strip out-of-bailiwick Ns/Extra glue before
 		// cache+serve. Only Answer + in-bailiwick Ns are kept; Extra is
 		// dropped except OPT.
@@ -1456,6 +1590,14 @@ func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, prot
 				return nil, &chainBlockedError{target: domain, action: "", source: "", shouldLog: false}
 			}
 			return nil, &chainBlockedError{target: target, action: act, source: src, shouldLog: lg}
+		}
+		// RFC 4035 §3.2.1: a DO=0 client only gets the DNSSEC RR type it
+		// explicitly asked for. Strip here (before DoHit caches the answer):
+		// the DO=0 cache entry stays small and no later path can leak
+		// RRSIGs to a client that did not request them. DO=1 keys are
+		// already partitioned from DO=0 keys.
+		if !do {
+			stripDNSSEC(m, q.Qtype)
 		}
 		return m, nil
 	}
@@ -1550,10 +1692,19 @@ func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, prot
 	}
 	out.Id = req.Id
 	out.Question = req.Question
-	// M2 AD: we never validate DNSSEC, so clear AD on all served responses
-	// (never serve cached AD=1 as validated). CD/DO forwarding is preserved
-	// via the query and cache key.
-	out.AuthenticatedData = false
+	// Delegated DNSSEC (dnssec: true) serves the upstream's AD bit only when
+	// the answer came from a trusted upstream (upstream.UDPResolver clears AD
+	// for plain UDP/TCP unless trust_ad), the client asked for validation
+	// status with DO or AD (RFC 6840 §5.8), and checking was not disabled
+	// (RFC 4035 §3.2.3). Capture the pre-gate upstream status first so the
+	// query log can mark validated domains even when the client did not ask
+	// for AD. Every other case keeps the historical M2 behavior: never assert
+	// AD=1 without validation.
+	dnssecVerified := s.dnssec.Load() && out.AuthenticatedData && !req.CheckingDisabled
+	out.AuthenticatedData = dnssecVerified && (do || req.AuthenticatedData)
+	// The upstream may echo an OPT/DO added solely to force validation; align
+	// the response with what this client actually sent.
+	normalizeResponseOPT(out, req, do)
 	// Path-MTU safety: truncate large responses so they fit without IP
 	// fragmentation (see responseCap); the client retries over TCP (TC bit)
 	// or with a larger OPT buffer. DoH rides HTTPS framing, so its answers
@@ -1588,6 +1739,7 @@ func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, prot
 			IPs:        ips,
 			Answers:    answers,
 			Cached:     cached,
+			DNSSEC:     dnssecVerified,
 			Upstream:   upstreamLabel,
 			DurationUs: time.Since(start).Microseconds(),
 		})
@@ -1924,6 +2076,28 @@ const maxRateLimitBurst = 100000
 // maxCacheSize bounds the runtime cache size to prevent a misconfigured push
 // from exhausting memory. Complements the control-layer >=0 check.
 const maxCacheSize = 1000000
+
+// SetDNSSEC enables or disables delegated DNSSEC at runtime. Validation is
+// still performed by trusted upstreams (trust_ad); the response cache is
+// purged because cached answers from one mode must not be served under the
+// other (AD and DNSSEC-RR filtering differ).
+func (s *Server) SetDNSSEC(enabled bool) {
+	if s.dnssec.Swap(enabled) == enabled {
+		return
+	}
+	s.cacheGen.Add(1)
+	if s.cache != nil {
+		s.cache.Purge()
+	}
+	if enabled {
+		if p := s.safePool(); p != nil && !p.AnyTrusted() {
+			log.Printf("blipd: WARNING dnssec enabled but no upstream is trusted; AD will be discarded")
+		}
+	}
+}
+
+// DNSSECEnabled reports whether delegated DNSSEC is enabled.
+func (s *Server) DNSSECEnabled() bool { return s.dnssec.Load() }
 
 // SetRateLimit configures the per-client DNS query rate limit (QPS). A qps of 0
 // disables rate limiting. burst is the per-client burst above qps; <= 0 means

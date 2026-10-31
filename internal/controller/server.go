@@ -1224,6 +1224,7 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			"instance_overrides":        s.fleet.InstanceOverrides(),
 			"doh_http_addr":             s.fleet.DoHHTTPAddr(),
 			"rate_limit_qps":            s.fleet.RateLimitQPS(),
+			"dnssec":                    s.fleet.DNSSEC(),
 			"allowed_networks":          s.fleet.AllowedNetworks(),
 			"open_recursion_ack":        s.fleet.OpenRecursionAck(),
 			"upstream_servers":          upServers,
@@ -1243,6 +1244,8 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			Override               *InstanceOverride          `json:"override"`
 			DoHHTTPAddr            *string                    `json:"doh_http_addr"`
 			RateLimitQPS           *int                       `json:"rate_limit_qps"`
+			DNSSEC                 *bool                      `json:"dnssec"`
+			DNSSECInherit          bool                       `json:"dnssec_inherit"`
 			AllowedNetworks        *[]string                  `json:"allowed_networks"`
 			OpenRecursionAck       *bool                      `json:"open_recursion_ack"`
 			CacheSize              *int                       `json:"cache_size"`
@@ -1359,6 +1362,36 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			applied, err := s.fleet.SetRateLimitQPS(r.Context(), qps)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			writeJSON(w, map[string]interface{}{"ok": true, "applied": applied})
+			return
+		}
+		// Delegated DNSSEC (fleet-wide or per-instance). Fleet scope sets the
+		// default; instance scope sets or clears the override. Validation is
+		// still performed by the upstreams marked trust_ad, not by blipd.
+		if req.DNSSECInherit || req.DNSSEC != nil {
+			if req.Scope == "instance" && req.Instance != "" {
+				existing := s.fleet.InstanceOverrideOf(req.Instance)
+				merged := mergeOverride(existing, &InstanceOverride{DNSSEC: req.DNSSEC})
+				if req.DNSSECInherit {
+					merged.DNSSEC = nil
+				}
+				applied, err := s.fleet.SetInstanceOverride(r.Context(), req.Instance, merged)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
+				writeJSON(w, map[string]interface{}{"ok": true, "applied": applied})
+				return
+			}
+			if req.DNSSEC == nil {
+				http.Error(w, "dnssec is required for the fleet scope", http.StatusBadRequest)
+				return
+			}
+			applied, err := s.fleet.SetDNSSEC(r.Context(), *req.DNSSEC)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return

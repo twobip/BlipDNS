@@ -91,6 +91,7 @@ const IC = {
   edit: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.8 2.8 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>',
   trash: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/></svg>',
   shield: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>',
+  lock: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="10" width="16" height="11" rx="2.5"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>',
   key: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6M15.5 7.5l3 3L22 7l-3-3"/></svg>',
   check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>',
   warn: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.8 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.8a2 2 0 0 0-3.4 0z"/><path d="M12 9v4m0 4h.01"/></svg>',
@@ -724,23 +725,26 @@ function queryRowHtml(r) {
   const action = (r.action || "").toUpperCase();
   const isBlock = action === "BLOCK";
   const isLocal = !isBlock && r.upstream === "local";
+  const verified = r.dnssec === true;
   const inst = instances.find((i) => (i.label || i.id) === r.instance);
   const actionLabel = isBlock ? "Blocked" : isLocal ? "Local" : action === "PASS" ? "Allowed" : esc(action || "—");
   const actionBadge = isBlock ? "err" : isLocal ? "accent" : action === "PASS" ? "on" : "";
   // info icon tooltip: request type (qtype) above the upstream/block source.
   const protoLabel = r.proto === "doh" ? "DoH" : r.proto === "dns" ? "DNS" : "";
-  const tipLabel = (r.q_type || "") + (r.q_type ? " · " : "") + (protoLabel ? protoLabel + " · " : "") + (isBlock ? "Blocked by" : isLocal ? "Local record" : r.cached ? "Cache" : "Upstream");
+  const tipLabel = (r.q_type || "") + (r.q_type ? " · " : "") + (protoLabel ? protoLabel + " · " : "") + (verified ? "DNSSEC · " : "") + (isBlock ? "Blocked by" : isLocal ? "Local record" : r.cached ? "Cache" : "Upstream");
   const tipValue = isBlock
     ? (r.blocklist || "blocklist")
     : isLocal ? "Static DNS record" : r.cached ? "Served from cache" : (r.upstream || "unknown");
   return `<tr class="${isBlock ? "q-row-block" : ""}">
     <td class="q-time"><span class="t" data-t="${esc(r.timestamp)}" title="${esc(r.timestamp)}">…</span></td>
-    <td class="q-domain"><span class="q-domain-line">
-      <span class="q-globe">${IC.globe}</span>
-      <span class="q-dom" title="${esc(r.domain)}">${esc(r.domain)}</span>
-      <span class="q-info" data-tipl="${esc(tipLabel)}" data-tipv="${esc(tipValue)}">${IC.info}</span>
-      <button class="icon-btn q-copy" data-copy="${esc(r.domain)}" title="Copy domain">${IC.copy}</button>
-    </span></td>
+    <td class="q-domain">
+      ${verified ? `<span class="q-dnssec" title="DNSSEC verified">${IC.lock}</span>` : ""}
+      <span class="q-domain-line">
+        <span class="q-globe">${IC.globe}</span>
+        <span class="q-dom" title="${esc(r.domain)}">${esc(r.domain)}</span>
+        <span class="q-info" data-tipl="${esc(tipLabel)}" data-tipv="${esc(tipValue)}">${IC.info}</span>
+        <button class="icon-btn q-copy" data-copy="${esc(r.domain)}" title="Copy domain">${IC.copy}</button>
+      </span></td>
     <td><span class="badge badge-action ${actionBadge}">${isLocal ? IC.set : isBlock ? IC.block : action === "PASS" ? IC.arrow : ""}${actionLabel}</span></td>
     <td class="q-client">${clientCellHtml(r)}</td>
     <td class="q-ips">${resolvedHtml(r)}</td>
@@ -1632,29 +1636,57 @@ async function savePolicy() {
 
 /* ---------- settings ---------- */
 /* ---------- upstream editor (named servers + conditional forwarding) ---------- */
-// A server is {name, address, priority}. priority 0 = route-only (never part
-// of the automatic rotation); 1+ = auto-failover order (lower first).
+// A server is {name, address, priority, trust_ad}. priority 0 = route-only
+// (never part of the automatic rotation); 1+ = auto-failover order (lower
+// first). trust_ad = may this server's DNSSEC AD bit be served; undefined
+// means the transport default (DoT/DoH yes, plain UDP/TCP no).
+function trustDefault(address) {
+  const a = String(address || "").trim().toLowerCase();
+  return a.startsWith("tls://") || a.startsWith("https://") || a.startsWith("doh://");
+}
+function effectiveTrust(u) {
+  return typeof u.trust_ad === "boolean" ? u.trust_ad : trustDefault(u.address);
+}
 function serverRow(u) {
   const row = document.createElement("div");
   row.className = "row up-row";
+  row.dataset.trust = effectiveTrust(u) ? "1" : "0";
+  row.dataset.trustTouched = typeof u.trust_ad === "boolean" ? "1" : "0";
   row.innerHTML = `
     <input class="input up-name" placeholder="name (e.g. quad9)" style="width:120px" value="${esc(u.name || "")}"/>
     <input class="input grow up-addr" placeholder="tls://1.1.1.1 (DoT:853), 9.9.9.9 (udp:53) or https://1.1.1.1/dns-query" value="${esc(u.address || "")}"/>
     <input class="input up-prio" type="number" min="0" title="Priority — lower = higher priority; 0 = route-only" style="width:72px" value="${esc(u.priority ?? "")}"/>
     <input class="input up-timeout" type="number" min="1" title="Seconds to wait before failing over to the next server (default 5)" style="width:72px" placeholder="5" value="${esc(u.timeout_sec ?? "")}"/>
     <button class="icon-btn up-del" title="Remove">${IC.trash}</button>`;
-  row.querySelector(".up-del").onclick = () => { row.remove(); refreshRouteServerOptions(); };
+  const addrIn = row.querySelector(".up-addr");
+  // Until the operator picks resolvers explicitly, follow the transport
+  // default while the address is typed (DoT/DoH trusted, plain UDP/TCP not).
+  addrIn.oninput = () => {
+    if (row.dataset.trustTouched === "1") return;
+    row.dataset.trust = trustDefault(addrIn.value) ? "1" : "0";
+    syncDNSSECUI();
+  };
+  row.querySelector(".up-del").onclick = () => {
+    row.remove();
+    serversDirty = true;
+    refreshRouteServerOptions();
+    syncDNSSECUI();
+  };
   return row;
 }
 function renderServerList(list, effective) {
   const wrap = $("s-upstream-list");
   wrap.innerHTML = "";
-  for (const u of list) wrap.appendChild(serverRow(u));
   const eff = effective || list;
+  // Instance scope without its own override: show the inherited servers as
+  // rows so their trust_ad values can be picked in the DNSSEC modal (saving
+  // materializes the list).
+  const rows = list.length ? list : eff;
+  for (const u of rows) wrap.appendChild(serverRow(u));
   if (!list.length) {
-    wrap.innerHTML = eff.length
-      ? `<div class="hint" style="padding:2px 0 6px">No instance override — this instance uses the inherited fleet-wide servers: ${eff.map((u) => esc(u.name || u.address)).join(", ")}. Saving a list here replaces them for this instance.</div>`
-      : `<div class="hint" style="padding:2px 0 6px">No named resolvers — the automatic rotation is disabled.</div>`;
+    wrap.insertAdjacentHTML("afterbegin", eff.length
+      ? `<div class="hint" style="padding:2px 0 6px">No instance override — these are the inherited fleet-wide servers. Saving an edited list here replaces them for this instance.</div>`
+      : `<div class="hint" style="padding:2px 0 6px">No named resolvers — the automatic rotation is disabled.</div>`);
   }
   const auto = eff.filter((u) => (u.priority || 0) > 0).length;
   if (auto === 1) {
@@ -1669,8 +1701,174 @@ function collectServers() {
     address: row.querySelector(".up-addr").value.trim(),
     priority: parseInt(row.querySelector(".up-prio").value, 10) || 0,
     timeout_sec: parseInt(row.querySelector(".up-timeout").value, 10) || 0,
+    trust_ad: row.dataset.trust === "1",
   })).filter((s) => s.address !== "");
 }
+
+// Resolvers eligible for the DNSSEC trust picker: rows with a non-empty
+// address (a half-typed new row does not count).
+function dnssecRows() {
+  return [...document.querySelectorAll("#s-upstream-list .up-row")]
+    .filter((row) => row.querySelector(".up-addr").value.trim() !== "");
+}
+
+// DNSSEC editor: the master toggle plus a UniFi-style resolver picker.
+// "All upstream servers" trusts every resolver; unticking it reveals the
+// picker, whose modal selects individual resolvers.
+function syncDNSSECUI() {
+  const on = $("s-dnssec").checked;
+  $("s-dnssec-opts").classList.toggle("hidden", !on);
+  if (!on) {
+    $("s-dnssec-warn").textContent = "";
+    return;
+  }
+  const rows = dnssecRows();
+  const trusted = rows.filter((row) => row.dataset.trust === "1");
+  const all = $("s-dnssec-all");
+  all.checked = rows.length > 0 && trusted.length === rows.length;
+  const pick = $("s-dnssec-select");
+  pick.classList.toggle("hidden", all.checked);
+  pick.disabled = rows.length === 0;
+  if (all.checked) {
+    $("s-dnssec-list-hint").textContent = "All listed resolvers are trusted. Untick “All upstream servers” to choose individually.";
+  } else {
+    $("s-dnssec-list-hint").textContent = rows.length
+      ? "Choose which resolvers validate DNSSEC; only tick plaintext resolvers on a trusted path (loopback/LAN)."
+      : "Add an upstream server first.";
+    $("s-dnssec-selected-title").textContent = trusted.length
+      ? `${trusted.length} of ${rows.length} resolver${rows.length === 1 ? "" : "s"} trusted`
+      : "Select resolvers";
+    $("s-dnssec-selected-sub").textContent = trusted.map((row) =>
+      row.querySelector(".up-name").value.trim() || row.querySelector(".up-addr").value.trim()
+    ).join(", ");
+  }
+  $("s-dnssec-warn").textContent = rows.length && !trusted.length
+    ? "No upstream is trusted — AD will always be discarded."
+    : "";
+}
+
+function loadDNSSECEditor() {
+  const instance = scopeState !== "default";
+  const o = instance ? (savedOverrides[scopeState] || {}) : {};
+  const hasOverride = typeof o.dnssec === "boolean";
+  $("s-dnssec-inherit-wrap").classList.toggle("hidden", !instance);
+  $("s-dnssec-inherit").checked = instance && !hasOverride;
+  if (instance) {
+    $("s-dnssec").checked = hasOverride ? o.dnssec : savedDNSSEC;
+    $("s-dnssec").disabled = !hasOverride;
+  } else {
+    $("s-dnssec").checked = savedDNSSEC;
+    $("s-dnssec").disabled = false;
+  }
+  syncDNSSECUI();
+}
+
+$("s-dnssec").addEventListener("change", syncDNSSECUI);
+$("s-dnssec-inherit").addEventListener("change", (e) => {
+  $("s-dnssec").disabled = e.target.checked;
+  if (e.target.checked) $("s-dnssec").checked = savedDNSSEC;
+  syncDNSSECUI();
+});
+$("s-dnssec-all").addEventListener("change", (e) => {
+  const on = e.target.checked;
+  for (const row of dnssecRows()) {
+    row.dataset.trust = on ? "1" : "0";
+    row.dataset.trustTouched = "1";
+  }
+  serversDirty = true;
+  syncDNSSECUI();
+});
+
+/* ---------- resolver picker (UniFi-style modal) ---------- */
+let resolverModal = []; // working copy: {row, name, address, plaintext, checked, initial}
+function resolverIcon(address) {
+  const a = String(address || "").toLowerCase();
+  if (a.startsWith("https://") || a.startsWith("doh://")) return `<span class="resolver-ic doh">DoH</span>`;
+  if (a.startsWith("tls://")) return `<span class="resolver-ic dot">DoT</span>`;
+  return `<span class="resolver-ic udp">UDP</span>`;
+}
+function visibleResolverModal() {
+  const q = $("resolver-search").value.trim().toLowerCase();
+  return resolverModal.filter((e) => !q || e.name.toLowerCase().includes(q) || e.address.toLowerCase().includes(q));
+}
+function syncResolverAll() {
+  const visible = visibleResolverModal();
+  const selected = visible.filter((e) => e.checked).length;
+  const all = $("resolver-all");
+  all.checked = visible.length > 0 && selected === visible.length;
+  all.indeterminate = selected > 0 && selected < visible.length;
+  all.disabled = visible.length === 0;
+}
+function renderResolverList() {
+  const visible = visibleResolverModal();
+  const list = $("resolver-list");
+  list.innerHTML = visible.map((e) => `
+    <label class="resolver-row" data-idx="${resolverModal.indexOf(e)}">
+      <input type="checkbox" class="resolver-check" ${e.checked ? "checked" : ""}/>
+      ${resolverIcon(e.address)}
+      <span class="grow resolver-text">
+        <span class="resolver-name">${esc(e.name)}</span>
+        <span class="resolver-addr">${esc(e.address)}</span>
+      </span>
+      ${e.plaintext ? `<span class="resolver-warn" title="Plaintext upstream — only tick on a trusted path (loopback/LAN)">${IC.warn}</span>` : ""}
+    </label>`).join("");
+  list.querySelectorAll(".resolver-row").forEach((el) => {
+    const entry = resolverModal[Number(el.dataset.idx)];
+    el.querySelector(".resolver-check").onchange = (ev) => {
+      entry.checked = ev.target.checked;
+      syncResolverAll();
+    };
+  });
+  $("resolver-empty").classList.toggle("hidden", visible.length > 0);
+  syncResolverAll();
+}
+function openResolverModal() {
+  const rows = dnssecRows();
+  if (!rows.length) return;
+  resolverModal = rows.map((row) => {
+    const address = row.querySelector(".up-addr").value.trim();
+    const name = row.querySelector(".up-name").value.trim() || address;
+    const checked = row.dataset.trust === "1";
+    return { row, name, address, plaintext: !trustDefault(address), checked, initial: checked };
+  });
+  $("resolver-search").value = "";
+  renderResolverList();
+  show("modal-resolvers");
+  setTimeout(() => $("resolver-search").focus(), 30);
+}
+$("s-dnssec-select").onclick = openResolverModal;
+$("resolver-search").oninput = renderResolverList;
+$("resolver-search").addEventListener("keydown", (e) => {
+  if (e.key === "Escape") hide("modal-resolvers");
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !$("modal-resolvers").classList.contains("hidden")) hide("modal-resolvers");
+});
+$("resolver-all").onchange = (e) => {
+  const on = e.target.checked;
+  for (const entry of visibleResolverModal()) entry.checked = on;
+  renderResolverList();
+};
+$("resolver-save").onclick = () => {
+  let changed = false;
+  for (const entry of resolverModal) {
+    if (entry.checked === entry.initial) continue;
+    entry.row.dataset.trust = entry.checked ? "1" : "0";
+    entry.row.dataset.trustTouched = "1";
+    changed = true;
+  }
+  if (changed) serversDirty = true;
+  hide("modal-resolvers");
+  syncDNSSECUI();
+  // The modal's Save is the commit action, like the UniFi picker: persist the
+  // new trust set (and the current Use DNSSEC switch) via the panel Save.
+  if (changed) $("s-save-upstream").click();
+};
+
+// Any edit in the server list marks it dirty, so an instance-scope save does
+// not materialize an inherited list just to save the DNSSEC toggle.
+$("s-upstream-list").addEventListener("input", () => { serversDirty = true; syncDNSSECUI(); });
+$("s-upstream-list").addEventListener("change", () => { serversDirty = true; syncDNSSECUI(); });
 // A route is {name, qname_suffix, server, client_cidr, disabled}. server
 // references a named server by name; matching queries are forwarded to it.
 // The leading checkbox is the enable/disable switch (a disabled route is kept
@@ -1735,6 +1933,8 @@ let scopeState = "default";    // "default" or an instance id
 let savedUpServers = [];       // fleet-wide default named servers
 let savedUpRoutes = [];        // fleet-wide default conditional-forwarding routes
 let savedUpBootstrap = [];     // fleet-wide default bootstrap DNS resolvers
+let savedDNSSEC = false;       // fleet-wide delegated-DNSSEC switch
+let serversDirty = false;      // true once the server list was edited in this scope
 
 // visibleUpServers/visibleUpRoutes/visibleUpBootstrap return what the editor
 // should show for a scope: the fleet default at "default", otherwise only the
@@ -2060,7 +2260,7 @@ function loadScopeEditor() {
     bootBadge.className = "badge purple";
     hint.textContent = "Only for this instance. Fields you leave blank inherit the fleet-wide default.";
     cfHint.textContent = "Only for this instance. Blank = inherit the fleet-wide default.";
-    upHint.textContent = "Blank = inherit the fleet-wide server pool.";
+    upHint.textContent = "Rows show the inherited fleet list until you edit them; saving an edited list replaces it for this instance.";
     bootHint.textContent = "Only for this instance. Blank = inherit the fleet-wide bootstrap resolvers.";
     const o = savedOverrides[scopeState] || {};
     const own = Array.isArray(o.upstream_servers) ? o.upstream_servers : [];
@@ -2069,6 +2269,8 @@ function loadScopeEditor() {
     renderRouteList(routes, effectiveUpServers(scopeState));
     renderBootstrapList(Array.isArray(o.upstream_bootstrap) ? o.upstream_bootstrap : []);
   }
+  serversDirty = false;
+  loadDNSSECEditor();
 }
 
 async function refreshSettings() {
@@ -2083,6 +2285,7 @@ async function refreshSettings() {
     // fleet-wide plain-HTTP DoH address ("" = off)
     savedFleetDoH = (d.doh_http_addr != null && d.doh_http_addr !== undefined) ? (d.doh_http_addr || "") : "";
     savedRLQPS = (d.rate_limit_qps != null && d.rate_limit_qps !== undefined) ? Number(d.rate_limit_qps || 0) : 0;
+    savedDNSSEC = d.dnssec === true;
     savedACL = Array.isArray(d.allowed_networks) ? d.allowed_networks : [];
     savedOpenAck = d.open_recursion_ack === true;
     savedCacheSize = (d.cache_size != null && d.cache_size !== undefined) ? Number(d.cache_size || 0) : 0;
@@ -2604,34 +2807,72 @@ $("p-save").onclick = savePolicy;
 $("s-up-add").onclick = () => {
   const prios = collectServers().map((s) => s.priority).filter((p) => p > 0);
   $("s-upstream-list").appendChild(serverRow({ name: "", address: "", priority: (prios.length ? Math.max(...prios) + 1 : 1) }));
+  serversDirty = true;
   // Keep the conditional-forwarding dropdowns in sync so the new server is
   // selectable immediately, without a page refresh.
   refreshRouteServerOptions();
+  syncDNSSECUI();
 };
 $("s-save-upstream").onclick = async () => {
   const servers = collectServers();
   const st = $("s-up-status");
   st.textContent = "saving…";
-  let body, msg;
-  if (scopeState === "default") {
-    body = { upstream_servers: servers };
-    msg = servers.length ? "fleet upstream servers saved" : "fleet upstream servers cleared";
-  } else {
-    body = { scope: "instance", instance: scopeState, upstream_servers: servers };
-    msg = servers.length ? "instance upstream servers saved" : "instance upstream servers cleared (inherits fleet)";
-  }
+  const isDefault = scopeState === "default";
+  const applied = {};
+  const msgs = [];
   try {
-    const r = await API("/api/settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-    const d = await r.json();
-    if (scopeState === "default") savedUpServers = servers;
-    else upsertOverrideField(scopeState, "upstream_servers", servers);
-    const applied = d.applied || {};
+    // Save the server list (including each row's trust_ad) unless this is an
+    // instance scope with no server edits: saving an inherited list would
+    // silently materialize it as an instance override.
+    if (isDefault || serversDirty) {
+      const body = isDefault
+        ? { upstream_servers: servers }
+        : { scope: "instance", instance: scopeState, upstream_servers: servers };
+      const r = await API("/api/settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+      const d = await r.json();
+      Object.assign(applied, d.applied || {});
+      if (isDefault) savedUpServers = servers;
+      else upsertOverrideField(scopeState, "upstream_servers", servers);
+      msgs.push(isDefault
+        ? (servers.length ? "fleet upstream servers saved" : "fleet upstream servers cleared")
+        : (servers.length ? "instance upstream servers saved" : "instance upstream servers cleared (inherits fleet)"));
+    }
+    // Save the DNSSEC switch separately (it is pushed independently of the
+    // upstream list). Instance scope can inherit the fleet setting.
+    let dnBody;
+    if (isDefault) {
+      dnBody = { dnssec: $("s-dnssec").checked };
+    } else if ($("s-dnssec-inherit").checked) {
+      dnBody = { scope: "instance", instance: scopeState, dnssec_inherit: true };
+    } else {
+      dnBody = { scope: "instance", instance: scopeState, dnssec: $("s-dnssec").checked };
+    }
+    const r2 = await API("/api/settings", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(dnBody) });
+    const d2 = await r2.json();
+    Object.assign(applied, d2.applied || {});
+    if (isDefault) {
+      savedDNSSEC = $("s-dnssec").checked;
+      msgs.push(savedDNSSEC ? "fleet DNSSEC enabled" : "fleet DNSSEC disabled");
+    } else if ($("s-dnssec-inherit").checked) {
+      const o = savedOverrides[scopeState] || {};
+      delete o.dnssec;
+      if (Object.keys(o).length) savedOverrides[scopeState] = o;
+      else delete savedOverrides[scopeState];
+      msgs.push("instance DNSSEC inherits fleet");
+    } else {
+      const o = savedOverrides[scopeState] || {};
+      o.dnssec = $("s-dnssec").checked;
+      savedOverrides[scopeState] = o;
+      msgs.push("instance DNSSEC saved");
+    }
+    serversDirty = false;
     const ids = Object.keys(applied);
     const ok = ids.filter((k) => applied[k] === "ok").length;
     const failed = ids.filter((k) => applied[k] !== "ok");
     st.textContent = ids.length ? `saved on blipc · pushed to ${ok}/${ids.length} instance${ids.length > 1 ? "s" : ""}` + (failed.length ? ` · errors: ${failed.map((k) => k + ": " + applied[k]).join(", ")}` : "") : "saved on blipc · no instance to push to yet";
-    toast(msg + (ids.length ? ` (${ok}/${ids.length})` : ""));
+    toast(msgs.join(" · ") + (ids.length ? ` (${ok}/${ids.length})` : ""));
     renderScopeSelect();
+    syncDNSSECUI();
   } catch (e) { st.textContent = ""; toast("save failed: " + e.message, "err"); }
 };
 $("s-cf-add").onclick = () => {
