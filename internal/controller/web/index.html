@@ -15,10 +15,13 @@
       <div class="brand-mark">
         <img src="/favicon.png" alt="BlipDNS" style="width:100%;height:100%;border-radius:9px;display:block"/>
       </div>
-      <div>
+      <div class="brand-id">
         <div class="brand-text">Blip<b>DNS</b></div>
         <div class="brand-sub">Controller</div>
       </div>
+      <button class="icon-btn" id="sidebar-toggle" title="Toggle sidebar" aria-label="Toggle sidebar">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18M3 12h18M9 18h12"/></svg>
+      </button>
     </div>
 
     <nav class="nav" id="nav"><!-- rendered by app.js --></nav>
@@ -35,19 +38,6 @@
 
   <!-- ============ MAIN ============ -->
   <main class="main">
-    <header class="topbar">
-      <button class="icon-btn" id="sidebar-toggle" title="Toggle sidebar">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18M3 12h18M9 18h12"/></svg>
-      </button>
-      <div class="topbar-title">
-        <h1 id="page-title">Dashboard</h1>
-        <p id="page-sub">Fleet overview</p>
-      </div>
-      <div class="topbar-right">
-        <span class="badge" id="conn">—</span>
-      </div>
-    </header>
-
     <div class="stack">
 
       <!-- ================= DASHBOARD ================= -->
@@ -123,7 +113,7 @@
             <div class="list" id="d-topdomains"><!-- rows --></div>
           </div>
           <div class="panel">
-            <div class="panel-head"><h3>Top Blocked Domains</h3><span class="spacer"></span><a href="#" data-goto="queries">View log →</a></div>
+            <div class="panel-head"><h3>Top Blocked Domains</h3><span class="spacer"></span><a href="#" data-goto="queries" data-goto-action="BLOCK">View blocked domains →</a></div>
             <div class="list" id="d-topblocked"><!-- rows --></div>
           </div>
           <div class="panel">

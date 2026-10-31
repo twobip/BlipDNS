@@ -103,6 +103,7 @@ const IC = {
   x: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M6 6l12 12"/></svg>',
   power: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18.4 6.6a9 9 0 1 1-12.8 0"/><path d="M12 2v10"/></svg>',
   cache: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.7 4 3 9 3s9-1.3 9-3V5"/><path d="M3 12c0 1.7 4 3 9 3s9-1.3 9-3"/></svg>',
+  book: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>',
 };
 
 /* ---------- routing ---------- */
@@ -115,25 +116,10 @@ const NAV = [
   { id: "blocklist", label: "Blocklists", icon: IC.block, group: "DNS" },
   { id: "filters", label: "DNS Filters", icon: IC.shield, group: "DNS" },
   { id: "upstream", label: "Upstream", icon: IC.globe, group: "DNS" },
-  { id: "records", label: "Local Records", icon: IC.set, group: "DNS" },
+  { id: "records", label: "Local Records", icon: IC.book, group: "DNS" },
   { id: "settings", label: "Settings", icon: IC.set, group: "System" },
   { id: "ha", label: "High Availability", icon: IC.shield, group: "System" },
 ];
-const TITLES = {
-  dashboard: ["Dashboard", "Fleet throughput & health"],
-  queries: ["Query Log", "Live DNS resolution history"],
-  "cache-stats": ["Cache Stats", "Cache hit rate and in-memory domain counts"],
-  errors: ["Errors", "Upstream failures and rate-limited queries"],
-  clients: ["Clients", "Who is querying this resolver"],
-  instances: ["Instances", "Managed blipd resolvers"],
-  instance: ["Instance", "Per-instance stats & actions"],
-  blocklist: ["Blocklists", "Global blocked domains and list sources"],
-  filters: ["DNS Filters", "Per-instance policies and scope rules"],
-  upstream: ["Upstream & Conditional Forwarding", "Named resolvers and per-suffix forwarding routes"],
-  records: ["Local Records", "Static DNS records answered locally before forwarding"],
-  settings: ["Settings", "Controller configuration"],
-  ha: ["High Availability", "LAN keepalived / VRRP failover"],
-};
 let current = "dashboard";
 let detailId = null; // instance id shown on the detail page ("instance")
 
@@ -158,14 +144,12 @@ function renderNav() {
 
 function go(page, push = true) {
   current = page;
+  document.body.dataset.page = page;
   document.querySelectorAll(".nav-item").forEach((a) => a.classList.toggle("active", a.dataset.nav === page));
   document.querySelectorAll(".view").forEach((v) => v.classList.toggle("hidden", v.id !== "view-" + page));
   if (push) {
     history.pushState({ page }, "", "/" + page);
   }
-  const t = TITLES[page] || ["", ""];
-  $("page-title").innerHTML = t[0];
-  $("page-sub").textContent = t[1];
   if (page !== "blocklist" && blStatusTimer) { clearInterval(blStatusTimer); blStatusTimer = null; }
   refresh();
   if (page === "instances") renderEvents();
@@ -305,50 +289,68 @@ function renderDashInstances(perInstance) {
   }).join("");
 }
 
-function renderTopClients(rows) {
+function renderTopClients(rows, totalQueries) {
   const el = $("d-topclients");
   const list = Array.isArray(rows) ? rows.slice(0, 10) : [];
   if (!list.length) {
     el.innerHTML = `<div class="empty"><div class="empty-ic">${IC.device}</div><h4>No clients yet</h4><p>Nothing queried in this window.</p></div>`;
     return;
   }
+  const total = Number(totalQueries) || 0;
   el.innerHTML = list.map((r, i) => {
+    const pct = total > 0 ? (Number(r.queries) || 0) / total * 100 : 0;
+    const pctText = pct >= 1 ? pct.toFixed(1) : pct.toFixed(2);
     return `<li>
       <span class="mono" style="flex:none;width:22px;color:var(--faint);font-size:12px">${i + 1}</span>
       <div class="grow q-client" style="min-width:0">${clientCellHtml(r)}</div>
-      <span class="mono muted" style="flex:none">${fmt(r.queries)} queries</span>
+      <div class="num" style="text-align:right;flex:none">
+        <div style="font-variant-numeric:tabular-nums;font-weight:600">${fmt(r.queries)}</div>
+        <div class="cell-sub" title="${fmt(r.queries)} of ${fmt(total)} queries"><span class="meter"><i style="width:${Math.min(100, pct)}%"></i></span> ${pctText}% of total</div>
+      </div>
     </li>`;
   }).join("");
 }
 
-function renderTopBlocked(domains) {
+function renderTopBlocked(domains, totalQueries) {
   const el = $("d-topblocked");
   const list = (Array.isArray(domains) ? domains : []).filter((d) => d.blocked > 0);
   if (!list.length) {
     el.innerHTML = `<div class="empty"><div class="empty-ic">${IC.shield}</div><h4>Nothing blocked</h4><p>No blocked queries in this window.</p></div>`;
     return;
   }
+  const total = Number(totalQueries) || 0;
   el.innerHTML = list.map((d, i) => {
+    const pct = total > 0 ? (Number(d.blocked) || 0) / total * 100 : 0;
+    const pctText = pct >= 1 ? pct.toFixed(1) : pct.toFixed(2);
     return `<li>
       <span class="mono" style="flex:none;width:22px;color:var(--faint);font-size:12px">${i + 1}</span>
       <div class="grow q-dom" style="min-width:0" title="${esc(d.domain)}">${esc(d.domain)}</div>
-      <span class="mono muted" style="flex:none">${fmt(d.blocked)} blocked</span>
+      <div class="num" style="text-align:right;flex:none">
+        <div style="font-variant-numeric:tabular-nums;font-weight:600">${fmt(d.blocked)}</div>
+        <div class="cell-sub" title="${fmt(d.blocked)} of ${fmt(total)} queries"><span class="meter red"><i style="width:${Math.min(100, pct)}%"></i></span> ${pctText}% of total</div>
+      </div>
     </li>`;
   }).join("");
 }
 
-function renderTopDomains(domains) {
+function renderTopDomains(domains, totalQueries) {
   const el = $("d-topdomains");
   const list = Array.isArray(domains) ? domains : [];
   if (!list.length) {
     el.innerHTML = `<div class="empty"><div class="empty-ic">${IC.globe}</div><h4>No queries yet</h4><p>Nothing resolved in this window.</p></div>`;
     return;
   }
+  const total = Number(totalQueries) || 0;
   el.innerHTML = list.map((d, i) => {
+    const pct = total > 0 ? (Number(d.queries) || 0) / total * 100 : 0;
+    const pctText = pct >= 1 ? pct.toFixed(1) : pct.toFixed(2);
     return `<li>
       <span class="mono" style="flex:none;width:22px;color:var(--faint);font-size:12px">${i + 1}</span>
       <div class="grow q-dom" style="min-width:0" title="${esc(d.domain)}">${esc(d.domain)}</div>
-      <span class="mono muted" style="flex:none">${fmt(d.queries)} queries</span>
+      <div class="num" style="text-align:right;flex:none">
+        <div style="font-variant-numeric:tabular-nums;font-weight:600">${fmt(d.queries)}</div>
+        <div class="cell-sub" title="${fmt(d.queries)} of ${fmt(total)} queries"><span class="meter"><i style="width:${Math.min(100, pct)}%"></i></span> ${pctText}% of total</div>
+      </div>
     </li>`;
   }).join("");
 }
@@ -405,15 +407,15 @@ async function fetchStats() {
     renderDashInstances(d.per_instance);
     API(`/api/top-domains?since=${rng.since}&limit=10&action=PASS`)
       .then((r) => r.json())
-      .then((t) => renderTopDomains(t.domains))
+      .then((t) => renderTopDomains(t.domains, d.total_queries))
       .catch(() => { /* best-effort */ });
     API(`/api/top-domains?since=${rng.since}&limit=10&action=BLOCK`)
       .then((r) => r.json())
-      .then((t) => renderTopBlocked(t.domains))
+      .then((t) => renderTopBlocked(t.domains, d.total_queries))
       .catch(() => { /* best-effort */ });
     API(`/api/clients?since=${rng.since}&limit=10`)
       .then((r) => r.json())
-      .then((t) => renderTopClients(t))
+      .then((t) => renderTopClients(t, d.total_queries))
       .catch(() => { /* best-effort */ });
     if (!ctx) return;
     const gl = ctx.getContext("2d");
@@ -663,10 +665,7 @@ function renderInstanceDetail() {
   const i = instances.find((x) => x.id === detailId);
   if (!i) { go("instances"); return; }
   const s = i.stats || {};
-  const name = i.label || i.id;
   const ver = (i.health && i.health.version) || "unknown";
-  $("page-title").textContent = "Stats: " + name;
-  $("page-sub").textContent = (i.online ? "online" : "offline") + (i.url ? " · " + i.url : "");
   $("di-url").textContent = i.url || "";
   $("di-queries").textContent = fmt(s.queries_total ?? 0);
   $("di-blocked").textContent = fmt(s.blocked_total ?? 0);
@@ -742,10 +741,10 @@ function queryRowHtml(r) {
       <span class="q-domain-line">
         <span class="q-globe">${IC.globe}</span>
         <span class="q-dom" title="${esc(r.domain)}">${esc(r.domain)}</span>
-        <span class="q-info" data-tipl="${esc(tipLabel)}" data-tipv="${esc(tipValue)}">${IC.info}</span>
         <button class="icon-btn q-copy" data-copy="${esc(r.domain)}" title="Copy domain">${IC.copy}</button>
+        <span class="q-info" data-tipl="${esc(tipLabel)}" data-tipv="${esc(tipValue)}">${IC.info}</span>
       </span></td>
-    <td><span class="badge badge-action ${actionBadge}">${isLocal ? IC.set : isBlock ? IC.block : action === "PASS" ? IC.arrow : ""}${actionLabel}</span></td>
+    <td><span class="badge badge-action ${actionBadge}">${isLocal ? IC.book : isBlock ? IC.block : action === "PASS" ? IC.arrow : ""}${actionLabel}</span></td>
     <td class="q-client">${clientCellHtml(r)}</td>
     <td class="q-ips">${resolvedHtml(r)}</td>
     <td class="q-lat">${latencyHtml(r)}</td>
@@ -883,22 +882,27 @@ function resolvedHtml(r) {
   const isBlock = (r.action || "").toUpperCase() === "BLOCK";
   const parts = ans.length
     ? ans.map((a) => {
-        const label = a.type + ": " + a.data;
-        if (isBlock || !a.ttl) return label;
-        return label + " (" + a.ttl + "s)";
+        const label = a.type + ": " + a.data + (!isBlock && a.ttl ? " (" + a.ttl + "s)" : "");
+        return { label, type: a.type || "", data: a.data ?? "", ttl: !isBlock && a.ttl ? a.ttl + "s" : "", value: a.data };
       })
-    : ips.map((ip) => ip);
+    : ips.map((ip) => ({ label: ip, type: "", data: ip, ttl: "", value: ip }));
   if (!parts.length) return `<span class="q-ips-empty">—</span>`;
   const shown = parts.slice(0, 1);
   const rest = parts.slice(1);
-  const shownHtml = shown.map((p) => `<span class="q-chip" title="${esc(p)}">${esc(trunc(p, RESOLVED_MAX))}</span>`).join("");
+  // Keep type and TTL visible while the value itself ellipsizes so the +N
+  // badge never gets clipped when an answer is too wide for the column.
+  const shownHtml = shown.map((p) => `<span class="q-chip" data-copy="${esc(p.value)}" title="Copy ${esc(p.value)}">`
+    + (p.type ? `<span class="q-ans-type">${esc(p.type)}:</span>` : "")
+    + `<span class="q-ans-data">${esc(trunc(p.data, RESOLVED_MAX))}</span>`
+    + (p.ttl ? `<span class="q-ans-ttl">(${esc(p.ttl)})</span>` : "")
+    + `</span>`).join("");
   const moreHtml = !rest.length
     ? ""
-    : `<span class="q-chip-more" title="${esc(rest.join(" · "))}">+${rest.length}</span>`;
-  return shownHtml + moreHtml;
+    : `<span class="q-chip-more" title="${esc(rest.map((p) => p.label).join(" · "))}">+${rest.length}</span>`;
+  return `<span class="q-ips-line">${shownHtml}${moreHtml}</span>`;
 }
 
-async function copyText(s) {
+async function copyText(s, el) {
   try {
     if (navigator.clipboard?.writeText) { await navigator.clipboard.writeText(s); }
     else {
@@ -907,7 +911,13 @@ async function copyText(s) {
       document.body.appendChild(ta); ta.select();
       document.execCommand("copy"); ta.remove();
     }
-    toast("copied " + s);
+    if (el && el.classList.contains("q-chip")) {
+      el.classList.add("copied");
+      clearTimeout(el._copiedTimer);
+      el._copiedTimer = setTimeout(() => el.classList.remove("copied"), 900);
+    } else {
+      toast("copied " + s);
+    }
   } catch { toast("copy failed", "err"); }
 }
 
@@ -1019,7 +1029,7 @@ function renderRecords() {
   const tb = $("r-tbody");
   $("r-count").textContent = savedRecords.length + (savedRecords.length === 1 ? " record" : " records");
   if (!savedRecords.length) {
-    tb.innerHTML = `<tr class="empty-row"><td colspan="5"><div class="empty"><div class="empty-ic">${IC.set}</div><h4>No local records</h4><p>Click "Add Record" to create a static DNS entry answered locally before forwarding.</p></div></td></tr>`;
+    tb.innerHTML = `<tr class="empty-row"><td colspan="5"><div class="empty"><div class="empty-ic">${IC.book}</div><h4>No local records</h4><p>Click "Add Record" to create a static DNS entry answered locally before forwarding.</p></div></td></tr>`;
     return;
   }
   tb.innerHTML = savedRecords.map((r, i) => {
@@ -1218,10 +1228,12 @@ let cState = { inst: "" };
 let rnState = { client: "", kind: "" };
 function clientCellHtml(r) {
   const name = r.name ? esc(r.name) : "";
-  const raw = `<span class="mono" title="${esc(r.client)}">${esc(r.client)}</span>`;
+  const ip = esc(r.client);
   return `<span class="q-cicon">${IC.device}</span>` + (name
-    ? `<span class="q-cname">${name}</span><span class="faint q-craw">${raw}</span>`
-    : raw);
+    // Named clients show only the name; the address stays available as a
+    // hover tooltip so the query log does not wrap onto a second line.
+    ? `<span class="q-cname" title="${ip}">${name}</span>`
+    : `<span class="mono" title="${ip}">${ip}</span>`);
 }
 function clientRowHtml(r) {
   const rate = r.queries > 0 ? Math.round(100 * r.blocked / r.queries) : 0;
@@ -2548,7 +2560,7 @@ $("cs-prev").addEventListener("click", () => { if (csState.page > 0) { csState.p
 $("cs-next").addEventListener("click", () => { csState.page++; renderCacheStats(); });
 $("q-tbody").addEventListener("click", (e) => {
   const c = e.target.closest("[data-copy]"); if (!c) return;
-  copyText(c.dataset.copy);
+  copyText(c.dataset.copy, c);
 });
 // Query-log info tooltip: a floating panel (appended to <body> so it is not
 // clipped by the table's scroll container) that shows which upstream answered

@@ -85,6 +85,7 @@ button { font-family: var(--font); }
   padding: 6px 8px 4px;
   margin-bottom: 20px;
 }
+.sidebar-brand #sidebar-toggle { margin-left: auto; }
 .brand-mark {
   width: 30px; height: 30px; border-radius: 9px;
   background: var(--accent-grad);
@@ -133,32 +134,19 @@ button { font-family: var(--font); }
 
 /* collapsible sidebar */
 body.sidebar-collapsed .sidebar { width: 60px; padding-inline: 10px; }
-body.sidebar-collapsed .brand-text, body.sidebar-collapsed .brand-sub,
+body.sidebar-collapsed .brand-id, body.sidebar-collapsed .brand-mark,
 body.sidebar-collapsed .nav-item span:not(.nav-icon), body.sidebar-collapsed .nav-group,
 body.sidebar-collapsed .sidebar-footer .version, body.sidebar-collapsed .sidebar-footer .spacer,
 body.sidebar-collapsed .nav-badge { display: none; }
 body.sidebar-collapsed .nav-item { justify-content: center; padding: 10px 0; }
 body.sidebar-collapsed .sidebar-brand { justify-content: center; padding-inline: 0; gap: 0; }
-body.sidebar-collapsed .sidebar-footer { justify-content: center; flex-direction: column; }
+body.sidebar-collapsed .sidebar-brand #sidebar-toggle { margin-left: 0; }
+body.sidebar-collapsed .sidebar-footer { justify-content: center; flex-direction: column; gap: 16px; }
 body.sidebar-collapsed .sidebar-footer .minipill, body.sidebar-collapsed .sidebar-footer .dot { font-size: 0; }
 
-.main { flex: 1; margin-left: 236px; padding: 16px clamp(20px, 4vw, 44px) 120px; min-width: 0; }
+.main { flex: 1; margin-left: 236px; padding: 24px clamp(20px, 4vw, 44px) 120px; min-width: 0; }
 body.sidebar-collapsed .main { margin-left: 60px; }
 
-/* ---------- topbar ---------- */
-.topbar {
-  position: sticky; top: 0; z-index: 30;
-  display: flex; align-items: center; gap: 12px;
-  width: 100%; max-width: var(--content-w); margin: 0 auto 20px;
-  padding: 20px 0 16px;
-  background: var(--bg);
-  /* ponytail: flat page colour, matching body — the sticky bar masks scrolled
-  content without painting a visible box. No backdrop-filter (re-composites
-  every scroll frame) and no viewport-fixed gradient (can band on scroll). */
-}
-.topbar-title h1 { margin: 0; font-size: 20px; font-weight: 650; letter-spacing: -0.02em; }
-.topbar-title p { margin: 2px 0 0; color: var(--muted); font-size: 12.5px; }
-.topbar-right { margin-left: auto; display: flex; align-items: center; gap: 10px; }
 .icon-btn {
   width: 34px; height: 34px; border-radius: var(--radius-sm);
   border: 1px solid var(--border); background: var(--surface);
@@ -357,7 +345,11 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
    ============================================================ */
 /* Query log lives in one card: toolbar / scrollable table / footer. */
 #view-queries { flex: 1; min-height: 0; }
-.ql-panel { overflow: hidden; }
+/* On the query page the card fills the viewport and the table scrolls inside
+   it, rather than stopping at an 80vh cap and leaving a gap above the fold. */
+body[data-page="queries"] .main { display: flex; flex-direction: column; height: 100vh; overflow: hidden; padding-bottom: 24px; }
+body[data-page="queries"] .stack { flex: 1; min-height: 0; }
+.ql-panel { overflow: hidden; display: flex; flex-direction: column; flex: 1; min-height: 0; }
 .ql-toolbar {
   display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
   padding: 16px 20px; border-bottom: 1px solid var(--border);
@@ -366,7 +358,7 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
 .ql-toolbar .right { flex: 1; }
 .ql-table {
   border: none; border-radius: 0; box-shadow: none; background: transparent;
-  max-height: min(80vh, 900px); overflow-y: auto;
+  flex: 1; min-height: 0; overflow-y: auto;
 }
 .ql-foot { font-size: 12.5px; }
 .ql-foot .hint { margin-left: auto; }
@@ -381,7 +373,8 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
 #view-queries .tbl>thead th:nth-child(1) { width: 96px; }
 #view-queries .tbl>thead th:nth-child(2) { width: auto; }
 #view-queries .tbl>thead th:nth-child(3) { width: 112px; }
-#view-queries .tbl>thead th:nth-child(4) { width: 190px; }
+#view-queries .tbl>thead th:nth-child(4) { width: 190px; text-align: center; }
+#view-queries .tbl tbody td.q-client { text-align: center; }
 #view-queries .tbl>thead th:nth-child(5) { width: auto; }
 #view-queries .tbl>thead th:nth-child(6) { width: 118px; }
 #view-queries .tbl>thead th:nth-child(7) { width: 132px; }
@@ -410,16 +403,16 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
 .q-globe svg { width: 14px; height: 14px; }
 .q-dom {
   font-family: var(--font); font-size: 15px; font-weight: 600; color: var(--text); letter-spacing: -0.01em;
-  flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-.q-copy { width: 24px; height: 24px; flex-shrink: 0; border: none; background: transparent; opacity: 0; margin-left: 6px; vertical-align: middle; transition: all .12s; }
+.q-copy { width: 24px; height: 24px; flex-shrink: 0; border: none; background: transparent; opacity: 0; margin: 0 8px 0 6px; vertical-align: middle; transition: all .12s; }
 #view-queries .tbl tbody tr:hover .q-copy, #view-queries .tbl tbody tr:focus-within .q-copy { opacity: 1; }
 .q-copy:hover { background: var(--surface-3); color: var(--text); }
 .q-copy svg { width: 13px; height: 13px; }
 
 .q-info {
   display: inline-grid; place-items: center; flex-shrink: 0;
-  width: 18px; height: 18px; margin-left: 8px; border-radius: 50%;
+  width: 18px; height: 18px; margin-left: auto; border-radius: 50%;
   color: var(--faint); cursor: help; vertical-align: middle; transition: all .12s;
 }
 .q-info svg { width: 12px; height: 12px; }
@@ -444,18 +437,28 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
 .q-cicon svg { width: 14px; height: 14px; }
 .q-client .mono { color: var(--text-2); font-size: 12px; max-width: 170px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display: inline-block; vertical-align: middle; }
 .q-cname { color: var(--text); font-weight: 600; font-size: 12.5px; vertical-align: middle; }
-.q-craw .mono { color: var(--faint); font-size: 11px; max-width: 130px; margin-left: 6px; }
 .q-name { color: var(--text-2); font-size: 12.5px; }
 .q-rename { text-align: right; }
 
 .q-ips { white-space: nowrap; }
+.q-ips-line { display: flex; align-items: center; min-width: 0; max-width: 100%; }
+.q-ips-line .q-chip { display: inline-flex; align-items: center; gap: 4px; flex: 0 1 auto; min-width: 0; }
+.q-ips-line .q-ans-type, .q-ips-line .q-ans-ttl { flex: none; }
+.q-ips-line .q-ans-data { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.q-ips-line .q-chip-more { flex: none; }
 .q-chip {
-  display: inline-block; font-family: var(--mono); font-size: 11.5px;
+  position: relative; display: inline-block; font-family: var(--mono); font-size: 11.5px;
   padding: 2px 9px; border-radius: 6px; margin: 2px 5px 2px 0;
   background: var(--surface-3); border: 1px solid var(--border); color: var(--text-2);
   cursor: pointer; transition: all .12s;
 }
 .q-chip:hover { color: var(--text); border-color: var(--accent-2); background: var(--surface-2); }
+.q-chip.copied { color: transparent; border-color: rgba(53,210,154,.45); background: rgba(53,210,154,.1); }
+.q-chip.copied::after {
+  content: "Copied!"; position: absolute; inset: 0;
+  display: grid; place-items: center;
+  color: var(--green); font-family: var(--font); font-size: 11px; font-weight: 600;
+}
 .q-chip-more {
   display: inline-block; align-items: center; justify-content: center;
   min-width: 28px; height: 20px; margin-left: 4px;
@@ -483,6 +486,7 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
 /* ---------- sparkline-ish progress ---------- */
 .meter { width: 60px; height: 5px; border-radius: 4px; background: var(--surface-3); overflow: hidden; display:inline-block; vertical-align: middle; }
 .meter > i { display: block; height: 100%; border-radius: 4px; background: var(--accent-grad); }
+.meter.red > i { background: linear-gradient(135deg, #f76b6b 0%, #ff9a9a 100%); }
 
 /* ============================================================
    MODAL
@@ -596,6 +600,7 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
 .kpi .v { font-size: 15px; font-weight: 650; margin-top: 2px; font-variant-numeric: tabular-nums; }
 
 .list { list-style: none; margin: 0; padding: 0; }
+.list .q-client { max-width: none; }
 .list li {
   display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
   padding: 13px 24px; border-bottom: 1px solid var(--hairline);
@@ -662,8 +667,8 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
 .seg button { border: none; background: transparent; color: var(--muted); font-size: 12.5px; font-weight: 500; padding: 5px 12px; border-radius: 7px; cursor: pointer; transition: all .15s; }
 .seg button.active { background: var(--surface-3); color: var(--text); box-shadow: 0 1px 3px rgba(0,0,0,.3); }
 
-/* Content column: the sidebar and topbar stay full-bleed, while every page's
-   body is capped to a fixed width and centered on wider displays. */
+/* Content column: the sidebar stays full-bleed, while every page's body is
+   capped to a fixed width and centered on wider displays. */
 .stack { display: flex; flex-direction: column; gap: 24px; width: 100%; max-width: var(--content-w); margin-inline: auto; }
 .row { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
 .mt { margin-top: 16px; }
@@ -706,9 +711,10 @@ table.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
 
 @media (max-width: 700px) {
   .sidebar { width: 60px; padding-inline: 10px; }
-  .brand-text, .brand-sub, .nav-item span:not(.nav-icon), .nav-group, .sidebar-footer .version, .sidebar-footer .spacer { display: none; }
+  .brand-id, .brand-mark, .nav-item span:not(.nav-icon), .nav-group, .sidebar-footer .version, .sidebar-footer .spacer { display: none; }
   .nav-item { justify-content: center; }
   .sidebar-brand { justify-content: center; padding-inline: 0; gap: 0; }
-  .sidebar-footer { justify-content: center; flex-direction: column; }
+  .sidebar-brand #sidebar-toggle { margin-left: 0; }
+  .sidebar-footer { justify-content: center; flex-direction: column; gap: 16px; }
   .main { margin-left: 60px; padding-inline: 14px; }
 }
