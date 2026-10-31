@@ -69,21 +69,13 @@
             <div class="stat-value" id="d-blocked">—</div>
             <div class="stat-sub"><span class="down" id="d-blockrate">—</span> filter rate</div>
           </div>
-          <div class="stat" data-goto="upstream-errors" role="link" title="View upstream errors" style="cursor:pointer">
+          <div class="stat" data-goto="errors" role="link" title="View upstream failures and rate-limited queries" style="cursor:pointer">
             <div class="stat-icon i-amber">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/><path d="M12 9v4m0 4h.01"/></svg>
             </div>
-            <div class="stat-label">Upstream Errors</div>
+            <div class="stat-label">Errors</div>
             <div class="stat-value" id="d-errors">—</div>
-            <div class="stat-sub">failed upstream requests</div>
-          </div>
-          <div class="stat" id="stat-refused" role="button" tabindex="0" title="Queries refused by the per-client rate limiter — click for the per-client breakdown">
-            <div class="stat-icon i-amber">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/></svg>
-            </div>
-            <div class="stat-label">Refused (rate limit)</div>
-            <div class="stat-value" id="d-refused">—</div>
-            <div class="stat-sub">refused in this fleet · <a href="#" data-goto="settings" class="muted" title="Change in Settings → Rate Limit">tune limit</a></div>
+            <div class="stat-sub" id="d-errors-break">upstream failures + rate-limited</div>
           </div>
           <div class="stat" title="Average query rate over the selected range">
             <div class="stat-icon i-green">
@@ -229,32 +221,55 @@
           </div>
        </section>
 
-      <!-- ================= UPSTREAM ERRORS ================= -->
-      <section id="view-upstream-errors" class="view hidden">
+      <!-- ================= ERRORS ================= -->
+      <section id="view-errors" class="view hidden">
         <div class="row">
-          <select class="select" id="ue-instance"><option value="">All instances</option></select>
-          <select class="select" id="ue-range">
+          <select class="select" id="err-instance"><option value="">All instances</option></select>
+          <select class="select" id="err-range">
             <option value="1h">1 hour</option>
             <option value="24h" selected>24 hours</option>
             <option value="168h">1 week</option>
             <option value="720h">1 month</option>
           </select>
           <span class="right"></span>
-          <button class="btn btn-danger" id="ue-clear">
+          <button class="btn btn-danger" id="err-clear" title="Clear the recorded upstream failures">
             <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/></svg>
-            Clear errors
+            Clear upstream errors
           </button>
-          <button class="btn" id="ue-refresh">
+          <button class="btn" id="err-refresh">
             <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-2.6-6.3M21 3v6h-6"/></svg>
             Refresh
           </button>
-          <span class="muted" id="ue-count">0 errors</span>
+          <span class="muted" id="err-count">0 errors</span>
         </div>
-        <div class="table-wrap">
-          <table class="tbl">
-            <thead><tr><th data-k="message">Error</th><th data-k="domain">Domain</th><th class="num" data-k="count">Times</th><th data-k="first_seen">First seen</th><th data-k="last_seen">Last seen</th><th data-k="instance">Instance</th></tr></thead>
-            <tbody id="ue-tbody"></tbody>
-          </table>
+
+        <div class="panel">
+          <div class="panel-head">
+            <h3>Upstream failures</h3>
+            <span class="spacer"></span>
+            <span class="muted" id="ue-count">0 errors</span>
+          </div>
+          <div class="table-wrap">
+            <table class="tbl">
+              <thead><tr><th data-k="message">Error</th><th data-k="domain">Domain</th><th class="num" data-k="count">Times</th><th data-k="first_seen">First seen</th><th data-k="last_seen">Last seen</th><th data-k="instance">Instance</th></tr></thead>
+              <tbody id="ue-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-head">
+            <h3>Rate-limited queries</h3>
+            <span class="spacer"></span>
+            <span class="muted" id="err-refused-count">0 refused</span>
+          </div>
+          <div class="table-wrap">
+            <table class="tbl">
+              <thead><tr><th>Client</th><th class="num">Refused</th><th>Instance</th></tr></thead>
+              <tbody id="err-refused-tbody"></tbody>
+            </table>
+          </div>
+          <div class="muted" style="padding:12px 18px 14px; font-size:12px; line-height:1.5">By source IP, highest first. Live counters reset when the rate limit is re-applied or the instance restarts; refused queries are not written to the query log. <a href="#" data-goto="settings" title="Change in Settings → Rate Limit">Tune rate limit →</a></div>
         </div>
       </section>
 
@@ -676,7 +691,7 @@
                   <option value="4320">6 months</option>
                   <option value="8760">1 year</option>
                 </select>
-                <span class="hint">Older entries are pruned automatically every hour. Applies to the query log and the upstream-errors details. Longer retention uses more disk: roughly 30 MB per day at typical home traffic, so a month is around 1 GB. Does not affect dashboard statistics or blocklists.</span>
+                <span class="hint">Older entries are pruned automatically every hour. Applies to the query log and the upstream failure details on the Errors page. Longer retention uses more disk: roughly 30 MB per day at typical home traffic, so a month is around 1 GB. Does not affect dashboard statistics or blocklists.</span>
               </div>
               <div class="row mt">
                 <button class="btn btn-primary" id="s-save-ql">Save</button>
@@ -1060,21 +1075,6 @@
       <button class="btn" data-close="modal-confirm">Cancel</button>
       <button class="btn btn-danger" id="cf-ok">Confirm</button>
     </div>
-  </div>
-</div>
-
-<div class="overlay hidden" id="modal-refused">
-  <div class="modal" style="max-width:520px">
-    <div class="modal-head"><h3>Refused queries by client</h3><button class="icon-btn x" data-close="modal-refused">
-      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg></button></div>
-    <div class="modal-body">
-      <table class="tbl">
-        <thead><tr><th>Client</th><th class="num">Refused</th></tr></thead>
-        <tbody id="refused-tbody"></tbody>
-      </table>
-      <span class="hint">By source IP, highest first · counts reset when the rate limit is re-applied. Refused queries are not written to the query log.</span>
-    </div>
-    <div class="modal-foot"><button class="btn" data-close="modal-refused">Close</button></div>
   </div>
 </div>
 

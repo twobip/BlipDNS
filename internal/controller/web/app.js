@@ -122,7 +122,7 @@ const TITLES = {
   dashboard: ["Dashboard", "Fleet throughput & health"],
   queries: ["Query Log", "Live DNS resolution history"],
   "cache-stats": ["Cache Stats", "Cache hit rate and in-memory domain counts"],
-  "upstream-errors": ["Upstream Errors", "Failed upstream requests and when they happened"],
+  errors: ["Errors", "Upstream failures and rate-limited queries"],
   clients: ["Clients", "Who is querying this resolver"],
   instances: ["Instances", "Managed blipd resolvers"],
   instance: ["Instance", "Per-instance stats & actions"],
@@ -189,7 +189,7 @@ function toast(msg, kind = "ok") {
 
 /* ---------- state ---------- */
 let instances = [];
-let refusedByClient = []; // [[client, refusedCount]] fleet-wide, worst first
+let errSummary = { upstream: 0, refused: 0 }; // Errors stat: range upstream failures + live rate-limited total
 let blDomains = [];
 let blAllowed = [];
 let blSourceStats = [];
@@ -219,7 +219,7 @@ async function refresh() {
      	else if (current === "queries") refreshQueryTop();
      	else if (current === "records") renderRecords();
      	else if (current === "cache-stats") renderCacheStats();
-    else if (current === "upstream-errors") renderUpstreamErrors();
+    else if (current === "errors") renderErrors();
     else if (current === "clients") renderClients();
     else if (current === "filters") renderPolicies();
     else if (current === "instance") renderInstanceDetail();
@@ -260,42 +260,24 @@ async function renderDashboard() {
   // Fleet-wide refused count = sum of each instance's cumulative rate_limited
   // counter (cumulative since its last restart; tracked separately from the
   // resolved query totals so the limiter no longer pollutes QPS/cache stats).
-  // Also fold the per-client breakdown for the refused-by-client dialog.
   let refused = 0;
-  const byClient = new Map();
   for (const i of instances) {
     if (!i.online || !i.stats) continue;
     refused += Number(i.stats.rate_limited) || 0;
-    for (const r of i.stats.refused_clients || []) {
-      byClient.set(r.client, (byClient.get(r.client) || 0) + (Number(r.refused) || 0));
-    }
   }
-  refusedByClient = [...byClient.entries()].sort((a, b) => b[1] - a[1]);
-  $("d-refused").textContent = fmt(refused);
+  errSummary.refused = refused;
+  paintErrorsStat();
   fetchStats();
 }
 
-// refusedRowsHtml renders the refused-by-client dialog body from
-// refusedByClient (populated by renderDashboard from the per-instance stats).
-function refusedRowsHtml() {
-  if (!refusedByClient.length) {
-    return `<tr class="empty-row"><td colspan="2"><div class="empty"><div class="empty-ic">${IC.warn}</div><h4>No refused queries</h4><p>Nothing has been rate-limited since the limit was last applied.</p></div></td></tr>`;
-  }
-  return refusedByClient.map(([c, n]) =>
-    `<tr><td class="mono">${esc(c)}</td><td class="num">${fmt(n)}</td></tr>`).join("");
+// paintErrorsStat renders the combined dashboard Errors stat: upstream
+// failures within the selected range plus live rate-limited queries. The two
+// have different scopes, so the breakdown spells out both numbers.
+function paintErrorsStat() {
+  $("d-errors").textContent = fmt(errSummary.upstream + errSummary.refused);
+  $("d-errors-break").textContent =
+    `${fmt(errSummary.upstream)} upstream · ${fmt(errSummary.refused)} rate-limited`;
 }
-
-function openRefusedModal() {
-  $("refused-tbody").innerHTML = refusedRowsHtml();
-  show("modal-refused");
-}
-$("stat-refused").onclick = (e) => {
-  if (e.target.closest("[data-goto]")) return; // "tune limit" link handles itself
-  openRefusedModal();
-};
-$("stat-refused").onkeydown = (e) => {
-  if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openRefusedModal(); }
-};
 
 function renderDashInstances(perInstance) {
   const el = $("d-instances");
@@ -411,7 +393,8 @@ async function fetchStats() {
     if (!d || !d.series) return;
     $("d-queries").textContent = fmt(d.total_queries ?? 0);
     $("d-blocked").textContent = fmt(d.blocked_queries ?? 0);
-    $("d-errors").textContent = fmt(d.upstream_errors ?? 0);
+    errSummary.upstream = Number(d.upstream_errors) || 0;
+    paintErrorsStat();
     $("d-blockrate").textContent = d.total_queries ? (d.blocked_queries / d.total_queries * 100).toFixed(1) + "%" : "0%";
     $("d-qps").textContent = fmtQPS(d.avg_qps);
     $("d-qps-range-hint").textContent = rng.label;
@@ -924,18 +907,18 @@ async function copyText(s) {
   } catch { toast("copy failed", "err"); }
 }
 
-/* ---------- upstream errors ---------- */
-let ueState = { inst: "", since: "24h", sort: null }; // sort: null = server order, else {k, dir}
-let ueRows = [];
-function paintUeRows() {
+/* ---------- errors: upstream failures + rate-limited queries ---------- */
+let errState = { inst: "", since: "24h", sort: null }; // sort: null = server order, else {k, dir}
+let upstreamErrorRows = [];
+function paintUpstreamErrorRows() {
   const tb = $("ue-tbody");
-  document.querySelectorAll('#view-upstream-errors th[data-k]').forEach((h) => {
+  document.querySelectorAll('#view-errors th[data-k]').forEach((h) => {
     h.removeAttribute("data-dir");
-    if (ueState.sort && h.dataset.k === ueState.sort.k) h.dataset.dir = ueState.sort.dir > 0 ? "asc" : "desc";
+    if (errState.sort && h.dataset.k === errState.sort.k) h.dataset.dir = errState.sort.dir > 0 ? "asc" : "desc";
   });
-  const rows = ueRows.slice();
-  if (ueState.sort) {
-    const { k, dir } = ueState.sort;
+  const rows = upstreamErrorRows.slice();
+  if (errState.sort) {
+    const { k, dir } = errState.sort;
     rows.sort((a, b) => k === "count"
       ? ((a.count || 0) - (b.count || 0)) * dir
       : String(a[k] || "").localeCompare(String(b[k] || "")) * dir);
@@ -953,33 +936,66 @@ function paintUeRows() {
   }).join("");
   tb.querySelectorAll(".t").forEach((t) => { t.textContent = timeAgo(t.dataset.t); });
 }
-document.querySelectorAll('#view-upstream-errors th[data-k]').forEach((h) => h.onclick = () => {
+document.querySelectorAll('#view-errors th[data-k]').forEach((h) => h.onclick = () => {
   const k = h.dataset.k;
-  ueState.sort = !ueState.sort || ueState.sort.k !== k
+  errState.sort = !errState.sort || errState.sort.k !== k
     ? { k, dir: k === "count" ? -1 : 1 } // counts: biggest first; text/dates: A→Z
-    : { k, dir: -ueState.sort.dir };
-  paintUeRows();
+    : { k, dir: -errState.sort.dir };
+  paintUpstreamErrorRows();
 });
-function propsUeInstanceOptions() {
-  const sel = $("ue-instance");
+function populateErrorInstanceOptions() {
+  const sel = $("err-instance");
   const cur = sel.value;
   const labels = [...new Set(instances.map((i) => i.label || i.id || ""))].filter(Boolean);
   sel.innerHTML = `<option value="">All instances</option>` + labels.map((l) => `<option value="${esc(l)}" ${l === cur ? "selected" : ""}>${esc(l)}</option>`).join("");
+  errState.inst = sel.value; // drop a stale filter when its instance was removed
 }
-async function renderUpstreamErrors() {
+// renderRateLimited fills the rate-limit table from the live per-instance
+// counters and returns the fleet-wide refused total for the page summary.
+function renderRateLimited() {
+  const tb = $("err-refused-tbody");
+  const rows = [];
+  let total = 0;
+  for (const i of instances) {
+    if (!i.online || !i.stats) continue;
+    const name = i.label || i.id || "";
+    if (errState.inst && name !== errState.inst) continue;
+    total += Number(i.stats.rate_limited) || 0;
+    for (const r of i.stats.refused_clients || []) {
+      rows.push({ client: r.client, refused: Number(r.refused) || 0, instance: name });
+    }
+  }
+  rows.sort((a, b) => b.refused - a.refused || a.client.localeCompare(b.client));
+  $("err-refused-count").textContent = fmt(total) + " refused";
+  if (!rows.length) {
+    tb.innerHTML = total > 0
+      ? `<tr class="empty-row"><td colspan="3"><div class="empty"><div class="empty-ic">${IC.warn}</div><h4>No per-client details</h4><p>${fmt(total)} refused ${total === 1 ? "query was" : "queries were"} counted, but the client counters have since been reset.</p></div></td></tr>`
+      : `<tr class="empty-row"><td colspan="3"><div class="empty"><div class="empty-ic">${IC.warn}</div><h4>No refused queries</h4><p>Nothing has been rate-limited since the limit was last applied.</p></div></td></tr>`;
+    return total;
+  }
+  tb.innerHTML = rows.map((r) =>
+    `<tr><td class="mono">${esc(r.client)}</td><td class="num">${fmt(r.refused)}</td><td class="q-inst">${esc(r.instance)}</td></tr>`).join("");
+  return total;
+}
+async function renderErrors() {
   const tb = $("ue-tbody");
-  propsUeInstanceOptions();
+  populateErrorInstanceOptions();
+  const refusedTotal = renderRateLimited();
+  $("err-count").textContent = fmt(refusedTotal) + " errors";
   try {
-    const res = await API(`/api/upstream-errors?instance=${encodeURIComponent(ueState.inst)}&since=${ueState.since}&limit=200`);
+    const res = await API(`/api/upstream-errors?instance=${encodeURIComponent(errState.inst)}&since=${errState.since}&limit=200`);
     const d = await res.json();
-    ueRows = d.errors || [];
-    $("ue-count").textContent = fmt(d.total ?? 0) + " errors";
-    if (!ueRows.length) {
+    upstreamErrorRows = d.errors || [];
+    const upstreamTotal = Number(d.total) || 0;
+    $("ue-count").textContent = fmt(upstreamTotal) + (upstreamTotal === 1 ? " error" : " errors");
+    $("err-count").textContent = fmt(upstreamTotal + refusedTotal) + " errors";
+    if (!upstreamErrorRows.length) {
       tb.innerHTML = `<tr class="empty-row"><td colspan="6"><div class="empty"><div class="empty-ic">${IC.warn}</div><h4>No upstream errors</h4><p>Nothing failed in the selected range.</p></div></td></tr>`;
       return;
     }
-    paintUeRows();
+    paintUpstreamErrorRows();
   } catch (e) {
+    upstreamErrorRows = [];
     tb.innerHTML = `<tr class="empty-row"><td colspan="6"><div class="empty"><div class="empty-ic">${IC.warn}</div><h4>Upstream errors unavailable</h4><p>${esc(e.message)}</p></div></td></tr>`;
   }
 }
@@ -2166,10 +2182,11 @@ $("logout-btn").onclick = async () => {
 };
 
 /* initial route */
-const validPage = (id) => NAV.some((n) => n.id === id) || id === "upstream-errors";
+const validPage = (id) => NAV.some((n) => n.id === id) || id === "errors";
 const routeFor = (p) => {
   const m = p.match(/^instance\/(.+)$/);
   if (m) { try { detailId = decodeURIComponent(m[1]); } catch { detailId = m[1]; } return "instance"; }
+  if (p === "upstream-errors") return "errors"; // old bookmarks/link alias
   return validPage(p) ? p : "dashboard";
 };
 const initial = (location.pathname.replace(/\/+$/, "") || "/").replace(/^\//, "");
@@ -2307,17 +2324,17 @@ $("q-filter").addEventListener("input", debounce((e) => { qState.filter = e.targ
 $("q-instance").addEventListener("change", (e) => { qState.inst = e.target.value; renderQueries(); });
 $("q-refresh").onclick = renderQueries;
 
-/* upstream errors */
-$("ue-instance").addEventListener("change", (e) => { ueState.inst = e.target.value; renderUpstreamErrors(); });
-$("ue-range").addEventListener("change", (e) => { ueState.since = e.target.value; renderUpstreamErrors(); });
-$("ue-refresh").onclick = renderUpstreamErrors;
-$("ue-clear").onclick = () => {
-  const scope = ueState.inst ? ` for "${ueState.inst}"` : "";
-  confirmDialog("Clear upstream errors?", `Removes the recorded upstream failures${scope}. This cannot be undone.`, async () => {
+/* errors */
+$("err-instance").addEventListener("change", (e) => { errState.inst = e.target.value; renderErrors(); });
+$("err-range").addEventListener("change", (e) => { errState.since = e.target.value; renderErrors(); });
+$("err-refresh").onclick = renderErrors;
+$("err-clear").onclick = () => {
+  const scope = errState.inst ? ` for "${errState.inst}"` : "";
+  confirmDialog("Clear upstream errors?", `Removes the recorded upstream failures${scope}. Rate-limit counters are not affected. This cannot be undone.`, async () => {
     try {
-      await API("/api/maintenance", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "clear_upstream_errors", instance: ueState.inst }) });
+      await API("/api/maintenance", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "clear_upstream_errors", instance: errState.inst }) });
       toast("upstream errors cleared");
-      renderUpstreamErrors();
+      renderErrors();
     } catch (e) { toast("clear failed: " + e.message, "err"); }
   });
 };
@@ -2980,7 +2997,7 @@ connectSSE();
 refresh();
 startClock();
 refreshSettings();
-pollTimer = setInterval(() => { if (current === "dashboard" || current === "instances" || current === "instance" || current === "cache-stats" || current === "upstream-errors") refresh(); }, 5000);
+pollTimer = setInterval(() => { if (current === "dashboard" || current === "instances" || current === "instance" || current === "cache-stats" || current === "errors") refresh(); }, 5000);
 // ponytail: no separate fetchStats timer — the 5s refresh() above already runs
 // fetchStats on the dashboard, so a second timer was pure duplicate requests.
 
