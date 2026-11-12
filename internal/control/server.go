@@ -63,6 +63,11 @@ type Server struct {
 	claimCode  string
 	stateFile  string
 	instanceID string
+	// claimIssuedAt bounds how long the one-time claim code stays valid.
+	// Without a TTL a bundle leaked before adoption stays redeemable forever,
+	// and the first redeemer is pinned as the controller and receives the
+	// management token. Zero means "no TTL" (tests/hand-built servers).
+	claimIssuedAt time.Time
 	// bundleURL is the management URL baked into the adopt bundle (set by
 	// the embedder, which owns listen-address knowledge). Empty = the
 	// adopt-code file holds a bare code, as before.
@@ -319,11 +324,25 @@ func (s *Server) ConfigureAdoption(stateFile, instanceID string) {
 
 func (s *Server) genClaim() {
 	s.claimCode = genClaimCode()
+	s.claimIssuedAt = time.Now()
 	s.adopted = false
 	// M9: do NOT log the code value — it is a secret. Box-local retrieval is
 	// via the 0600 adopt-code file + one-time stdout in cmd/blipd. Both
 	// callers hold adoptMu, so the locked path variant is safe here.
 	log.Printf("blipd: adoption code generated (see %s 0600, printed once to stdout)", s.adoptCodePathLocked())
+}
+
+// claimCodeTTL bounds the claim-code (and therefore adopt-bundle) lifetime.
+// Long enough for an operator to copy the bundle and paste it into the
+// controller, short enough that a bundle leaked before adoption is not a
+// permanent grant of full management control.
+const claimCodeTTL = 15 * time.Minute
+
+// claimExpiredLocked reports whether the active claim code has aged out.
+// Caller must hold adoptMu. A zero issue time means "no TTL" (tests and
+// servers built by hand rather than through genClaim).
+func (s *Server) claimExpiredLocked() bool {
+	return !s.claimIssuedAt.IsZero() && time.Since(s.claimIssuedAt) > claimCodeTTL
 }
 
 func (s *Server) persistAdopted(adopted bool) {
@@ -1478,7 +1497,22 @@ func (s *Server) handleAdopt(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "too many attempts; try again later", http.StatusTooManyRequests)
 		return
 	}
-	if req.Code == "" || !checkClaimCode(req.Code, s.claimCode) {
+	codeMatches := req.Code != "" && checkClaimCode(req.Code, s.claimCode)
+	if codeMatches && s.claimExpiredLocked() {
+		// The caller holds a stale bundle. Rotate and point at the fresh code
+		// instead of silently rejecting: an expired code with no regeneration
+		// path would leave a tokenless instance unadoptable until restart.
+		// Only a caller that already knows the code reaches this, so it is not
+		// a rotation DoS.
+		s.genClaim()
+		path := s.adoptCodePathLocked()
+		if err := s.writeAdoptCodeFileLocked(path); err != nil {
+			log.Printf("blipd: adopt-code file: %v", err)
+		}
+		writeJSON(w, AdoptResponse{Adopted: false, Message: "code expired; a new code was written to " + path})
+		return
+	}
+	if !codeMatches {
 		if len(s.adoptFails) >= maxAuthFailEntries {
 			sweepAuthFailsLocked(s.adoptFails)
 			if len(s.adoptFails) >= maxAuthFailEntries {

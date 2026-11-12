@@ -29,7 +29,6 @@ readonly LOCK_FILE="/run/lock/blipd-keepalived.lock"
 die() { echo "blipd-keepalived: $*" >&2; exit 1; }
 
 [[ "$(id -u)" -eq 0 ]] || die "must run as root"
-[[ "$#" -eq 10 ]] || die "usage: blipd-keepalived MODE ROLE IFACE SOURCE_IP PEER_IP VIP VRID PRIORITY ADVERT AUTH_PASS"
 
 mode="$1"
 role="$2"
@@ -40,7 +39,19 @@ virtual_ip="$6"
 vrid="$7"
 priority="$8"
 advert="$9"
-auth_pass="${10}"
+
+# The VRRP password is a LAN-shared secret, and argv is world-readable through
+# ps and /proc/<pid>/cmdline. The current contract therefore passes it on
+# stdin (9 positional arguments); the legacy 10-argument form is still accepted
+# so a helper that has not been re-installed keeps working with an
+# already-updated blipd. Any extra argument is rejected rather than ignored.
+if [[ "$#" -eq 9 ]]; then
+  IFS= read -r auth_pass || auth_pass=""
+elif [[ "$#" -eq 10 ]]; then
+  auth_pass="${10}"
+else
+  die "usage: blipd-keepalived MODE ROLE IFACE SOURCE_IP PEER_IP VIP VRID PRIORITY ADVERT (AUTH_PASS on stdin when omitted)"
+fi
 
 [[ "$mode" == "unicast" || "$mode" == "multicast" ]] || die "invalid mode"
 [[ "$role" == "primary" || "$role" == "secondary" ]] || die "invalid role"

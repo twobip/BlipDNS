@@ -17,39 +17,45 @@ import (
 
 // Config is the blipd YAML configuration.
 type Config struct {
-	DNSAddr              string                    `yaml:"dns_addr"`
-	DoHAddr              string                    `yaml:"doh_addr"`
-	CertFile             string                    `yaml:"cert_file"`
-	KeyFile              string                    `yaml:"key_file"`
-	DoHTLS               bool                      `yaml:"doh_tls"`          // serve DoH over HTTPS on DoHAddr (self-signed cert auto-generated when CertFile/KeyFile unset)
-	DoHHTTPAddr          string                    `yaml:"doh_http_addr"`    // additional plain-HTTP DoH listener ("" = off)
-	RateLimitQPS         int                       `yaml:"rate_limit_qps"`   // per-client DNS QPS limit (0 = unlimited; stock default 20)
-	RateLimitBurst       int                       `yaml:"rate_limit_burst"` // per-client burst above QPS (0 = auto = QPS, min 1)
-	SlowQueryMS          int                       `yaml:"slow_query_ms"`    // log one diagnostic line per query slower than this (0 = off)
-	TLSDir               string                    `yaml:"tls_dir"`          // where a generated self-signed DoH cert/key are persisted
-	DoHSANs              []string                  `yaml:"doh_san"`          // extra DNS names/IPs the generated self-signed DoH cert must cover (e.g. an HA VIP); changing it regenerates the pair
-	AdminAddr            string                    `yaml:"admin_addr"`
-	AdminToken           string                    `yaml:"admin_token"`
-	AdminSocket          string                    `yaml:"admin_socket"`     // local Unix socket for passwordless admin (0600, blipd user; "" = off)
-	TrustedProxies       []string                  `yaml:"trusted_proxies"`  // CIDRs/IPs allowed to supply X-Forwarded-For / CF-Connecting-IP to DoH
-	AllowedNetworks      []string                  `yaml:"allowed_networks"` // recursion ACL: CIDRs/IPs allowed to recurse; empty on a non-loopback bind defaults to local networks (warn), open only with open_recursion
-	OpenRecursion        bool                      `yaml:"open_recursion"`   // explicit ack for empty allowed_networks on a non-loopback bind (fail closed without it)
-	StateFile            string                    `yaml:"state_file"`       // persists "adopted" so the claim code isn't regenerated
-	InstanceID           string                    `yaml:"instance_id"`      // stable id shown to the controller
-	DNSSEC               bool                      `yaml:"dnssec"`           // delegate validation to authenticated (DoT/DoH) upstreams and honor their AD bit; blipd does not validate signatures itself
-	Upstream             string                    `yaml:"upstream"`
-	UpstreamServers      []upstream.UpstreamServer `yaml:"upstream_servers"`       // named upstream pool (priority 0 = route-only)
-	UpstreamRoutes       []upstream.UpstreamRoute  `yaml:"upstream_routes"`        // conditional forwarding (qname/client -> server)
-	UpstreamBootstrap    []upstream.UpstreamServer `yaml:"upstream_bootstrap"`     // DNS servers used to resolve DoH upstream hostnames (UDP or DoH)
-	CacheCap             time.Duration             `yaml:"cache_cap"`              // max TTL for cached responses
-	CacheSize            int                       `yaml:"cache_size"`             // max cached responses in RAM (0 = bounded default of 100k, never unlimited)
-	BlocklistURL         string                    `yaml:"blocklist_url"`          // AdBlock Plus feed URL (optional, legacy single)
-	BlocklistURLs        []string                  `yaml:"blocklist_urls"`         // one or more ABP/hosts feeds (Pi-hole style)
-	BlocklistUpdateHours int                       `yaml:"blocklist_update_hours"` // refresh interval (0 = no auto-refresh)
-	BlocklistCacheFile   string                    `yaml:"blocklist_cache_file"`   // persisted snapshot restored into RAM at startup
-	RecordsCacheFile     string                    `yaml:"records_cache_file"`     // persisted local-record snapshot restored at startup (local names survive a restart without the controller)
-	Default              *filter.Policy            `yaml:"default_policy"`
-	Policies             []*filter.Policy          `yaml:"policies"`
+	DNSAddr        string   `yaml:"dns_addr"`
+	DoHAddr        string   `yaml:"doh_addr"`
+	CertFile       string   `yaml:"cert_file"`
+	KeyFile        string   `yaml:"key_file"`
+	DoHTLS         bool     `yaml:"doh_tls"`          // serve DoH over HTTPS on DoHAddr (self-signed cert auto-generated when CertFile/KeyFile unset)
+	DoHHTTPAddr    string   `yaml:"doh_http_addr"`    // additional plain-HTTP DoH listener ("" = off)
+	RateLimitQPS   int      `yaml:"rate_limit_qps"`   // per-client DNS QPS limit (0 = unlimited; stock default 20)
+	RateLimitBurst int      `yaml:"rate_limit_burst"` // per-client burst above QPS (0 = auto = QPS, min 1)
+	SlowQueryMS    int      `yaml:"slow_query_ms"`    // log one diagnostic line per query slower than this (0 = off)
+	TLSDir         string   `yaml:"tls_dir"`          // where a generated self-signed DoH cert/key are persisted
+	DoHSANs        []string `yaml:"doh_san"`          // extra DNS names/IPs the generated self-signed DoH cert must cover (e.g. an HA VIP); changing it regenerates the pair
+	AdminAddr      string   `yaml:"admin_addr"`
+	AdminToken     string   `yaml:"admin_token"`
+	// AdminAllowUnpinnedRemote accepts the risk of a static admin_token on a
+	// non-loopback admin_addr. A static token has no claim-code step, so the
+	// management API cannot pin itself to a controller (adoptedBy stays
+	// empty): every peer that can reach the listener and knows the token has
+	// full control. Loopback binds and claim-code adoption need no ack.
+	AdminAllowUnpinnedRemote bool                      `yaml:"admin_allow_unpinned_remote"`
+	AdminSocket              string                    `yaml:"admin_socket"`     // local Unix socket for passwordless admin (0600, blipd user; "" = off)
+	TrustedProxies           []string                  `yaml:"trusted_proxies"`  // CIDRs/IPs allowed to supply X-Forwarded-For / CF-Connecting-IP to DoH
+	AllowedNetworks          []string                  `yaml:"allowed_networks"` // recursion ACL: CIDRs/IPs allowed to recurse; empty on a non-loopback bind defaults to local networks (warn), open only with open_recursion
+	OpenRecursion            bool                      `yaml:"open_recursion"`   // explicit ack for empty allowed_networks on a non-loopback bind (fail closed without it)
+	StateFile                string                    `yaml:"state_file"`       // persists "adopted" so the claim code isn't regenerated
+	InstanceID               string                    `yaml:"instance_id"`      // stable id shown to the controller
+	DNSSEC                   bool                      `yaml:"dnssec"`           // delegate validation to authenticated (DoT/DoH) upstreams and honor their AD bit; blipd does not validate signatures itself
+	Upstream                 string                    `yaml:"upstream"`
+	UpstreamServers          []upstream.UpstreamServer `yaml:"upstream_servers"`       // named upstream pool (priority 0 = route-only)
+	UpstreamRoutes           []upstream.UpstreamRoute  `yaml:"upstream_routes"`        // conditional forwarding (qname/client -> server)
+	UpstreamBootstrap        []upstream.UpstreamServer `yaml:"upstream_bootstrap"`     // DNS servers used to resolve DoH upstream hostnames (UDP or DoH)
+	CacheCap                 time.Duration             `yaml:"cache_cap"`              // max TTL for cached responses
+	CacheSize                int                       `yaml:"cache_size"`             // max cached responses in RAM (0 = bounded default of 100k, never unlimited)
+	BlocklistURL             string                    `yaml:"blocklist_url"`          // AdBlock Plus feed URL (optional, legacy single)
+	BlocklistURLs            []string                  `yaml:"blocklist_urls"`         // one or more ABP/hosts feeds (Pi-hole style)
+	BlocklistUpdateHours     int                       `yaml:"blocklist_update_hours"` // refresh interval (0 = no auto-refresh)
+	BlocklistCacheFile       string                    `yaml:"blocklist_cache_file"`   // persisted snapshot restored into RAM at startup
+	RecordsCacheFile         string                    `yaml:"records_cache_file"`     // persisted local-record snapshot restored at startup (local names survive a restart without the controller)
+	Default                  *filter.Policy            `yaml:"default_policy"`
+	Policies                 []*filter.Policy          `yaml:"policies"`
 }
 
 // DefaultRateLimitQPS is the stock per-client DNS QPS limit. A fresh blipd

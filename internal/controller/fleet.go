@@ -71,6 +71,11 @@ type InstanceConfig struct {
 	Label      string `yaml:"label" json:"label"`
 	Claim      string `yaml:"claim" json:"claim"`                                   // one-time claim code (optional bootstrap)
 	MgmtCertFP string `yaml:"mgmt_cert_fp,omitempty" json:"mgmt_cert_fp,omitempty"` // pinned SHA256 of the instance's self-signed management cert (TOFU); "" = system trust
+	// AllowInsecure accepts a cleartext http:// management URL to a remote
+	// host. Without it, such a URL is refused: the instance bearer token (full
+	// control of the node) would cross the network unencrypted. loopback and
+	// URLs the controller successfully upgrades to https need no opt-in.
+	AllowInsecure bool `yaml:"allow_insecure,omitempty" json:"allow_insecure,omitempty"`
 }
 
 // InstanceOverride is a partial per-instance config: only fields that are set
@@ -798,6 +803,24 @@ func isInsecureInstanceURL(raw string) bool {
 	return u.Scheme == "http" && !isLoopbackHost(u.Hostname())
 }
 
+// ErrInsecureRemoteMgmt marks a management URL that is cleartext http to a
+// remote host without a per-instance allow_insecure opt-in. Callers that load
+// a config written before the opt-in existed can match it and migrate instead
+// of dropping the instance.
+var ErrInsecureRemoteMgmt = errors.New("remote cleartext management URL")
+
+// requireSecureManagementURL refuses a remote cleartext management URL unless
+// the operator opted in for that instance. Callers run it AFTER the
+// opportunistic https upgrade, so the common case (blipd serving TLS, operator
+// typed http://host:8444) is rewritten to https and passes untouched. Only an
+// endpoint that genuinely has no TLS reaches the error.
+func requireSecureManagementURL(cfg InstanceConfig) error {
+	if !isInsecureInstanceURL(cfg.URL) || cfg.AllowInsecure {
+		return nil
+	}
+	return fmt.Errorf("%w: instance %q management URL %q is cleartext http to a remote host and the bearer token would cross the network unencrypted; use https:// (blipd serves TLS by default) or set allow_insecure: true on the instance to accept the risk", ErrInsecureRemoteMgmt, cfg.ID, cfg.URL)
+}
+
 // warnInsecureInstanceURL logs the F-05 warning for a remote cleartext
 // management URL: tokens, policies and query history cross the wire
 // unprotected. Emitted at Add time (startup and UI/API adds alike) so the
@@ -912,6 +935,9 @@ func (f *Fleet) Add(ctx context.Context, cfg InstanceConfig) error {
 			}
 			cfg.URL, cfg.MgmtCertFP, client = target, fp, c
 		}
+	}
+	if err := requireSecureManagementURL(cfg); err != nil {
+		return err
 	}
 	warnInsecureInstanceURL(cfg.ID, cfg.URL)
 	warnMgmtTLSInstanceURL(cfg.ID, cfg.URL)

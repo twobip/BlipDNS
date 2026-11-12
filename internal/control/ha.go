@@ -73,6 +73,9 @@ const DefaultAdoptCodeFile = "/var/lib/blipd/adopt-code"
 func (s *Server) CurrentClaimCode() string {
 	s.adoptMu.Lock()
 	defer s.adoptMu.Unlock()
+	if s.adopted || s.claimExpiredLocked() {
+		return ""
+	}
 	return s.claimCode
 }
 
@@ -106,7 +109,7 @@ func (s *Server) SetAdoptBundleURL(mgmtURL string) {
 func (s *Server) AdoptBundleString() string {
 	s.adoptMu.Lock()
 	defer s.adoptMu.Unlock()
-	if s.adopted || s.claimCode == "" || s.bundleURL == "" {
+	if s.adopted || s.claimCode == "" || s.bundleURL == "" || s.claimExpiredLocked() {
 		return ""
 	}
 	b, err := MakeAdoptBundle(s.instanceID, s.bundleURL, s.claimCode)
@@ -121,16 +124,23 @@ func (s *Server) AdoptBundleString() string {
 // journal-only). When already adopted (no active code) it removes any stale
 // file and returns nil. Parent dirs are created 0700.
 func (s *Server) WriteAdoptCodeFile(path string) error {
-	if path == "" {
-		path = s.AdoptCodePath()
-	}
 	s.adoptMu.Lock()
+	defer s.adoptMu.Unlock()
+	return s.writeAdoptCodeFileLocked(path)
+}
+
+// writeAdoptCodeFileLocked is WriteAdoptCodeFile for callers that already hold
+// adoptMu (handleAdopt rotates an expired code inline rather than dropping the
+// lock and racing another claim).
+func (s *Server) writeAdoptCodeFileLocked(path string) error {
+	if path == "" {
+		path = s.adoptCodePathLocked()
+	}
 	code := s.claimCode
 	adopted := s.adopted
 	instanceID := s.instanceID
 	bundleURL := s.bundleURL
-	s.adoptMu.Unlock()
-	if adopted || code == "" {
+	if adopted || code == "" || s.claimExpiredLocked() {
 		_ = os.Remove(path)
 		return nil
 	}

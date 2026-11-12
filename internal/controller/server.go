@@ -581,15 +581,35 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	id, err := s.auth.Login(req.Username, req.Password, s.clientIP(r))
 	if err != nil {
+		// Audit every attempt. Without this, a credential attack leaves no
+		// trace anywhere: the only other audit lines cover self-update,
+		// restart, adopt and query reads. The username is attacker-supplied,
+		// so it goes through logUserField (quoted + capped); the password is
+		// never logged under any path.
 		if err == errLocked {
+			log.Printf("blipc: audit: login user=%s ip=%s result=rate-limited", logUserField(req.Username), s.clientIP(r))
 			http.Error(w, "too many attempts", http.StatusTooManyRequests)
 			return
 		}
+		log.Printf("blipc: audit: login user=%s ip=%s result=fail", logUserField(req.Username), s.clientIP(r))
 		http.Error(w, "invalid credentials", http.StatusUnauthorized)
 		return
 	}
+	log.Printf("blipc: audit: login user=%s ip=%s result=ok", logUserField(req.Username), s.clientIP(r))
 	s.auth.MintCookieSecure(w, r, id, s.isSecure(r))
 	writeJSON(w, map[string]bool{"ok": true})
+}
+
+// logUserField renders an attacker-supplied username for a log line safely:
+// strconv.Quote escapes newlines and control bytes (so a crafted name cannot
+// forge a second audit entry), and the cap keeps a 1 MiB login body from
+// inflating the journal.
+func logUserField(u string) string {
+	const maxLogUser = 64
+	if len(u) > maxLogUser {
+		u = u[:maxLogUser]
+	}
+	return strconv.Quote(u)
 }
 
 // handleSetup creates the first controller credentials and immediately signs
@@ -883,12 +903,13 @@ func bundleURLScheme(bundleURL string) string {
 // write-only on InstanceConfig (never serialized back), while manual setup
 // still needs to supply one.
 type addInstanceRequest struct {
-	ID         string `json:"id"`
-	URL        string `json:"url"`
-	Token      string `json:"token"`
-	Label      string `json:"label"`
-	Claim      string `json:"claim"`
-	MgmtCertFP string `json:"mgmt_cert_fp"`
+	ID            string `json:"id"`
+	URL           string `json:"url"`
+	Token         string `json:"token"`
+	Label         string `json:"label"`
+	Claim         string `json:"claim"`
+	MgmtCertFP    string `json:"mgmt_cert_fp"`
+	AllowInsecure bool   `json:"allow_insecure"`
 }
 
 func (s *Server) handleInstances(w http.ResponseWriter, r *http.Request) {
@@ -904,7 +925,7 @@ func (s *Server) handleInstances(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		cfg := InstanceConfig{ID: req.ID, URL: req.URL, Token: req.Token, Label: req.Label, Claim: req.Claim, MgmtCertFP: req.MgmtCertFP}
+		cfg := InstanceConfig{ID: req.ID, URL: req.URL, Token: req.Token, Label: req.Label, Claim: req.Claim, MgmtCertFP: req.MgmtCertFP, AllowInsecure: req.AllowInsecure}
 		// Token file expansion is never allowed via the API: "@..." or
 		// absolute-path-looking tokens are rejected so an API caller cannot
 		// make the controller read arbitrary local files. Use startup config

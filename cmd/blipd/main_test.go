@@ -75,3 +75,27 @@ func TestCheckBootConfig(t *testing.T) {
 		t.Errorf("missing cert files accepted, want error")
 	}
 }
+
+// A static admin_token has no claim-code step, so the management API cannot
+// pin itself to a controller. On a non-loopback bind that means anyone who
+// learns the token has full control, which is why blipd refuses to open the
+// listener without an explicit ack. An empty or wildcard host binds every
+// interface and must never count as loopback.
+func TestAdminListenIsLoopback(t *testing.T) {
+	cases := map[string]bool{
+		"127.0.0.1:8444": true,
+		"localhost:8444": true,
+		"[::1]:8444":     true,
+		":8444":          false,
+		"":               false,
+		"0.0.0.0:8444":   false,
+		"[::]:8444":      false,
+		"10.0.0.5:8444":  false,
+		"garbage":        false,
+	}
+	for addr, want := range cases {
+		if got := adminListenIsLoopback(addr); got != want {
+			t.Errorf("adminListenIsLoopback(%q) = %v, want %v", addr, got, want)
+		}
+	}
+}

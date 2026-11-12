@@ -580,7 +580,7 @@ function renderInstances() {
   }).join("");
 }
 
-function openInstanceModal() { $("inst-modal-title").textContent = "Add Instance"; $("i-save").textContent = "Add Instance"; $("i-save").dataset.mode = "add"; ["i-id","i-label","i-url","i-token","i-claim","i-name","i-code","i-host","i-port"].forEach((x) => $(x).value = ""); setInstanceMode(false); show("modal-instance"); }
+function openInstanceModal() { $("inst-modal-title").textContent = "Add Instance"; $("i-save").textContent = "Add Instance"; $("i-save").dataset.mode = "add"; ["i-id","i-label","i-url","i-token","i-claim","i-name","i-code","i-host","i-port"].forEach((x) => $(x).value = ""); $("i-insecure").checked = false; $("i-insecure-auto").checked = false; setInstanceMode(false); show("modal-instance"); }
 
 function setInstanceMode(manual) {
   $("inst-auto").classList.toggle("hidden", manual);
@@ -604,7 +604,7 @@ async function saveInstance() {
       url = host + ":" + port; // scheme-less: inherits the bundle scheme server-side
     }
     try {
-      const res = await API("/api/instances", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id, url, claim }) }).then((r) => r.json().catch(() => ({})));
+      const res = await API("/api/instances", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id, url, claim, allow_insecure: $("i-insecure-auto").checked }) }).then((r) => r.json().catch(() => ({})));
       hide("modal-instance");
       if (!res.adopted) toast("added " + id + ", but adoption failed — click Adopt on its row and retry the code", "err");
       else toast("added and adopted " + (res.id || id));
@@ -612,7 +612,7 @@ async function saveInstance() {
     } catch (e) { toast("add failed: " + e.message, "err"); }
     return;
   }
-  const body = { id: $("i-id").value.trim(), label: $("i-label").value.trim(), url: $("i-url").value.trim(), token: $("i-token").value, claim: $("i-claim").value.trim() };
+  const body = { id: $("i-id").value.trim(), label: $("i-label").value.trim(), url: $("i-url").value.trim(), token: $("i-token").value, claim: $("i-claim").value.trim(), allow_insecure: $("i-insecure").checked };
   if ((!body.id || !body.url) && !body.claim) return toast("id and url, or a pasted adopt code, are required", "err");
   try {
     // Single call: the server adopts server-side when a claim is present and

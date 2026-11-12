@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -217,7 +218,19 @@ func main() {
 	for _, ic := range cfg.Instances {
 		ic = controller.ResolveTokenFile(ic)
 		if err := fleet.Add(ctx, ic); err != nil {
-			log.Printf("blipc: instance %s: %v", ic.ID, err)
+			// A config written before the allow_insecure opt-in existed holds
+			// remote http instances that have worked for that operator until
+			// now. Refusing them at startup would silently drop the instance
+			// from the fleet (only a log line), so migrate it to an explicit
+			// opt-in and keep the warning, rather than breaking an upgrade.
+			if errors.Is(err, controller.ErrInsecureRemoteMgmt) {
+				log.Printf("blipc: WARNING instance %q uses a legacy cleartext http management URL; recording allow_insecure: true to keep it serving (bearer tokens are sniffable on the network path). Migrate it to https.", ic.ID)
+				ic.AllowInsecure = true
+				err = fleet.Add(ctx, ic)
+			}
+			if err != nil {
+				log.Printf("blipc: instance %s: %v", ic.ID, err)
+			}
 		}
 	}
 	fleet.StartAutoUpdater()

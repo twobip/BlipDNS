@@ -10,6 +10,9 @@ import (
 	"strings"
 	"testing"
 
+	"errors"
+	"gopkg.in/yaml.v3"
+
 	"github.com/twobip/BlipDNS/internal/control"
 )
 
@@ -290,5 +293,56 @@ func TestValidateInstanceURLRejectsQueryFragment(t *testing.T) {
 	}
 	if err := validateInstanceURL("http://192.168.1.5:8444/prefix"); err != nil {
 		t.Errorf("path prefix rejected: %v", err)
+	}
+}
+
+// A remote cleartext management URL hands the instance bearer token (full
+// control of that node) to anyone on the network path, so it must be an
+// explicit per-instance decision. Loopback and https need no opt-in.
+func TestRequireSecureManagementURL(t *testing.T) {
+	cases := []struct {
+		name  string
+		url   string
+		allow bool
+		want  bool
+	}{
+		{"https remote", "https://10.0.0.5:8444", false, false},
+		{"loopback http", "http://127.0.0.1:8444", false, false},
+		{"localhost http", "http://localhost:8444", false, false},
+		{"ipv6 loopback http", "http://[::1]:8444", false, false},
+		{"remote http refused", "http://10.0.0.5:8444", false, true},
+		{"remote http acked", "http://10.0.0.5:8444", true, false},
+		{"remote https acked", "https://10.0.0.5:8444", true, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := requireSecureManagementURL(InstanceConfig{ID: "x", URL: c.url, AllowInsecure: c.allow})
+			if (err != nil) != c.want {
+				t.Fatalf("err = %v, want error %v", err, c.want)
+			}
+			if c.want && !errors.Is(err, ErrInsecureRemoteMgmt) {
+				t.Fatalf("error %v is not ErrInsecureRemoteMgmt", err)
+			}
+		})
+	}
+}
+
+// The opt-in must survive a YAML round trip, otherwise it is lost on the next
+// persist and the instance would be dropped at the following startup.
+func TestAllowInsecurePersists(t *testing.T) {
+	cfg := InstanceConfig{ID: "lan", URL: "http://10.0.0.5:8444", Token: "t", AllowInsecure: true}
+	b, err := yaml.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(b), "allow_insecure: true") {
+		t.Fatalf("allow_insecure not persisted: %s", b)
+	}
+	var back InstanceConfig
+	if err := yaml.Unmarshal(b, &back); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !back.AllowInsecure {
+		t.Fatal("allow_insecure lost on round trip")
 	}
 }
