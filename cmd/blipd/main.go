@@ -355,12 +355,15 @@ func main() {
 	// A static admin_token has no claim-code step, so the management API never
 	// learns which controller may drive it: adoptedBy stays empty and every
 	// peer that can reach the listener and knows the token has full control.
-	// On loopback that is fine (the box is the boundary). On a non-loopback
-	// bind it turns one token leak into remote fleet takeover, so the listener
-	// is refused unless the operator acknowledges it explicitly.
-	adminUnpinnedRemote := cfg.AdminToken != "" && !adminListenIsLoopback(cfg.AdminAddr)
-	if adminUnpinnedRemote && cfg.AdminAllowUnpinnedRemote {
-		log.Printf("blipd: WARNING management API on %q uses a static admin_token and is UNPINNED (admin_allow_unpinned_remote: true): any peer that can reach it and knows the token has full control", cfg.AdminAddr)
+	// Two distinct risks, gated differently: a cleartext listener also puts the
+	// token on the wire (hard stop unless acknowledged), while a TLS listener
+	// only leaves the API unpinned — inherent to static tokens, so warn and
+	// serve. Refusing a TLS listener would take a working fleet offline for
+	// what is a documented trust-model property, not a vulnerability.
+	adminTLSServing := adminTLS || (cfg.DoHTLS && tlsCert != nil)
+	plan := planAdminListener(cfg.AdminAddr, cfg.AdminToken != "", adminTLSServing, cfg.AdminAllowUnpinnedRemote)
+	if plan.Warn != "" {
+		log.Printf("blipd: WARNING %s", plan.Warn)
 	}
 	if cfg.AdminToken != "" || cfg.StateFile != "" {
 		srv.SetMgmtToken(cfg.AdminToken)
@@ -426,8 +429,8 @@ func main() {
 			MaxHeaderBytes:    1 << 20,
 		}
 		go func() {
-			if adminUnpinnedRemote && !cfg.AdminAllowUnpinnedRemote {
-				log.Printf("blipd: ERROR not starting the management API: admin_addr %q is not loopback while admin_token is set statically, so the token is unpinned and any host that knows it would have full control. Bind admin_addr to 127.0.0.1 (the default) and adopt with a claim code, or set admin_allow_unpinned_remote: true to accept the risk. DNS and DoH keep serving.", cfg.AdminAddr)
+			if !plan.Serve {
+				log.Printf("blipd: ERROR %s", plan.Err)
 				return
 			}
 			if adminTLS {
@@ -599,6 +602,51 @@ func adminListenIsLoopback(addr string) bool {
 	}
 	ip := net.ParseIP(h)
 	return ip != nil && ip.IsLoopback()
+}
+
+// adminListenPlan is the startup decision for the management listener when the
+// token is statically configured (and therefore can never be pinned to a
+// controller). Serve is false only for the genuinely dangerous case.
+type adminListenPlan struct {
+	Serve bool
+	Warn  string // non-empty: log at WARNING and keep serving
+	Err   string // non-empty: log at ERROR and do not open the listener
+}
+
+// planAdminListener decides whether a static admin_token may open a listener on
+// addr. The two failure modes are not equivalent:
+//
+//   - cleartext on a non-loopback address: the bearer token itself is
+//     readable off the wire, so anyone sniffing the segment has full control.
+//     Refused unless the operator acknowledged it with
+//     admin_allow_unpinned_remote: true.
+//   - TLS on a non-loopback address: the token is protected in transit. The
+//     API is still unpinned, but that is inherent to a static token (there is
+//     no claim-code step at which a controller could be learned), so it is a
+//     trust-model property to warn about, not a reason to refuse service and
+//     take a fleet offline on upgrade.
+//
+// Loopback is always served: the box is the boundary.
+func planAdminListener(addr string, staticToken, tlsServing, allowUnpinnedRemote bool) adminListenPlan {
+	if !staticToken || adminListenIsLoopback(addr) {
+		return adminListenPlan{Serve: true}
+	}
+	if tlsServing {
+		return adminListenPlan{
+			Serve: true,
+			Warn:  fmt.Sprintf("management API on %q uses a static admin_token and is UNPINNED: the API is TLS-protected, but any peer that can reach it and knows the token has full control and no controller pinning applies. Bind admin_addr to 127.0.0.1 and adopt with a claim code if you want pinning.", addr),
+		}
+	}
+	if allowUnpinnedRemote {
+		return adminListenPlan{
+			Serve: true,
+			Warn:  fmt.Sprintf("management API on %q is CLEARTEXT and UNPINNED with a static admin_token (admin_allow_unpinned_remote: true): the bearer token is readable on the network path and any peer that knows it has full control. Terminate TLS in front of it.", addr),
+		}
+	}
+	return adminListenPlan{
+		Serve: false,
+		Err:   fmt.Sprintf("not starting the management API: admin_addr %q is not loopback while a static admin_token is configured and the listener has no TLS, so the bearer token would cross the network in cleartext and any host that reads it has full control. Bind admin_addr to 127.0.0.1 (the default) and adopt with a claim code, enable TLS, or set admin_allow_unpinned_remote: true to accept the risk. DNS and DoH keep serving.", addr),
+	}
 }
 
 // pickBundleHost chooses the management host baked into the adopt bundle:
