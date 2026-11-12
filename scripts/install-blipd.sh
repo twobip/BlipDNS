@@ -23,6 +23,9 @@ REPO="github.com/twobip/BlipDNS"
 BIN_DIR="${BIN_DIR:-/usr/local/bin}"
 CONFIG_DIR="${CONFIG_DIR:-/etc/blipd}"
 STATE_DIR="${STATE_DIR:-/var/lib/blipd}"
+# Go build caches for a source install. Created unconditionally below
+# because the systemd unit names it in ReadWritePaths.
+CACHE_DIR="${CACHE_DIR:-/var/cache/blipd-update}"
 SYSTEMD_DIR="${SYSTEMD_DIR:-/etc/systemd/system}"
 SERVICE_NAME="blipd"
 BASE_URL="https://github.com/twobip/BlipDNS/releases/download"
@@ -369,7 +372,6 @@ fetch_verified() {
 
 if [ "$BUILD_FROM_SOURCE" -eq 1 ]; then
   # /root may be read-only (containers/LXC); keep Go caches somewhere writable.
-  CACHE_DIR="/var/cache/blipd-update"
   mkdir -p "$CACHE_DIR/gomod" "$CACHE_DIR/gocache" "$CACHE_DIR/gopath"
   export GOMODCACHE="$CACHE_DIR/gomod"
   export GOCACHE="$CACHE_DIR/gocache"
@@ -472,7 +474,7 @@ visudo -cf /etc/sudoers.d/blipd-keepalived
 
 # --- config / state dirs -----------------------------------------------------
 log "creating config and state directories"
-mkdir -p "$CONFIG_DIR" "$STATE_DIR" /etc/keepalived
+mkdir -p "$CONFIG_DIR" "$STATE_DIR" "$CACHE_DIR" /etc/keepalived
 chmod 700 "$CONFIG_DIR" "$STATE_DIR"
 
 # The root helper writes /etc/keepalived/keepalived.conf itself. Remove the
