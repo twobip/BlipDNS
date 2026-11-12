@@ -1646,15 +1646,16 @@ func (s *Server) serveInner(ctx context.Context, clientIP net.IP, clientID, prot
 		resp.AuthenticatedData = false
 		return resp, false
 	}
-	// A cached entry may predate a policy/blocklist change: re-inspect its
-	// chain so a newly-blocked alias is not served from cache. Evict the
-	// poisoned entry so later queries miss and refetch.
+	// Re-inspect the chain under *this* client's policy, always. Two reasons:
+	// a cached entry may predate a policy/blocklist change, and a coalesced
+	// singleflight waiter comes back with cached=false even though the shared
+	// fetch walked the chain under the leader's policy only. Cache keys do not
+	// encode policy, so gating on cached would serve a waiter an alias its own
+	// policy blocks. Evict a poisoned entry so later queries miss and refetch.
 	var chainTarget, chainSrc string
 	var chainAct filter.BlockAction
 	var chainLg, chainHit bool
-	if cached {
-		chainHit, chainTarget, chainAct, chainSrc, chainLg = inspectChain(out, classifyTarget)
-	}
+	chainHit, chainTarget, chainAct, chainSrc, chainLg = inspectChain(out, classifyTarget)
 	if chainHit {
 		var cbe *chainBlockedError
 		if chainTarget != "" {

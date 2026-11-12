@@ -78,7 +78,9 @@ func TestApplyArgsContract(t *testing.T) {
 		VirtualRouterID: 51, Priority: 101, AdvertIntervalSec: 1, AuthPass: "safe1234",
 	}
 	got := applyArgs(cfg)
-	want := []string{"unicast", "primary", "eth0", "192.0.2.10", "192.0.2.11", "192.0.2.1/24", "51", "101", "1", "safe1234"}
+	// auth_pass is deliberately absent: it travels on stdin so it never shows
+	// up in ps / /proc/<pid>/cmdline.
+	want := []string{"unicast", "primary", "eth0", "192.0.2.10", "192.0.2.11", "192.0.2.1/24", "51", "101", "1"}
 	if len(got) != len(want) {
 		t.Fatalf("applyArgs len = %d, want %d (%v)", len(got), len(want), got)
 	}
@@ -213,5 +215,21 @@ func TestSetHAConfigRefreshesCertWhenEnabled(t *testing.T) {
 	}
 	if calls != 1 {
 		t.Errorf("cert refresher called %d times for enabled config, want 1", calls)
+	}
+}
+
+// The VRRP password is a LAN-shared secret and argv is world-readable through
+// ps and /proc/<pid>/cmdline, so it must never appear in the helper's
+// argument list — it travels on stdin instead.
+func TestApplyArgsOmitsAuthPass(t *testing.T) {
+	cfg := control.HAConfig{
+		Enabled: true, Mode: "multicast", NodeRole: "secondary", Interface: "eth0",
+		SourceIP: "192.0.2.10", VirtualIP: "192.0.2.1/24",
+		VirtualRouterID: 51, Priority: 101, AdvertIntervalSec: 2, AuthPass: "safe1234",
+	}
+	for i, a := range applyArgs(cfg) {
+		if a == cfg.AuthPass {
+			t.Fatalf("applyArgs[%d] carries the VRRP password; it must go on stdin", i)
+		}
 	}
 }

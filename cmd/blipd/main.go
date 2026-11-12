@@ -352,6 +352,16 @@ func main() {
 	// Admin / management API. The servers are hoisted so SIGTERM shuts them
 	// down gracefully instead of abandoning in-flight uploads (e.g. blocklist).
 	var adminSrv, localSrv *http.Server
+	// A static admin_token has no claim-code step, so the management API never
+	// learns which controller may drive it: adoptedBy stays empty and every
+	// peer that can reach the listener and knows the token has full control.
+	// On loopback that is fine (the box is the boundary). On a non-loopback
+	// bind it turns one token leak into remote fleet takeover, so the listener
+	// is refused unless the operator acknowledges it explicitly.
+	adminUnpinnedRemote := cfg.AdminToken != "" && !adminListenIsLoopback(cfg.AdminAddr)
+	if adminUnpinnedRemote && cfg.AdminAllowUnpinnedRemote {
+		log.Printf("blipd: WARNING management API on %q uses a static admin_token and is UNPINNED (admin_allow_unpinned_remote: true): any peer that can reach it and knows the token has full control", cfg.AdminAddr)
+	}
 	if cfg.AdminToken != "" || cfg.StateFile != "" {
 		srv.SetMgmtToken(cfg.AdminToken)
 		srv.ControlServer().ConfigureAdoption(cfg.StateFile, cfg.InstanceID)
@@ -416,6 +426,10 @@ func main() {
 			MaxHeaderBytes:    1 << 20,
 		}
 		go func() {
+			if adminUnpinnedRemote && !cfg.AdminAllowUnpinnedRemote {
+				log.Printf("blipd: ERROR not starting the management API: admin_addr %q is not loopback while admin_token is set statically, so the token is unpinned and any host that knows it would have full control. Bind admin_addr to 127.0.0.1 (the default) and adopt with a claim code, or set admin_allow_unpinned_remote: true to accept the risk. DNS and DoH keep serving.", cfg.AdminAddr)
+				return
+			}
 			if adminTLS {
 				log.Printf("blipd: management API on https://%s (TLS)", cfg.AdminAddr)
 				if err := adminSrv.ListenAndServeTLS(*adminTLSCert, *adminTLSKey); err != nil && err != http.ErrServerClosed {
@@ -570,6 +584,21 @@ func dohScheme(cfg *config.Config) string {
 		return "https"
 	}
 	return "http"
+}
+
+// adminListenIsLoopback reports whether addr binds only the loopback
+// interface. An empty host (":8444") or a wildcard address binds every
+// interface and is NOT loopback, so it must not take the permissive path.
+func adminListenIsLoopback(addr string) bool {
+	h, _, err := net.SplitHostPort(strings.TrimSpace(addr))
+	if err != nil || h == "" {
+		return false
+	}
+	if h == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(h)
+	return ip != nil && ip.IsLoopback()
 }
 
 // pickBundleHost chooses the management host baked into the adopt bundle:

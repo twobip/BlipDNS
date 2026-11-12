@@ -254,7 +254,7 @@ func (m *Manager) ApplyHA() error {
 	// Apply through the root helper: it validates every field and renders the
 	// fixed keepalived template itself. The service never writes a config that
 	// keepalived will execute as root.
-	if err := runCommand("/usr/bin/sudo", append([]string{"-n", applyHelperPath}, applyArgs(cfg)...)...); err != nil {
+	if err := applyKeepalived(cfg); err != nil {
 		m.recordError(err)
 		return fmt.Errorf("apply keepalived configuration: %w", err)
 	}
@@ -381,6 +381,10 @@ func (m *Manager) validateRendered(cfg control.HAConfig) error {
 // scripts/blipd-keepalived.sh. Keep this in sync with that helper: it is the
 // trust boundary that prevents a compromised service from writing a raw
 // keepalived config.
+//
+// The VRRP password is deliberately NOT part of the argument list: argv is
+// world-readable via /proc/<pid>/cmdline and shows up in process listings, so
+// it travels on stdin instead (see applyKeepalived).
 func applyArgs(cfg control.HAConfig) []string {
 	peer := cfg.PeerIP
 	if cfg.Mode != "unicast" {
@@ -398,8 +402,27 @@ func applyArgs(cfg control.HAConfig) []string {
 		strconv.Itoa(cfg.VirtualRouterID),
 		strconv.Itoa(cfg.Priority),
 		strconv.Itoa(cfg.AdvertIntervalSec),
-		cfg.AuthPass,
 	}
+}
+
+// applyKeepalived hands the structured config to the root helper, with the
+// VRRP password on stdin so it never appears in argv (ps, /proc/*/cmdline,
+// process accounting). A helper installed before this change only understands
+// the legacy 10-argument form, and blipd's self-update replaces the binary
+// before the installer refreshes helpers, so fall back once to keep HA working
+// until the operator re-runs the installer.
+func applyKeepalived(cfg control.HAConfig) error {
+	args := applyArgs(cfg)
+	err := runCommandInput(cfg.AuthPass+"\n", "/usr/bin/sudo", append([]string{"-n", applyHelperPath}, args...)...)
+	if err == nil {
+		return nil
+	}
+	if !strings.Contains(err.Error(), "usage: blipd-keepalived") {
+		return err
+	}
+	log.Printf("ha: WARNING: %s predates stdin secret passing; falling back to legacy argv (auth_pass visible in ps). Re-run the BlipDNS installer to move it off the command line.", applyHelperPath)
+	legacy := append(append([]string{}, args...), cfg.AuthPass)
+	return runCommand("/usr/bin/sudo", append([]string{"-n", applyHelperPath}, legacy...)...)
 }
 
 func render(cfg control.HAConfig) string {
@@ -525,9 +548,18 @@ func commandSucceeds(name string, args ...string) bool {
 	return exec.CommandContext(ctx, name, args...).Run() == nil
 }
 func runCommand(name string, args ...string) error {
+	return runCommandInput("", name, args...)
+}
+
+// runCommandInput is runCommand with a stdin payload. Used for secrets that
+// must not appear in argv.
+func runCommandInput(stdin string, name string, args ...string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, name, args...)
+	if stdin != "" {
+		cmd.Stdin = strings.NewReader(stdin)
+	}
 	out, err := cmd.CombinedOutput()
 	if ctx.Err() == context.DeadlineExceeded {
 		return fmt.Errorf("%s: timeout after 10s: %w", name, ctx.Err())

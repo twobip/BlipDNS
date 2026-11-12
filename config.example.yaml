@@ -4,6 +4,14 @@ admin_addr: "127.0.0.1:8444"
 # H4: never ship a real token here. Generate one with:
 #   openssl rand -hex 32
 # and keep the config file at 0600 (it controls the management API).
+#
+# A static admin_token is unpinned: there is no claim-code step at which the
+# management API can learn which controller is allowed to drive it, so ANY peer
+# that can reach admin_addr and knows the token has full control. Keep admin_addr
+# on loopback and adopt with a claim code, which pins the API to the controller.
+# A non-loopback admin_addr with a static token is refused at startup unless
+# admin_allow_unpinned_remote: true is set here as an explicit acknowledgement.
+# admin_allow_unpinned_remote: true
 admin_token: "REPLACE-ME-generate-with-openssl-rand-hex-32"
 # Only trust X-Forwarded-For / CF-Connecting-IP from explicitly listed reverse proxies. Empty/off
 # means use the direct peer address (recommended unless behind a proxy).

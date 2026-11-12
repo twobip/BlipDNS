@@ -996,6 +996,7 @@
             <div class="field"><label>Port</label><input class="input" id="i-port" inputmode="numeric" placeholder="8444"/></div>
           </div>
           <span class="hint">Only needed when the bundle's address is wrong. Inherits the bundle's http/https scheme.</span>
+          <label class="row" style="gap:8px;margin-top:8px"><input type="checkbox" id="i-insecure-auto" style="accent-color:var(--accent)"/> <span>Allow cleartext HTTP (token sent unencrypted)</span></label>
         </details>
       </div>
       <div id="inst-manual" class="hidden">
@@ -1004,6 +1005,7 @@
         <div class="field"><label>Label</label><input class="input" id="i-label" placeholder="Office"/></div>
       </div>
       <div class="field"><label>Management URL</label><input class="input" id="i-url" placeholder="http://10.0.0.5:8444"/></div>
+      <label class="row" style="gap:8px"><input type="checkbox" id="i-insecure" style="accent-color:var(--accent)"/> <span>Allow cleartext HTTP to a remote host <span class="faint">(bearer token would be sent unencrypted)</span></span></label>
       <div class="form-grid">
         <div class="field"><label>Token <span class="faint">(existing installs — skip if using a claim code)</span></label><input class="input" id="i-token" type="password" placeholder="admin token" autocomplete="new-password"/></div>
         <div class="field"><label>Claim code <span class="faint">(fresh blipd only, one-time)</span></label><input class="input" id="i-claim" placeholder="ABCD-1234"/></div>
