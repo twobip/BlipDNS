@@ -37,7 +37,11 @@ SystemCallArchitectures=native
 # even via sudo) and self-update dies with "cannot open lock".
 # /usr/local/bin: the helper stages (mktemp) and installs there. Both stay
 # root-owned, so the service user gains no write access; only root passes.
-ReadWritePaths=/etc/blipc /var/lib/blipc /var/cache/blipc-update /run/lock /usr/local/bin
+# /var/cache/blipc-update is prefixed with '-': the daemon never writes there
+# (that path only holds the installer's source-build Go caches), and an
+# unprefixed entry aborts namespace setup with ENOENT on a release-only
+# install, so the service never executes.
+ReadWritePaths=/etc/blipc /var/lib/blipc -/var/cache/blipc-update /run/lock /usr/local/bin
 LimitNOFILE=65536
 
 StandardOutput=journal

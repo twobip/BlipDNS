@@ -24,6 +24,9 @@ REPO="github.com/twobip/BlipDNS"
 BIN_DIR="${BIN_DIR:-/usr/local/bin}"
 CONFIG_DIR="${CONFIG_DIR:-/etc/blipc}"
 STATE_DIR="${STATE_DIR:-/var/lib/blipc}"
+# Go build caches for a source install. Created unconditionally below
+# because the systemd unit names it in ReadWritePaths.
+CACHE_DIR="${CACHE_DIR:-/var/cache/blipc-update}"
 SYSTEMD_DIR="${SYSTEMD_DIR:-/etc/systemd/system}"
 SERVICE_NAME="blipc"
 SYSTEMD_AVAILABLE=0
@@ -339,7 +342,6 @@ esac
 
 # --- obtain the binaries (download, clone + build, or local build) -----------
 # /root may be read-only (containers/LXC); keep Go caches somewhere writable.
-CACHE_DIR="/var/cache/blipc-update"
 mkdir -p "$CACHE_DIR/gomod" "$CACHE_DIR/gocache" "$CACHE_DIR/gopath"
 export GOMODCACHE="$CACHE_DIR/gomod"
 export GOCACHE="$CACHE_DIR/gocache"
@@ -459,7 +461,7 @@ visudo -cf /etc/sudoers.d/blipc-install
 
 # --- config / state dirs -----------------------------------------------------
 log "creating config and state directories"
-mkdir -p "$CONFIG_DIR" "$STATE_DIR"
+mkdir -p "$CONFIG_DIR" "$STATE_DIR" "$CACHE_DIR"
 chown blipc:blipc "$CONFIG_DIR" "$STATE_DIR"
 chmod 700 "$CONFIG_DIR" "$STATE_DIR"
 

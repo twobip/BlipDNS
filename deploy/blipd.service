@@ -35,13 +35,17 @@ SystemCallArchitectures=native
 # even via sudo) and self-update dies with "cannot open lock".
 # /usr/local/bin: the helper stages (mktemp) and installs there. Both stay
 # root-owned, so the service user gains no write access; only root passes.
+# /var/cache/blipd-update is prefixed with '-': the daemon never writes there
+# (that path only holds the installer's source-build Go caches), and an
+# unprefixed entry aborts namespace setup with ENOENT on a release-only
+# install, so the service never executes.
 # /etc/blipd is deliberately NOT writable here (finding 11): the config is
 # root-owned 0640 so a compromised daemon cannot persist via admin_token,
 # upstream or allowed_networks. ProtectSystem=strict still allows reads.
 # /etc/keepalived: the root HA helper runs inside this mount namespace and
 # must be able to replace the root-owned config. The directory stays 0755
 # root-owned, so the unprivileged service user still cannot write it.
-ReadWritePaths=/var/lib/blipd /var/cache/blipd-update /run/lock /usr/local/bin /etc/keepalived
+ReadWritePaths=/var/lib/blipd -/var/cache/blipd-update /run/lock /usr/local/bin /etc/keepalived
 LimitNOFILE=65536
 # Bound Go GC heap on small boxes: the blocklist cache can hold ~400-500 MiB.
 # (Same stanza as blipc.service; commented out = Go default.)
