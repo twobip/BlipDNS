@@ -43,11 +43,15 @@ SIGN_IDENTITY="release@blipdns"
 SIGN_NAMESPACE="blipdns-release"
 SIGNING_ALLOWED='release@blipdns ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAllzM9gHKiNT3JLmP4nj0VgS68IBkFVsP6OIirPEm2V BlipDNS release signing (GitHub Actions)'
 
-command -v ssh-keygen >/dev/null 2>&1 || err "ssh-keygen (openssh-client) is required to verify release signatures"
-
 # verify_sums_sig <dir> — verify dir/SHA256SUMS against dir/SHA256SUMS.sig.
 # Fail closed: a missing or bad signature refuses the install.
+#
+# ssh-keygen (openssh-client) is checked HERE, not at script load: a slim
+# image without it must still reach --install-deps installing it instead of
+# dying before any dependency work runs.
 verify_sums_sig() {
+  command -v ssh-keygen >/dev/null 2>&1 \
+    || err "ssh-keygen is required to verify release signatures; install openssh-client (openssh-clients on RHEL/Fedora) and run this script again"
   [ -f "$1/SHA256SUMS" ] || err "SHA256SUMS missing — refusing to install"
   [ -f "$1/SHA256SUMS.sig" ] || err "SHA256SUMS.sig missing — release is not signed — refusing to install"
   _signers="$(mktemp)" || err "cannot create signers scratch file"
@@ -94,7 +98,7 @@ for ARG in "$@"; do
   esac
 done
 
-GO_REQUIRED_VERSION="1.25.0"
+GO_REQUIRED_VERSION="1.27.4"
 GO_INSTALL_DIR="/usr/local/go-blipdns-${GO_REQUIRED_VERSION}"
 GO_TMPDIR=""
 
@@ -106,10 +110,23 @@ cleanup_go_tmp() {
 }
 
 install_dependencies() {
-  local packages="ca-certificates curl"
+  # ssh-keygen verifies the release signature (verify_sums_sig). RHEL/Fedora
+  # ship it as openssh-clients, Arch as openssh.
+  local ssh_pkg="openssh-client"
+  if command -v dnf >/dev/null 2>&1 || command -v yum >/dev/null 2>&1; then
+    ssh_pkg="openssh-clients"
+  elif command -v pacman >/dev/null 2>&1; then
+    ssh_pkg="openssh"
+  elif command -v zypper >/dev/null 2>&1; then
+    # openSUSE's client split is not uniform across releases; skip the guess
+    # rather than break --install-deps with a name that does not resolve (the
+    # use-site check still reports what is missing).
+    ssh_pkg=""
+  fi
+  local packages="ca-certificates curl $ssh_pkg"
   local go_needed=0
   if [ "$BUILD_FROM_SOURCE" -eq 1 ]; then
-    packages="git ca-certificates curl jq"
+    packages="git ca-certificates curl jq $ssh_pkg"
     go_needed=1
     if dedicated_go_is_supported || { command -v go >/dev/null 2>&1 && go_is_supported; }; then
       go_needed=0
@@ -191,14 +208,23 @@ install_git() {
   command -v git >/dev/null 2>&1 || err "Git installation failed; install Git and run this script again"
 }
 
-# Return success only when the installed Go version is at least 1.25.
+# Return success only when the installed Go version is at least
+# GO_REQUIRED_VERSION, patch included: GO-2026-6859 fixed a net/http crash in
+# go1.27.4 (MaxBytesReader header race, reachable from blipd's DoH/management
+# handlers), so 1.27.3 must not pass this guard.
 go_version_is_supported() {
-  local version major minor
+  local version major minor patch req_major req_minor req_patch
   version="$1"
-  [[ "$version" =~ go([0-9]+)\.([0-9]+) ]] || return 1
+  [[ "$version" =~ go([0-9]+)\.([0-9]+)(\.([0-9]+))? ]] || return 1
   major="${BASH_REMATCH[1]}"
   minor="${BASH_REMATCH[2]}"
-  [ "$major" -gt 1 ] || { [ "$major" -eq 1 ] && [ "$minor" -ge 25 ]; }
+  patch="${BASH_REMATCH[4]:-0}"
+  IFS=. read -r req_major req_minor req_patch <<< "$GO_REQUIRED_VERSION"
+  if [ "$major" -gt "$req_major" ]; then return 0; fi
+  if [ "$major" -lt "$req_major" ]; then return 1; fi
+  if [ "$minor" -gt "$req_minor" ]; then return 0; fi
+  if [ "$minor" -lt "$req_minor" ]; then return 1; fi
+  [ "$patch" -ge "$req_patch" ]
 }
 
 go_is_supported() {
@@ -281,13 +307,13 @@ require_go() {
     if [ "$INSTALL_DEPS" -eq 1 ]; then
       install_go_from_archive
     else
-      err "Go is not installed. Install Go 1.25+ first: https://go.dev/dl/ (or rerun with --install-deps)"
+      err "Go is not installed. Install Go ${GO_REQUIRED_VERSION}+ first: https://go.dev/dl/ (or rerun with --install-deps)"
     fi
   elif ! go_is_supported; then
     if [ "$INSTALL_DEPS" -eq 1 ]; then
       install_go_from_archive
     else
-      err "Go 1.25+ is required; found $(go version 2>/dev/null). Install a newer Go version: https://go.dev/dl/ (or rerun with --install-deps)"
+      err "Go ${GO_REQUIRED_VERSION}+ is required; found $(go version 2>/dev/null). Install a newer Go version: https://go.dev/dl/ (or rerun with --install-deps)"
     fi
   fi
   go_is_supported || err "Go ${GO_REQUIRED_VERSION}+ installation failed"
@@ -302,15 +328,15 @@ if [ "$BUILD_FROM_SOURCE" -eq 1 ]; then
   install_git
   require_go
 else
-  # Download path needs only curl and sha256sum (coreutils) — no Go, no git.
+  # Download path needs curl, sha256sum (coreutils) and ssh-keygen (release
+  # signature) — no Go, no git. Install deps when any of them is missing, so a
+  # slim image can bootstrap with --install-deps instead of failing at the
+  # signature check after the download.
   command -v sha256sum >/dev/null 2>&1 || err "sha256sum (coreutils) is required; install coreutils and rerun"
-  if ! command -v curl >/dev/null 2>&1; then
-    if [ "$INSTALL_DEPS" -eq 1 ]; then
-      install_dependencies
-    else
-      err "curl is required to download the release binary; install curl or rerun with --install-deps"
-    fi
+  if [ "$INSTALL_DEPS" -eq 1 ] && { ! command -v curl >/dev/null 2>&1 || ! command -v ssh-keygen >/dev/null 2>&1; }; then
+    install_dependencies
   fi
+  command -v curl >/dev/null 2>&1 || err "curl is required to download the release binary; install curl or rerun with --install-deps"
 fi
 
 # --- resolve release channel / tag ------------------------------------------
