@@ -38,7 +38,15 @@ go build -o bin/blipc ./cmd/blipc
 
 ## Install (one-liner)
 
-The installers require root privileges. By default they use an existing Go 1.25+ installation and automatically install Git if it is missing. Add `--install-deps` to install Git, Go, CA certificates, curl, and jq with the detected system package manager before cloning and building. If the package manager only provides an older Go (such as Debian 13's Go 1.24), the installer downloads the official Go 1.25.0 Linux archive, verifies its SHA-256 checksum, and uses it for the build. The archive is installed under `/usr/local/go-blipdns-1.25.0`; later runs reuse that supported installation and do not download Go again:
+The installers require root privileges. They download the pre-built static
+binary from the latest signed release by default — no Go toolchain, no git.
+`--install-deps` installs the runtime dependencies (CA certificates, curl,
+openssh-client for the release-signature check) with the detected system
+package manager. Pass `--build-from-source` (with `--install-deps` when Go is
+missing) to clone the pinned ref and build locally instead; that path needs Go
+**1.27.4+** (GO-2026-6859) and installs the official Go archive under
+`/usr/local/go-blipdns-1.27.4` when the distro Go is older. Later runs reuse
+that installation and do not download Go again:
 
 ```bash
 curl -sL https://raw.githubusercontent.com/twobip/BlipDNS/master/scripts/install-blipd.sh | sudo bash -s -- --install-deps
@@ -117,8 +125,8 @@ namespace `blipdns-release`).
 
 Two honest limits: the one-line installer remains trust-on-first-use (verify it
 against a pinned ref before piping to root), and releases cut before signing
-existed carry no `.sig` — re-run the installer once on each node to refresh the
-helpers, then update onto a signed release. To rotate the key: add the new
+existed carry no `.sig` — the first signed stable release is 0.8.0. Re-run the
+installer once on each node, then update onto a signed release. To rotate the key: add the new
 public key line beside the old one in both `scripts/*-install.sh` helpers,
 release, re-run the installers on the nodes, then swap the CI secret.
 
